@@ -51,7 +51,7 @@ option('game-new-api',
 
 option('homedir',
   type: 'string',
-  value: '~/.q2pro',
+  value: '.',
   description: 'Default value for "homedir" console variable')
 
 option('icmp-errors',
