@@ -38,11 +38,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define COM_POSTEXEC_CFG    "postexec.cfg"
 #define COM_POSTINIT_CFG    "postinit.cfg"
 
-#ifdef _WIN32
 #define COM_CONFIG_CFG      "q2config.cfg"
-#else
-#define COM_CONFIG_CFG      "config.cfg"
-#endif
 
 // FIXME: rename these
 #define COM_HISTORYFILE_NAME    ".conhistory"
