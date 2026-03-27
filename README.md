@@ -65,6 +65,45 @@ Best might be to use Docker for the job.
 # Tested on CachyOS
 sudo pacman -S gcc meson ninja pkgconf
 
+# Build zstd static version if missing in:
+# /usr/x86_64-w64-mingw32/lib/libzstd.a
+# /usr/i686-w64-mingw32/lib/libzstd.a
+cd /tmp
+git clone https://github.com/facebook/zstd.git
+cd zstd/build/cmake
+
+# Win64
+cat <<EOF>toolchain-mingw64.cmake
+set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+set(CMAKE_C_COMPILER x86_64-w64-mingw32-gcc)
+set(CMAKE_RC_COMPILER x86_64-w64-mingw32-windres)
+set(CMAKE_FIND_ROOT_PATH /usr/x86_64-w64-mingw32)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+EOF
+rm -rf build-cmake
+cmake -S . -B build-cmake -DZSTD_BUILD_SHARED=OFF -DZSTD_BUILD_STATIC=ON -DCMAKE_TOOLCHAIN_FILE=toolchain-mingw64.cmake
+cmake --build build-cmake
+sudo cp build-cmake/lib/libzstd.a /usr/x86_64-w64-mingw32/lib/
+
+# Win32
+cat <<EOF>toolchain-mingw32.cmake
+set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_PROCESSOR x86)
+set(CMAKE_C_COMPILER i686-w64-mingw32-gcc)
+set(CMAKE_RC_COMPILER i686-w64-mingw32-windres)
+set(CMAKE_FIND_ROOT_PATH /usr/i686-w64-mingw32)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+EOF
+rm -rf build-cmake
+cmake -S . -B build-cmake -DZSTD_BUILD_SHARED=OFF -DZSTD_BUILD_STATIC=ON -DCMAKE_TOOLCHAIN_FILE=toolchain-mingw32.cmake
+cmake --build build-cmake
+sudo cp build-cmake/lib/libzstd.a /usr/i686-w64-mingw32/lib/
+
 # For cross compilation
 sudo pacman -S \
     mingw-w64-tools \
@@ -93,6 +132,34 @@ Review scripts before executing them.
 ./build-win32.sh
 ./build-win64.sh
 ```
+
+## To play
+
+Copy files from build folder to:
+
+```
+baseq2/gamex*.*
+q2pro*
+```
+
+along with files/folders from non-remastered Quake 2:
+
+```
+baseq2/players/
+baseq2/pak0.pak
+baseq2/pak1.pak
+baseq2/pak2.pak
+```
+
+and add [OpenAL Soft](https://github.com/kcat/openal-soft) for
+Windows builds:
+
+```
+OpenAL32.dll
+OpenAL64.dll // rename from OpenAL32.dll 64-bit version
+```
+
+Additionally Copy file `src/client/ui/q2pro.menu` to `baseq2` folder.
 
 # TODO
 
