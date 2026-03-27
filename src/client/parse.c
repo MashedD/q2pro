@@ -291,10 +291,16 @@ static void CL_ParseFrame(int extrabits)
         } else {
             frame.valid = true; // valid delta parse
         }
-        if (!frame.valid && cl.frame.valid && cls.demo.playback) {
+        if (!frame.valid && cls.demo.playback) {
             Com_DPrintf("%s: recovering broken demo\n", __func__);
-            oldframe = &cl.frame;
-            from = &oldframe->ps;
+            if (cl.frame.valid) {
+                oldframe = &cl.frame;
+                from = &oldframe->ps;
+            } else {
+                oldframe = NULL;
+                from = NULL;
+                cl.frameflags |= FF_NODELTA;
+            }
             frame.valid = true;
         }
     } else {
