@@ -992,9 +992,7 @@ static void CL_ParseReconnect(void)
 #if USE_AUTOREPLY
 static void CL_CheckForVersion(const char *s)
 {
-    char *p;
-
-    p = strstr(s, ": ");
+    const char *p = strstr(s, ": ");
     if (!p) {
         return;
     }
