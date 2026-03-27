@@ -1,4 +1,5 @@
 /subprojects/*/
+/subprojects/.wraplock
 !/subprojects/packagefiles/
 /tags
 /TAGS
