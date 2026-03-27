@@ -32,14 +32,12 @@ If model or skin are found to be invalid, replaces them with sane defaults.
 */
 void CL_ParsePlayerSkin(char *name, char *model, char *skin, const char *s)
 {
-    size_t len;
-    char *t;
-
-    len = strlen(s);
+    size_t len = strlen(s);
+    char *p;
     Q_assert(len < MAX_QPATH);
 
     // isolate the player's name
-    t = strchr(s, '\\');
+    const char *t = strchr(s, '\\');
     if (t) {
         len = t - s;
         strcpy(model, t + 1);
@@ -55,18 +53,18 @@ void CL_ParsePlayerSkin(char *name, char *model, char *skin, const char *s)
     }
 
     // isolate the model name
-    t = strchr(model, '/');
-    if (!t)
-        t = strchr(model, '\\');
-    if (!t)
+    p = strchr(model, '/');
+    if (!p)
+        p = strchr(model, '\\');
+    if (!p)
         goto default_model;
-    *t = 0;
+    *p = 0;
 
     // isolate the skin name
-    strcpy(skin, t + 1);
+    strcpy(skin, p + 1);
 
     // fix empty model to male
-    if (t == model)
+    if (p == model)
         strcpy(model, "male");
 
     // apply restrictions on skins
