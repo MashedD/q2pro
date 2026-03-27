@@ -9,4 +9,5 @@ meson setup build-win32 \
     --force-fallback-for=libcurl,zlib,libjpeg,libpng \
     -Danticheat-server=true || :
 meson compile -C build-win32
+chmod -x build-win32/gamex86.dll
 

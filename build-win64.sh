@@ -9,4 +9,5 @@ meson setup build-win64 \
     --force-fallback-for=libcurl,zlib,libjpeg,libpng \
     -Danticheat-server=true || :
 meson compile -C build-win64 -j$(nproc)
+chmod -x build-win64/gamex86_64.dll
 
