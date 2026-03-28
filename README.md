@@ -24,14 +24,10 @@ features include:
 * eliminates frame overflows (even for legacy clients)
 * won't crash if game data is corrupted
 
-Q2PRO doesn't have releases. It is always recommended to use the latest nightly
-build from the top of Releases page.
+# Documentation
 
-Linux binaries are not provided. Users are advised to build from source. See
-BUILDING.md file for instructions.
-
-For information on using and configuring Q2PRO, refer to client and server
-manuals available in doc/ subdirectory.
+- [Client](doc/client.asciidoc)
+- [Server](doc/server.asciidoc)
 
 # Fixes in this fork
 
@@ -67,6 +63,8 @@ set s_underwater "0" // hearing underwater should be improved
 
 # Building
 
+Alternative notes about building are [here](BUILDING.md).
+
 ## Prerequisites
 
 Dependencies might be missing and some are probably excessive.
@@ -75,7 +73,7 @@ Best might be to use Docker for the job.
 
 ```bash
 # Tested on CachyOS
-sudo pacman -S gcc meson ninja pkgconf
+sudo pacman -S gcc meson ninja pkgconf libcurl-gnutls
 
 # Build zstd static version if missing in:
 # /usr/x86_64-w64-mingw32/lib/libzstd.a
@@ -151,6 +149,7 @@ Copy files from build folder to:
 
 ```
 baseq2/gamex*.*
+baseq2/q2pro.menu
 q2pro*
 ```
 
@@ -180,4 +179,5 @@ Additionally Copy file `src/client/ui/q2pro.menu` to `baseq2` folder.
 - replace links to https://github.com/skullernet/q2pro as they
   are dead
 - check q2repro for useful changes (like in manuals)
+- consider adding Vulkan renderer
 
