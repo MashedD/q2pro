@@ -58,6 +58,12 @@ set cl_stream_scoreboard "1"
 set cl_stream_scoreboard_x "20" // margin
 set cl_stream_scoreboard_offset "120" // position from the bottom
 ```
+- added `s_r1q2_openal`: changes sound attenuation to similar as in r1q2 if using OpenAL driver:
+```
+set s_enable "2" // OpenAL - required for s_r1q2_openal
+set s_r1q2_openal "1" // make sound more like in r1q2
+set s_underwater "0" // hearing underwater should be improved
+```
 
 # Building
 
@@ -171,8 +177,6 @@ Additionally Copy file `src/client/ui/q2pro.menu` to `baseq2` folder.
 
 - fix transparency problems in game menu background
 - expand q2pro.menu with additional items
-- add option to switch audio parameters to be like in r1q2's OpenAL
-  (I have a ready commit for that too, but I'll add it later on)
 - replace links to https://github.com/skullernet/q2pro as they
   are dead
 - check q2repro for useful changes (like in manuals)
