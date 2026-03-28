@@ -52,6 +52,12 @@ manuals available in doc/ subdirectory.
   compliant
 - change so that config file name on Linux is same as on Windows (q2config.cfg
   instead of config.cfg)
+- added new scores layout for streaming, works only with OpenTDM. To turn it on:
+```
+set cl_stream_scoreboard "1"
+set cl_stream_scoreboard_x "20" // margin
+set cl_stream_scoreboard_offset "120" // position from the bottom
+```
 
 # Building
 
@@ -165,8 +171,6 @@ Additionally Copy file `src/client/ui/q2pro.menu` to `baseq2` folder.
 
 - fix transparency problems in game menu background
 - expand q2pro.menu with additional items
-- add option to change layout of scoreboard for OpenTDM
-  (I have a ready commit for that, but it wasn't properly tested yet)
 - add option to switch audio parameters to be like in r1q2's OpenAL
   (I have a ready commit for that too, but I'll add it later on)
 - replace links to https://github.com/skullernet/q2pro as they

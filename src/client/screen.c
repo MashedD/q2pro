@@ -2225,6 +2225,294 @@ static void SCR_DrawStats(void)
     SCR_ExecuteLayoutString(cl.configstrings[CS_STATUSBAR]);
 }
 
+typedef struct {
+    char name[32];
+    int frags;
+    int deaths;
+    int net;
+    int ping;
+    qboolean has_stats;
+    //qboolean ready;  // unused
+    qboolean captain;
+} stream_player_t;
+
+typedef struct {
+    char name[32];
+    int score;
+    float avg_ping;
+    char skin[32];
+    stream_player_t players[16];
+    int num_players;
+} stream_team_t;
+
+// Parse lines like "Team name     -42"
+static qboolean ParseTeamLine(const char *line, char *out_name, size_t name_size, int *out_score)
+{
+    if (!line || !*line)
+        return qfalse;
+
+    // Find last digits, can be negative
+    const char *p = line + strlen(line) - 1;
+    while (p >= line && !isdigit(*p) && *p != '-') p--;
+
+    if (p < line || (!isdigit(*p) && *p != '-'))
+        return qfalse;
+
+    // Go to starting position of a number (including -)
+    if (*p == '-') p--;
+    while (p >= line && isdigit(*p)) p--;
+    p++;  // beginning of a number
+
+    *out_score = atoi(p);
+
+    // Team name - everything before a number, remove trailing spaces
+    ptrdiff_t name_len = p - line;
+    while (name_len > 0 && isspace(line[name_len-1])) name_len--;
+
+    if (name_len <= 0 || name_len >= (ptrdiff_t)name_size)
+        return qfalse;
+
+    strncpy(out_name, line, name_len);
+    out_name[name_len] = '\0';
+
+    return qtrue;
+}
+
+static inline int is_number(const char *s) {
+    if (!s || !*s) return 0;
+    if (*s == '-' || *s == '+') s++;
+    return *s && isdigit((unsigned char)*s);
+}
+
+static qboolean parse_status_line_right_to_left(const char *line, stream_player_t *out)
+{
+    char buf[40];
+    strncpy(buf, line, sizeof(buf)-1);
+    buf[sizeof(buf)-1] = '\0';
+
+    char *tokens[16];
+    int   tok_count = 0;
+
+    // Split into tokens (very simple version)
+    char *p = buf;
+    while (*p) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+        tokens[tok_count++] = p;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        if (*p) *p++ = '\0'; // terminate token
+    }
+
+    if (tok_count == 0)
+        return false;
+
+    // Rule 1: last token is ALWAYS the ping (or last value)
+    char *last = tokens[tok_count-1];
+    if (!is_number(last))
+        return false; // must end with number
+
+    out->ping = atoi(last);
+    tok_count--; // remove ping
+
+    // Rule 2: optional [READY] right before ping
+    //out->ready = false;
+    if (tok_count >= 1 && strcmp(tokens[tok_count-1], "[READY]") == 0) {
+        //out->ready = true;
+        tok_count--;
+    }
+
+    // Rule 3: if now last 3 tokens are numbers → stats mode
+    out->has_stats = false;
+    if (tok_count >= 3 &&
+        is_number(tokens[tok_count-1]) &&
+        is_number(tokens[tok_count-2]) &&
+        is_number(tokens[tok_count-3])) {
+
+        out->frags         = atoi(tokens[tok_count-3]);
+        out->deaths        = atoi(tokens[tok_count-2]);
+        out->net           = atoi(tokens[tok_count-1]);
+        out->has_stats     = true;
+
+        tok_count -= 3;
+    }
+
+    // Name: first 15 chars including spaces
+    strncpy(out->name, line, 15);
+    return true;
+}
+
+static void SCR_DrawOpenTDMScores(const char *s)
+{
+    stream_team_t team1 = {0}, team2 = {0};
+    //char time_str[64] = {0};
+    //char server_name[64] = {0};
+
+    char *token;
+    char **string_list = NULL;
+    int num_strings = 0;
+    int max_strings = 64;
+
+    if (!s[0])
+        return;
+
+    string_list = Z_Malloc(max_strings * sizeof(char*));
+
+    // Step 1: Collect all text values
+    while (s) {
+        token = COM_Parse(&s);
+        if (!strcmp(token, "string") || !strcmp(token, "string2")) {
+            token = COM_Parse(&s);
+            if (num_strings < max_strings - 1) {
+                // For debugging:
+                //HUD_DrawString(50, 120 + (num_strings * 15), token);
+                //Com_Printf("%s\n", token);
+                char *copy = Z_Malloc(strlen(token) + 1);
+                if (copy) {
+                    strcpy(copy, token);
+                    string_list[num_strings++] = copy;
+                }
+            }
+        }
+    }
+
+    if (num_strings < 4) {
+        Z_Free(string_list);
+        return;
+    }
+
+    // Step 2: Extract team names and scores
+    if (ParseTeamLine(string_list[1], team1.name, sizeof(team1.name), &team1.score) == false) {
+        strncpy(team1.name, "Hometeam", sizeof(team1.name));
+        team1.score = 0;
+    }
+
+    if (ParseTeamLine(string_list[2], team2.name, sizeof(team2.name), &team2.score) == false) {
+        strncpy(team2.name, "Visitors", sizeof(team2.name));
+        team2.score = 0;
+    }
+
+    // Time
+    //strncpy(time_str, string_list[3], sizeof(time_str));
+
+    // Check for old scoreboard
+    if (strstr(string_list[4], "oldscoreboard:")) {
+        // Unimplemented, but still works (you just can't differentiate
+        // if you're looking at current match or previous one
+    }
+
+    // Step 3: Find team headers (format "Name:avg(skin)")
+    for (int i = 4; i < num_strings; i++) {
+        char *hdr = string_list[i];
+        if (strchr(hdr, ':') && strchr(hdr, '(') && strchr(hdr, ')')) {
+            if (strstr(hdr, team1.name)) {
+                sscanf(hdr, "%[^:]:%f%s", team1.name, &team1.avg_ping, team1.skin);
+            } else {
+                sscanf(hdr, "%[^:]:%f%s", team2.name, &team2.avg_ping, team2.skin);
+                break;
+            }
+        }
+    }
+
+    // Step 4: Find players (by column headers, interleaved team1/team2 - except for * sign)
+    int player_idx = 0;
+    int start_players = 0;
+    for (int i = 6; i < num_strings; i++) {
+        char *line = string_list[i];
+        if (!strcmp(line, " Name            Frags Dths Net Ping") || !strcmp(line, " Name")) {
+            start_players = i + 1;
+            break; // break on first team
+        }
+    }
+
+    for (int i = start_players; i < num_strings; i++) {
+        char *line = string_list[i];
+
+        if (!strcmp(line, " Spectators")) break;
+
+        // skip second team header
+        if (!strcmp(line, " Name            Frags Dths Net Ping") || !strcmp(line, " Name"))
+            continue;
+
+        // skip admin marker, but add to previous player
+        if (!strcmp(line, "*")) {
+            if (player_idx > 0) {
+                // go back and add captain flag to previous player
+                int last = player_idx - 1;
+                if (last % 2 == 0 && team1.num_players > 0)
+                    team1.players[team1.num_players - 1].captain = true;
+                else if (team2.num_players > 0)
+                    team2.players[team2.num_players - 1].captain = true;
+            }
+            continue; // don't increment player_idx
+        }
+
+        stream_player_t pl = {0};
+        if (!parse_status_line_right_to_left(line, &pl))
+            continue;
+
+        if (player_idx % 2 == 0)
+            team1.players[team1.num_players++] = pl;
+        else
+            team2.players[team2.num_players++] = pl;
+
+        player_idx++;
+    }
+
+    // Step 5: Server name (last string unless there are spectators)
+    //strncpy(server_name, string_list[num_strings-1], sizeof(server_name));
+
+    // Step 6: Drawing
+    char buf[128];
+    int x = cl_stream_scoreboard_x->integer;
+    int x2 = scr.hud_width - x - (sizeof("Name            Frags Dths Net Ping") * CONCHAR_WIDTH);
+    int y = scr.hud_height - cl_stream_scoreboard_offset->integer - (8 * CONCHAR_HEIGHT);
+
+    // Team headers
+    Q_snprintf(buf, sizeof(buf), "%s: %d %s", team1.name, team1.score, team1.skin);
+    HUD_DrawAltString(x, y, buf);
+    Q_snprintf(buf, sizeof(buf), "%s: %d %s", team2.name, team2.score, team2.skin);
+    HUD_DrawAltString(x2, y, buf);
+    y += CONCHAR_HEIGHT;
+
+    // Column names
+    HUD_DrawAltString(x, y,  "Name            Frags Dths Net Ping");
+    HUD_DrawAltString(x2, y, "Name            Frags Dths Net Ping");
+    y += CONCHAR_HEIGHT;
+
+    // Team1 players
+    int old_y = y;
+    for (int p = 0; p < team1.num_players; p++) {
+        HUD_DrawString(x, y, team1.players[p].name);
+        Q_snprintf(buf, sizeof(buf), "%5d %4d %3d %4d %s",
+            team1.players[p].frags, team1.players[p].deaths,
+            team1.players[p].net, team1.players[p].ping,
+            team1.players[p].captain ? "*" : "");
+        HUD_DrawString(x + (CONCHAR_WIDTH * 16), y, buf);
+
+        y += CONCHAR_HEIGHT;
+    }
+
+    y = old_y;
+    // Team2 players
+    for (int p = 0; p < team2.num_players; p++) {
+        HUD_DrawString(x2, y, team2.players[p].name);
+        Q_snprintf(buf, sizeof(buf), "%5d %4d %3d %4d %s",
+                   team2.players[p].frags, team2.players[p].deaths,
+                   team2.players[p].net, team2.players[p].ping,
+                   team2.players[p].captain ? "*" : "");
+        HUD_DrawString(x2 + (CONCHAR_WIDTH * 16), y, buf);
+        y += CONCHAR_HEIGHT;
+    }
+
+    // Footer
+    //y += CONCHAR_HEIGHT;
+    //Q_snprintf(buf, sizeof(buf), "%s %s", server_name, time_str);
+    //HUD_DrawString(x, y, buf);
+
+    // Cleanup
+    Z_Free(string_list);
+}
+
 static void SCR_DrawLayout(void)
 {
     if (scr_draw2d->integer == 3 && !Key_IsDown(K_F1))
@@ -2237,6 +2525,18 @@ static void SCR_DrawLayout(void)
         return;
 
 draw:
+
+    // MashedD: prolly stupid, but works
+    if (cl_stream_scoreboard->value
+        && cl.frame.ps.stats[STAT_LAYOUTS] & LAYOUTS_LAYOUT
+        && *cl.layout
+        && cl.layout[0] == 'x'
+        && cl.layout[1] == 'v'
+        && cl.layout[3] == '7')
+    {
+        SCR_DrawOpenTDMScores(cl.layout);
+        return;
+    }
     SCR_ExecuteLayoutString(cl.layout);
 }
 
