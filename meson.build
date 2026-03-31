@@ -284,6 +284,30 @@ curl = dependency('libcurl',
   default_options: fallback_opt,
 )
 
+if curl.found() and win32
+  curl = declare_dependency(
+    compile_args: ['-DCURL_STATICLIB'],
+    link_args: [
+      '-l:libcurl.a',
+      '-lnghttp2',
+      '-lpsl',
+      '-lidn2',
+      '-lbrotlidec',
+      '-lbrotlicommon',
+      '-lzstd',
+      '-lunistring',
+      '-lssh2',
+      '-lssl',
+      '-lcrypto',
+      '-lws2_32',
+      '-lwldap32',
+      '-liconv',
+      '-lbcrypt',
+      '-lcrypt32',
+    ],
+  )
+endif
+
 if curl.found()
   client_src += 'src/client/http.c'
   config.set10('USE_CURL', true)
