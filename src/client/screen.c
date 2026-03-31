@@ -2401,27 +2401,45 @@ static void SCR_DrawOpenTDMScores(const char *s)
     }
 
     // Step 3: Find team headers (format "Name:avg(skin)")
+    int teams_count = 0;
     for (int i = 4; i < num_strings; i++) {
         char *hdr = string_list[i];
         if (strchr(hdr, ':') && strchr(hdr, '(') && strchr(hdr, ')')) {
             if (strstr(hdr, team1.name)) {
                 sscanf(hdr, "%[^:]:%f%s", team1.name, &team1.avg_ping, team1.skin);
-            } else {
+                ++teams_count;
+            } else if (strstr(hdr, team2.name)) {
                 sscanf(hdr, "%[^:]:%f%s", team2.name, &team2.avg_ping, team2.skin);
-                break;
+                ++teams_count;
             }
+        }
+        if (teams_count == 2) {
+            break;
         }
     }
 
+    // Debug: dump all parsed strings
+    //for (int i = 0; i < num_strings; i++) {
+    //    Com_Printf("[%d] \"%s\"\n", i, string_list[i]);
+    //}
+
     // Step 4: Find players (by column headers, interleaved team1/team2 - except for * sign)
+    // Skip " Ping" headers (lone token before each team's " Name" header).
+    // With 2 teams, two " Name" headers exist - start after the last one.
     int player_idx = 0;
-    int start_players = 0;
+    int start_players = -1;
     for (int i = 6; i < num_strings; i++) {
         char *line = string_list[i];
         if (!strcmp(line, " Name            Frags Dths Net Ping") || !strcmp(line, " Name")) {
             start_players = i + 1;
-            break; // break on first team
+            break;
         }
+    }
+
+    if (start_players < 0) {
+        // Don't display anything when there are only
+        // spectators and no players
+        goto cleanup;
     }
 
     for (int i = start_players; i < num_strings; i++) {
@@ -2435,7 +2453,7 @@ static void SCR_DrawOpenTDMScores(const char *s)
 
         // skip admin marker, but add to previous player
         if (!strcmp(line, "*")) {
-            if (player_idx > 0) {
+            if (player_idx > 0 && teams_count == 2) {
                 // go back and add captain flag to previous player
                 int last = player_idx - 1;
                 if (last % 2 == 0 && team1.num_players > 0)
@@ -2450,7 +2468,16 @@ static void SCR_DrawOpenTDMScores(const char *s)
         if (!parse_status_line_right_to_left(line, &pl))
             continue;
 
-        if (player_idx % 2 == 0)
+        // Only Hometeam
+        if (team1.skin[0] && !team2.skin[0])
+        {
+            team1.players[team1.num_players++] = pl;
+        // Only Visitors
+        } else if (!team1.skin[0] && team2.skin[0])
+        {
+            team2.players[team2.num_players++] = pl;
+        // If there are two teams
+        } else if (player_idx % 2 == 0)
             team1.players[team1.num_players++] = pl;
         else
             team2.players[team2.num_players++] = pl;
@@ -2509,6 +2536,7 @@ static void SCR_DrawOpenTDMScores(const char *s)
     //Q_snprintf(buf, sizeof(buf), "%s %s", server_name, time_str);
     //HUD_DrawString(x, y, buf);
 
+cleanup:
     // Cleanup
     Z_Free(string_list);
 }
