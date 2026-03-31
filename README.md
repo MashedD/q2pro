@@ -65,7 +65,6 @@ set s_underwater "0" // hearing underwater should be improved
 # TODO
 
 - fix transparency problems in game menu background
-- expand q2pro.menu with additional items
 - replace links to https://github.com/skullernet/q2pro as they
   are dead
 - check q2repro for useful changes (like in manuals)
