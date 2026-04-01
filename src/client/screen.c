@@ -2259,9 +2259,30 @@ static qboolean ParseTeamLine(const char *line, char *out_name, size_t name_size
         return qfalse;
 
     // Go to starting position of a number (including -)
-    if (*p == '-') p--;
+    // If we stopped at '-', make sure it's part of negative number
+    if (*p == '-') {
+        const char *next = p + 1;
+        if (next < line + strlen(line) && isdigit(*next)) {
+            // '-' is part of negative number, keep it
+        } else {
+            // '-' is not part of negative number - skip it
+            while (p >= line && !isdigit(*p)) p--;
+            if (p < line) return qfalse;
+        }
+    }
+    // Move back from digit to find start of number (including -)
     while (p >= line && isdigit(*p)) p--;
-    p++;  // beginning of a number
+    // Check if '-' is before the digits
+    if (*p == '-') {
+        const char *next = p + 1;
+        if (next < line + strlen(line) && isdigit(*next)) {
+            // negative number, keep '-'
+        } else {
+            p++;
+        }
+    } else {
+        p++;
+    }
 
     *out_score = atoi(p);
 
@@ -2405,16 +2426,15 @@ static void SCR_DrawOpenTDMScores(const char *s)
     for (int i = 4; i < num_strings; i++) {
         char *hdr = string_list[i];
         if (strchr(hdr, ':') && strchr(hdr, '(') && strchr(hdr, ')')) {
-            if (strstr(hdr, team1.name)) {
+            if (teams_count == 0) {
                 sscanf(hdr, "%[^:]:%f%s", team1.name, &team1.avg_ping, team1.skin);
-                ++teams_count;
-            } else if (strstr(hdr, team2.name)) {
+            } else {
                 sscanf(hdr, "%[^:]:%f%s", team2.name, &team2.avg_ping, team2.skin);
-                ++teams_count;
             }
-        }
-        if (teams_count == 2) {
-            break;
+            ++teams_count;
+            if (teams_count == 2) {
+                break;
+            }
         }
     }
 
