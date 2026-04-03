@@ -2214,6 +2214,42 @@ static void SCR_DrawCrosshair(void)
     SCR_DrawHitMarker();
 }
 
+static void replace_substring(char *str, const char *old, const char *new) {
+    char *pos = strstr(str, old);
+    if (pos == NULL) return; // not found
+
+    size_t old_len = strlen(old);
+    size_t new_len = strlen(new);
+    size_t tail_len = strlen(pos + old_len); // length after the match
+
+    // Move the tail to make space or shrink
+    memmove(pos + new_len, pos + old_len, tail_len + 1); // +1 for '\0'
+
+    // Copy the new string in place
+    memcpy(pos, new, new_len);
+}
+
+static int get_quoted_string_length(const char *str, const char *prefix) {
+    char *start = strstr(str, prefix);
+    if (!start) {
+        //Com_Printf("prefix not found: [%s]\n", prefix);
+        return 0;
+    }
+    start += strlen(prefix);
+    while (*start == ' ') start++;
+    if (start[0] == 's' && strncmp(start, "string ", 7) == 0) {
+        start += 7;
+    }
+    while (*start == ' ') start++;
+    if (start[0] != '"') {
+        //Com_Printf("no quote, got: [%c%c%c]\n", start[0], start[1], start[2]);
+        return 0;
+    }
+    char *end = strchr(start + 1, '"');
+    if (!end) return 0;
+    return end - start - 1;
+}
+
 // The status bar is a small layout program that is based on the stats array
 static void SCR_DrawStats(void)
 {
@@ -2221,8 +2257,47 @@ static void SCR_DrawStats(void)
         return;
     if (cl.frame.ps.stats[STAT_LAYOUTS] & LAYOUTS_HIDE_HUD)
         return;
+    if (cl_stream_scoreboard->value
+        && cl.frame.ps.stats[STAT_LAYOUTS] & LAYOUTS_LAYOUT
+        && *cl.layout
+        && cl.layout[0] == 'x'
+        && cl.layout[1] == 'v'
+        && cl.layout[3] == '7') {
+        char statusbar_copy[1536];
+        strncpy(statusbar_copy, cl.configstrings[CS_STATUSBAR], sizeof(statusbar_copy) - 1);
+        statusbar_copy[sizeof(statusbar_copy) - 1] = 0;
 
-    SCR_ExecuteLayoutString(cl.configstrings[CS_STATUSBAR]);
+        char buf[64] = {};
+        int center_x = scr.hud_width / 2;
+        // Hometeam
+        int text_w = get_quoted_string_length(statusbar_copy, "xr -64 yb -96") * CONCHAR_WIDTH;
+        Q_snprintf(buf, sizeof(buf), "xr %d yb %d", -center_x - (text_w) - CONCHAR_WIDTH, -(scr.hud_height));
+        replace_substring(statusbar_copy, "xr -64 yb -96", buf);
+        // Hometeam score
+        Q_snprintf(buf, sizeof(buf), "xr %d yb %d", -center_x - (text_w) - (text_w / 2), -(scr.hud_height) + CONCHAR_HEIGHT);
+        //Q_snprintf(buf, sizeof(buf), "xr %d yb %d", -center_x - (text_w) - CONCHAR_WIDTH, -(scr.hud_height) + CONCHAR_HEIGHT);
+        replace_substring(statusbar_copy, "xr -66 yb -120", buf);
+        // Visitors
+        int text_w2 = get_quoted_string_length(statusbar_copy, "xr -64 yb -48") * CONCHAR_WIDTH;
+        Q_snprintf(buf, sizeof(buf), "xr %d yb %d", -center_x + CONCHAR_WIDTH, -(scr.hud_height));
+        replace_substring(statusbar_copy, "xr -64 yb -48", buf);
+        // Visitors score
+        Q_snprintf(buf, sizeof(buf), "xr %d", -center_x + (2 * CONCHAR_WIDTH) - (text_w2 / 2));
+        //Q_snprintf(buf, sizeof(buf), "xr %d", -center_x + CONCHAR_WIDTH);
+        replace_substring(statusbar_copy, "yb -72", buf);
+
+        R_DrawFill32(
+            center_x - text_w - CONCHAR_WIDTH - 4,
+            0,
+            text_w + text_w2 + (2 * CONCHAR_WIDTH) + 8,
+            (CONCHAR_HEIGHT * 4) + 4,
+            MakeColor(80, 100, 10, 40)
+        );
+
+        SCR_ExecuteLayoutString(statusbar_copy);
+    } else {
+        SCR_ExecuteLayoutString(cl.configstrings[CS_STATUSBAR]);
+    }
 }
 
 typedef struct {
@@ -2239,7 +2314,7 @@ typedef struct {
 typedef struct {
     char name[32];
     int score;
-    float avg_ping;
+    int avg_ping;
     char skin[32];
     stream_player_t players[16];
     int num_players;
@@ -2427,9 +2502,9 @@ static void SCR_DrawOpenTDMScores(const char *s)
         char *hdr = string_list[i];
         if (strchr(hdr, ':') && strchr(hdr, '(') && strchr(hdr, ')')) {
             if (teams_count == 0) {
-                sscanf(hdr, "%[^:]:%f%s", team1.name, &team1.avg_ping, team1.skin);
+                sscanf(hdr, "%[^:]:%d%s", team1.name, &team1.avg_ping, team1.skin);
             } else {
-                sscanf(hdr, "%[^:]:%f%s", team2.name, &team2.avg_ping, team2.skin);
+                sscanf(hdr, "%[^:]:%d%s", team2.name, &team2.avg_ping, team2.skin);
             }
             ++teams_count;
             if (teams_count == 2) {
@@ -2513,11 +2588,22 @@ static void SCR_DrawOpenTDMScores(const char *s)
     int x = cl_stream_scoreboard_x->integer;
     int x2 = scr.hud_width - x - (sizeof("Name            Frags Dths Net Ping") * CONCHAR_WIDTH);
     int y = scr.hud_height - cl_stream_scoreboard_offset->integer - (8 * CONCHAR_HEIGHT);
+    int col_width = sizeof("Name            Frags Dths Net Ping") * CONCHAR_WIDTH;
 
-    // Team headers
-    Q_snprintf(buf, sizeof(buf), "%s: %d %s", team1.name, team1.score, team1.skin);
+    // Calculate table heights
+    int team1_height = (2 + team1.num_players) * CONCHAR_HEIGHT;
+    int team2_height = (2 + team2.num_players) * CONCHAR_HEIGHT;
+
+    // Draw transparent backgrounds
+    //R_DrawFill32(x - 4, y - 4, col_width + 8, team1_height + 8, MakeColor(0, 0, 255, 20));
+    //R_DrawFill32(x2 - 4, y - 4, col_width + 8, team2_height + 8, MakeColor(0, 255, 0, 20));
+    R_DrawFill32(x - 4, y - 4, col_width + 8, team1_height + 8, MakeColor(80, 100, 10, 40));
+    R_DrawFill32(x2 - 4, y - 4, col_width + 8, team2_height + 8, MakeColor(80, 100, 10, 40));
+
+    // Team headers with avg ping
+    Q_snprintf(buf, sizeof(buf), "%s: %d (%d ping) %s", team1.name, team1.score, team1.avg_ping, team1.skin);
     HUD_DrawAltString(x, y, buf);
-    Q_snprintf(buf, sizeof(buf), "%s: %d %s", team2.name, team2.score, team2.skin);
+    Q_snprintf(buf, sizeof(buf), "%s: %d (%d ping) %s", team2.name, team2.score, team2.avg_ping, team2.skin);
     HUD_DrawAltString(x2, y, buf);
     y += CONCHAR_HEIGHT;
 
