@@ -53,8 +53,6 @@ features include:
 # TODO
 
 - fix transparency problems in game menu background
-- replace links to https://github.com/skullernet/q2pro as they
-  are dead
 - check q2repro for useful changes (like in manuals)
 - consider adding Vulkan renderer
 

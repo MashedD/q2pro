@@ -198,7 +198,7 @@ sv_downloadserver::
 
 TIP: It is highly advisable to setup HTTP downloading on any public Quake 2
 server. The easiest way to do so is to run
-https://github.com/skullernet/pakserve[pakserve] on the same machine as Quake 2
+https://github.com/q2pro/pakserve[pakserve] on the same machine as Quake 2
 server.
 
 sv_show_name_changes::
