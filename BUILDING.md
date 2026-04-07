@@ -285,5 +285,5 @@ OpenAL32.dll
 OpenAL64.dll // rename from OpenAL32.dll 64-bit version
 ```
 
-Additionally Copy file `src/client/ui/q2pro.menu` to `baseq2` folder.
+Additionally Copy file `assets/baseq2/q2pro.menu` to `baseq2` folder.
 
