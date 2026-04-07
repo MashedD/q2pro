@@ -43,6 +43,8 @@ static struct {
 
     qhandle_t   backtile_pic;
 
+    qhandle_t   logo_pic;
+
     qhandle_t   net_pic;
     qhandle_t   font_pic;
 
@@ -1369,6 +1371,7 @@ void SCR_RegisterMedia(void)
     scr.backtile_pic = R_RegisterImage("backtile", IT_PIC, IF_PERMANENT | IF_REPEAT);
     scr.pause_pic = R_RegisterPic("pause");
     scr.loading_pic = R_RegisterPic("loading");
+    scr.logo_pic = R_RegisterPic("logo");
     scr.net_pic = R_RegisterPic("net");
     scr.hit_marker_pic = R_RegisterImage("marker", IT_PIC, IF_PERMANENT | IF_OPTIONAL);
 
@@ -2269,30 +2272,49 @@ static void SCR_DrawStats(void)
 
         char buf[64] = {};
         int center_x = scr.hud_width / 2;
+        int spacing = 6 * CONCHAR_WIDTH;
+        int spacing2 = 5 * CONCHAR_WIDTH;
         // Hometeam
         int text_w = get_quoted_string_length(statusbar_copy, "xr -64 yb -96") * CONCHAR_WIDTH;
-        Q_snprintf(buf, sizeof(buf), "xr %d yb %d", -center_x - (text_w) - CONCHAR_WIDTH, -(scr.hud_height));
-        replace_substring(statusbar_copy, "xr -64 yb -96", buf);
-        // Hometeam score
-        Q_snprintf(buf, sizeof(buf), "xr %d yb %d", -center_x - (text_w) - (text_w / 2), -(scr.hud_height) + CONCHAR_HEIGHT);
-        //Q_snprintf(buf, sizeof(buf), "xr %d yb %d", -center_x - (text_w) - CONCHAR_WIDTH, -(scr.hud_height) + CONCHAR_HEIGHT);
+        if (text_w == 0)
+        {
+            // Pf
+            text_w = get_quoted_string_length(statusbar_copy, "xr -32 yb -96") * CONCHAR_WIDTH;
+            Q_snprintf(buf, sizeof(buf), "xr %d yb %d", -center_x - (text_w) - spacing, -(scr.hud_height));
+            replace_substring(statusbar_copy, "xr -32 yb -96", buf);
+            // Hometeam score
+            Q_snprintf(buf, sizeof(buf), "xr %d yb %d", -center_x - (text_w) - (text_w / 2) - spacing2 - 32, -(scr.hud_height) + CONCHAR_HEIGHT);
+        } else {
+            Q_snprintf(buf, sizeof(buf), "xr %d yb %d", -center_x - (text_w) - spacing, -(scr.hud_height));
+            replace_substring(statusbar_copy, "xr -64 yb -96", buf);
+            // Hometeam score
+            Q_snprintf(buf, sizeof(buf), "xr %d yb %d", -center_x - (text_w) - (text_w / 2) - spacing2, -(scr.hud_height) + CONCHAR_HEIGHT);
+        }
+
         replace_substring(statusbar_copy, "xr -66 yb -120", buf);
+
         // Visitors
         int text_w2 = get_quoted_string_length(statusbar_copy, "xr -64 yb -48") * CONCHAR_WIDTH;
-        Q_snprintf(buf, sizeof(buf), "xr %d yb %d", -center_x + CONCHAR_WIDTH, -(scr.hud_height));
-        replace_substring(statusbar_copy, "xr -64 yb -48", buf);
-        // Visitors score
-        Q_snprintf(buf, sizeof(buf), "xr %d", -center_x + (2 * CONCHAR_WIDTH) - (text_w2 / 2));
-        //Q_snprintf(buf, sizeof(buf), "xr %d", -center_x + CONCHAR_WIDTH);
+        if (text_w2 == 0)
+        {
+            // Pf
+            text_w2 = get_quoted_string_length(statusbar_copy, "xr -32 yb -48") * CONCHAR_WIDTH;
+            Q_snprintf(buf, sizeof(buf), "xr %d yb %d", -center_x + spacing, -(scr.hud_height));
+            replace_substring(statusbar_copy, "xr -32 yb -48", buf);
+            // Visitors score
+            Q_snprintf(buf, sizeof(buf), "xr %d", -center_x + (2 * CONCHAR_WIDTH) - (text_w2 / 2) + spacing2 - 32);
+        } else {
+            Q_snprintf(buf, sizeof(buf), "xr %d yb %d", -center_x + spacing, -(scr.hud_height));
+            replace_substring(statusbar_copy, "xr -64 yb -48", buf);
+            // Visitors score
+            Q_snprintf(buf, sizeof(buf), "xr %d", -center_x + (2 * CONCHAR_WIDTH) - (text_w2 / 2) + spacing2);
+        }
+
         replace_substring(statusbar_copy, "yb -72", buf);
 
-        R_DrawFill32(
-            center_x - text_w - CONCHAR_WIDTH - 4,
-            0,
-            text_w + text_w2 + (2 * CONCHAR_WIDTH) + 8,
-            (CONCHAR_HEIGHT * 4) + 4,
-            MakeColor(80, 100, 10, 40)
-        );
+        R_SetScale(1.0f);
+        R_DrawPic((scr.hud_width / (scr.hud_scale == 0 ? 1 : scr.hud_scale) / 2) - 55, 0, scr.logo_pic);
+        R_SetScale(scr.hud_scale);
 
         SCR_ExecuteLayoutString(statusbar_copy);
     } else {
