@@ -27,7 +27,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define MIN_CHANNELS    16
 
 static cvar_t       *al_merge_looping;
-static cvar_t       *s_r1q2_openal;
 
 static ALuint       s_srcnums[MAX_CHANNELS];
 static ALuint       s_stream;
@@ -88,8 +87,6 @@ static bool AL_Init(void)
     if (i < 0)
         goto fail0;
     s_merge_looping_minval = i + 1;
-
-    s_r1q2_openal = Cvar_Get("s_r1q2_openal", "0", 0);
 
     Com_DPrintf("AL_VENDOR: %s\n", qalGetString(AL_VENDOR));
     Com_DPrintf("AL_RENDERER: %s\n", qalGetString(AL_RENDERER));
@@ -324,15 +321,9 @@ static void AL_PlayChannel(channel_t *ch)
         Com_Printf("%s: %s\n", __func__, ch->sfx->name);
 #endif
 
-    if (s_r1q2_openal->integer) {
-        ref_dist = 125.0f;
-        max_distance = 0.0f; // infinite distance
-        rolloff_factor = 1.0f;
-    } else {
-        ref_dist = SOUND_FULLVOLUME;
-        max_distance = 8192.0f;
-        rolloff_factor = ch->dist_mult * (8192.0f - (float)SOUND_FULLVOLUME);
-    }
+    ref_dist = SOUND_FULLVOLUME;
+    max_distance = 8192.0f;
+    rolloff_factor = ch->dist_mult * (8192.0f - (float)SOUND_FULLVOLUME);
 
     ch->srcnum = s_srcnums[ch - s_channels];
     qalGetError();

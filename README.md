@@ -49,12 +49,6 @@ features include:
   compliant
 - change so that config file name on Linux is same as on Windows (q2config.cfg
   instead of config.cfg)
-- added `s_r1q2_openal`: changes sound attenuation to similar as in r1q2 if using OpenAL driver:
-```
-set s_enable "2" // OpenAL - required for s_r1q2_openal
-set s_r1q2_openal "1" // make sound more like in r1q2
-set s_underwater "0" // hearing underwater should be improved
-```
 
 # TODO
 
