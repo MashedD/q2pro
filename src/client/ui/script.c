@@ -765,5 +765,8 @@ static bool Parse_File(const char *path, int depth)
 
 void UI_LoadScript(void)
 {
-    Parse_File("q2pro.menu", 0);
+    if (!Parse_File("q2pro.menu", 0)) {
+        Com_EPrintf("Could not load q2pro.menu! Menus will NOT work.\n");
+        Com_EPrintf("See https://github.com/MashedD/q2pro/blob/master/BUILDING.md#installation\n");
+    }
 }
