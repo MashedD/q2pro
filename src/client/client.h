@@ -603,13 +603,6 @@ extern cvar_t   *info_hand;
 extern cvar_t   *info_gender;
 extern cvar_t   *info_uf;
 
-//
-// streaming
-//
-extern cvar_t   *cl_stream_scoreboard;
-extern cvar_t   *cl_stream_scoreboard_x;
-extern cvar_t   *cl_stream_scoreboard_offset;
-
 //=============================================================================
 
 static inline void CL_AdvanceValue(float *restrict val, float target, float speed)
