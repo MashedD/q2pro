@@ -54,6 +54,7 @@ features include:
   checkerboard similar to one seen in original Quake 2
 - sound: added `al_hrtf` option to menu
 - sound: added `al_reverb` option to menu. 1 - softer, 2 - stronger
+- added `chase quadkiller` command
 
 # TODO
 

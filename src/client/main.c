@@ -95,6 +95,13 @@ cvar_t  *info_hand;
 cvar_t  *info_gender;
 cvar_t  *info_uf;
 
+//
+// streaming
+//
+cvar_t  *cl_stream_scoreboard;
+cvar_t  *cl_stream_scoreboard_x;
+cvar_t  *cl_stream_scoreboard_offset;
+
 #if USE_REF
 extern cvar_t *gl_modulate_world;
 extern cvar_t *gl_modulate_entities;
@@ -2826,6 +2833,13 @@ static void CL_InitLocal(void)
     info_gender = Cvar_Get("gender", "male", CVAR_USERINFO | CVAR_ARCHIVE);
     info_gender->modified = false; // clear this so we know when user sets it manually
     info_uf = Cvar_Get("uf", "", CVAR_USERINFO);
+
+    //
+    // streaming
+    //
+    cl_stream_scoreboard = Cvar_Get("cl_stream_scoreboard", "0", CVAR_ARCHIVE);
+    cl_stream_scoreboard_x = Cvar_Get("cl_stream_scoreboard_x", "20", CVAR_ARCHIVE);
+    cl_stream_scoreboard_offset = Cvar_Get("cl_stream_scoreboard_offset", "120", CVAR_ARCHIVE);
 
     //
     // macros
