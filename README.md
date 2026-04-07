@@ -49,6 +49,8 @@ features include:
   compliant
 - change so that config file name on Linux is same as on Windows (q2config.cfg
   instead of config.cfg)
+- textures: when missing, replaced red dot on black screen to pink/black
+  checkerboard similar to one seen in original Quake 2
 
 # TODO
 
