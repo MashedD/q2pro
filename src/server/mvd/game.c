@@ -40,6 +40,8 @@ mvd_player_t    mvd_dummy;
 
 static int      mvd_numplayers;
 
+#define MVD_CHASE_QUADKILLER   -1
+
 static void MVD_UpdateClient(mvd_client_t *client);
 
 /*
@@ -594,6 +596,75 @@ static mvd_player_t *MVD_MostFollowed(mvd_t *mvd)
     return target;
 }
 
+static edict_t *MVD_PlayerEdict(mvd_t *mvd, mvd_player_t *player)
+{
+    return &mvd->edicts[player - mvd->players + 1];
+}
+
+static unsigned MVD_PlayerEffects(mvd_t *mvd, mvd_player_t *player)
+{
+    if (!player || player == mvd->dummy)
+        return 0;
+    return MVD_PlayerEdict(mvd, player)->s.effects;
+}
+
+static mvd_player_t *MVD_FindFragScorer(mvd_t *mvd, mvd_player_t *victim)
+{
+    mvd_player_t *player, *killer = NULL;
+    int delta, best_delta = 0;
+    int i;
+
+    for (i = 0, player = mvd->players; i < mvd->maxclients; i++, player++) {
+        if (!player->inuse || player == mvd->dummy || player == victim) {
+            continue;
+        }
+        delta = player->ps.stats[STAT_FRAGS] - player->prev_frags;
+        if (delta > best_delta) {
+            best_delta = delta;
+            killer = player;
+        }
+    }
+
+    return killer;
+}
+
+static mvd_player_t *MVD_FindQuadKiller(mvd_client_t *client)
+{
+    mvd_t *mvd = client->mvd;
+    mvd_player_t *player, *quad = NULL, *killer;
+    edict_t *ent;
+    int i;
+
+    for (i = 0, player = mvd->players; i < mvd->maxclients; i++, player++) {
+        if (!player->inuse || player == mvd->dummy) {
+            continue;
+        }
+        ent = MVD_PlayerEdict(mvd, player);
+        if ((ent->s.effects & EF_QUAD) && !(player->prev_effects & EF_QUAD)) {
+            return player;
+        }
+        if (ent->s.effects & EF_QUAD) {
+            quad = player;
+        }
+    }
+
+    if (client->target &&
+        (client->target->prev_effects & EF_QUAD) &&
+        client->target->prev_pm_type != PM_DEAD &&
+        client->target->ps.pmove.pm_type == PM_DEAD) {
+        killer = MVD_FindFragScorer(mvd, client->target);
+        if (killer) {
+            return killer;
+        }
+    }
+
+    if (!client->target || !(MVD_PlayerEffects(mvd, client->target) & EF_QUAD)) {
+        return quad;
+    }
+
+    return NULL;
+}
+
 static void MVD_UpdateTarget(mvd_client_t *client)
 {
     mvd_t *mvd = client->mvd;
@@ -601,8 +672,17 @@ static void MVD_UpdateTarget(mvd_client_t *client)
     edict_t *ent;
     int i;
 
+    // find a quad carrier, or the player who just killed one
+    if (client->chase_mask == MVD_CHASE_QUADKILLER && !mvd->intermission) {
+        target = MVD_FindQuadKiller(client);
+        if (target) {
+            MVD_FollowStart(client, target);
+            return;
+        }
+    }
+
     // find new target for effects auto chasecam
-    if (client->chase_mask && !mvd->intermission) {
+    if (client->chase_mask > 0 && !mvd->intermission) {
         for (i = 0; i < mvd->maxclients; i++) {
             target = &mvd->players[i];
             if (!target->inuse || target == mvd->dummy) {
@@ -1103,12 +1183,77 @@ static mvd_player_t *MVD_SetPlayer(mvd_client_t *client, const char *s)
     return match;
 }
 
+static int MVD_ChaseMaskForName(const char *s)
+{
+    if (!Q_stricmp(s, "q") || !Q_stricmp(s, "quad"))
+        return EF_QUAD;
+    if (!Q_stricmp(s, "i") || !Q_stricmp(s, "invulner") ||
+        !Q_stricmp(s, "invuln") || !Q_stricmp(s, "invul") ||
+        !Q_stricmp(s, "pent"))
+        return EF_PENT;
+    if (!Q_stricmp(s, "r") || !Q_stricmp(s, "red_flag"))
+        return EF_FLAG1;
+    if (!Q_stricmp(s, "b") || !Q_stricmp(s, "blue_flag"))
+        return EF_FLAG2;
+    if (!Q_stricmp(s, "quadkiller"))
+        return MVD_CHASE_QUADKILLER;
+
+    return 0;
+}
+
+static void MVD_ClearAutoChase(mvd_client_t *client)
+{
+    client->chase_auto = false;
+    client->chase_wait = false;
+}
+
+static void MVD_StartEffectChase(mvd_client_t *client, int mask, const char *name)
+{
+    SV_ClientPrintf(client->cl, PRINT_MEDIUM,
+                    "[MVD] Chasing players with '%s' powerup.\n", name);
+    client->chase_mask = mask;
+    MVD_ClearAutoChase(client);
+}
+
+static void MVD_StartQuadKillerChase(mvd_client_t *client)
+{
+    SV_ClientPrintf(client->cl, PRINT_MEDIUM,
+                    "[MVD] Chasing quad killers.\n");
+    client->chase_mask = MVD_CHASE_QUADKILLER;
+    MVD_ClearAutoChase(client);
+    client->oldtarget = client->target;
+    client->target = NULL;
+    MVD_UpdateTarget(client);
+}
+
+static void MVD_FollowPreviousTarget(mvd_client_t *client)
+{
+    if (client->oldtarget) {
+        if (client->oldtarget->inuse) {
+            MVD_FollowStart(client, client->oldtarget);
+        } else {
+            SV_ClientPrintf(client->cl, PRINT_HIGH,
+                            "[MVD] Previous chase target is not active.\n");
+        }
+    } else {
+        SV_ClientPrintf(client->cl, PRINT_HIGH,
+                        "[MVD] You have no previous chase target.\n");
+    }
+}
+
+static bool MVD_IsPreviousTargetAlias(const char *s)
+{
+    return !Q_stricmp(s, "p") || !Q_stricmp(s, "previous") ||
+        !Q_stricmp(s, "previous_target");
+}
+
 static void MVD_Follow_f(mvd_client_t *client)
 {
     mvd_t *mvd = client->mvd;
     mvd_player_t *player;
     char *s;
     int mask;
+    bool bang = false;
 
     if (!mvd->players) {
         SV_ClientPrintf(client->cl, PRINT_HIGH,
@@ -1128,45 +1273,31 @@ static void MVD_Follow_f(mvd_client_t *client)
     s = Cmd_Argv(1);
     if (*s == '!') {
         s++;
-        switch (*s) {
-        case 'q':
-            mask = EF_QUAD;
-            break;
-        case 'i':
-            mask = EF_PENT;
-            break;
-        case 'r':
-            mask = EF_FLAG1;
-            break;
-        case 'b':
-            mask = EF_FLAG2;
-            break;
-        case '!':
+        bang = true;
+        if (*s == '!') {
             goto match;
-        case 'p':
-            if (client->oldtarget) {
-                if (client->oldtarget->inuse) {
-                    MVD_FollowStart(client, client->oldtarget);
-                } else {
-                    SV_ClientPrintf(client->cl, PRINT_HIGH,
-                                    "[MVD] Previous chase target is not active.\n");
-                }
-            } else {
-                SV_ClientPrintf(client->cl, PRINT_HIGH,
-                                "[MVD] You have no previous chase target.\n");
-            }
-            return;
-        default:
-            SV_ClientPrintf(client->cl, PRINT_HIGH,
-                            "[MVD] Unknown chase target '%s'. Valid targets are: "
-                            "q[uad]/i[nvulner]/r[ed_flag]/b[lue_flag]/p[revious_target].\n", s);
-            return;
         }
-        SV_ClientPrintf(client->cl, PRINT_MEDIUM,
-                        "[MVD] Chasing players with '%s' powerup.\n", s);
-        client->chase_mask = mask;
-        client->chase_auto = false;
-        client->chase_wait = false;
+    }
+
+    mask = MVD_ChaseMaskForName(s);
+    if (mask) {
+        if (mask == MVD_CHASE_QUADKILLER)
+            MVD_StartQuadKillerChase(client);
+        else
+            MVD_StartEffectChase(client, mask, s);
+        return;
+    }
+
+    if (MVD_IsPreviousTargetAlias(s)) {
+        MVD_FollowPreviousTarget(client);
+        return;
+    }
+
+    if (bang) {
+        SV_ClientPrintf(client->cl, PRINT_HIGH,
+                        "[MVD] Unknown chase target '%s'. Valid targets are: "
+                        "q[uad]/i[nvulner]/r[ed_flag]/b[lue_flag]/"
+                        "quadkiller/p[revious_target].\n", s);
         return;
     }
 
@@ -2245,6 +2376,8 @@ static void MVD_NotifyClient(mvd_client_t *client)
 void MVD_UpdateClients(mvd_t *mvd)
 {
     mvd_client_t *client;
+    mvd_player_t *player;
+    int i;
     bool intermission = mvd_freeze_hack->integer
         && mvd->dummy && mvd->dummy->ps.pmove.pm_type == PM_FREEZE;
 
@@ -2261,6 +2394,12 @@ void MVD_UpdateClients(mvd_t *mvd)
             MVD_UpdateClient(client);
             MVD_NotifyClient(client);
         }
+    }
+
+    for (i = 0, player = mvd->players; i < mvd->maxclients; i++, player++) {
+        player->prev_frags = player->ps.stats[STAT_FRAGS];
+        player->prev_pm_type = player->ps.pmove.pm_type;
+        player->prev_effects = mvd->edicts[i + 1].s.effects;
     }
 }
 
