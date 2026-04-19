@@ -1,3 +1,17 @@
+#if web
+#  emscripten_dep = dependency('emscripten', required: false)
+#  if emscripten_dep.found()
+#    client_src += files('emscripten.c')
+#    client_deps += emscripten_dep
+#    subdir_done()
+#  endif
+#endif
+
+if web
+  client_src += files('emscripten.c')
+  subdir_done()
+endif
+
 x11_use = true
 x11_deps = [
   dependency('x11', required: get_option('x11')),

@@ -1,0 +1,17 @@
+[binaries]
+c = 'emcc'
+cpp = 'em++'
+ar = 'emar'
+ranlib = 'emranlib'
+strip = 'emstrip'
+pkgconfig = ['emmake']
+
+[host_machine]
+system = 'emscripten'
+cpu_family = 'wasm'
+cpu = 'wasm'
+endian = 'little'
+
+[properties]
+needs_exe_wrapper = true
+

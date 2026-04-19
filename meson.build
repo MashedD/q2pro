@@ -163,6 +163,7 @@ game_src = [
 cc = meson.get_compiler('c')
 
 win32 = host_machine.system() == 'windows'
+web = host_machine.system() == 'emscripten'
 x86 = host_machine.cpu_family() == 'x86'
 
 cpuremap = {
@@ -211,6 +212,7 @@ endif
 common_link_args = []
 exe_link_args = []
 dll_link_args = []
+exe_link_with = []
 
 if cc.get_argument_syntax() == 'gcc'
   if x86
@@ -242,6 +244,13 @@ if cc.get_argument_syntax() == 'gcc'
     endif
 
     dll_link_args += '-static-libgcc'
+  elif web
+    common_link_args += [
+      '-sMAX_WEBGL_VERSION=2',
+      '-sMIN_WEBGL_VERSION=2',
+      '-sSTACK_SIZE=4MB',
+      '-sTOTAL_MEMORY=200MB',
+    ]
   endif
 elif cc.get_id() == 'msvc'
   common_args += ['/wd4146', '/wd4244', '/wd4305']
@@ -266,11 +275,20 @@ if not zlib.found()
   warning('zlib not found, client will be unable to connect to protocol 35 servers')
 endif
 
-png = dependency('libpng',
-  version:         '>= 1.6.11',
-  required:        get_option('libpng'),
-  default_options: fallback_opt,
-)
+if web
+  png = dependency('libpng',
+    method: 'system',
+    version:         '>= 1.6.11',
+    required: true,
+    default_options: fallback_opt,
+  )
+else
+  png = dependency('libpng',
+    version:         '>= 1.6.11',
+    required:        get_option('libpng'),
+    default_options: fallback_opt,
+  )
+endif
 if png.found()
   texture_formats += 'png'
 endif
@@ -348,15 +366,25 @@ if get_option('tga')
   texture_formats += 'tga'
 endif
 
-openal = dependency('openal',
-  version:         '>= 1.18.0',
-  required:        get_option('openal'),
-  default_options: fallback_opt,
-)
+if web
+  openal = dependency('openal',
+    method: 'system',
+    required: true,
+  )
+else
+  openal = dependency('openal',
+    version:         '>= 1.18.0',
+    required:        get_option('openal'),
+    default_options: fallback_opt,
+  )
+endif
 if openal.found()
   client_src += [ 'src/client/sound/al.c', 'src/client/sound/qal.c' ]
   client_deps += openal.partial_dependency(compile_args: true, includes: true)
   config.set10('USE_OPENAL', true)
+  if web
+    config.set('QAL_HARD_LINKED', true)
+  endif
 endif
 
 # require FFmpeg >= 5.1.3
@@ -425,7 +453,7 @@ if get_option('save-games')
   config.set10('USE_SAVEGAMES', true)
 endif
 
-if get_option('system-console')
+if not web and get_option('system-console')
   if not win32
     common_src += 'src/unix/tty.c'
   endif
@@ -446,36 +474,46 @@ if get_option('game-abi-hack').require(x86 and cc.get_id() == 'gcc' and cc.has_a
   engine_args += '-mstackrealign'
 endif
 
+if web
+  exe_link_with += static_library('game', game_src, include_directories: 'inc')
+  config.set('GAME_HARD_LINKED', true)
+  exe_link_args=['-sWASM=1', '-sFORCE_FILESYSTEM=1', '-sALLOW_MEMORY_GROWTH=1', '-sNO_EXIT_RUNTIME=1', '-sINITIAL_MEMORY=512MB', '-sMAXIMUM_MEMORY=2048MB', '-sEXPORTED_RUNTIME_METHODS=["ccall", "cwrap", "FS", "FS_createPath", "FS_createDataFile", "addRunDependency", "removeRunDependency"]', '-O3']
+endif
+
 executable('q2pro', common_src, client_src, refresh_src,
   dependencies:          common_deps + client_deps,
   include_directories:   'inc',
   gnu_symbol_visibility: 'hidden',
   win_subsystem:         'windows,6.0',
   link_args:             exe_link_args,
+  link_with:             exe_link_with,
   c_args:                ['-DUSE_CLIENT=1', '-DUSE_REF=1', engine_args],
   install:               system_wide,
 )
 
-executable('q2proded', common_src, server_src,
-  dependencies:          common_deps + server_deps,
-  include_directories:   'inc',
-  gnu_symbol_visibility: 'hidden',
-  win_subsystem:         'console,6.0',
-  link_args:             exe_link_args,
-  c_args:                ['-DUSE_SERVER=1', engine_args],
-  install:               system_wide,
-)
+if not web
+  executable('q2proded', common_src, server_src,
+    dependencies:          common_deps + server_deps,
+    include_directories:   'inc',
+    gnu_symbol_visibility: 'hidden',
+    win_subsystem:         'console,6.0',
+    link_args:             exe_link_args,
+    link_with:             exe_link_with,
+    c_args:                ['-DUSE_SERVER=1', engine_args],
+    install:               system_wide,
+  )
 
-shared_library('game' + cpu, game_src,
-  name_prefix:           '',
-  dependencies:          game_deps,
-  include_directories:   'inc',
-  gnu_symbol_visibility: 'hidden',
-  link_args:             dll_link_args,
-  install:               system_wide,
-  install_dir:           libdir / get_option('base-game'),
-  override_options:      get_option('game-build-options'),
-)
+  shared_library('game' + cpu, game_src,
+    name_prefix:           '',
+    dependencies:          game_deps,
+    include_directories:   'inc',
+    gnu_symbol_visibility: 'hidden',
+    link_args:             dll_link_args,
+    install:               system_wide,
+    install_dir:           libdir / get_option('base-game'),
+    override_options:      get_option('game-build-options'),
+  )
+endif
 
 config.set('REVISION',            meson.project_version().substring(1).split('~')[0].to_int())
 config.set_quoted('VERSION',      meson.project_version())

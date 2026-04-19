@@ -32,6 +32,14 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define ALC_STEREO_BASIC_SOFT   0x19AE
 #endif
 
+#ifdef QAL_HARD_LINKED
+#define qalcCloseDevice alcCloseDevice
+#define qalcCreateContext alcCreateContext
+#define qalcDestroyContext alcDestroyContext
+#define qalcIsExtensionPresent alcIsExtensionPresent
+#define qalcMakeContextCurrent alcMakeContextCurrent
+#define qalcOpenDevice alcOpenDevice
+#else
 static LPALCCLOSEDEVICE qalcCloseDevice;
 static LPALCCREATECONTEXT qalcCreateContext;
 static LPALCGETINTEGERV qalcGetIntegerv;
@@ -40,6 +48,7 @@ static LPALCDESTROYCONTEXT qalcDestroyContext;
 static LPALCISEXTENSIONPRESENT qalcIsExtensionPresent;
 static LPALCMAKECONTEXTCURRENT qalcMakeContextCurrent;
 static LPALCOPENDEVICE qalcOpenDevice;
+#endif
 
 typedef struct {
     const char *name;
@@ -55,6 +64,7 @@ typedef struct {
 #define QAL_FN(x)   { "al"#x, &qal##x }
 
 static const alsection_t sections[] = {
+#ifndef QAL_HARD_LINKED
     {
         .functions = (const alfunction_t []) {
             QALC_FN(CloseDevice),
@@ -95,6 +105,7 @@ static const alsection_t sections[] = {
             { NULL }
         }
     },
+#endif
     {
         .extension = "ALC_EXT_EFX",
         .functions = (const alfunction_t []) {
@@ -110,7 +121,9 @@ static const alsection_t sections[] = {
 static cvar_t   *al_device;
 static cvar_t   *al_hrtf;
 
+#ifndef QAL_HARD_LINKED
 static void *handle;
+#endif
 static ALCdevice *device;
 static ALCcontext *context;
 
@@ -134,10 +147,12 @@ void QAL_Shutdown(void)
             *(void **)func->dest = NULL;
     }
 
+#ifndef QAL_HARD_LINKED
     if (handle) {
         Sys_FreeLibrary(handle);
         handle = NULL;
     }
+#endif
 
     if (al_device)
         al_device->flags &= ~CVAR_SOUND;
@@ -145,6 +160,7 @@ void QAL_Shutdown(void)
         al_hrtf->flags &= ~CVAR_SOUND;
 }
 
+#ifndef QAL_HARD_LINKED
 static const char *const al_drivers[] = {
 #ifdef _WIN64
     "soft_oal", "OpenAL64"
@@ -156,6 +172,7 @@ static const char *const al_drivers[] = {
     "libopenal.so.1", "libopenal.so"
 #endif
 };
+#endif
 
 static const char *get_device_list(void)
 {
@@ -190,6 +207,7 @@ int QAL_Init(void)
     al_device = Cvar_Get("al_device", "", 0);
     al_hrtf = Cvar_Get("al_hrtf", "0", 0);
 
+#ifndef QAL_HARD_LINKED
     for (i = 0; i < q_countof(al_drivers); i++) {
         Com_DPrintf("Trying %s\n", al_drivers[i]);
         Sys_LoadLibrary(al_drivers[i], NULL, &handle);
@@ -210,6 +228,7 @@ int QAL_Init(void)
             *(void **)func->dest = addr;
         }
     }
+#endif
 
     major = minor = 0;
     qalcGetIntegerv(NULL, ALC_MAJOR_VERSION, 1, &major);

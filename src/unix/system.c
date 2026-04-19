@@ -42,6 +42,11 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <SDL.h>
 #endif
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#define exit(s) emscripten_force_exit(s)
+#endif
+
 #if USE_CLIENT
 #include <pthread.h>
 static pthread_t main_thread;
@@ -56,7 +61,9 @@ extern cvar_t   *console_prefix;
 #endif
 
 static int terminate;
+#ifndef __EMSCRIPTEN__
 static bool flush_logs;
+#endif
 
 /*
 ===============================================================================
@@ -156,10 +163,12 @@ bool Sys_SetNonBlock(int fd, bool nb)
     return fcntl(fd, F_SETFL, ret ^ O_NONBLOCK) == 0;
 }
 
+#ifndef __EMSCRIPTEN__
 static void usr1_handler(int signum)
 {
     flush_logs = true;
 }
+#endif
 
 static void term_handler(int signum)
 {
@@ -181,7 +190,9 @@ void Sys_Init(void)
     signal(SIGTTOU, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
     signal(SIGHUP, term_handler);
+#ifndef __EMSCRIPTEN__
     signal(SIGUSR1, usr1_handler);
+#endif
 
     // basedir <path>
     // allows the game to run from outside the data tree
@@ -446,11 +457,13 @@ int main(int argc, char **argv)
         }
     }
 
+#ifndef __EMSCRIPTEN__
     if (!getuid() || !geteuid()) {
         fprintf(stderr, "You can not run " PRODUCT " as superuser "
                 "for security reasons!\n");
         return EXIT_FAILURE;
     }
+#endif
 
 #if USE_CLIENT
     main_thread = pthread_self();
@@ -458,6 +471,9 @@ int main(int argc, char **argv)
 
     Qcommon_Init(argc, argv);
 
+#ifdef __EMSCRIPTEN__
+    emscripten_set_main_loop(Qcommon_Frame, 0, true);
+#else
     while (!terminate) {
         if (flush_logs) {
             Com_FlushLogs();
@@ -465,6 +481,7 @@ int main(int argc, char **argv)
         }
         Qcommon_Frame();
     }
+#endif
 
     Com_Printf("%s\n", strsignal(terminate));
     Com_Quit(NULL, ERR_DISCONNECT);
