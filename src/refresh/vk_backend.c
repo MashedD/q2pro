@@ -37,6 +37,14 @@ static const uint32_t vk_tex_frag_spv[] =
 #include "vk_tex_frag_spv.h"
 ;
 
+static const uint32_t vk_color3d_vert_spv[] =
+#include "vk_color3d_vert_spv.h"
+;
+
+static const uint32_t vk_color3d_frag_spv[] =
+#include "vk_color3d_frag_spv.h"
+;
+
 typedef struct {
     float rect[4];
     float color[4];
@@ -58,6 +66,11 @@ typedef struct {
     float color[4];
     float screen[2];
 } vk_rect_push_t;
+
+typedef struct {
+    mat4_t mvp;
+    float color[4];
+} vk_color3d_push_t;
 
 typedef struct {
     uint32_t graphics_family;
@@ -167,6 +180,7 @@ typedef struct {
     VkPipelineLayout rect_pipeline_layout;
     VkPipeline rect_pipeline;
     VkPipeline texture_pipeline;
+    VkPipeline color3d_pipeline;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
     VkFormat swapchain_format;
@@ -198,6 +212,7 @@ typedef struct {
 } vk_state_t;
 
 static vk_state_t vk;
+static cvar_t *vk_show_test_triangle;
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static void vk_destroy_texture(image_t *image);
@@ -1016,7 +1031,7 @@ static bool vk_create_frame_resources(void)
     VkPushConstantRange push_range = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
-        .size = sizeof(vk_draw_push_t),
+        .size = max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
     };
     VkPipelineLayoutCreateInfo layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1121,6 +1136,11 @@ static void vk_destroy_swapchain(void)
     if (vk.texture_pipeline) {
         vk.DestroyPipeline(vk.device, vk.texture_pipeline, NULL);
         vk.texture_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.color3d_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.color3d_pipeline, NULL);
+        vk.color3d_pipeline = VK_NULL_HANDLE;
     }
 
     if (vk.framebuffers) {
@@ -1611,6 +1631,115 @@ static bool vk_create_texture_pipeline(void)
     return true;
 }
 
+static bool vk_create_color3d_pipeline(void)
+{
+    VkShaderModule vert = vk_create_shader_module(vk_color3d_vert_spv,
+                                                  sizeof(vk_color3d_vert_spv));
+    if (!vert)
+        return false;
+
+    VkShaderModule frag = vk_create_shader_module(vk_color3d_frag_spv,
+                                                  sizeof(vk_color3d_frag_spv));
+    if (!frag) {
+        vk.DestroyShaderModule(vk.device, vert, NULL);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vert,
+            .pName = "main",
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = frag,
+            .pName = "main",
+        },
+    };
+    VkPipelineVertexInputStateCreateInfo vertex_input = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+    };
+    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = vk.swapchain_extent.width,
+        .height = vk.swapchain_extent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    VkRect2D scissor = {
+        .offset = { 0, 0 },
+        .extent = vk.swapchain_extent,
+    };
+    VkPipelineViewportStateCreateInfo viewport_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = &viewport,
+        .scissorCount = 1,
+        .pScissors = &scissor,
+    };
+    VkPipelineRasterizationStateCreateInfo raster = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth = 1.0f,
+    };
+    VkPipelineMultisampleStateCreateInfo multisample = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    VkPipelineColorBlendAttachmentState color_blend_attachment = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    VkPipelineColorBlendStateCreateInfo color_blend = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &color_blend_attachment,
+    };
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+    };
+
+    VkGraphicsPipelineCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = q_countof(stages),
+        .pStages = stages,
+        .pVertexInputState = &vertex_input,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &raster,
+        .pMultisampleState = &multisample,
+        .pDepthStencilState = &depth_stencil,
+        .pColorBlendState = &color_blend,
+        .layout = vk.rect_pipeline_layout,
+        .renderPass = vk.render_pass,
+        .subpass = 0,
+    };
+
+    VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
+                                                 &create_info, NULL,
+                                                 &vk.color3d_pipeline);
+    vk.DestroyShaderModule(vk.device, frag, NULL);
+    vk.DestroyShaderModule(vk.device, vert, NULL);
+
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateGraphicsPipelines", result);
+
+    return true;
+}
+
 static bool vk_create_swapchain(int width, int height)
 {
     VkSurfaceCapabilitiesKHR caps;
@@ -1738,6 +1867,7 @@ static bool vk_create_swapchain(int width, int height)
     if (!vk_create_render_pass() ||
         !vk_create_rect_pipeline() ||
         !vk_create_texture_pipeline() ||
+        !vk_create_color3d_pipeline() ||
         !vk_create_depth_resources() ||
         !vk_create_framebuffers())
         return false;
@@ -1969,6 +2099,45 @@ static void vk_draw_texture_rect(int x, int y, int w, int h,
                              &vk.textures[index]);
 }
 
+static void vk_projection_matrix(mat4_t m, float fov_x, float fov_y)
+{
+    const float znear = 4.0f;
+    const float zfar = 4096.0f;
+    float xmax = tanf(fov_x * (M_PIf / 360.0f));
+    float ymax = tanf(fov_y * (M_PIf / 360.0f));
+
+    memset(m, 0, sizeof(mat4_t));
+    m[0] = xmax ? 1.0f / xmax : 1.0f;
+    m[5] = ymax ? 1.0f / ymax : 1.0f;
+    m[10] = zfar / (znear - zfar);
+    m[11] = -1.0f;
+    m[14] = (znear * zfar) / (znear - zfar);
+}
+
+static void vk_draw_test_triangle(const refdef_t *fd)
+{
+    if (!vk.render_pass_active || !vk.color3d_pipeline ||
+        !vk_show_test_triangle || !vk_show_test_triangle->integer)
+        return;
+    if (fd->rdflags & RDF_NOWORLDMODEL)
+        return;
+
+    vk_color3d_push_t push;
+
+    vk_projection_matrix(push.mvp, fd->fov_x, fd->fov_y);
+    push.color[0] = 0.1f;
+    push.color[1] = 0.9f;
+    push.color[2] = 0.55f;
+    push.color[3] = 1.0f;
+
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.color3d_pipeline);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDraw(cmd, 3, 1, 0, 0);
+}
+
 bool VKR_Init(bool total)
 {
     if (!total)
@@ -1976,6 +2145,8 @@ bool VKR_Init(bool total)
 
     Com_Printf("------- VKR_Init -------\n");
     Com_Printf("Using video driver: %s\n", vid->name);
+
+    vk_show_test_triangle = Cvar_Get("vk_show_test_triangle", "0", 0);
 
     if (!vid->init())
         return false;
@@ -2113,6 +2284,10 @@ void VKR_EndRegistration(void)
 
 void VKR_RenderFrame(const refdef_t *fd)
 {
+    if (!fd)
+        return;
+
+    vk_draw_test_triangle(fd);
 }
 
 void VKR_LightPoint(const vec3_t origin, vec3_t light)
