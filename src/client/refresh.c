@@ -342,9 +342,7 @@ void CL_InitRefresh(void)
         return;
     }
 
-    // Renderer selection is still read-only for compatibility. The refresh
-    // module owns backend dispatch internally.
-    Cvar_Get("vid_ref", "gl", CVAR_ROM);
+    Cvar_Get("vid_ref", "gl", CVAR_ARCHIVE | CVAR_REFRESH);
 
     // Create the video variables so we know how to start the graphics drivers
     cvar_t *vid_driver = Cvar_Get("vid_driver", "", CVAR_REFRESH);
