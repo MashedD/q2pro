@@ -281,6 +281,7 @@ typedef struct {
 
 static vk_state_t vk;
 static cvar_t *vk_show_test_triangle;
+static cvar_t *vk_drawentities;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_world_cull;
@@ -2545,6 +2546,49 @@ static void vk_world_mvp(mat4_t out, const refdef_t *fd)
     vk_matrix_multiply(out, proj, view);
 }
 
+static void vk_entity_axis(const entity_t *ent, vec3_t axis[3])
+{
+    if (VectorEmpty(ent->angles)) {
+        VectorSet(axis[0], 1.0f, 0.0f, 0.0f);
+        VectorSet(axis[1], 0.0f, 1.0f, 0.0f);
+        VectorSet(axis[2], 0.0f, 0.0f, 1.0f);
+    } else {
+        AnglesToAxis(ent->angles, axis);
+    }
+
+    if (ent->scale && ent->scale != 1.0f) {
+        VectorScale(axis[0], ent->scale, axis[0]);
+        VectorScale(axis[1], ent->scale, axis[1]);
+        VectorScale(axis[2], ent->scale, axis[2]);
+    }
+}
+
+static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
+                          const entity_t *ent, const vec3_t axis[3])
+{
+    mat4_t proj, view, model, view_model;
+
+    memset(model, 0, sizeof(model));
+    model[0] = axis[0][0];
+    model[1] = axis[0][1];
+    model[2] = axis[0][2];
+    model[4] = axis[1][0];
+    model[5] = axis[1][1];
+    model[6] = axis[1][2];
+    model[8] = axis[2][0];
+    model[9] = axis[2][1];
+    model[10] = axis[2][2];
+    model[12] = ent->origin[0];
+    model[13] = ent->origin[1];
+    model[14] = ent->origin[2];
+    model[15] = 1.0f;
+
+    vk_projection_matrix(proj, fd->fov_x, fd->fov_y);
+    vk_view_matrix(view, fd);
+    vk_matrix_multiply(view_model, view, model);
+    vk_matrix_multiply(out, proj, view_model);
+}
+
 static bool vk_create_test_triangle(void)
 {
     static const vk_vertex_t vertices[] = {
@@ -2583,10 +2627,11 @@ static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float co
     vk.CmdDrawIndexed(cmd, mesh->index_count, 1, 0, 0, 0);
 }
 
-static void vk_draw_world_mesh(const mat4_t mvp)
+static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only)
 {
     const vk_mesh_t *mesh = &vk.world.mesh;
-    bool use_vis = vk_world_vis && vk_world_vis->integer && vk.world.face_count;
+    bool use_marked = marked_only ||
+        (vk_world_vis && vk_world_vis->integer && vk.world.face_count);
 
     if (!vk.render_pass_active || !vk.world_pipeline ||
         !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count ||
@@ -2623,7 +2668,7 @@ static void vk_draw_world_mesh(const mat4_t mvp)
                                  vk.rect_pipeline_layout, 0, 1,
                                  &texture->descriptor_set, 0, NULL);
 
-        if (!use_vis) {
+        if (!use_marked) {
             vk.CmdDrawIndexed(cmd, batch->index_count, 1, batch->first_index, 0, 0);
             continue;
         }
@@ -2806,6 +2851,82 @@ static void vk_mark_world_faces(const refdef_t *fd)
     clipflags = (vk_world_cull && vk_world_cull->integer) ?
         VK_NODE_CLIPPED : VK_NODE_UNCLIPPED;
     vk_mark_world_node_faces(bsp->nodes, fd, clipflags);
+}
+
+#define VK_BACKFACE_EPSILON 0.01f
+
+static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
+                                 const refdef_t *fd, const vec3_t axis[3])
+{
+    vec3_t transformed;
+
+    VectorSubtract(fd->vieworg, ent->origin, transformed);
+    if (!VectorEmpty(ent->angles) || (ent->scale && ent->scale != 1.0f)) {
+        vec3_t temp;
+        VectorCopy(transformed, temp);
+        VectorRotate(temp, axis, transformed);
+    }
+
+    for (int i = 0; i < model->numfaces; i++) {
+        mface_t *face = model->firstface + i;
+        vec_t dot;
+
+        if (face->drawflags & (SURF_SKY | SURF_NODRAW | SURF_TRANS_MASK))
+            continue;
+        if (!face->texinfo->image || !face->texinfo->image->texnum ||
+            face->texinfo->image->texnum >= MAX_RIMAGES)
+            continue;
+
+        dot = PlaneDiffFast(transformed, face->plane);
+        if ((face->drawflags & DSURF_PLANEBACK) ?
+            (dot > VK_BACKFACE_EPSILON) : (dot < -VK_BACKFACE_EPSILON)) {
+            continue;
+        }
+
+        face->drawframe = vk.world.drawframe;
+    }
+}
+
+static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd)
+{
+    bsp_t *bsp = vk.world.cache;
+    int index = ~ent->model;
+    mmodel_t *model;
+    vec3_t axis[3];
+    mat4_t mvp;
+
+    if (!bsp || index < 1 || index >= bsp->nummodels)
+        return;
+    if (!vk_world_textures || !vk_world_textures->integer)
+        return;
+    if (ent->flags & RF_TRANSLUCENT)
+        return;
+
+    model = &bsp->models[index];
+    if (!model->numfaces)
+        return;
+
+    vk_entity_axis(ent, axis);
+    vk_entity_mvp(mvp, fd, ent, axis);
+
+    vk.world.drawframe++;
+    vk_mark_bmodel_faces(model, ent, fd, axis);
+    vk_draw_world_mesh(mvp, true);
+}
+
+static void vk_draw_entities(const refdef_t *fd)
+{
+    if (!vk_drawentities || !vk_drawentities->integer)
+        return;
+
+    for (int i = 0; i < fd->num_entities; i++) {
+        const entity_t *ent = &fd->entities[i];
+
+        if (ent->flags & RF_BEAM)
+            continue;
+        if (ent->model & BIT(31))
+            vk_draw_bmodel(ent, fd);
+    }
 }
 
 static void vk_surface_color(const mface_t *face, float color[4])
@@ -3050,6 +3171,7 @@ bool VKR_Init(bool total)
     Com_Printf("Using video driver: %s\n", vid->name);
 
     vk_show_test_triangle = Cvar_Get("vk_show_test_triangle", "0", 0);
+    vk_drawentities = Cvar_Get("vk_drawentities", "1", CVAR_CHEAT);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
@@ -3206,13 +3328,14 @@ void VKR_RenderFrame(const refdef_t *fd)
         if (vk_world_textures && vk_world_textures->integer) {
             if (vk_world_vis && vk_world_vis->integer)
                 vk_mark_world_faces(fd);
-            vk_draw_world_mesh(mvp);
+            vk_draw_world_mesh(mvp, false);
         } else {
             const float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
             vk_draw_mesh(&vk.world.mesh, mvp, color);
         }
     }
 
+    vk_draw_entities(fd);
     vk_draw_test_triangle(fd);
 }
 
