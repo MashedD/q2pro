@@ -357,6 +357,7 @@ game_deps = [zlib]
 vulkan = dependency('vulkan', required: get_option('vulkan'))
 if vulkan.found()
   client_deps += vulkan.partial_dependency(compile_args: true, includes: true)
+  refresh_src += 'src/refresh/vk_backend.c'
   config.set10('USE_VULKAN', true)
 endif
 
