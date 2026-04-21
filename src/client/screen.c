@@ -2398,6 +2398,19 @@ static void SCR_CopyTrimmed(char *dst, size_t size, const char *src, size_t len)
     dst[len] = 0;
 }
 
+static void SCR_CopyOpenTDMSkinModel(char *dst, size_t size, const char *skin, const char *skin_end)
+{
+    const char *slash;
+
+    if (skin < skin_end && *skin == '(')
+        skin++;
+    slash = memchr(skin, '/', skin_end - skin);
+    if (slash)
+        skin_end = slash;
+
+    SCR_CopyTrimmed(dst, size, skin, skin_end - skin);
+}
+
 // Parse lines like "Team name     -42".
 static bool SCR_ParseOpenTDMTeamScore(const char *line, stream_team_t *team)
 {
@@ -2438,7 +2451,7 @@ static bool SCR_ParseOpenTDMTeamHeader(const char *line, stream_team_t *team)
 
     SCR_CopyTrimmed(team->name, sizeof(team->name), line, colon - line);
     team->avg_ping = atoi(colon + 1);
-    SCR_CopyTrimmed(team->skin, sizeof(team->skin), skin, skin_end - skin + 1);
+    SCR_CopyOpenTDMSkinModel(team->skin, sizeof(team->skin), skin, skin_end);
     return team->name[0] != 0;
 }
 
@@ -2510,8 +2523,8 @@ static void SCR_DrawOpenTDMTeamScore(int x, int y, const stream_team_t *team)
                  STREAM_SCOREBOARD_COLUMN_CHARS * CONCHAR_WIDTH + 8,
                  height + 8, MakeColor(80, 100, 10, 40));
 
-    Q_snprintf(buf, sizeof(buf), "%s: %d (%d ping) %s",
-               team->name, team->score, team->avg_ping, team->skin);
+    Q_snprintf(buf, sizeof(buf), "%s (%d ping) %s",
+               team->name, team->avg_ping, team->skin);
     HUD_DrawAltString(x, y, buf);
     HUD_DrawAltString(x, y + CONCHAR_HEIGHT, STREAM_SCOREBOARD_COLUMNS);
 
