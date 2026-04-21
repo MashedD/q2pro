@@ -213,7 +213,6 @@ endif
 common_link_args = []
 exe_link_args = []
 dll_link_args = []
-exe_link_with = []
 
 if cc.get_argument_syntax() == 'gcc'
   if x86
@@ -395,6 +394,23 @@ if openal.found()
   config.set10('USE_OPENAL', true)
   if web
     config.set('QAL_HARD_LINKED', true)
+  endif
+endif
+
+if get_option('qal-hard-linked')
+  config.set('QAL_HARD_LINKED', true)
+
+  if win32
+    client_deps += declare_dependency(
+      compile_args: ['-DAL_LIBTYPE_STATIC'],
+      link_args: [
+        '-l:libOpenAL32.a',
+        '-lstdc++',
+        '-lavrt',
+      ],
+    )
+  else
+    client_deps += openal.partial_dependency(links: true)
   endif
 endif
 
@@ -583,7 +599,6 @@ executable('q2pro', common_src, client_src, refresh_src,
   gnu_symbol_visibility: 'hidden',
   win_subsystem:         'windows,6.0',
   link_args:             exe_link_args,
-  link_with:             exe_link_with,
   c_args:                ['-DUSE_CLIENT=1', '-DUSE_REF=1', engine_args],
   install:               system_wide,
 )
@@ -595,7 +610,6 @@ if not web
     gnu_symbol_visibility: 'hidden',
     win_subsystem:         'console,6.0',
     link_args:             exe_link_args,
-    link_with:             exe_link_with,
     c_args:                ['-DUSE_SERVER=1', engine_args],
     install:               system_wide,
   )

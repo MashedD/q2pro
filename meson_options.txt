@@ -190,3 +190,8 @@ option('zlib',
   type: 'feature',
   value: 'auto',
   description: 'zlib support')
+
+option('qal-hard-linked',
+  type: 'boolean',
+  value: false,
+  description: 'Hard link OpenAL library')

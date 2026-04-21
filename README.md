@@ -51,6 +51,7 @@ features include:
   instead of config.cfg)
 - textures: when missing, replaced red dot on black screen to pink/black
   checkerboard similar to one seen in original Quake 2
+- win build have OpenAL library hard linked
 
 # TODO
 
