@@ -15,6 +15,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include "common/zone.h"
 #include "client/client.h"
 #include "client/video.h"
+#include "format/md2.h"
 #include "format/sp2.h"
 #include "images.h"
 #include "refresh/refresh.h"
@@ -121,10 +122,19 @@ typedef struct {
 } vk_sprite_frame_t;
 
 typedef struct {
+    enum {
+        VK_MODEL_FREE,
+        VK_MODEL_ALIAS,
+        VK_MODEL_SPRITE,
+    } type;
     char name[MAX_QPATH];
     unsigned registration_sequence;
     vk_sprite_frame_t *frames;
     int frame_count;
+    vk_mesh_t mesh;
+    image_t **skins;
+    int skin_count;
+    uint32_t vertex_count;
 } vk_model_t;
 
 typedef struct {
@@ -313,6 +323,9 @@ static cvar_t *vk_world_cull;
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static void vk_destroy_texture(image_t *image);
+static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
+                           uint32_t vertex_count, const uint32_t *indices,
+                           uint32_t index_count);
 static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, const void *pixels);
 static void vk_destroy_texture_resource(vk_texture_t *texture);
@@ -633,6 +646,11 @@ static void vk_free_model(vk_model_t *model)
         Z_Free(model->frames);
         model->frames = NULL;
     }
+    if (model->skins) {
+        Z_Free(model->skins);
+        model->skins = NULL;
+    }
+    vk_destroy_mesh(&model->mesh);
 
     memset(model, 0, sizeof(*model));
 }
@@ -642,7 +660,7 @@ static void vk_free_models(bool all)
     for (uint32_t i = 0; i < vk.model_count; i++) {
         vk_model_t *model = &vk.models[i];
 
-        if (!model->frame_count)
+        if (model->type == VK_MODEL_FREE)
             continue;
         if (!all && model->registration_sequence == r_registration_sequence)
             continue;
@@ -659,7 +677,7 @@ static vk_model_t *vk_find_model(const char *name)
     for (uint32_t i = 0; i < vk.model_count; i++) {
         vk_model_t *model = &vk.models[i];
 
-        if (model->frame_count && !FS_pathcmp(model->name, name))
+        if (model->type != VK_MODEL_FREE && !FS_pathcmp(model->name, name))
             return model;
     }
 
@@ -669,7 +687,7 @@ static vk_model_t *vk_find_model(const char *name)
 static vk_model_t *vk_alloc_model(void)
 {
     for (uint32_t i = 0; i < vk.model_count; i++) {
-        if (!vk.models[i].frame_count)
+        if (vk.models[i].type == VK_MODEL_FREE)
             return &vk.models[i];
     }
 
@@ -704,6 +722,7 @@ static qhandle_t vk_load_sprite_model(const char *name, const byte *rawdata, siz
         return 0;
 
     Q_strlcpy(model->name, name, sizeof(model->name));
+    model->type = VK_MODEL_SPRITE;
     model->registration_sequence = r_registration_sequence;
     model->frame_count = header.numframes;
     model->frames = Z_Mallocz(sizeof(model->frames[0]) * model->frame_count);
@@ -725,6 +744,208 @@ static qhandle_t vk_load_sprite_model(const char *name, const byte *rawdata, siz
     }
 
     return (model - vk.models) + 1;
+}
+
+static bool vk_check_md2_bounds(const dmd2header_t *header, size_t length)
+{
+    if (header->skinwidth < 1 || header->skinheight < 1 ||
+        header->skinwidth > MD2_MAX_SKINWIDTH ||
+        header->skinheight > MD2_MAX_SKINHEIGHT)
+        return false;
+    if (header->framesize < sizeof(dmd2frame_t) ||
+        header->framesize > MD2_MAX_FRAMESIZE)
+        return false;
+    if (header->num_skins > MD2_MAX_SKINS ||
+        header->num_xyz < 3 || header->num_xyz > MD2_MAX_VERTS ||
+        header->num_st < 3 || header->num_tris < 1 ||
+        header->num_tris > MD2_MAX_TRIANGLES ||
+        header->num_frames < 1 || header->num_frames > MD2_MAX_FRAMES)
+        return false;
+    if ((uint64_t)header->ofs_skins + header->num_skins * MD2_MAX_SKINNAME > length ||
+        (uint64_t)header->ofs_st + header->num_st * sizeof(dmd2stvert_t) > length ||
+        (uint64_t)header->ofs_tris + header->num_tris * sizeof(dmd2triangle_t) > length ||
+        (uint64_t)header->ofs_frames + header->num_frames * header->framesize > length ||
+        header->ofs_end > length)
+        return false;
+
+    return true;
+}
+
+static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t length)
+{
+    dmd2header_t header;
+    const dmd2triangle_t *src_tri;
+    const dmd2stvert_t *src_tc;
+    vk_model_t *model = NULL;
+    uint16_t *vert_indices = NULL;
+    uint16_t *tc_indices = NULL;
+    uint32_t *final_indices = NULL;
+    uint16_t *remap = NULL;
+    vk_vertex_t *vertices = NULL;
+    uint32_t *indices = NULL;
+    uint32_t numindices = 0;
+    uint32_t numverts = 0;
+    qhandle_t handle = 0;
+
+    if (length < sizeof(header))
+        return 0;
+
+    const dmd2header_t *src_header = (const dmd2header_t *)rawdata;
+    header.ident = LittleLong(src_header->ident);
+    header.version = LittleLong(src_header->version);
+    header.skinwidth = LittleLong(src_header->skinwidth);
+    header.skinheight = LittleLong(src_header->skinheight);
+    header.framesize = LittleLong(src_header->framesize);
+    header.num_skins = LittleLong(src_header->num_skins);
+    header.num_xyz = LittleLong(src_header->num_xyz);
+    header.num_st = LittleLong(src_header->num_st);
+    header.num_tris = LittleLong(src_header->num_tris);
+    header.num_glcmds = LittleLong(src_header->num_glcmds);
+    header.num_frames = LittleLong(src_header->num_frames);
+    header.ofs_skins = LittleLong(src_header->ofs_skins);
+    header.ofs_st = LittleLong(src_header->ofs_st);
+    header.ofs_tris = LittleLong(src_header->ofs_tris);
+    header.ofs_frames = LittleLong(src_header->ofs_frames);
+    header.ofs_glcmds = LittleLong(src_header->ofs_glcmds);
+    header.ofs_end = LittleLong(src_header->ofs_end);
+
+    if (header.ident != MD2_IDENT || header.version != MD2_VERSION ||
+        !vk_check_md2_bounds(&header, length))
+        return 0;
+
+    uint32_t max_indices = header.num_tris * 3;
+    vert_indices = Z_Malloc(sizeof(*vert_indices) * max_indices);
+    tc_indices = Z_Malloc(sizeof(*tc_indices) * max_indices);
+    final_indices = Z_Malloc(sizeof(*final_indices) * max_indices);
+    remap = Z_Malloc(sizeof(*remap) * max_indices);
+
+    src_tri = (const dmd2triangle_t *)(rawdata + header.ofs_tris);
+    for (uint32_t i = 0; i < header.num_tris; i++) {
+        uint32_t base = numindices;
+        uint32_t j;
+
+        for (j = 0; j < 3; j++) {
+            uint16_t idx_xyz = LittleShort(src_tri[i].index_xyz[j]);
+            uint16_t idx_st = LittleShort(src_tri[i].index_st[j]);
+
+            if (idx_xyz >= header.num_xyz || idx_st >= header.num_st)
+                break;
+
+            vert_indices[base + j] = idx_xyz;
+            tc_indices[base + j] = idx_st;
+        }
+        if (j == 3)
+            numindices += 3;
+    }
+
+    if (numindices < 3)
+        goto out;
+
+    for (uint32_t i = 0; i < numindices; i++)
+        remap[i] = UINT16_MAX;
+
+    src_tc = (const dmd2stvert_t *)(rawdata + header.ofs_st);
+    for (uint32_t i = 0; i < numindices; i++) {
+        if (remap[i] != UINT16_MAX)
+            continue;
+
+        for (uint32_t j = i + 1; j < numindices; j++) {
+            if (vert_indices[i] == vert_indices[j] &&
+                src_tc[tc_indices[i]].s == src_tc[tc_indices[j]].s &&
+                src_tc[tc_indices[i]].t == src_tc[tc_indices[j]].t) {
+                remap[j] = i;
+                final_indices[j] = numverts;
+            }
+        }
+
+        remap[i] = i;
+        final_indices[i] = numverts++;
+    }
+
+    if (!numverts || (uint64_t)numverts * header.num_frames > UINT32_MAX)
+        goto out;
+
+    vertices = Z_Malloc(sizeof(*vertices) * numverts * header.num_frames);
+    indices = Z_Malloc(sizeof(*indices) * numindices);
+
+    for (uint32_t i = 0; i < numindices; i++)
+        indices[i] = final_indices[i];
+
+    float scale_s = 1.0f / header.skinwidth;
+    float scale_t = 1.0f / header.skinheight;
+    for (uint32_t frame = 0; frame < header.num_frames; frame++) {
+        const dmd2frame_t *src_frame =
+            (const dmd2frame_t *)(rawdata + header.ofs_frames + frame * header.framesize);
+        vec3_t scale, translate;
+
+        LittleVector(src_frame->scale, scale);
+        LittleVector(src_frame->translate, translate);
+
+        for (uint32_t i = 0; i < numindices; i++) {
+            if (remap[i] != i)
+                continue;
+
+            const dmd2trivertx_t *src_vert = &src_frame->verts[vert_indices[i]];
+            vk_vertex_t *dst = &vertices[frame * numverts + final_indices[i]];
+
+            dst->position[0] = src_vert->v[0] * scale[0] + translate[0];
+            dst->position[1] = src_vert->v[1] * scale[1] + translate[1];
+            dst->position[2] = src_vert->v[2] * scale[2] + translate[2];
+            dst->color[0] = 1.0f;
+            dst->color[1] = 1.0f;
+            dst->color[2] = 1.0f;
+            dst->color[3] = 1.0f;
+            dst->uv[0] = (int16_t)LittleShort(src_tc[tc_indices[i]].s) * scale_s;
+            dst->uv[1] = (int16_t)LittleShort(src_tc[tc_indices[i]].t) * scale_t;
+        }
+    }
+
+    model = vk_alloc_model();
+    if (!model)
+        goto out;
+
+    Q_strlcpy(model->name, name, sizeof(model->name));
+    model->type = VK_MODEL_ALIAS;
+    model->registration_sequence = r_registration_sequence;
+    model->frame_count = header.num_frames;
+    model->vertex_count = numverts;
+    model->skin_count = header.num_skins;
+    if (model->skin_count)
+        model->skins = Z_Mallocz(sizeof(model->skins[0]) * model->skin_count);
+
+    const char *src_skin = (const char *)rawdata + header.ofs_skins;
+    for (int i = 0; i < model->skin_count; i++) {
+        char skin_name[MD2_MAX_SKINNAME];
+
+        if (!Q_memccpy(skin_name, src_skin, 0, sizeof(skin_name)))
+            model->skins[i] = R_NOTEXTURE;
+        else
+            model->skins[i] = IMG_Find(skin_name, IT_SKIN, IF_NONE);
+        src_skin += MD2_MAX_SKINNAME;
+    }
+
+    if (!vk_upload_mesh(&model->mesh, vertices, numverts * header.num_frames,
+                        indices, numindices)) {
+        vk_free_model(model);
+        goto out;
+    }
+
+    handle = (model - vk.models) + 1;
+
+out:
+    if (vert_indices)
+        Z_Free(vert_indices);
+    if (tc_indices)
+        Z_Free(tc_indices);
+    if (final_indices)
+        Z_Free(final_indices);
+    if (remap)
+        Z_Free(remap);
+    if (vertices)
+        Z_Free(vertices);
+    if (indices)
+        Z_Free(indices);
+    return handle;
 }
 
 static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
@@ -3186,17 +3407,76 @@ static vk_model_t *vk_model_for_handle(qhandle_t handle)
         return NULL;
 
     vk_model_t *model = &vk.models[handle - 1];
-    if (!model->frame_count)
+    if (model->type == VK_MODEL_FREE)
         return NULL;
 
     return model;
+}
+
+static const image_t *vk_skin_for_model(const vk_model_t *model, const entity_t *ent)
+{
+    if (ent->skin)
+        return IMG_ForHandle(ent->skin);
+    if (!model->skin_count)
+        return R_NOTEXTURE;
+    if (ent->skinnum < 0 || ent->skinnum >= model->skin_count)
+        return model->skins[0];
+    if (model->skins[ent->skinnum] == R_NOTEXTURE)
+        return model->skins[0];
+    return model->skins[ent->skinnum];
+}
+
+static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
+{
+    vk_model_t *model = vk_model_for_handle(ent->model);
+
+    if (!model || model->type != VK_MODEL_ALIAS ||
+        !model->mesh.vertices.buffer || !model->mesh.indices.buffer ||
+        !model->vertex_count)
+        return;
+
+    const image_t *skin = vk_skin_for_model(model, ent);
+    if (!skin || !skin->texnum || skin->texnum >= MAX_RIMAGES)
+        return;
+
+    const vk_texture_t *texture = &vk.textures[skin->texnum];
+    if (!texture->descriptor_set)
+        return;
+
+    vec3_t axis[3];
+    mat4_t mvp;
+    vk_color3d_push_t push;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+    uint32_t frame = ent->frame % model->frame_count;
+
+    vk_entity_axis(ent, axis);
+    vk_entity_mvp(mvp, fd, ent, axis);
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    push.color[0] = 1.0f;
+    push.color[1] = 1.0f;
+    push.color[2] = 1.0f;
+    push.color[3] = (ent->flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                       (ent->flags & RF_TRANSLUCENT) ? vk.sprite_pipeline : vk.world_pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &model->mesh.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.rect_pipeline_layout, 0, 1,
+                             &texture->descriptor_set, 0, NULL);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0,
+                      frame * model->vertex_count, 0);
 }
 
 static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
 {
     vk_model_t *model = vk_model_for_handle(ent->model);
 
-    if (!model || !vk.sprite_pipeline ||
+    if (!model || model->type != VK_MODEL_SPRITE || !vk.sprite_pipeline ||
         !vk.sprite_quad.vertices.buffer || !vk.sprite_quad.indices.buffer)
         return;
 
@@ -3268,8 +3548,16 @@ static void vk_draw_entities(const refdef_t *fd)
             continue;
         if (ent->model & BIT(31))
             vk_draw_bmodel(ent, fd);
-        else
-            vk_draw_sprite(ent, fd);
+        else {
+            vk_model_t *model = vk_model_for_handle(ent->model);
+
+            if (!model)
+                continue;
+            if (model->type == VK_MODEL_SPRITE)
+                vk_draw_sprite(ent, fd);
+            else if (model->type == VK_MODEL_ALIAS)
+                vk_draw_alias_model(ent, fd);
+        }
     }
 }
 
@@ -3667,8 +3955,12 @@ qhandle_t VKR_RegisterModel(const char *name)
     if (model) {
         model->registration_sequence = r_registration_sequence;
         for (int i = 0; i < model->frame_count; i++) {
-            if (model->frames[i].image)
+            if (model->type == VK_MODEL_SPRITE && model->frames[i].image)
                 model->frames[i].image->registration_sequence = r_registration_sequence;
+        }
+        for (int i = 0; i < model->skin_count; i++) {
+            if (model->skins[i])
+                model->skins[i]->registration_sequence = r_registration_sequence;
         }
         return (model - vk.models) + 1;
     }
@@ -3680,6 +3972,8 @@ qhandle_t VKR_RegisterModel(const char *name)
     handle = 0;
     if (ret >= 4 && LittleLong(*(uint32_t *)rawdata) == SP2_IDENT)
         handle = vk_load_sprite_model(normalized, rawdata, ret);
+    else if (ret >= 4 && LittleLong(*(uint32_t *)rawdata) == MD2_IDENT)
+        handle = vk_load_md2_model(normalized, rawdata, ret);
 
     FS_FreeFile(rawdata);
     if (!handle)
