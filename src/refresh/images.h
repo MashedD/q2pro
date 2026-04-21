@@ -92,8 +92,18 @@ void IMG_GetPalette(void);
 
 image_t *IMG_ForHandle(qhandle_t h);
 
+typedef struct {
+    void (*load)(image_t *image, byte *pic);
+    void (*unload)(image_t *image);
+    bool glowmaps;
+} image_upload_t;
+
+void IMG_SetUploadBackend(const image_upload_t *backend);
 void IMG_Unload(image_t *image);
 void IMG_Load(image_t *image, byte *pic);
+qhandle_t IMG_RegisterImage(const char *name, imagetype_t type,
+                            imageflags_t flags);
+bool IMG_GetPicSize(int *w, int *h, qhandle_t pic);
 
 typedef struct screenshot_s screenshot_t;
 
