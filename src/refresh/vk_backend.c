@@ -46,6 +46,14 @@ static const uint32_t vk_color3d_frag_spv[] =
 #include "vk_color3d_frag_spv.h"
 ;
 
+static const uint32_t vk_world_vert_spv[] =
+#include "vk_world_vert_spv.h"
+;
+
+static const uint32_t vk_world_frag_spv[] =
+#include "vk_world_frag_spv.h"
+;
+
 typedef struct {
     float rect[4];
     float color[4];
@@ -71,7 +79,8 @@ typedef struct {
 typedef struct {
     float position[3];
     float color[4];
-} vk_color3d_vertex_t;
+    float uv[2];
+} vk_vertex_t;
 
 typedef struct {
     vk_buffer_t vertices;
@@ -80,8 +89,16 @@ typedef struct {
 } vk_mesh_t;
 
 typedef struct {
+    uint32_t first_index;
+    uint32_t index_count;
+    uint32_t texture_index;
+} vk_world_batch_t;
+
+typedef struct {
     bsp_t *cache;
     vk_mesh_t mesh;
+    vk_world_batch_t *batches;
+    uint32_t batch_count;
 } vk_world_t;
 
 typedef struct {
@@ -208,6 +225,7 @@ typedef struct {
     VkPipeline rect_pipeline;
     VkPipeline texture_pipeline;
     VkPipeline color3d_pipeline;
+    VkPipeline world_pipeline;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
     VkFormat swapchain_format;
@@ -540,6 +558,11 @@ static void vk_destroy_mesh(vk_mesh_t *mesh)
 static void vk_free_world(void)
 {
     vk_destroy_mesh(&vk.world.mesh);
+    if (vk.world.batches) {
+        Z_Free(vk.world.batches);
+        vk.world.batches = NULL;
+    }
+    vk.world.batch_count = 0;
 
     if (vk.world.cache) {
         BSP_Free(vk.world.cache);
@@ -547,7 +570,7 @@ static void vk_free_world(void)
     }
 }
 
-static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_color3d_vertex_t *vertices,
+static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
                            uint32_t vertex_count, const uint32_t *indices,
                            uint32_t index_count)
 {
@@ -1302,6 +1325,11 @@ static void vk_destroy_swapchain(void)
         vk.color3d_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.world_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.world_pipeline, NULL);
+        vk.world_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.framebuffers) {
         for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
             if (vk.framebuffers[i])
@@ -1590,31 +1618,8 @@ static bool vk_create_rect_pipeline(void)
         },
     };
 
-    VkVertexInputBindingDescription binding = {
-        .binding = 0,
-        .stride = sizeof(vk_color3d_vertex_t),
-        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
-    };
-    VkVertexInputAttributeDescription attributes[] = {
-        {
-            .location = 0,
-            .binding = 0,
-            .format = VK_FORMAT_R32G32B32_SFLOAT,
-            .offset = offsetof(vk_color3d_vertex_t, position),
-        },
-        {
-            .location = 1,
-            .binding = 0,
-            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
-            .offset = offsetof(vk_color3d_vertex_t, color),
-        },
-    };
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount = 1,
-        .pVertexBindingDescriptions = &binding,
-        .vertexAttributeDescriptionCount = q_countof(attributes),
-        .pVertexAttributeDescriptions = attributes,
     };
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -1841,8 +1846,31 @@ static bool vk_create_color3d_pipeline(void)
             .pName = "main",
         },
     };
+    VkVertexInputBindingDescription binding = {
+        .binding = 0,
+        .stride = sizeof(vk_vertex_t),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+    VkVertexInputAttributeDescription attributes[] = {
+        {
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, position),
+        },
+        {
+            .location = 1,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, color),
+        },
+    };
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding,
+        .vertexAttributeDescriptionCount = q_countof(attributes),
+        .pVertexAttributeDescriptions = attributes,
     };
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -1913,6 +1941,144 @@ static bool vk_create_color3d_pipeline(void)
     VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
                                                  &create_info, NULL,
                                                  &vk.color3d_pipeline);
+    vk.DestroyShaderModule(vk.device, frag, NULL);
+    vk.DestroyShaderModule(vk.device, vert, NULL);
+
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateGraphicsPipelines", result);
+
+    return true;
+}
+
+static bool vk_create_world_pipeline(void)
+{
+    VkShaderModule vert = vk_create_shader_module(vk_world_vert_spv,
+                                                  sizeof(vk_world_vert_spv));
+    if (!vert)
+        return false;
+
+    VkShaderModule frag = vk_create_shader_module(vk_world_frag_spv,
+                                                  sizeof(vk_world_frag_spv));
+    if (!frag) {
+        vk.DestroyShaderModule(vk.device, vert, NULL);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vert,
+            .pName = "main",
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = frag,
+            .pName = "main",
+        },
+    };
+    VkVertexInputBindingDescription binding = {
+        .binding = 0,
+        .stride = sizeof(vk_vertex_t),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+    VkVertexInputAttributeDescription attributes[] = {
+        {
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, position),
+        },
+        {
+            .location = 1,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, color),
+        },
+        {
+            .location = 2,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, uv),
+        },
+    };
+    VkPipelineVertexInputStateCreateInfo vertex_input = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding,
+        .vertexAttributeDescriptionCount = q_countof(attributes),
+        .pVertexAttributeDescriptions = attributes,
+    };
+    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = vk.swapchain_extent.width,
+        .height = vk.swapchain_extent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    VkRect2D scissor = {
+        .offset = { 0, 0 },
+        .extent = vk.swapchain_extent,
+    };
+    VkPipelineViewportStateCreateInfo viewport_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = &viewport,
+        .scissorCount = 1,
+        .pScissors = &scissor,
+    };
+    VkPipelineRasterizationStateCreateInfo raster = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth = 1.0f,
+    };
+    VkPipelineMultisampleStateCreateInfo multisample = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    VkPipelineColorBlendAttachmentState color_blend_attachment = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    VkPipelineColorBlendStateCreateInfo color_blend = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &color_blend_attachment,
+    };
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+    };
+
+    VkGraphicsPipelineCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = q_countof(stages),
+        .pStages = stages,
+        .pVertexInputState = &vertex_input,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &raster,
+        .pMultisampleState = &multisample,
+        .pDepthStencilState = &depth_stencil,
+        .pColorBlendState = &color_blend,
+        .layout = vk.rect_pipeline_layout,
+        .renderPass = vk.render_pass,
+        .subpass = 0,
+    };
+
+    VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
+                                                 &create_info, NULL,
+                                                 &vk.world_pipeline);
     vk.DestroyShaderModule(vk.device, frag, NULL);
     vk.DestroyShaderModule(vk.device, vert, NULL);
 
@@ -2050,6 +2216,7 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_rect_pipeline() ||
         !vk_create_texture_pipeline() ||
         !vk_create_color3d_pipeline() ||
+        !vk_create_world_pipeline() ||
         !vk_create_depth_resources() ||
         !vk_create_framebuffers())
         return false;
@@ -2349,10 +2516,10 @@ static void vk_world_mvp(mat4_t out, const refdef_t *fd)
 
 static bool vk_create_test_triangle(void)
 {
-    static const vk_color3d_vertex_t vertices[] = {
-        { { -24.0f, -16.0f, -96.0f }, { 1.0f, 0.15f, 0.10f, 1.0f } },
-        { {  24.0f, -16.0f, -96.0f }, { 0.1f, 0.85f, 0.25f, 1.0f } },
-        { {   0.0f,  24.0f, -96.0f }, { 0.1f, 0.35f, 1.00f, 1.0f } },
+    static const vk_vertex_t vertices[] = {
+        { { -24.0f, -16.0f, -96.0f }, { 1.0f, 0.15f, 0.10f, 1.0f }, { 0.0f, 0.0f } },
+        { {  24.0f, -16.0f, -96.0f }, { 0.1f, 0.85f, 0.25f, 1.0f }, { 1.0f, 0.0f } },
+        { {   0.0f,  24.0f, -96.0f }, { 0.1f, 0.35f, 1.00f, 1.0f }, { 0.5f, 1.0f } },
     };
     static const uint32_t indices[] = { 0, 1, 2 };
 
@@ -2385,6 +2552,48 @@ static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float co
     vk.CmdDrawIndexed(cmd, mesh->index_count, 1, 0, 0, 0);
 }
 
+static void vk_draw_world_mesh(const mat4_t mvp)
+{
+    const vk_mesh_t *mesh = &vk.world.mesh;
+
+    if (!vk.render_pass_active || !vk.world_pipeline ||
+        !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count ||
+        !vk.world.batch_count)
+        return;
+
+    vk_color3d_push_t push;
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    push.color[0] = 1.0f;
+    push.color[1] = 1.0f;
+    push.color[2] = 1.0f;
+    push.color[3] = 1.0f;
+
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.world_pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+
+    for (uint32_t i = 0; i < vk.world.batch_count; i++) {
+        const vk_world_batch_t *batch = &vk.world.batches[i];
+        if (batch->texture_index >= MAX_RIMAGES)
+            continue;
+
+        const vk_texture_t *texture = &vk.textures[batch->texture_index];
+        if (!texture->descriptor_set)
+            continue;
+
+        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 vk.rect_pipeline_layout, 0, 1,
+                                 &texture->descriptor_set, 0, NULL);
+        vk.CmdDrawIndexed(cmd, batch->index_count, 1, batch->first_index, 0, 0);
+    }
+}
+
 static void vk_surface_color(const mface_t *face, float color[4])
 {
     uint32_t hash = FS_HashPath(face->texinfo->name, UINT32_MAX);
@@ -2414,14 +2623,18 @@ static bool vk_build_world_mesh(bsp_t *bsp)
 {
     uint64_t vertex_count = 0;
     uint64_t index_count = 0;
+    uint32_t batch_count = 0;
 
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *face = &bsp->faces[i];
         if (!vk_face_is_drawable(face))
             continue;
+        if (!face->texinfo->image || !face->texinfo->image->texnum)
+            continue;
 
         vertex_count += face->numsurfedges;
         index_count += (face->numsurfedges - 2) * 3;
+        batch_count++;
     }
 
     if (!vertex_count || !index_count)
@@ -2431,19 +2644,27 @@ static bool vk_build_world_mesh(bsp_t *bsp)
         return false;
     }
 
-    vk_color3d_vertex_t *vertices = Z_Malloc(sizeof(*vertices) * vertex_count);
+    vk_vertex_t *vertices = Z_Malloc(sizeof(*vertices) * vertex_count);
     uint32_t *indices = Z_Malloc(sizeof(*indices) * index_count);
+    vk_world_batch_t *batches = Z_Malloc(sizeof(*batches) * batch_count);
     uint32_t v = 0;
     uint32_t idx = 0;
+    uint32_t batch = 0;
 
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *face = &bsp->faces[i];
         if (!vk_face_is_drawable(face))
             continue;
+        image_t *image = face->texinfo->image;
+        if (!image || !image->texnum)
+            continue;
 
         uint32_t first = v;
+        uint32_t first_index = idx;
         float color[4];
         vk_surface_color(face, color);
+        float scale_s = image->width ? 1.0f / image->width : 1.0f;
+        float scale_t = image->height ? 1.0f / image->height : 1.0f;
 
         for (int j = 0; j < face->numsurfedges; j++) {
             const msurfedge_t *surfedge = face->firstsurfedge + j;
@@ -2452,6 +2673,10 @@ static bool vk_build_world_mesh(bsp_t *bsp)
 
             VectorCopy(src->point, vertices[v].position);
             memcpy(vertices[v].color, color, sizeof(vertices[v].color));
+            vertices[v].uv[0] = (DotProduct(src->point, face->texinfo->axis[0]) +
+                                 face->texinfo->offset[0]) * scale_s;
+            vertices[v].uv[1] = (DotProduct(src->point, face->texinfo->axis[1]) +
+                                 face->texinfo->offset[1]) * scale_t;
             v++;
         }
 
@@ -2460,13 +2685,46 @@ static bool vk_build_world_mesh(bsp_t *bsp)
             indices[idx++] = first + j + 1;
             indices[idx++] = first + j + 2;
         }
+
+        batches[batch++] = (vk_world_batch_t) {
+            .first_index = first_index,
+            .index_count = idx - first_index,
+            .texture_index = image->texnum,
+        };
     }
 
     bool ok = vk_upload_mesh(&vk.world.mesh, vertices, v, indices, idx);
+    if (ok) {
+        if (vk.world.batches)
+            Z_Free(vk.world.batches);
+        vk.world.batches = batches;
+        vk.world.batch_count = batch;
+        batches = NULL;
+    }
 
     Z_Free(vertices);
     Z_Free(indices);
+    if (batches)
+        Z_Free(batches);
     return ok;
+}
+
+static void vk_register_world_images(bsp_t *bsp)
+{
+    char buffer[MAX_QPATH];
+
+    for (int i = 0; i < bsp->numtexinfo; i++) {
+        mtexinfo_t *info = &bsp->texinfo[i];
+
+        if (info->c.flags & (SURF_SKY | SURF_NODRAW)) {
+            info->image = R_NOTEXTURE;
+            continue;
+        }
+
+        imageflags_t flags = (info->c.flags & SURF_WARP) ? IF_TURBULENT : IF_NONE;
+        Q_concat(buffer, sizeof(buffer), "textures/", info->name, ".wal");
+        info->image = IMG_Find(buffer, IT_WALL, flags);
+    }
 }
 
 static void vk_load_world(const char *name)
@@ -2492,10 +2750,13 @@ static void vk_load_world(const char *name)
     vk_free_world();
     vk.world.cache = bsp;
 
+    vk_register_world_images(bsp);
+
     if (!vk_build_world_mesh(bsp))
         Com_WPrintf("Couldn't build Vulkan world mesh: %s\n", Com_GetLastError());
     else
-        Com_DPrintf("Vulkan world mesh: %u indices\n", vk.world.mesh.index_count);
+        Com_DPrintf("Vulkan world mesh: %u indices, %u batches\n",
+                    vk.world.mesh.index_count, vk.world.batch_count);
 }
 
 static void vk_draw_test_triangle(const refdef_t *fd)
@@ -2506,25 +2767,11 @@ static void vk_draw_test_triangle(const refdef_t *fd)
     if (fd->rdflags & RDF_NOWORLDMODEL)
         return;
 
-    vk_color3d_push_t push;
+    mat4_t mvp;
+    const float color[4] = { 0.1f, 0.9f, 0.55f, 1.0f };
 
-    vk_projection_matrix(push.mvp, fd->fov_x, fd->fov_y);
-    push.color[0] = 0.1f;
-    push.color[1] = 0.9f;
-    push.color[2] = 0.55f;
-    push.color[3] = 1.0f;
-
-    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
-    VkDeviceSize offset = 0;
-
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.color3d_pipeline);
-    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.test_triangle.vertices.buffer, &offset);
-    vk.CmdBindIndexBuffer(cmd, vk.test_triangle.indices.buffer, 0,
-                          VK_INDEX_TYPE_UINT32);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
-    vk.CmdDrawIndexed(cmd, vk.test_triangle.index_count, 1, 0, 0, 0);
+    vk_projection_matrix(mvp, fd->fov_x, fd->fov_y);
+    vk_draw_mesh(&vk.test_triangle, mvp, color);
 }
 
 bool VKR_Init(bool total)
@@ -2684,10 +2931,9 @@ void VKR_RenderFrame(const refdef_t *fd)
 
     if (!(fd->rdflags & RDF_NOWORLDMODEL) && vk.world.mesh.index_count) {
         mat4_t mvp;
-        const float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 
         vk_world_mvp(mvp, fd);
-        vk_draw_mesh(&vk.world.mesh, mvp, color);
+        vk_draw_world_mesh(mvp);
     }
 
     vk_draw_test_triangle(fd);
