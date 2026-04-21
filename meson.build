@@ -169,6 +169,7 @@ x86 = host_machine.cpu_family() == 'x86'
 cpuremap = {
   'x86': win32 ? 'x86' : 'i386',
   'aarch64': 'arm64',
+  'wasm': 'wasm32',
 }
 
 cpu = host_machine.cpu_family()
@@ -265,11 +266,21 @@ texture_formats = []
 
 fallback_opt = ['default_library=static']
 
-zlib = dependency('zlib',
-  fallback:        'zlib-ng',
-  required:        get_option('zlib'),
-  default_options: fallback_opt + [ 'tests=disabled', 'zlib-compat=true', 'force-sse2=true' ],
-)
+if web
+  # Force fallback on web so we do not pick host/system -lz.
+  zlib = dependency('zlib',
+    method:          'pkg-config',
+    fallback:        'zlib-ng',
+    required:        get_option('zlib'),
+    default_options: fallback_opt + [ 'tests=disabled', 'zlib-compat=true', 'force-sse2=true' ],
+  )
+else
+  zlib = dependency('zlib',
+    fallback:        'zlib-ng',
+    required:        get_option('zlib'),
+    default_options: fallback_opt + [ 'tests=disabled', 'zlib-compat=true', 'force-sse2=true' ],
+  )
+endif
 
 if not zlib.found()
   warning('zlib not found, client will be unable to connect to protocol 35 servers')
@@ -475,9 +486,95 @@ if get_option('game-abi-hack').require(x86 and cc.get_id() == 'gcc' and cc.has_a
 endif
 
 if web
-  exe_link_with += static_library('game', game_src, include_directories: 'inc')
-  config.set('GAME_HARD_LINKED', true)
-  exe_link_args=['-sWASM=1', '-sFORCE_FILESYSTEM=1', '-sALLOW_MEMORY_GROWTH=1', '-sNO_EXIT_RUNTIME=1', '-sINITIAL_MEMORY=512MB', '-sMAXIMUM_MEMORY=2048MB', '-sEXPORTED_RUNTIME_METHODS=["ccall", "cwrap", "FS", "FS_createPath", "FS_createDataFile", "addRunDependency", "removeRunDependency"]', '-O3']
+  side_module_imports = [
+    'acos',
+    'asin',
+    'rand',
+    'strcmp',
+    'strcpy',
+    'strchr',
+    'strrchr',
+    'qsort',
+    'strlen',
+    'strcat',
+    'strdup',
+    'strtok',
+    'strcasecmp',
+    'strncasecmp',
+    'free',
+    'atoi',
+    'atof',
+    'sscanf',
+    'sprintf',
+    'vsprintf',
+    'strtof',
+    'fopen',
+    'fseek',
+    'fgets',
+    'fread',
+    'fwrite',
+    'feof',
+    'fprintf',
+    'fclose',
+    'strstr',
+    'cos',
+    'sin',
+    'atan2',
+    'cosf',
+    'sinf',
+    'tanf',
+    'atan2f',
+    'strncmp',
+    'strncpy',
+    'strnlen',
+    'memcmp',
+    'vsnprintf',
+    'strtol',
+    'aligned_alloc',
+    'close',
+    'read',
+    '__errno_location',
+    'strerror',
+    'malloc',
+    'snprintf',
+    'open',
+    'lseek',
+    'write',
+    'time',
+    'localtime',
+    'srand',
+  ]
+
+  # Avoid optimizer/wasm validation issues seen with this toolchain by
+  # preferring conservative optimization for web builds.
+  add_project_arguments('-O0', language: 'c')
+  add_project_arguments('-fPIC', language: 'c')
+  add_project_link_arguments('-O0', language: 'c')
+
+  exe_link_args += [
+    '-sWASM=1',
+    '-sMAIN_MODULE=2',
+    '-sWASM_BIGINT=1',
+    '-sFORCE_FILESYSTEM=1',
+    '-sALLOW_MEMORY_GROWTH=1',
+    '-sNO_EXIT_RUNTIME=1',
+    '-sASSERTIONS=2',
+    '-sEXPORTED_FUNCTIONS=["_main"]',
+    '-sINITIAL_MEMORY=512MB',
+    '-sMAXIMUM_MEMORY=2048MB',
+    '-sEXPORTED_RUNTIME_METHODS=["ccall", "cwrap", "FS", "FS_createPath", "FS_createDataFile", "addRunDependency", "removeRunDependency"]'
+  ]
+  foreach sym : side_module_imports
+    exe_link_args += '-Wl,--undefined=' + sym
+    exe_link_args += '-Wl,--export=' + sym
+  endforeach
+  dll_link_args += [
+    '-sSIDE_MODULE=2',
+    '-sWASM_BIGINT=1',
+    '-sEXPORT_ALL=1',
+    '-sEXPORTED_FUNCTIONS=["_GetGameAPI"]',
+    '-Wl,--export=GetGameAPI',
+  ]
 endif
 
 executable('q2pro', common_src, client_src, refresh_src,
@@ -503,6 +600,22 @@ if not web
     install:               system_wide,
   )
 
+endif
+
+if web
+  executable('game' + cpu, game_src,
+    name_prefix:           '',
+    name_suffix:           'so',
+    dependencies:          game_deps,
+    include_directories:   'inc',
+    gnu_symbol_visibility: 'default',
+    c_args:                '-fPIC',
+    link_args:             dll_link_args,
+    install:               system_wide,
+    install_dir:           libdir / get_option('base-game'),
+    override_options:      get_option('game-build-options'),
+  )
+else
   shared_library('game' + cpu, game_src,
     name_prefix:           '',
     dependencies:          game_deps,
@@ -536,7 +649,7 @@ config.set10('USE_FPS',           get_option('variable-fps'))
 config.set10('USE_GLES',          get_option('opengl-es1'))
 config.set10('USE_ICMP',          get_option('icmp-errors').require(win32 or cc.has_header('linux/errqueue.h')).allowed())
 config.set10('USE_MD3',           get_option('md3'))
-config.set10('USE_MD5',           get_option('md5'))
+config.set10('USE_MD5',           not web and get_option('md5'))
 config.set10('USE_PACKETDUP',     get_option('packetdup-hack'))
 config.set10('USE_TGA',           get_option('tga'))
 config.set10('USE_' + host_machine.endian().to_upper() + '_ENDIAN', true)

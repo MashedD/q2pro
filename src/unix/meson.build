@@ -7,12 +7,12 @@ if libm.found()
 endif
 
 librt = cc.find_library('rt', required: false)
-if librt.found()
+if not web and librt.found()
   common_deps += librt
 endif
 
 libdl = cc.find_library('dl', required: false)
-if cc.has_function('dlopen', dependencies: libdl, prefix: '#include <dlfcn.h>')
+if not web and cc.has_function('dlopen', dependencies: libdl, prefix: '#include <dlfcn.h>')
   common_deps += libdl
 endif
 
