@@ -315,6 +315,7 @@ typedef struct {
     clipRect_t clip;
     bool clip_set;
     vk_texture_t raw_texture;
+    vk_texture_t particle_texture;
     vk_mesh_t test_triangle;
     vk_mesh_t skybox;
     vk_mesh_t sprite_quad;
@@ -329,6 +330,8 @@ static vk_state_t vk;
 static cvar_t *vk_show_test_triangle;
 static cvar_t *vk_drawentities;
 static cvar_t *vk_drawsky;
+static cvar_t *vk_partscale;
+static cvar_t *vk_partstyle;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_world_cull;
@@ -1572,12 +1575,12 @@ static bool vk_create_frame_resources(void)
 
     VkDescriptorPoolSize pool_size = {
         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = MAX_RIMAGES + 1,
+        .descriptorCount = MAX_RIMAGES + 4,
     };
     VkDescriptorPoolCreateInfo pool_info_desc = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-        .maxSets = MAX_RIMAGES + 1,
+        .maxSets = MAX_RIMAGES + 4,
         .poolSizeCount = 1,
         .pPoolSizes = &pool_size,
     };
@@ -3219,6 +3222,26 @@ static bool vk_create_sprite_quad(void)
                           indices, q_countof(indices));
 }
 
+static bool vk_create_particle_texture(void)
+{
+    uint32_t pixels[16 * 16];
+
+    for (int y = 0; y < 16; y++) {
+        for (int x = 0; x < 16; x++) {
+            float fx = x - 16 / 2 + 0.5f;
+            float fy = y - 16 / 2 + 0.5f;
+            float f = sqrtf(fx * fx + fy * fy);
+            byte alpha;
+
+            f = 1.0f - f / (16 / 2 - 0.5f);
+            alpha = 255 * Q_clipf(f, 0.0f, 1.0f);
+            pixels[y * 16 + x] = MakeColor(255, 255, 255, alpha);
+        }
+    }
+
+    return vk_upload_texture_data(&vk.particle_texture, 16, 16, pixels);
+}
+
 static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float color[4])
 {
     if (!vk.render_pass_active || !vk.color3d_pipeline ||
@@ -3728,6 +3751,88 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
 }
 
+#define VK_PARTICLE_SIZE    (1.0f + M_SQRT1_2f)
+#define VK_PARTICLE_SCALE   (1.0f / (2.0f * VK_PARTICLE_SIZE))
+
+static void vk_draw_particles(const refdef_t *fd)
+{
+    if (!fd->num_particles || !fd->particles ||
+        !vk.sprite_pipeline || !vk.particle_texture.descriptor_set ||
+        !vk.sprite_quad.vertices.buffer || !vk.sprite_quad.indices.buffer)
+        return;
+
+    vec3_t viewaxis[3];
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    AnglesToAxis(fd->viewangles, viewaxis);
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sprite_pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.rect_pipeline_layout, 0, 1,
+                             &vk.particle_texture.descriptor_set, 0, NULL);
+
+    for (int i = 0; i < fd->num_particles; i++) {
+        const particle_t *particle = &fd->particles[i];
+        vec3_t transformed, left, right, down, up, xaxis, yaxis, origin;
+        vec_t dist, scale, scale2;
+        mat4_t model_matrix, mvp;
+        vk_color3d_push_t push;
+        color_t color;
+
+        VectorSubtract(particle->origin, fd->vieworg, transformed);
+        dist = DotProduct(transformed, viewaxis[0]);
+
+        scale = 1.0f;
+        if (dist > 20.0f)
+            scale += dist * 0.004f;
+        scale *= (vk_partscale ? vk_partscale->value : 2.0f) * particle->scale;
+        scale2 = scale * VK_PARTICLE_SCALE;
+
+        VectorScale(viewaxis[1], scale2, left);
+        VectorScale(viewaxis[1], -scale, right);
+        VectorScale(viewaxis[2], -scale2, down);
+        VectorScale(viewaxis[2], scale, up);
+        VectorSubtract(right, left, xaxis);
+        VectorSubtract(up, down, yaxis);
+        VectorAdd3(particle->origin, left, down, origin);
+
+        memset(model_matrix, 0, sizeof(model_matrix));
+        model_matrix[0] = xaxis[0];
+        model_matrix[1] = xaxis[1];
+        model_matrix[2] = xaxis[2];
+        model_matrix[4] = yaxis[0];
+        model_matrix[5] = yaxis[1];
+        model_matrix[6] = yaxis[2];
+        model_matrix[10] = 1.0f;
+        model_matrix[12] = origin[0];
+        model_matrix[13] = origin[1];
+        model_matrix[14] = origin[2];
+        model_matrix[15] = 1.0f;
+
+        vk_model_mvp(mvp, fd, model_matrix);
+        memcpy(push.mvp, mvp, sizeof(push.mvp));
+
+        if (particle->color == -1)
+            color.u32 = particle->rgba.u32;
+        else
+            color.u32 = d_8to24table[particle->color & 0xff];
+        color.u8[3] *= particle->alpha;
+
+        push.color[0] = color.u8[0] / 255.0f;
+        push.color[1] = color.u8[1] / 255.0f;
+        push.color[2] = color.u8[2] / 255.0f;
+        push.color[3] = color.u8[3] / 255.0f;
+
+        vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                            0, sizeof(push), &push);
+        vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+    }
+}
+
 static void vk_draw_entities(const refdef_t *fd)
 {
     if (!vk_drawentities || !vk_drawentities->integer)
@@ -3997,6 +4102,8 @@ bool VKR_Init(bool total)
     vk_show_test_triangle = Cvar_Get("vk_show_test_triangle", "0", 0);
     vk_drawentities = Cvar_Get("vk_drawentities", "1", CVAR_CHEAT);
     vk_drawsky = Cvar_Get("vk_drawsky", "1", 0);
+    vk_partscale = Cvar_Get("gl_partscale", "2", 0);
+    vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
@@ -4020,6 +4127,8 @@ bool VKR_Init(bool total)
         Com_WPrintf("Couldn't create Vulkan skybox mesh: %s\n", Com_GetLastError());
     if (!vk_create_sprite_quad())
         Com_WPrintf("Couldn't create Vulkan sprite quad: %s\n", Com_GetLastError());
+    if (!vk_create_particle_texture())
+        Com_WPrintf("Couldn't create Vulkan particle texture: %s\n", Com_GetLastError());
 
     r_registration_sequence = 1;
     IMG_Init();
@@ -4041,6 +4150,7 @@ void VKR_Shutdown(bool total)
     }
 
     vk_destroy_texture_resource(&vk.raw_texture);
+    vk_destroy_texture_resource(&vk.particle_texture);
 
     vk_destroy_swapchain();
 
@@ -4240,6 +4350,7 @@ void VKR_RenderFrame(const refdef_t *fd)
     }
 
     vk_draw_entities(fd);
+    vk_draw_particles(fd);
     vk_draw_test_triangle(fd);
 }
 
