@@ -10,6 +10,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include "shared/shared.h"
 #include "common/bsp.h"
 #include "common/common.h"
+#include "common/math.h"
 #include "common/zone.h"
 #include "client/client.h"
 #include "client/video.h"
@@ -116,7 +117,9 @@ typedef struct {
     vk_world_face_t *faces;
     uint32_t batch_count;
     uint32_t face_count;
+    cplane_t frustum[4];
     unsigned drawframe;
+    unsigned visframe;
 } vk_world_t;
 
 typedef struct {
@@ -280,6 +283,7 @@ static vk_state_t vk;
 static cvar_t *vk_show_test_triangle;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
+static cvar_t *vk_world_cull;
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static void vk_destroy_texture(image_t *image);
@@ -589,6 +593,7 @@ static void vk_free_world(void)
     vk.world.batch_count = 0;
     vk.world.face_count = 0;
     vk.world.drawframe = 0;
+    vk.world.visframe = 0;
 
     if (vk.world.cache) {
         BSP_Free(vk.world.cache);
@@ -2634,6 +2639,66 @@ static void vk_draw_world_mesh(const mat4_t mvp)
     }
 }
 
+static void vk_setup_world_frustum(const refdef_t *fd)
+{
+    vec3_t axis[3], forward, left, up;
+    vec_t angle, sf, cf;
+
+    AnglesToAxis(fd->viewangles, axis);
+
+    angle = DEG2RAD(fd->fov_x / 2);
+    sf = sinf(angle);
+    cf = cosf(angle);
+
+    VectorScale(axis[0], sf, forward);
+    VectorScale(axis[1], cf, left);
+    VectorAdd(forward, left, vk.world.frustum[0].normal);
+    VectorSubtract(forward, left, vk.world.frustum[1].normal);
+
+    angle = DEG2RAD(fd->fov_y / 2);
+    sf = sinf(angle);
+    cf = cosf(angle);
+
+    VectorScale(axis[0], sf, forward);
+    VectorScale(axis[2], cf, up);
+    VectorAdd(forward, up, vk.world.frustum[2].normal);
+    VectorSubtract(forward, up, vk.world.frustum[3].normal);
+
+    for (int i = 0; i < 4; i++) {
+        cplane_t *plane = &vk.world.frustum[i];
+        plane->dist = DotProduct(fd->vieworg, plane->normal);
+        plane->type = PLANE_NON_AXIAL;
+        SetPlaneSignbits(plane);
+    }
+}
+
+#define VK_NODE_CLIPPED     0
+#define VK_NODE_UNCLIPPED   MASK(4)
+
+static bool vk_clip_world_node(const mnode_t *node, int *clipflags)
+{
+    int flags = *clipflags;
+
+    if (flags == VK_NODE_UNCLIPPED)
+        return true;
+
+    for (int i = 0, mask = 1; i < 4; i++, mask <<= 1) {
+        box_plane_t bits;
+
+        if (flags & mask)
+            continue;
+
+        bits = BoxOnPlaneSide(node->mins, node->maxs, &vk.world.frustum[i]);
+        if (bits == BOX_BEHIND)
+            return false;
+        if (bits == BOX_INFRONT)
+            flags |= mask;
+    }
+
+    *clipflags = flags;
+    return true;
+}
+
 static void vk_mark_world_leaf(const mleaf_t *leaf, const refdef_t *fd)
 {
     if (leaf->contents[0] == CONTENTS_SOLID)
@@ -2646,9 +2711,9 @@ static void vk_mark_world_leaf(const mleaf_t *leaf, const refdef_t *fd)
         leaf->firstleafface[i]->drawframe = vk.world.drawframe;
 }
 
-static void vk_mark_world_faces(const refdef_t *fd)
+static void vk_mark_world_visible_nodes(const refdef_t *fd)
 {
-    const bsp_t *bsp = vk.world.cache;
+    bsp_t *bsp = vk.world.cache;
     const mleaf_t *leaf;
     visrow_t vis1, vis2;
     int cluster1, cluster2;
@@ -2657,7 +2722,7 @@ static void vk_mark_world_faces(const refdef_t *fd)
     if (!bsp)
         return;
 
-    vk.world.drawframe++;
+    vk.world.visframe++;
 
     leaf = BSP_PointLeaf(bsp->nodes, fd->vieworg);
     cluster1 = cluster2 = leaf->cluster;
@@ -2672,7 +2737,9 @@ static void vk_mark_world_faces(const refdef_t *fd)
 
     if (!bsp->vis || cluster1 == -1) {
         for (int i = 0; i < bsp->numleafs; i++)
-            vk_mark_world_leaf(&bsp->leafs[i], fd);
+            bsp->leafs[i].visframe = vk.world.visframe;
+        for (int i = 0; i < bsp->numnodes; i++)
+            bsp->nodes[i].visframe = vk.world.visframe;
         return;
     }
 
@@ -2693,8 +2760,52 @@ static void vk_mark_world_faces(const refdef_t *fd)
         if (!Q_IsBitSet(vis1.b, cluster))
             continue;
 
-        vk_mark_world_leaf(leaf, fd);
+        for (mnode_t *node = (mnode_t *)leaf;
+             node && node->visframe != vk.world.visframe;
+             node = node->parent) {
+            node->visframe = vk.world.visframe;
+        }
     }
+}
+
+static void vk_mark_world_node_faces(const mnode_t *node, const refdef_t *fd, int clipflags)
+{
+    while (node->visframe == vk.world.visframe) {
+        int side;
+        vec_t dot;
+
+        if (!vk_clip_world_node(node, &clipflags))
+            break;
+
+        if (!node->plane) {
+            vk_mark_world_leaf((const mleaf_t *)node, fd);
+            break;
+        }
+
+        dot = PlaneDiffFast(fd->vieworg, node->plane);
+        side = dot < 0;
+
+        vk_mark_world_node_faces(node->children[side], fd, clipflags);
+
+        node = node->children[side ^ 1];
+    }
+}
+
+static void vk_mark_world_faces(const refdef_t *fd)
+{
+    const bsp_t *bsp = vk.world.cache;
+    int clipflags;
+
+    if (!bsp)
+        return;
+
+    vk.world.drawframe++;
+    vk_mark_world_visible_nodes(fd);
+    vk_setup_world_frustum(fd);
+
+    clipflags = (vk_world_cull && vk_world_cull->integer) ?
+        VK_NODE_CLIPPED : VK_NODE_UNCLIPPED;
+    vk_mark_world_node_faces(bsp->nodes, fd, clipflags);
 }
 
 static void vk_surface_color(const mface_t *face, float color[4])
@@ -2941,6 +3052,7 @@ bool VKR_Init(bool total)
     vk_show_test_triangle = Cvar_Get("vk_show_test_triangle", "0", 0);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
+    vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
 
     if (!vid->init())
         return false;
