@@ -283,6 +283,7 @@ typedef struct {
     VkPipeline rect_pipeline;
     VkPipeline texture_pipeline;
     VkPipeline color3d_pipeline;
+    VkPipeline beam_pipeline;
     VkPipeline world_pipeline;
     VkPipeline sky_pipeline;
     VkPipeline sprite_pipeline;
@@ -332,6 +333,7 @@ static cvar_t *vk_drawentities;
 static cvar_t *vk_drawsky;
 static cvar_t *vk_partscale;
 static cvar_t *vk_partstyle;
+static cvar_t *vk_beamstyle;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_world_cull;
@@ -1719,6 +1721,11 @@ static void vk_destroy_swapchain(void)
         vk.color3d_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.beam_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.beam_pipeline, NULL);
+        vk.beam_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.world_pipeline) {
         vk.DestroyPipeline(vk.device, vk.world_pipeline, NULL);
         vk.world_pipeline = VK_NULL_HANDLE;
@@ -2232,7 +2239,7 @@ static bool vk_create_texture_pipeline(void)
     return true;
 }
 
-static bool vk_create_color3d_pipeline(void)
+static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_write, bool blend)
 {
     VkShaderModule vert = vk_create_shader_module(vk_color3d_vert_spv,
                                                   sizeof(vk_color3d_vert_spv));
@@ -2321,6 +2328,13 @@ static bool vk_create_color3d_pipeline(void)
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
     };
     VkPipelineColorBlendAttachmentState color_blend_attachment = {
+        .blendEnable = blend,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
     };
@@ -2332,7 +2346,7 @@ static bool vk_create_color3d_pipeline(void)
     VkPipelineDepthStencilStateCreateInfo depth_stencil = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = VK_TRUE,
-        .depthWriteEnable = VK_TRUE,
+        .depthWriteEnable = depth_write,
         .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
     };
 
@@ -2354,7 +2368,7 @@ static bool vk_create_color3d_pipeline(void)
 
     VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
                                                  &create_info, NULL,
-                                                 &vk.color3d_pipeline);
+                                                 pipeline);
     vk.DestroyShaderModule(vk.device, frag, NULL);
     vk.DestroyShaderModule(vk.device, vert, NULL);
 
@@ -2794,7 +2808,8 @@ static bool vk_create_swapchain(int width, int height)
     if (!vk_create_render_pass() ||
         !vk_create_rect_pipeline() ||
         !vk_create_texture_pipeline() ||
-        !vk_create_color3d_pipeline() ||
+        !vk_create_color3d_pipeline(&vk.color3d_pipeline, VK_TRUE, VK_FALSE) ||
+        !vk_create_color3d_pipeline(&vk.beam_pipeline, VK_FALSE, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE) ||
@@ -3833,6 +3848,68 @@ static void vk_draw_particles(const refdef_t *fd)
     }
 }
 
+static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
+{
+    if (!vk.beam_pipeline || !vk.sprite_quad.vertices.buffer ||
+        !vk.sprite_quad.indices.buffer || !ent->frame)
+        return;
+
+    vec3_t dir, to_view, normal, xaxis, yaxis, origin;
+    mat4_t model_matrix, mvp;
+    vk_color3d_push_t push;
+    color_t color;
+    float scale = (vk_beamstyle && vk_beamstyle->integer) ? 0.5f : 1.2f;
+    float width = abs((int16_t)ent->frame) * scale;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    VectorSubtract(ent->oldorigin, ent->origin, dir);
+    VectorSubtract(fd->vieworg, ent->origin, to_view);
+    CrossProduct(dir, to_view, normal);
+    if (VectorNormalize(normal) < 0.1f)
+        return;
+
+    VectorScale(normal, width, normal);
+    VectorCopy(dir, xaxis);
+    VectorScale(normal, -2.0f, yaxis);
+    VectorAdd(ent->origin, normal, origin);
+
+    memset(model_matrix, 0, sizeof(model_matrix));
+    model_matrix[0] = xaxis[0];
+    model_matrix[1] = xaxis[1];
+    model_matrix[2] = xaxis[2];
+    model_matrix[4] = yaxis[0];
+    model_matrix[5] = yaxis[1];
+    model_matrix[6] = yaxis[2];
+    model_matrix[10] = 1.0f;
+    model_matrix[12] = origin[0];
+    model_matrix[13] = origin[1];
+    model_matrix[14] = origin[2];
+    model_matrix[15] = 1.0f;
+
+    vk_model_mvp(mvp, fd, model_matrix);
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+
+    if (ent->skinnum == -1)
+        color.u32 = ent->rgba.u32;
+    else
+        color.u32 = d_8to24table[ent->skinnum & 0xff];
+    color.u8[3] *= ent->alpha;
+
+    push.color[0] = color.u8[0] / 255.0f;
+    push.color[1] = color.u8[1] / 255.0f;
+    push.color[2] = color.u8[2] / 255.0f;
+    push.color[3] = color.u8[3] / 255.0f;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.beam_pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+}
+
 static void vk_draw_entities(const refdef_t *fd)
 {
     if (!vk_drawentities || !vk_drawentities->integer)
@@ -3841,8 +3918,10 @@ static void vk_draw_entities(const refdef_t *fd)
     for (int i = 0; i < fd->num_entities; i++) {
         const entity_t *ent = &fd->entities[i];
 
-        if (ent->flags & RF_BEAM)
+        if (ent->flags & RF_BEAM) {
+            vk_draw_beam(ent, fd);
             continue;
+        }
         if (ent->model & BIT(31))
             vk_draw_bmodel(ent, fd);
         else {
@@ -4104,6 +4183,7 @@ bool VKR_Init(bool total)
     vk_drawsky = Cvar_Get("vk_drawsky", "1", 0);
     vk_partscale = Cvar_Get("gl_partscale", "2", 0);
     vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
+    vk_beamstyle = Cvar_Get("gl_beamstyle", "0", 0);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
