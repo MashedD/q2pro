@@ -58,6 +58,10 @@ static const uint32_t vk_world_frag_spv[] =
 #include "vk_world_frag_spv.h"
 ;
 
+static const uint32_t vk_alias_vert_spv[] =
+#include "vk_alias_vert_spv.h"
+;
+
 typedef struct {
     float rect[4];
     float color[4];
@@ -159,6 +163,12 @@ typedef struct {
     mat4_t mvp;
     float color[4];
 } vk_color3d_push_t;
+
+typedef struct {
+    mat4_t mvp;
+    float color[4];
+    float backlerp;
+} vk_alias_push_t;
 
 typedef struct {
     uint32_t graphics_family;
@@ -276,6 +286,8 @@ typedef struct {
     VkPipeline world_pipeline;
     VkPipeline sky_pipeline;
     VkPipeline sprite_pipeline;
+    VkPipeline alias_pipeline;
+    VkPipeline alias_blend_pipeline;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
     VkFormat swapchain_format;
@@ -1591,7 +1603,8 @@ static bool vk_create_frame_resources(void)
     VkPushConstantRange push_range = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
-        .size = max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
+        .size = max(max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
+                    sizeof(vk_alias_push_t)),
     };
     VkPipelineLayoutCreateInfo layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1716,6 +1729,16 @@ static void vk_destroy_swapchain(void)
     if (vk.sprite_pipeline) {
         vk.DestroyPipeline(vk.device, vk.sprite_pipeline, NULL);
         vk.sprite_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.alias_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_pipeline, NULL);
+        vk.alias_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.alias_blend_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_blend_pipeline, NULL);
+        vk.alias_blend_pipeline = VK_NULL_HANDLE;
     }
 
     if (vk.framebuffers) {
@@ -2484,6 +2507,163 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
     return true;
 }
 
+static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write, bool blend)
+{
+    VkShaderModule vert = vk_create_shader_module(vk_alias_vert_spv,
+                                                  sizeof(vk_alias_vert_spv));
+    if (!vert)
+        return false;
+
+    VkShaderModule frag = vk_create_shader_module(vk_world_frag_spv,
+                                                  sizeof(vk_world_frag_spv));
+    if (!frag) {
+        vk.DestroyShaderModule(vk.device, vert, NULL);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vert,
+            .pName = "main",
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = frag,
+            .pName = "main",
+        },
+    };
+    VkVertexInputBindingDescription bindings[] = {
+        {
+            .binding = 0,
+            .stride = sizeof(vk_vertex_t),
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        },
+        {
+            .binding = 1,
+            .stride = sizeof(vk_vertex_t),
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        },
+    };
+    VkVertexInputAttributeDescription attributes[] = {
+        {
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, position),
+        },
+        {
+            .location = 1,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, color),
+        },
+        {
+            .location = 2,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, uv),
+        },
+        {
+            .location = 3,
+            .binding = 1,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, position),
+        },
+    };
+    VkPipelineVertexInputStateCreateInfo vertex_input = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = q_countof(bindings),
+        .pVertexBindingDescriptions = bindings,
+        .vertexAttributeDescriptionCount = q_countof(attributes),
+        .pVertexAttributeDescriptions = attributes,
+    };
+    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = vk.swapchain_extent.width,
+        .height = vk.swapchain_extent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    VkRect2D scissor = {
+        .offset = { 0, 0 },
+        .extent = vk.swapchain_extent,
+    };
+    VkPipelineViewportStateCreateInfo viewport_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = &viewport,
+        .scissorCount = 1,
+        .pScissors = &scissor,
+    };
+    VkPipelineRasterizationStateCreateInfo raster = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth = 1.0f,
+    };
+    VkPipelineMultisampleStateCreateInfo multisample = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    VkPipelineColorBlendAttachmentState color_blend_attachment = {
+        .blendEnable = blend,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    VkPipelineColorBlendStateCreateInfo color_blend = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &color_blend_attachment,
+    };
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = depth_write,
+        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+    };
+    VkGraphicsPipelineCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = q_countof(stages),
+        .pStages = stages,
+        .pVertexInputState = &vertex_input,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &raster,
+        .pMultisampleState = &multisample,
+        .pDepthStencilState = &depth_stencil,
+        .pColorBlendState = &color_blend,
+        .layout = vk.rect_pipeline_layout,
+        .renderPass = vk.render_pass,
+        .subpass = 0,
+    };
+
+    VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
+                                                 &create_info, NULL,
+                                                 pipeline);
+    vk.DestroyShaderModule(vk.device, frag, NULL);
+    vk.DestroyShaderModule(vk.device, vert, NULL);
+
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateGraphicsPipelines", result);
+
+    return true;
+}
+
 static bool vk_create_swapchain(int width, int height)
 {
     VkSurfaceCapabilitiesKHR caps;
@@ -2615,6 +2795,8 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE) ||
+        !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE) ||
+        !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE) ||
         !vk_create_depth_resources() ||
         !vk_create_framebuffers())
         return false;
@@ -3430,7 +3612,10 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 {
     vk_model_t *model = vk_model_for_handle(ent->model);
 
-    if (!model || model->type != VK_MODEL_ALIAS ||
+    bool translucent = ent->flags & RF_TRANSLUCENT;
+    VkPipeline pipeline = translucent ? vk.alias_blend_pipeline : vk.alias_pipeline;
+
+    if (!model || model->type != VK_MODEL_ALIAS || !pipeline ||
         !model->mesh.vertices.buffer || !model->mesh.indices.buffer ||
         !model->vertex_count)
         return;
@@ -3445,10 +3630,18 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 
     vec3_t axis[3];
     mat4_t mvp;
-    vk_color3d_push_t push;
+    vk_alias_push_t push;
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
-    VkDeviceSize offset = 0;
     uint32_t frame = ent->frame % model->frame_count;
+    uint32_t oldframe = ent->oldframe % model->frame_count;
+    VkDeviceSize offsets[] = {
+        (VkDeviceSize)frame * model->vertex_count * sizeof(vk_vertex_t),
+        (VkDeviceSize)oldframe * model->vertex_count * sizeof(vk_vertex_t),
+    };
+    VkBuffer buffers[] = {
+        model->mesh.vertices.buffer,
+        model->mesh.vertices.buffer,
+    };
 
     vk_entity_axis(ent, axis);
     vk_entity_mvp(mvp, fd, ent, axis);
@@ -3456,11 +3649,11 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     push.color[0] = 1.0f;
     push.color[1] = 1.0f;
     push.color[2] = 1.0f;
-    push.color[3] = (ent->flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f;
+    push.color[3] = translucent ? ent->alpha : 1.0f;
+    push.backlerp = Q_clip(ent->backlerp, 0.0f, 1.0f);
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                       (ent->flags & RF_TRANSLUCENT) ? vk.sprite_pipeline : vk.world_pipeline);
-    vk.CmdBindVertexBuffers(cmd, 0, 1, &model->mesh.vertices.buffer, &offset);
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, q_countof(buffers), buffers, offsets);
     vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                              vk.rect_pipeline_layout, 0, 1,
@@ -3468,8 +3661,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(push), &push);
-    vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0,
-                      frame * model->vertex_count, 0);
+    vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0, 0, 0);
 }
 
 static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
