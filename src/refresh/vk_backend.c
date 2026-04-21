@@ -11,6 +11,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include "common/common.h"
 #include "common/zone.h"
 #include "client/video.h"
+#include "images.h"
 #include "refresh/refresh.h"
 #include "system/system.h"
 #include "vk_backend.h"
@@ -54,6 +55,10 @@ typedef struct {
     PFN_vkGetSwapchainImagesKHR GetSwapchainImagesKHR;
     PFN_vkCreateImageView CreateImageView;
     PFN_vkDestroyImageView DestroyImageView;
+    PFN_vkCreateRenderPass CreateRenderPass;
+    PFN_vkDestroyRenderPass DestroyRenderPass;
+    PFN_vkCreateFramebuffer CreateFramebuffer;
+    PFN_vkDestroyFramebuffer DestroyFramebuffer;
     PFN_vkCreateCommandPool CreateCommandPool;
     PFN_vkDestroyCommandPool DestroyCommandPool;
     PFN_vkAllocateCommandBuffers AllocateCommandBuffers;
@@ -62,7 +67,9 @@ typedef struct {
     PFN_vkBeginCommandBuffer BeginCommandBuffer;
     PFN_vkEndCommandBuffer EndCommandBuffer;
     PFN_vkCmdPipelineBarrier CmdPipelineBarrier;
-    PFN_vkCmdClearColorImage CmdClearColorImage;
+    PFN_vkCmdBeginRenderPass CmdBeginRenderPass;
+    PFN_vkCmdEndRenderPass CmdEndRenderPass;
+    PFN_vkCmdClearAttachments CmdClearAttachments;
     PFN_vkCreateSemaphore CreateSemaphore;
     PFN_vkDestroySemaphore DestroySemaphore;
     PFN_vkCreateFence CreateFence;
@@ -81,10 +88,12 @@ typedef struct {
     VkQueue present_queue;
     VkCommandPool command_pool;
     VkSwapchainKHR swapchain;
+    VkRenderPass render_pass;
     VkFormat swapchain_format;
     VkExtent2D swapchain_extent;
     VkImage *swapchain_images;
     VkImageView *swapchain_views;
+    VkFramebuffer *framebuffers;
     VkImageLayout *swapchain_layouts;
     VkCommandBuffer *command_buffers;
     uint32_t swapchain_image_count;
@@ -94,6 +103,12 @@ typedef struct {
     VkFence frame_fence;
     uint32_t current_image;
     bool frame_active;
+    bool render_pass_active;
+    float scale;
+    color_t color;
+    bool color_set;
+    clipRect_t clip;
+    bool clip_set;
 } vk_state_t;
 
 static vk_state_t vk;
@@ -179,6 +194,10 @@ static bool vk_load_device(void)
     LOAD(GetSwapchainImagesKHR);
     LOAD(CreateImageView);
     LOAD(DestroyImageView);
+    LOAD(CreateRenderPass);
+    LOAD(DestroyRenderPass);
+    LOAD(CreateFramebuffer);
+    LOAD(DestroyFramebuffer);
     LOAD(CreateCommandPool);
     LOAD(DestroyCommandPool);
     LOAD(AllocateCommandBuffers);
@@ -187,7 +206,9 @@ static bool vk_load_device(void)
     LOAD(BeginCommandBuffer);
     LOAD(EndCommandBuffer);
     LOAD(CmdPipelineBarrier);
-    LOAD(CmdClearColorImage);
+    LOAD(CmdBeginRenderPass);
+    LOAD(CmdEndRenderPass);
+    LOAD(CmdClearAttachments);
     LOAD(CreateSemaphore);
     LOAD(DestroySemaphore);
     LOAD(CreateFence);
@@ -470,11 +491,28 @@ static void vk_destroy_swapchain(void)
     if (vk.device && vk.DeviceWaitIdle)
         vk.DeviceWaitIdle(vk.device);
 
+    vk.render_pass_active = false;
+    vk.frame_active = false;
+
     if (vk.command_buffers) {
         vk.FreeCommandBuffers(vk.device, vk.command_pool,
                               vk.swapchain_image_count, vk.command_buffers);
         Z_Free(vk.command_buffers);
         vk.command_buffers = NULL;
+    }
+
+    if (vk.framebuffers) {
+        for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
+            if (vk.framebuffers[i])
+                vk.DestroyFramebuffer(vk.device, vk.framebuffers[i], NULL);
+        }
+        Z_Free(vk.framebuffers);
+        vk.framebuffers = NULL;
+    }
+
+    if (vk.render_pass) {
+        vk.DestroyRenderPass(vk.device, vk.render_pass, NULL);
+        vk.render_pass = VK_NULL_HANDLE;
     }
 
     if (vk.swapchain_views) {
@@ -518,6 +556,69 @@ static bool vk_allocate_swapchain_commands(void)
     VkResult result = vk.AllocateCommandBuffers(vk.device, &alloc_info, vk.command_buffers);
     if (result != VK_SUCCESS)
         return vk_fail_result("vkAllocateCommandBuffers", result);
+
+    return true;
+}
+
+static bool vk_create_render_pass(void)
+{
+    VkAttachmentDescription color_attachment = {
+        .format = vk.swapchain_format,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    };
+
+    VkAttachmentReference color_ref = {
+        .attachment = 0,
+        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    };
+
+    VkSubpassDescription subpass = {
+        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &color_ref,
+    };
+
+    VkRenderPassCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &color_attachment,
+        .subpassCount = 1,
+        .pSubpasses = &subpass,
+    };
+
+    VkResult result = vk.CreateRenderPass(vk.device, &create_info, NULL, &vk.render_pass);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateRenderPass", result);
+
+    return true;
+}
+
+static bool vk_create_framebuffers(void)
+{
+    vk.framebuffers = Z_Mallocz(sizeof(*vk.framebuffers) * vk.swapchain_image_count);
+
+    for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
+        VkImageView attachments[] = { vk.swapchain_views[i] };
+        VkFramebufferCreateInfo create_info = {
+            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .renderPass = vk.render_pass,
+            .attachmentCount = 1,
+            .pAttachments = attachments,
+            .width = vk.swapchain_extent.width,
+            .height = vk.swapchain_extent.height,
+            .layers = 1,
+        };
+
+        VkResult result = vk.CreateFramebuffer(vk.device, &create_info, NULL, &vk.framebuffers[i]);
+        if (result != VK_SUCCESS)
+            return vk_fail_result("vkCreateFramebuffer", result);
+    }
 
     return true;
 }
@@ -641,6 +742,9 @@ static bool vk_create_swapchain(int width, int height)
             return vk_fail_result("vkCreateImageView", result);
     }
 
+    if (!vk_create_render_pass() || !vk_create_framebuffers())
+        return false;
+
     if (!vk_allocate_swapchain_commands())
         return false;
 
@@ -650,7 +754,10 @@ static bool vk_create_swapchain(int width, int height)
     return true;
 }
 
-static void vk_record_clear(VkCommandBuffer cmd, uint32_t image_index)
+static void vk_transition_image(VkCommandBuffer cmd, uint32_t image_index,
+                                VkImageLayout new_layout,
+                                VkAccessFlags dst_access,
+                                VkPipelineStageFlags dst_stage)
 {
     VkImageSubresourceRange range = {
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -660,47 +767,100 @@ static void vk_record_clear(VkCommandBuffer cmd, uint32_t image_index)
         .layerCount = 1,
     };
 
-    VkImageMemoryBarrier to_transfer = {
+    VkPipelineStageFlags src_stage;
+    VkAccessFlags src_access;
+
+    if (vk.swapchain_layouts[image_index] == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        src_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        src_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    } else if (vk.swapchain_layouts[image_index] == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR) {
+        src_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+        src_access = 0;
+    } else {
+        src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        src_access = 0;
+    }
+
+    VkImageMemoryBarrier barrier = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        .srcAccessMask = 0,
-        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .srcAccessMask = src_access,
+        .dstAccessMask = dst_access,
         .oldLayout = vk.swapchain_layouts[image_index],
-        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .newLayout = new_layout,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image = vk.swapchain_images[image_index],
         .subresourceRange = range,
     };
 
-    vk.CmdPipelineBarrier(cmd,
-                          VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                          VK_PIPELINE_STAGE_TRANSFER_BIT,
-                          0, 0, NULL, 0, NULL, 1, &to_transfer);
+    vk.CmdPipelineBarrier(cmd, src_stage, dst_stage,
+                          0, 0, NULL, 0, NULL, 1, &barrier);
 
+    vk.swapchain_layouts[image_index] = new_layout;
+}
+
+static VkClearColorValue vk_color_to_clear(uint32_t color)
+{
+    color_t c = { .u32 = color };
     VkClearColorValue clear = {
-        .float32 = { 0.015f, 0.025f, 0.035f, 1.0f },
-    };
-    vk.CmdClearColorImage(cmd, vk.swapchain_images[image_index],
-                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &range);
-
-    VkImageMemoryBarrier to_present = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-        .dstAccessMask = 0,
-        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = vk.swapchain_images[image_index],
-        .subresourceRange = range,
+        .float32 = {
+            c.u8[0] / 255.0f,
+            c.u8[1] / 255.0f,
+            c.u8[2] / 255.0f,
+            c.u8[3] / 255.0f,
+        },
     };
 
-    vk.CmdPipelineBarrier(cmd,
-                          VK_PIPELINE_STAGE_TRANSFER_BIT,
-                          VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                          0, 0, NULL, 0, NULL, 1, &to_present);
+    return clear;
+}
 
-    vk.swapchain_layouts[image_index] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
+{
+    if (!vk.render_pass_active || w <= 0 || h <= 0)
+        return;
+
+    if (vk.scale != 0 && vk.scale != 1.0f) {
+        x = Q_rint(x * vk.scale);
+        y = Q_rint(y * vk.scale);
+        w = Q_rint(w * vk.scale);
+        h = Q_rint(h * vk.scale);
+    }
+
+    if (vk.clip_set) {
+        int x2 = min(x + w, vk.clip.right);
+        int y2 = min(y + h, vk.clip.bottom);
+        x = max(x, vk.clip.left);
+        y = max(y, vk.clip.top);
+        w = x2 - x;
+        h = y2 - y;
+        if (w <= 0 || h <= 0)
+            return;
+    }
+
+    int x2 = min(x + w, (int)vk.swapchain_extent.width);
+    int y2 = min(y + h, (int)vk.swapchain_extent.height);
+    x = max(x, 0);
+    y = max(y, 0);
+    w = x2 - x;
+    h = y2 - y;
+    if (w <= 0 || h <= 0)
+        return;
+
+    VkClearAttachment attachment = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .colorAttachment = 0,
+        .clearValue.color = vk_color_to_clear(color),
+    };
+    VkClearRect rect = {
+        .rect = {
+            .offset = { x, y },
+            .extent = { w, h },
+        },
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+    };
+
+    vk.CmdClearAttachments(vk.command_buffers[vk.current_image], 1, &attachment, 1, &rect);
 }
 
 bool VKR_Init(bool total)
@@ -817,18 +977,29 @@ void VKR_LightPoint(const vec3_t origin, vec3_t light)
 
 void VKR_ClearColor(void)
 {
+    vk.color_set = false;
 }
 
 void VKR_SetAlpha(float alpha)
 {
+    if (vk.color_set)
+        vk.color.u8[3] = Q_clip(alpha, 0.0f, 1.0f) * 255;
 }
 
 void VKR_SetColor(uint32_t color)
 {
+    vk.color.u32 = color;
+    vk.color_set = true;
 }
 
 void VKR_SetClipRect(const clipRect_t *clip)
 {
+    if (clip) {
+        vk.clip = *clip;
+        vk.clip_set = true;
+    } else {
+        vk.clip_set = false;
+    }
 }
 
 float VKR_ClampScale(cvar_t *var)
@@ -844,6 +1015,7 @@ float VKR_ClampScale(cvar_t *var)
 
 void VKR_SetScale(float scale)
 {
+    vk.scale = scale;
 }
 
 void VKR_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
@@ -891,10 +1063,15 @@ void VKR_TileClear(int x, int y, int w, int h, qhandle_t pic)
 
 void VKR_DrawFill8(int x, int y, int w, int h, int c)
 {
+    uint32_t color = vk.color_set ? vk.color.u32 : d_8to24table[c & 0xff];
+    vk_clear_rect(x, y, w, h, color);
 }
 
 void VKR_DrawFill32(int x, int y, int w, int h, uint32_t color)
 {
+    if (vk.color_set)
+        color = vk.color.u32;
+    vk_clear_rect(x, y, w, h, color);
 }
 
 void VKR_BeginFrame(void)
@@ -942,13 +1119,29 @@ void VKR_BeginFrame(void)
         return;
     }
 
-    vk_record_clear(cmd, vk.current_image);
+    vk_transition_image(cmd, vk.current_image,
+                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 
-    result = vk.EndCommandBuffer(cmd);
-    if (result != VK_SUCCESS) {
-        Com_EPrintf("vkEndCommandBuffer failed: Vulkan error %d\n", result);
-        return;
-    }
+    VkClearValue clear = {
+        .color = { .float32 = { 0.015f, 0.025f, 0.035f, 1.0f } },
+    };
+    VkRenderPassBeginInfo render_pass_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .renderPass = vk.render_pass,
+        .framebuffer = vk.framebuffers[vk.current_image],
+        .renderArea = {
+            .offset = { 0, 0 },
+            .extent = vk.swapchain_extent,
+        },
+        .clearValueCount = 1,
+        .pClearValues = &clear,
+    };
+
+    vk.CmdBeginRenderPass(cmd, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+    vk.render_pass_active = true;
+
 
     vk.frame_active = true;
 }
@@ -959,7 +1152,24 @@ void VKR_EndFrame(void)
         return;
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
-    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if (vk.render_pass_active) {
+        vk.CmdEndRenderPass(cmd);
+        vk.render_pass_active = false;
+    }
+
+    vk_transition_image(cmd, vk.current_image,
+                        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                        0,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+
+    VkResult result = vk.EndCommandBuffer(cmd);
+    if (result != VK_SUCCESS) {
+        Com_EPrintf("vkEndCommandBuffer failed: Vulkan error %d\n", result);
+        vk.frame_active = false;
+        return;
+    }
+
+    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo submit_info = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = 1,
@@ -971,7 +1181,7 @@ void VKR_EndFrame(void)
         .pSignalSemaphores = &vk.render_finished,
     };
 
-    VkResult result = vk.QueueSubmit(vk.graphics_queue, 1, &submit_info, vk.frame_fence);
+    result = vk.QueueSubmit(vk.graphics_queue, 1, &submit_info, vk.frame_fence);
     if (result != VK_SUCCESS) {
         Com_EPrintf("vkQueueSubmit failed: Vulkan error %d\n", result);
         vk.frame_active = false;
