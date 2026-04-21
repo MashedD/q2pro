@@ -15,6 +15,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include "common/zone.h"
 #include "client/client.h"
 #include "client/video.h"
+#include "format/sp2.h"
 #include "images.h"
 #include "refresh/refresh.h"
 #include "system/system.h"
@@ -110,6 +111,21 @@ typedef struct {
     uint32_t first_index;
     uint32_t index_count;
 } vk_world_face_t;
+
+typedef struct {
+    int width;
+    int height;
+    int origin_x;
+    int origin_y;
+    image_t *image;
+} vk_sprite_frame_t;
+
+typedef struct {
+    char name[MAX_QPATH];
+    unsigned registration_sequence;
+    vk_sprite_frame_t *frames;
+    int frame_count;
+} vk_model_t;
 
 typedef struct {
     bsp_t *cache;
@@ -249,6 +265,7 @@ typedef struct {
     VkPipeline color3d_pipeline;
     VkPipeline world_pipeline;
     VkPipeline sky_pipeline;
+    VkPipeline sprite_pipeline;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
     VkFormat swapchain_format;
@@ -278,8 +295,11 @@ typedef struct {
     vk_texture_t raw_texture;
     vk_mesh_t test_triangle;
     vk_mesh_t skybox;
+    vk_mesh_t sprite_quad;
     uint32_t sky_images[6];
     vk_world_t world;
+    vk_model_t models[MAX_MODELS];
+    uint32_t model_count;
     vk_texture_t textures[MAX_RIMAGES];
 } vk_state_t;
 
@@ -605,6 +625,106 @@ static void vk_free_world(void)
         BSP_Free(vk.world.cache);
         vk.world.cache = NULL;
     }
+}
+
+static void vk_free_model(vk_model_t *model)
+{
+    if (model->frames) {
+        Z_Free(model->frames);
+        model->frames = NULL;
+    }
+
+    memset(model, 0, sizeof(*model));
+}
+
+static void vk_free_models(bool all)
+{
+    for (uint32_t i = 0; i < vk.model_count; i++) {
+        vk_model_t *model = &vk.models[i];
+
+        if (!model->frame_count)
+            continue;
+        if (!all && model->registration_sequence == r_registration_sequence)
+            continue;
+
+        vk_free_model(model);
+    }
+
+    if (all)
+        vk.model_count = 0;
+}
+
+static vk_model_t *vk_find_model(const char *name)
+{
+    for (uint32_t i = 0; i < vk.model_count; i++) {
+        vk_model_t *model = &vk.models[i];
+
+        if (model->frame_count && !FS_pathcmp(model->name, name))
+            return model;
+    }
+
+    return NULL;
+}
+
+static vk_model_t *vk_alloc_model(void)
+{
+    for (uint32_t i = 0; i < vk.model_count; i++) {
+        if (!vk.models[i].frame_count)
+            return &vk.models[i];
+    }
+
+    if (vk.model_count == q_countof(vk.models))
+        return NULL;
+
+    return &vk.models[vk.model_count++];
+}
+
+static qhandle_t vk_load_sprite_model(const char *name, const byte *rawdata, size_t length)
+{
+    dsp2header_t header;
+    vk_model_t *model;
+    const dsp2frame_t *src_frame;
+
+    if (length < sizeof(header))
+        return 0;
+
+    header.ident = LittleLong(((const dsp2header_t *)rawdata)->ident);
+    header.version = LittleLong(((const dsp2header_t *)rawdata)->version);
+    header.numframes = LittleLong(((const dsp2header_t *)rawdata)->numframes);
+
+    if (header.ident != SP2_IDENT || header.version != SP2_VERSION)
+        return 0;
+    if (header.numframes < 1 || header.numframes > SP2_MAX_FRAMES)
+        return 0;
+    if (sizeof(dsp2header_t) + sizeof(dsp2frame_t) * header.numframes > length)
+        return 0;
+
+    model = vk_alloc_model();
+    if (!model)
+        return 0;
+
+    Q_strlcpy(model->name, name, sizeof(model->name));
+    model->registration_sequence = r_registration_sequence;
+    model->frame_count = header.numframes;
+    model->frames = Z_Mallocz(sizeof(model->frames[0]) * model->frame_count);
+
+    src_frame = (const dsp2frame_t *)(rawdata + sizeof(dsp2header_t));
+    for (int i = 0; i < model->frame_count; i++) {
+        char image_name[SP2_MAX_FRAMENAME];
+        vk_sprite_frame_t *dst_frame = &model->frames[i];
+
+        dst_frame->width = (int32_t)LittleLong(src_frame[i].width);
+        dst_frame->height = (int32_t)LittleLong(src_frame[i].height);
+        dst_frame->origin_x = (int32_t)LittleLong(src_frame[i].origin_x);
+        dst_frame->origin_y = (int32_t)LittleLong(src_frame[i].origin_y);
+
+        if (!Q_memccpy(image_name, src_frame[i].name, 0, sizeof(image_name)))
+            dst_frame->image = R_NOTEXTURE;
+        else
+            dst_frame->image = IMG_Find(image_name, IT_SPRITE, IF_NONE);
+    }
+
+    return (model - vk.models) + 1;
 }
 
 static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
@@ -1372,6 +1492,11 @@ static void vk_destroy_swapchain(void)
         vk.sky_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.sprite_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.sprite_pipeline, NULL);
+        vk.sprite_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.framebuffers) {
         for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
             if (vk.framebuffers[i])
@@ -1992,7 +2117,8 @@ static bool vk_create_color3d_pipeline(void)
     return true;
 }
 
-static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test, bool depth_write)
+static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
+                                     bool depth_write, bool blend)
 {
     VkShaderModule vert = vk_create_shader_module(vk_world_vert_spv,
                                                   sizeof(vk_world_vert_spv));
@@ -2087,6 +2213,13 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test, bool
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
     };
     VkPipelineColorBlendAttachmentState color_blend_attachment = {
+        .blendEnable = blend,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
     };
@@ -2258,8 +2391,9 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_rect_pipeline() ||
         !vk_create_texture_pipeline() ||
         !vk_create_color3d_pipeline() ||
-        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE) ||
-        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE) ||
         !vk_create_depth_resources() ||
         !vk_create_framebuffers())
         return false;
@@ -2600,6 +2734,16 @@ static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
     vk_matrix_multiply(out, proj, view_model);
 }
 
+static void vk_model_mvp(mat4_t out, const refdef_t *fd, const mat4_t model)
+{
+    mat4_t proj, view, view_model;
+
+    vk_projection_matrix(proj, fd->fov_x, fd->fov_y);
+    vk_view_matrix(view, fd);
+    vk_matrix_multiply(view_model, view, model);
+    vk_matrix_multiply(out, proj, view_model);
+}
+
 static bool vk_create_test_triangle(void)
 {
     static const vk_vertex_t vertices[] = {
@@ -2655,6 +2799,20 @@ static bool vk_create_skybox_mesh(void)
     }
 
     return vk_upload_mesh(&vk.skybox, vertices, q_countof(vertices),
+                          indices, q_countof(indices));
+}
+
+static bool vk_create_sprite_quad(void)
+{
+    static const vk_vertex_t vertices[] = {
+        { { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
+        { { 0.0f, 1.0f, 0.0f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } },
+        { { 1.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
+        { { 1.0f, 1.0f, 0.0f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
+    };
+    static const uint32_t indices[] = { 0, 1, 2, 2, 1, 3 };
+
+    return vk_upload_mesh(&vk.sprite_quad, vertices, q_countof(vertices),
                           indices, q_countof(indices));
 }
 
@@ -3022,6 +3180,82 @@ static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd)
     vk_draw_world_mesh(mvp, true);
 }
 
+static vk_model_t *vk_model_for_handle(qhandle_t handle)
+{
+    if (handle <= 0 || handle > vk.model_count)
+        return NULL;
+
+    vk_model_t *model = &vk.models[handle - 1];
+    if (!model->frame_count)
+        return NULL;
+
+    return model;
+}
+
+static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
+{
+    vk_model_t *model = vk_model_for_handle(ent->model);
+
+    if (!model || !vk.sprite_pipeline ||
+        !vk.sprite_quad.vertices.buffer || !vk.sprite_quad.indices.buffer)
+        return;
+
+    const vk_sprite_frame_t *frame = &model->frames[ent->frame % model->frame_count];
+    if (!frame->image || !frame->image->texnum || frame->image->texnum >= MAX_RIMAGES)
+        return;
+
+    const vk_texture_t *texture = &vk.textures[frame->image->texnum];
+    if (!texture->descriptor_set)
+        return;
+
+    vec3_t viewaxis[3], left, right, down, up, xaxis, yaxis, origin;
+    float scale = ent->scale ? ent->scale : 1.0f;
+    mat4_t model_matrix, mvp;
+    vk_color3d_push_t push;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    AnglesToAxis(fd->viewangles, viewaxis);
+    VectorScale(viewaxis[1], frame->origin_x * scale, left);
+    VectorScale(viewaxis[1], (frame->origin_x - frame->width) * scale, right);
+    VectorScale(viewaxis[2], -frame->origin_y * scale, down);
+    VectorScale(viewaxis[2], (frame->height - frame->origin_y) * scale, up);
+    VectorSubtract(right, left, xaxis);
+    VectorSubtract(up, down, yaxis);
+    VectorAdd3(ent->origin, left, down, origin);
+
+    memset(model_matrix, 0, sizeof(model_matrix));
+    model_matrix[0] = xaxis[0];
+    model_matrix[1] = xaxis[1];
+    model_matrix[2] = xaxis[2];
+    model_matrix[4] = yaxis[0];
+    model_matrix[5] = yaxis[1];
+    model_matrix[6] = yaxis[2];
+    model_matrix[10] = 1.0f;
+    model_matrix[12] = origin[0];
+    model_matrix[13] = origin[1];
+    model_matrix[14] = origin[2];
+    model_matrix[15] = 1.0f;
+
+    vk_model_mvp(mvp, fd, model_matrix);
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    push.color[0] = 1.0f;
+    push.color[1] = 1.0f;
+    push.color[2] = 1.0f;
+    push.color[3] = (ent->flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sprite_pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.rect_pipeline_layout, 0, 1,
+                             &texture->descriptor_set, 0, NULL);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+}
+
 static void vk_draw_entities(const refdef_t *fd)
 {
     if (!vk_drawentities || !vk_drawentities->integer)
@@ -3034,6 +3268,8 @@ static void vk_draw_entities(const refdef_t *fd)
             continue;
         if (ent->model & BIT(31))
             vk_draw_bmodel(ent, fd);
+        else
+            vk_draw_sprite(ent, fd);
     }
 }
 
@@ -3302,6 +3538,8 @@ bool VKR_Init(bool total)
         Com_WPrintf("Couldn't create Vulkan test triangle: %s\n", Com_GetLastError());
     if (!vk_create_skybox_mesh())
         Com_WPrintf("Couldn't create Vulkan skybox mesh: %s\n", Com_GetLastError());
+    if (!vk_create_sprite_quad())
+        Com_WPrintf("Couldn't create Vulkan sprite quad: %s\n", Com_GetLastError());
 
     r_registration_sequence = 1;
     IMG_Init();
@@ -3350,8 +3588,10 @@ void VKR_Shutdown(bool total)
     }
 
     vk_free_world();
+    vk_free_models(true);
     vk_destroy_mesh(&vk.test_triangle);
     vk_destroy_mesh(&vk.skybox);
+    vk_destroy_mesh(&vk.sprite_quad);
 
     if (vk.sampler) {
         vk.DestroySampler(vk.device, vk.sampler, NULL);
@@ -3407,11 +3647,44 @@ void VKR_BeginRegistration(const char *map)
 
 qhandle_t VKR_RegisterModel(const char *name)
 {
+    char normalized[MAX_QPATH];
+    size_t namelen;
+    byte *rawdata;
+    int ret;
+    vk_model_t *model;
+    qhandle_t handle;
+
     if (!name || !*name)
         return 0;
     if (*name == '*')
         return ~Q_atoi(name + 1);
-    return 0;
+
+    namelen = FS_NormalizePathBuffer(normalized, name, sizeof(normalized));
+    if (!namelen || namelen >= sizeof(normalized))
+        return 0;
+
+    model = vk_find_model(normalized);
+    if (model) {
+        model->registration_sequence = r_registration_sequence;
+        for (int i = 0; i < model->frame_count; i++) {
+            if (model->frames[i].image)
+                model->frames[i].image->registration_sequence = r_registration_sequence;
+        }
+        return (model - vk.models) + 1;
+    }
+
+    ret = FS_LoadFile(normalized, (void **)&rawdata);
+    if (!rawdata)
+        return 0;
+
+    handle = 0;
+    if (ret >= 4 && LittleLong(*(uint32_t *)rawdata) == SP2_IDENT)
+        handle = vk_load_sprite_model(normalized, rawdata, ret);
+
+    FS_FreeFile(rawdata);
+    if (!handle)
+        Com_DPrintf("Vulkan renderer skipped unsupported model %s\n", normalized);
+    return handle;
 }
 
 qhandle_t VKR_RegisterImage(const char *name, imagetype_t type, imageflags_t flags)
@@ -3454,6 +3727,7 @@ void VKR_SetSky(const char *name, float rotate, bool autorotate, const vec3_t ax
 
 void VKR_EndRegistration(void)
 {
+    vk_free_models(false);
     IMG_FreeUnused();
 }
 
