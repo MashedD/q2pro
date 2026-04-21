@@ -62,6 +62,23 @@ typedef struct {
 } vk_texture_t;
 
 typedef struct {
+    VkBuffer buffer;
+    VkDeviceMemory memory;
+    VkDeviceSize size;
+} vk_buffer_t;
+
+typedef struct {
+    float position[3];
+    float color[4];
+} vk_color3d_vertex_t;
+
+typedef struct {
+    vk_buffer_t vertices;
+    vk_buffer_t indices;
+    uint32_t index_count;
+} vk_mesh_t;
+
+typedef struct {
     float rect[4];
     float color[4];
     float screen[2];
@@ -141,8 +158,11 @@ typedef struct {
     PFN_vkCmdClearAttachments CmdClearAttachments;
     PFN_vkCmdBindPipeline CmdBindPipeline;
     PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets;
+    PFN_vkCmdBindVertexBuffers CmdBindVertexBuffers;
+    PFN_vkCmdBindIndexBuffer CmdBindIndexBuffer;
     PFN_vkCmdPushConstants CmdPushConstants;
     PFN_vkCmdDraw CmdDraw;
+    PFN_vkCmdDrawIndexed CmdDrawIndexed;
     PFN_vkCreateBuffer CreateBuffer;
     PFN_vkDestroyBuffer DestroyBuffer;
     PFN_vkGetBufferMemoryRequirements GetBufferMemoryRequirements;
@@ -155,6 +175,7 @@ typedef struct {
     PFN_vkBindImageMemory BindImageMemory;
     PFN_vkMapMemory MapMemory;
     PFN_vkUnmapMemory UnmapMemory;
+    PFN_vkCmdCopyBuffer CmdCopyBuffer;
     PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage;
     PFN_vkCreateSemaphore CreateSemaphore;
     PFN_vkDestroySemaphore DestroySemaphore;
@@ -208,6 +229,7 @@ typedef struct {
     clipRect_t clip;
     bool clip_set;
     vk_texture_t raw_texture;
+    vk_mesh_t test_triangle;
     vk_texture_t textures[MAX_RIMAGES];
 } vk_state_t;
 
@@ -220,6 +242,8 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, const void *pixels);
 static void vk_destroy_texture_resource(vk_texture_t *texture);
 static bool vk_create_swapchain(int width, int height);
+static bool vk_create_test_triangle(void);
+static void vk_destroy_mesh(vk_mesh_t *mesh);
 
 static void vk_upload_image(image_t *image, byte *pic)
 {
@@ -418,6 +442,90 @@ static bool vk_end_immediate(VkCommandBuffer cmd)
 
     vk.FreeCommandBuffers(vk.device, vk.command_pool, 1, &cmd);
     return true;
+}
+
+static void vk_destroy_buffer(vk_buffer_t *buffer)
+{
+    if (!vk.device)
+        return;
+
+    if (buffer->buffer)
+        vk.DestroyBuffer(vk.device, buffer->buffer, NULL);
+    if (buffer->memory)
+        vk.FreeMemory(vk.device, buffer->memory, NULL);
+
+    memset(buffer, 0, sizeof(*buffer));
+}
+
+static bool vk_upload_buffer(vk_buffer_t *dst, const void *data,
+                             VkDeviceSize size, VkBufferUsageFlags usage)
+{
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+    VkBuffer device_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory device_memory = VK_NULL_HANDLE;
+
+    if (!data || !size)
+        return true;
+
+    if (!vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          &staging, &staging_memory))
+        goto fail;
+
+    void *mapped;
+    VkResult result = vk.MapMemory(vk.device, staging_memory, 0, size, 0, &mapped);
+    if (result != VK_SUCCESS) {
+        vk_fail_result("vkMapMemory", result);
+        goto fail;
+    }
+    memcpy(mapped, data, size);
+    vk.UnmapMemory(vk.device, staging_memory);
+
+    if (!vk_create_buffer(size, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                          &device_buffer, &device_memory))
+        goto fail;
+
+    VkCommandBuffer cmd;
+    if (!vk_begin_immediate(&cmd))
+        goto fail;
+
+    VkBufferCopy copy = {
+        .size = size,
+    };
+    vk.CmdCopyBuffer(cmd, staging, device_buffer, 1, &copy);
+
+    if (!vk_end_immediate(cmd))
+        goto fail;
+
+    vk_destroy_buffer(dst);
+    dst->buffer = device_buffer;
+    dst->memory = device_memory;
+    dst->size = size;
+
+    vk.DestroyBuffer(vk.device, staging, NULL);
+    vk.FreeMemory(vk.device, staging_memory, NULL);
+    return true;
+
+fail:
+    if (staging)
+        vk.DestroyBuffer(vk.device, staging, NULL);
+    if (staging_memory)
+        vk.FreeMemory(vk.device, staging_memory, NULL);
+    if (device_buffer)
+        vk.DestroyBuffer(vk.device, device_buffer, NULL);
+    if (device_memory)
+        vk.FreeMemory(vk.device, device_memory, NULL);
+    return false;
+}
+
+static void vk_destroy_mesh(vk_mesh_t *mesh)
+{
+    vk_destroy_buffer(&mesh->vertices);
+    vk_destroy_buffer(&mesh->indices);
+    mesh->index_count = 0;
 }
 
 static void vk_texture_barrier(VkCommandBuffer cmd, VkImage image,
@@ -757,8 +865,11 @@ static bool vk_load_device(void)
     LOAD(CmdClearAttachments);
     LOAD(CmdBindPipeline);
     LOAD(CmdBindDescriptorSets);
+    LOAD(CmdBindVertexBuffers);
+    LOAD(CmdBindIndexBuffer);
     LOAD(CmdPushConstants);
     LOAD(CmdDraw);
+    LOAD(CmdDrawIndexed);
     LOAD(CreateBuffer);
     LOAD(DestroyBuffer);
     LOAD(GetBufferMemoryRequirements);
@@ -771,6 +882,7 @@ static bool vk_load_device(void)
     LOAD(BindImageMemory);
     LOAD(MapMemory);
     LOAD(UnmapMemory);
+    LOAD(CmdCopyBuffer);
     LOAD(CmdCopyBufferToImage);
     LOAD(CreateSemaphore);
     LOAD(DestroySemaphore);
@@ -1431,8 +1543,31 @@ static bool vk_create_rect_pipeline(void)
         },
     };
 
+    VkVertexInputBindingDescription binding = {
+        .binding = 0,
+        .stride = sizeof(vk_color3d_vertex_t),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+    VkVertexInputAttributeDescription attributes[] = {
+        {
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_color3d_vertex_t, position),
+        },
+        {
+            .location = 1,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .offset = offsetof(vk_color3d_vertex_t, color),
+        },
+    };
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding,
+        .vertexAttributeDescriptionCount = q_countof(attributes),
+        .pVertexAttributeDescriptions = attributes,
     };
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -2114,12 +2249,36 @@ static void vk_projection_matrix(mat4_t m, float fov_x, float fov_y)
     m[14] = (znear * zfar) / (znear - zfar);
 }
 
+static bool vk_create_test_triangle(void)
+{
+    static const vk_color3d_vertex_t vertices[] = {
+        { { -24.0f, -16.0f, -96.0f }, { 1.0f, 0.15f, 0.10f, 1.0f } },
+        { {  24.0f, -16.0f, -96.0f }, { 0.1f, 0.85f, 0.25f, 1.0f } },
+        { {   0.0f,  24.0f, -96.0f }, { 0.1f, 0.35f, 1.00f, 1.0f } },
+    };
+    static const uint16_t indices[] = { 0, 1, 2 };
+
+    if (!vk_upload_buffer(&vk.test_triangle.vertices, vertices, sizeof(vertices),
+                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
+        return false;
+    if (!vk_upload_buffer(&vk.test_triangle.indices, indices, sizeof(indices),
+                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
+        vk_destroy_mesh(&vk.test_triangle);
+        return false;
+    }
+
+    vk.test_triangle.index_count = q_countof(indices);
+    return true;
+}
+
 static void vk_draw_test_triangle(const refdef_t *fd)
 {
     if (!vk.render_pass_active || !vk.color3d_pipeline ||
         !vk_show_test_triangle || !vk_show_test_triangle->integer)
         return;
     if (fd->rdflags & RDF_NOWORLDMODEL)
+        return;
+    if (!vk.test_triangle.vertices.buffer || !vk.test_triangle.indices.buffer)
         return;
 
     vk_color3d_push_t push;
@@ -2131,11 +2290,16 @@ static void vk_draw_test_triangle(const refdef_t *fd)
     push.color[3] = 1.0f;
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.color3d_pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.test_triangle.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.test_triangle.indices.buffer, 0,
+                          VK_INDEX_TYPE_UINT16);
     vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(push), &push);
-    vk.CmdDraw(cmd, 3, 1, 0, 0);
+    vk.CmdDrawIndexed(cmd, vk.test_triangle.index_count, 1, 0, 0, 0);
 }
 
 bool VKR_Init(bool total)
@@ -2160,6 +2324,9 @@ bool VKR_Init(bool total)
         VKR_Shutdown(true);
         return false;
     }
+
+    if (!vk_create_test_triangle())
+        Com_WPrintf("Couldn't create Vulkan test triangle: %s\n", Com_GetLastError());
 
     r_registration_sequence = 1;
     IMG_Init();
@@ -2206,6 +2373,8 @@ void VKR_Shutdown(bool total)
         vk.DestroyCommandPool(vk.device, vk.command_pool, NULL);
         vk.command_pool = VK_NULL_HANDLE;
     }
+
+    vk_destroy_mesh(&vk.test_triangle);
 
     if (vk.sampler) {
         vk.DestroySampler(vk.device, vk.sampler, NULL);
