@@ -92,19 +92,31 @@ typedef struct {
     uint32_t first_index;
     uint32_t index_count;
     uint32_t texture_index;
+    uint32_t first_face;
+    uint32_t face_count;
 } vk_world_batch_t;
 
 typedef struct {
     uint32_t first_vertex;
     uint32_t edge_count;
     uint32_t texture_index;
+    mface_t *face;
+} vk_world_build_face_t;
+
+typedef struct {
+    mface_t *face;
+    uint32_t first_index;
+    uint32_t index_count;
 } vk_world_face_t;
 
 typedef struct {
     bsp_t *cache;
     vk_mesh_t mesh;
     vk_world_batch_t *batches;
+    vk_world_face_t *faces;
     uint32_t batch_count;
+    uint32_t face_count;
+    unsigned drawframe;
 } vk_world_t;
 
 typedef struct {
@@ -267,6 +279,7 @@ typedef struct {
 static vk_state_t vk;
 static cvar_t *vk_show_test_triangle;
 static cvar_t *vk_world_textures;
+static cvar_t *vk_world_vis;
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static void vk_destroy_texture(image_t *image);
@@ -569,7 +582,13 @@ static void vk_free_world(void)
         Z_Free(vk.world.batches);
         vk.world.batches = NULL;
     }
+    if (vk.world.faces) {
+        Z_Free(vk.world.faces);
+        vk.world.faces = NULL;
+    }
     vk.world.batch_count = 0;
+    vk.world.face_count = 0;
+    vk.world.drawframe = 0;
 
     if (vk.world.cache) {
         BSP_Free(vk.world.cache);
@@ -2562,6 +2581,7 @@ static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float co
 static void vk_draw_world_mesh(const mat4_t mvp)
 {
     const vk_mesh_t *mesh = &vk.world.mesh;
+    bool use_vis = vk_world_vis && vk_world_vis->integer && vk.world.face_count;
 
     if (!vk.render_pass_active || !vk.world_pipeline ||
         !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count ||
@@ -2597,7 +2617,83 @@ static void vk_draw_world_mesh(const mat4_t mvp)
         vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                  vk.rect_pipeline_layout, 0, 1,
                                  &texture->descriptor_set, 0, NULL);
-        vk.CmdDrawIndexed(cmd, batch->index_count, 1, batch->first_index, 0, 0);
+
+        if (!use_vis) {
+            vk.CmdDrawIndexed(cmd, batch->index_count, 1, batch->first_index, 0, 0);
+            continue;
+        }
+
+        for (uint32_t j = 0; j < batch->face_count; j++) {
+            const vk_world_face_t *face = &vk.world.faces[batch->first_face + j];
+
+            if (face->face->drawframe != vk.world.drawframe)
+                continue;
+
+            vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
+        }
+    }
+}
+
+static void vk_mark_world_leaf(const mleaf_t *leaf, const refdef_t *fd)
+{
+    if (leaf->contents[0] == CONTENTS_SOLID)
+        return;
+
+    if (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area))
+        return;
+
+    for (int i = 0; i < leaf->numleaffaces; i++)
+        leaf->firstleafface[i]->drawframe = vk.world.drawframe;
+}
+
+static void vk_mark_world_faces(const refdef_t *fd)
+{
+    const bsp_t *bsp = vk.world.cache;
+    const mleaf_t *leaf;
+    visrow_t vis1, vis2;
+    int cluster1, cluster2;
+    vec3_t tmp;
+
+    if (!bsp)
+        return;
+
+    vk.world.drawframe++;
+
+    leaf = BSP_PointLeaf(bsp->nodes, fd->vieworg);
+    cluster1 = cluster2 = leaf->cluster;
+    VectorCopy(fd->vieworg, tmp);
+    if (!leaf->contents[0])
+        tmp[2] -= 16;
+    else
+        tmp[2] += 16;
+    leaf = BSP_PointLeaf(bsp->nodes, tmp);
+    if (!(leaf->contents[0] & CONTENTS_SOLID))
+        cluster2 = leaf->cluster;
+
+    if (!bsp->vis || cluster1 == -1) {
+        for (int i = 0; i < bsp->numleafs; i++)
+            vk_mark_world_leaf(&bsp->leafs[i], fd);
+        return;
+    }
+
+    BSP_ClusterVis(bsp, &vis1, cluster1, DVIS_PVS);
+    if (cluster2 != -1 && cluster1 != cluster2) {
+        BSP_ClusterVis(bsp, &vis2, cluster2, DVIS_PVS);
+        int longs = VIS_FAST_LONGS(bsp->visrowsize);
+        for (int i = 0; i < longs; i++)
+            vis1.l[i] |= vis2.l[i];
+    }
+
+    for (int i = 0; i < bsp->numleafs; i++) {
+        leaf = &bsp->leafs[i];
+        int cluster = leaf->cluster;
+
+        if (cluster == -1)
+            continue;
+        if (!Q_IsBitSet(vis1.b, cluster))
+            continue;
+
+        vk_mark_world_leaf(leaf, fd);
     }
 }
 
@@ -2636,7 +2732,8 @@ static bool vk_build_world_mesh(bsp_t *bsp)
         mface_t *face = &bsp->faces[i];
         if (!vk_face_is_drawable(face))
             continue;
-        if (!face->texinfo->image || !face->texinfo->image->texnum)
+        if (!face->texinfo->image || !face->texinfo->image->texnum ||
+            face->texinfo->image->texnum >= MAX_RIMAGES)
             continue;
 
         vertex_count += face->numsurfedges;
@@ -2653,7 +2750,8 @@ static bool vk_build_world_mesh(bsp_t *bsp)
 
     vk_vertex_t *vertices = Z_Malloc(sizeof(*vertices) * vertex_count);
     uint32_t *indices = Z_Malloc(sizeof(*indices) * index_count);
-    vk_world_face_t *faces = Z_Malloc(sizeof(*faces) * face_count);
+    vk_world_build_face_t *build_faces = Z_Malloc(sizeof(*build_faces) * face_count);
+    vk_world_face_t *draw_faces = Z_Malloc(sizeof(*draw_faces) * face_count);
     uint32_t *texture_index_counts = Z_Mallocz(sizeof(*texture_index_counts) * MAX_RIMAGES);
     uint32_t v = 0;
     uint32_t face_index = 0;
@@ -2663,7 +2761,7 @@ static bool vk_build_world_mesh(bsp_t *bsp)
         if (!vk_face_is_drawable(face))
             continue;
         image_t *image = face->texinfo->image;
-        if (!image || !image->texnum)
+        if (!image || !image->texnum || image->texnum >= MAX_RIMAGES)
             continue;
 
         uint32_t first = v;
@@ -2686,10 +2784,11 @@ static bool vk_build_world_mesh(bsp_t *bsp)
             v++;
         }
 
-        faces[face_index++] = (vk_world_face_t) {
+        build_faces[face_index++] = (vk_world_build_face_t) {
             .first_vertex = first,
             .edge_count = face->numsurfedges,
             .texture_index = image->texnum,
+            .face = face,
         };
         texture_index_counts[image->texnum] += (face->numsurfedges - 2) * 3;
     }
@@ -2703,28 +2802,41 @@ static bool vk_build_world_mesh(bsp_t *bsp)
     vk_world_batch_t *batches = Z_Malloc(sizeof(*batches) * batch_count);
     uint32_t idx = 0;
     uint32_t batch = 0;
+    uint32_t draw_face_count = 0;
 
     for (uint32_t texture_index = 0; texture_index < MAX_RIMAGES; texture_index++) {
         uint32_t texture_index_count = texture_index_counts[texture_index];
         if (!texture_index_count)
             continue;
 
-        batches[batch++] = (vk_world_batch_t) {
+        vk_world_batch_t *world_batch = &batches[batch++];
+        *world_batch = (vk_world_batch_t) {
             .first_index = idx,
             .index_count = texture_index_count,
             .texture_index = texture_index,
+            .first_face = draw_face_count,
         };
 
         for (uint32_t i = 0; i < face_index; i++) {
-            const vk_world_face_t *face = &faces[i];
+            const vk_world_build_face_t *face = &build_faces[i];
             if (face->texture_index != texture_index)
                 continue;
+
+            uint32_t first_index = idx;
+            uint32_t face_index_count = (face->edge_count - 2) * 3;
 
             for (uint32_t j = 0; j < face->edge_count - 2; j++) {
                 indices[idx++] = face->first_vertex;
                 indices[idx++] = face->first_vertex + j + 1;
                 indices[idx++] = face->first_vertex + j + 2;
             }
+
+            draw_faces[draw_face_count++] = (vk_world_face_t) {
+                .face = face->face,
+                .first_index = first_index,
+                .index_count = face_index_count,
+            };
+            world_batch->face_count++;
         }
     }
 
@@ -2732,17 +2844,24 @@ static bool vk_build_world_mesh(bsp_t *bsp)
     if (ok) {
         if (vk.world.batches)
             Z_Free(vk.world.batches);
+        if (vk.world.faces)
+            Z_Free(vk.world.faces);
         vk.world.batches = batches;
+        vk.world.faces = draw_faces;
         vk.world.batch_count = batch;
+        vk.world.face_count = draw_face_count;
         batches = NULL;
+        draw_faces = NULL;
     }
 
     Z_Free(vertices);
     Z_Free(indices);
-    Z_Free(faces);
+    Z_Free(build_faces);
     Z_Free(texture_index_counts);
     if (batches)
         Z_Free(batches);
+    if (draw_faces)
+        Z_Free(draw_faces);
     return ok;
 }
 
@@ -2792,8 +2911,8 @@ static void vk_load_world(const char *name)
     if (!vk_build_world_mesh(bsp))
         Com_WPrintf("Couldn't build Vulkan world mesh: %s\n", Com_GetLastError());
     else
-        Com_DPrintf("Vulkan world mesh: %u indices, %u batches\n",
-                    vk.world.mesh.index_count, vk.world.batch_count);
+        Com_DPrintf("Vulkan world mesh: %u indices, %u faces, %u batches\n",
+                    vk.world.mesh.index_count, vk.world.face_count, vk.world.batch_count);
 }
 
 static void vk_draw_test_triangle(const refdef_t *fd)
@@ -2821,6 +2940,7 @@ bool VKR_Init(bool total)
 
     vk_show_test_triangle = Cvar_Get("vk_show_test_triangle", "0", 0);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
+    vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
 
     if (!vid->init())
         return false;
@@ -2972,6 +3092,8 @@ void VKR_RenderFrame(const refdef_t *fd)
 
         vk_world_mvp(mvp, fd);
         if (vk_world_textures && vk_world_textures->integer) {
+            if (vk_world_vis && vk_world_vis->integer)
+                vk_mark_world_faces(fd);
             vk_draw_world_mesh(mvp);
         } else {
             const float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
