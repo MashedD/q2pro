@@ -95,6 +95,12 @@ typedef struct {
 } vk_world_batch_t;
 
 typedef struct {
+    uint32_t first_vertex;
+    uint32_t edge_count;
+    uint32_t texture_index;
+} vk_world_face_t;
+
+typedef struct {
     bsp_t *cache;
     vk_mesh_t mesh;
     vk_world_batch_t *batches;
@@ -260,6 +266,7 @@ typedef struct {
 
 static vk_state_t vk;
 static cvar_t *vk_show_test_triangle;
+static cvar_t *vk_world_textures;
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static void vk_destroy_texture(image_t *image);
@@ -2623,7 +2630,7 @@ static bool vk_build_world_mesh(bsp_t *bsp)
 {
     uint64_t vertex_count = 0;
     uint64_t index_count = 0;
-    uint32_t batch_count = 0;
+    uint32_t face_count = 0;
 
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *face = &bsp->faces[i];
@@ -2634,7 +2641,7 @@ static bool vk_build_world_mesh(bsp_t *bsp)
 
         vertex_count += face->numsurfedges;
         index_count += (face->numsurfedges - 2) * 3;
-        batch_count++;
+        face_count++;
     }
 
     if (!vertex_count || !index_count)
@@ -2646,10 +2653,10 @@ static bool vk_build_world_mesh(bsp_t *bsp)
 
     vk_vertex_t *vertices = Z_Malloc(sizeof(*vertices) * vertex_count);
     uint32_t *indices = Z_Malloc(sizeof(*indices) * index_count);
-    vk_world_batch_t *batches = Z_Malloc(sizeof(*batches) * batch_count);
+    vk_world_face_t *faces = Z_Malloc(sizeof(*faces) * face_count);
+    uint32_t *texture_index_counts = Z_Mallocz(sizeof(*texture_index_counts) * MAX_RIMAGES);
     uint32_t v = 0;
-    uint32_t idx = 0;
-    uint32_t batch = 0;
+    uint32_t face_index = 0;
 
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *face = &bsp->faces[i];
@@ -2660,7 +2667,6 @@ static bool vk_build_world_mesh(bsp_t *bsp)
             continue;
 
         uint32_t first = v;
-        uint32_t first_index = idx;
         float color[4];
         vk_surface_color(face, color);
         float scale_s = image->width ? 1.0f / image->width : 1.0f;
@@ -2680,17 +2686,46 @@ static bool vk_build_world_mesh(bsp_t *bsp)
             v++;
         }
 
-        for (int j = 0; j < face->numsurfedges - 2; j++) {
-            indices[idx++] = first;
-            indices[idx++] = first + j + 1;
-            indices[idx++] = first + j + 2;
-        }
-
-        batches[batch++] = (vk_world_batch_t) {
-            .first_index = first_index,
-            .index_count = idx - first_index,
+        faces[face_index++] = (vk_world_face_t) {
+            .first_vertex = first,
+            .edge_count = face->numsurfedges,
             .texture_index = image->texnum,
         };
+        texture_index_counts[image->texnum] += (face->numsurfedges - 2) * 3;
+    }
+
+    uint32_t batch_count = 0;
+    for (uint32_t i = 0; i < MAX_RIMAGES; i++) {
+        if (texture_index_counts[i])
+            batch_count++;
+    }
+
+    vk_world_batch_t *batches = Z_Malloc(sizeof(*batches) * batch_count);
+    uint32_t idx = 0;
+    uint32_t batch = 0;
+
+    for (uint32_t texture_index = 0; texture_index < MAX_RIMAGES; texture_index++) {
+        uint32_t texture_index_count = texture_index_counts[texture_index];
+        if (!texture_index_count)
+            continue;
+
+        batches[batch++] = (vk_world_batch_t) {
+            .first_index = idx,
+            .index_count = texture_index_count,
+            .texture_index = texture_index,
+        };
+
+        for (uint32_t i = 0; i < face_index; i++) {
+            const vk_world_face_t *face = &faces[i];
+            if (face->texture_index != texture_index)
+                continue;
+
+            for (uint32_t j = 0; j < face->edge_count - 2; j++) {
+                indices[idx++] = face->first_vertex;
+                indices[idx++] = face->first_vertex + j + 1;
+                indices[idx++] = face->first_vertex + j + 2;
+            }
+        }
     }
 
     bool ok = vk_upload_mesh(&vk.world.mesh, vertices, v, indices, idx);
@@ -2704,6 +2739,8 @@ static bool vk_build_world_mesh(bsp_t *bsp)
 
     Z_Free(vertices);
     Z_Free(indices);
+    Z_Free(faces);
+    Z_Free(texture_index_counts);
     if (batches)
         Z_Free(batches);
     return ok;
@@ -2783,6 +2820,7 @@ bool VKR_Init(bool total)
     Com_Printf("Using video driver: %s\n", vid->name);
 
     vk_show_test_triangle = Cvar_Get("vk_show_test_triangle", "0", 0);
+    vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
 
     if (!vid->init())
         return false;
@@ -2933,7 +2971,12 @@ void VKR_RenderFrame(const refdef_t *fd)
         mat4_t mvp;
 
         vk_world_mvp(mvp, fd);
-        vk_draw_world_mesh(mvp);
+        if (vk_world_textures && vk_world_textures->integer) {
+            vk_draw_world_mesh(mvp);
+        } else {
+            const float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+            vk_draw_mesh(&vk.world.mesh, mvp, color);
+        }
     }
 
     vk_draw_test_triangle(fd);

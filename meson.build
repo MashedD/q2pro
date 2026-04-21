@@ -359,7 +359,8 @@ if vulkan.found()
   glslc = find_program('glslc', required: get_option('vulkan'))
   vk_shader_headers = []
   foreach shader : ['vk_rect.vert', 'vk_rect.frag', 'vk_tex.vert', 'vk_tex.frag',
-                    'vk_color3d.vert', 'vk_color3d.frag']
+                    'vk_color3d.vert', 'vk_color3d.frag',
+                    'vk_world.vert', 'vk_world.frag']
     vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
       input: 'src/refresh' / shader,
       output: shader.underscorify() + '_spv.h',
