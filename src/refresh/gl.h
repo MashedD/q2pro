@@ -42,6 +42,40 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define R_Malloc(size)  Z_TagMalloc(size, TAG_RENDERER)
 #define R_Mallocz(size) Z_TagMallocz(size, TAG_RENDERER)
 
+#define R_Init              GLR_Init
+#define R_Shutdown          GLR_Shutdown
+#define R_BeginRegistration GLR_BeginRegistration
+#define R_RegisterModel     GLR_RegisterModel
+#define R_RegisterImage     GLR_RegisterImage
+#define R_SetSky            GLR_SetSky
+#define R_EndRegistration   GLR_EndRegistration
+#define R_RenderFrame       GLR_RenderFrame
+#define R_LightPoint        GLR_LightPoint
+#define R_ClearColor        GLR_ClearColor
+#define R_SetAlpha          GLR_SetAlpha
+#define R_SetColor          GLR_SetColor
+#define R_SetClipRect       GLR_SetClipRect
+#define R_ClampScale        GLR_ClampScale
+#define R_SetScale          GLR_SetScale
+#define R_DrawChar          GLR_DrawChar
+#define R_DrawString        GLR_DrawString
+#define R_GetPicSize        GLR_GetPicSize
+#define R_DrawPic           GLR_DrawPic
+#define R_DrawStretchPic    GLR_DrawStretchPic
+#define R_DrawKeepAspectPic GLR_DrawKeepAspectPic
+#define R_DrawStretchRaw    GLR_DrawStretchRaw
+#define R_UpdateRawPic      GLR_UpdateRawPic
+#define R_TileClear         GLR_TileClear
+#define R_DrawFill8         GLR_DrawFill8
+#define R_DrawFill32        GLR_DrawFill32
+#define R_BeginFrame        GLR_BeginFrame
+#define R_EndFrame          GLR_EndFrame
+#define R_ModeChanged       GLR_ModeChanged
+#define R_VideoSync         GLR_VideoSync
+#define R_GetGLConfig       GLR_GetGLConfig
+
+#include "gl_backend.h"
+
 #if USE_GLES
 #define QGL_INDEX_TYPE  GL_UNSIGNED_SHORT
 typedef GLushort glIndex_t;

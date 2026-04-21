@@ -161,6 +161,11 @@ option('vid-modelist',
   value: '640x480 800x600 1024x768',
   description: 'Default video mode list')
 
+option('vulkan',
+  type: 'feature',
+  value: 'auto',
+  description: 'Vulkan renderer support')
+
 option('wayland',
   type: 'feature',
   value: 'auto',

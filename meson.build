@@ -79,6 +79,7 @@ ui_src = [
 ]
 
 refresh_src = [
+  'src/refresh/backend.c',
   'src/refresh/draw.c',
   'src/refresh/hq2x.c',
   'src/refresh/images.c',
@@ -352,6 +353,12 @@ common_deps = [zlib]
 client_deps = [png, curl, sdl2]
 server_deps = []
 game_deps = [zlib]
+
+vulkan = dependency('vulkan', required: get_option('vulkan'))
+if vulkan.found()
+  client_deps += vulkan.partial_dependency(compile_args: true, includes: true)
+  config.set10('USE_VULKAN', true)
+endif
 
 jpeg = dependency('libjpeg',
   required:        get_option('libjpeg'),
@@ -719,6 +726,7 @@ summary({
   'tests'              : config.get('USE_TESTS', 0) != 0,
   'tga'                : config.get('USE_TGA', 0) != 0,
   'variable-fps'       : config.get('USE_FPS', 0) != 0,
+  'vulkan'             : config.get('USE_VULKAN', 0) != 0,
   'wayland'            : config.get('USE_WAYLAND', 0) != 0,
   'windows-crash-dumps': config.get('USE_DBGHELP', 0) != 0,
   'windows-egl'        : config.get('USE_WIN32EGL', 0) != 0,

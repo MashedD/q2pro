@@ -151,6 +151,11 @@ typedef struct {
 
 extern refcfg_t r_config;
 
+typedef enum {
+    REF_VIDEO_OPENGL,
+    REF_VIDEO_VULKAN,
+} ref_video_api_t;
+
 typedef struct {
     int left, right, top, bottom;
 } clipRect_t;
@@ -246,5 +251,6 @@ void    R_BeginFrame(void);
 void    R_EndFrame(void);
 void    R_ModeChanged(int width, int height, int flags);
 bool    R_VideoSync(void);
+ref_video_api_t R_GetVideoAPI(void);
 
 r_opengl_config_t R_GetGLConfig(void);
