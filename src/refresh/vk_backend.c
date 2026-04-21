@@ -11,6 +11,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include "common/bsp.h"
 #include "common/common.h"
 #include "common/math.h"
+#include "common/utils.h"
 #include "common/zone.h"
 #include "client/client.h"
 #include "client/video.h"
@@ -247,6 +248,7 @@ typedef struct {
     VkPipeline texture_pipeline;
     VkPipeline color3d_pipeline;
     VkPipeline world_pipeline;
+    VkPipeline sky_pipeline;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
     VkFormat swapchain_format;
@@ -275,6 +277,8 @@ typedef struct {
     bool clip_set;
     vk_texture_t raw_texture;
     vk_mesh_t test_triangle;
+    vk_mesh_t skybox;
+    uint32_t sky_images[6];
     vk_world_t world;
     vk_texture_t textures[MAX_RIMAGES];
 } vk_state_t;
@@ -282,6 +286,7 @@ typedef struct {
 static vk_state_t vk;
 static cvar_t *vk_show_test_triangle;
 static cvar_t *vk_drawentities;
+static cvar_t *vk_drawsky;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_world_cull;
@@ -1362,6 +1367,11 @@ static void vk_destroy_swapchain(void)
         vk.world_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.sky_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.sky_pipeline, NULL);
+        vk.sky_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.framebuffers) {
         for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
             if (vk.framebuffers[i])
@@ -1982,7 +1992,7 @@ static bool vk_create_color3d_pipeline(void)
     return true;
 }
 
-static bool vk_create_world_pipeline(void)
+static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test, bool depth_write)
 {
     VkShaderModule vert = vk_create_shader_module(vk_world_vert_spv,
                                                   sizeof(vk_world_vert_spv));
@@ -2087,8 +2097,8 @@ static bool vk_create_world_pipeline(void)
     };
     VkPipelineDepthStencilStateCreateInfo depth_stencil = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable = VK_TRUE,
-        .depthWriteEnable = VK_TRUE,
+        .depthTestEnable = depth_test,
+        .depthWriteEnable = depth_write,
         .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
     };
 
@@ -2110,7 +2120,7 @@ static bool vk_create_world_pipeline(void)
 
     VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
                                                  &create_info, NULL,
-                                                 &vk.world_pipeline);
+                                                 pipeline);
     vk.DestroyShaderModule(vk.device, frag, NULL);
     vk.DestroyShaderModule(vk.device, vert, NULL);
 
@@ -2248,7 +2258,8 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_rect_pipeline() ||
         !vk_create_texture_pipeline() ||
         !vk_create_color3d_pipeline() ||
-        !vk_create_world_pipeline() ||
+        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE) ||
         !vk_create_depth_resources() ||
         !vk_create_framebuffers())
         return false;
@@ -2605,6 +2616,48 @@ static bool vk_create_test_triangle(void)
     return true;
 }
 
+static bool vk_create_skybox_mesh(void)
+{
+    const float s = 2048.0f;
+    const float white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    vk_vertex_t vertices[24];
+    uint32_t indices[36];
+    static const float positions[6][4][3] = {
+        { { s, -s, -s }, { s, -s,  s }, { s,  s,  s }, { s,  s, -s } },
+        { {-s,  s, -s }, {-s,  s,  s }, {-s, -s,  s }, {-s, -s, -s } },
+        { {-s, -s, -s }, {-s, -s,  s }, { s, -s,  s }, { s, -s, -s } },
+        { { s,  s, -s }, { s,  s,  s }, {-s,  s,  s }, {-s,  s, -s } },
+        { {-s, -s,  s }, {-s,  s,  s }, { s,  s,  s }, { s, -s,  s } },
+        { {-s,  s, -s }, {-s, -s, -s }, { s, -s, -s }, { s,  s, -s } },
+    };
+    static const float uvs[4][2] = {
+        { 0.0f, 1.0f },
+        { 0.0f, 0.0f },
+        { 1.0f, 0.0f },
+        { 1.0f, 1.0f },
+    };
+
+    for (uint32_t face = 0; face < 6; face++) {
+        for (uint32_t vert = 0; vert < 4; vert++) {
+            vk_vertex_t *dst = &vertices[face * 4 + vert];
+
+            memcpy(dst->position, positions[face][vert], sizeof(dst->position));
+            memcpy(dst->color, white, sizeof(dst->color));
+            memcpy(dst->uv, uvs[vert], sizeof(dst->uv));
+        }
+
+        indices[face * 6 + 0] = face * 4 + 0;
+        indices[face * 6 + 1] = face * 4 + 1;
+        indices[face * 6 + 2] = face * 4 + 2;
+        indices[face * 6 + 3] = face * 4 + 0;
+        indices[face * 6 + 4] = face * 4 + 2;
+        indices[face * 6 + 5] = face * 4 + 3;
+    }
+
+    return vk_upload_mesh(&vk.skybox, vertices, q_countof(vertices),
+                          indices, q_countof(indices));
+}
+
 static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float color[4])
 {
     if (!vk.render_pass_active || !vk.color3d_pipeline ||
@@ -2681,6 +2734,61 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only)
 
             vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
         }
+    }
+}
+
+static void vk_sky_mvp(mat4_t out, const refdef_t *fd)
+{
+    refdef_t sky_fd = *fd;
+    mat4_t proj, view;
+
+    VectorClear(sky_fd.vieworg);
+    vk_projection_matrix(proj, sky_fd.fov_x, sky_fd.fov_y);
+    vk_view_matrix(view, &sky_fd);
+    vk_matrix_multiply(out, proj, view);
+}
+
+static void vk_draw_skybox(const refdef_t *fd)
+{
+    if (!vk_drawsky || !vk_drawsky->integer)
+        return;
+    if (!vk.render_pass_active || !vk.sky_pipeline ||
+        !vk.skybox.vertices.buffer || !vk.skybox.indices.buffer)
+        return;
+
+    mat4_t mvp;
+    vk_color3d_push_t push;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    vk_sky_mvp(mvp, fd);
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    push.color[0] = 1.0f;
+    push.color[1] = 1.0f;
+    push.color[2] = 1.0f;
+    push.color[3] = 1.0f;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sky_pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.skybox.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.skybox.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+
+    for (uint32_t face = 0; face < 6; face++) {
+        uint32_t texture_index = vk.sky_images[face];
+
+        if (!texture_index || texture_index >= MAX_RIMAGES)
+            continue;
+
+        const vk_texture_t *texture = &vk.textures[texture_index];
+        if (!texture->descriptor_set)
+            continue;
+
+        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 vk.rect_pipeline_layout, 0, 1,
+                                 &texture->descriptor_set, 0, NULL);
+        vk.CmdDrawIndexed(cmd, 6, 1, face * 6, 0, 0);
     }
 }
 
@@ -3172,6 +3280,7 @@ bool VKR_Init(bool total)
 
     vk_show_test_triangle = Cvar_Get("vk_show_test_triangle", "0", 0);
     vk_drawentities = Cvar_Get("vk_drawentities", "1", CVAR_CHEAT);
+    vk_drawsky = Cvar_Get("vk_drawsky", "1", 0);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
@@ -3191,6 +3300,8 @@ bool VKR_Init(bool total)
 
     if (!vk_create_test_triangle())
         Com_WPrintf("Couldn't create Vulkan test triangle: %s\n", Com_GetLastError());
+    if (!vk_create_skybox_mesh())
+        Com_WPrintf("Couldn't create Vulkan skybox mesh: %s\n", Com_GetLastError());
 
     r_registration_sequence = 1;
     IMG_Init();
@@ -3240,6 +3351,7 @@ void VKR_Shutdown(bool total)
 
     vk_free_world();
     vk_destroy_mesh(&vk.test_triangle);
+    vk_destroy_mesh(&vk.skybox);
 
     if (vk.sampler) {
         vk.DestroySampler(vk.device, vk.sampler, NULL);
@@ -3309,6 +3421,35 @@ qhandle_t VKR_RegisterImage(const char *name, imagetype_t type, imageflags_t fla
 
 void VKR_SetSky(const char *name, float rotate, bool autorotate, const vec3_t axis)
 {
+    char pathname[MAX_QPATH];
+
+    (void)rotate;
+    (void)autorotate;
+    (void)axis;
+
+    memset(vk.sky_images, 0, sizeof(vk.sky_images));
+
+    if (!name || !*name || (vk_drawsky && !vk_drawsky->integer))
+        return;
+
+    for (uint32_t i = 0; i < 6; i++) {
+        const image_t *image;
+
+        if (Q_concat(pathname, sizeof(pathname), "env/", name,
+                     com_env_suf[i], ".tga") >= sizeof(pathname)) {
+            memset(vk.sky_images, 0, sizeof(vk.sky_images));
+            return;
+        }
+
+        image = IMG_Find(pathname, IT_SKY, IF_NONE);
+        if (!image || image == R_SKYTEXTURE || !image->texnum ||
+            image->texnum >= MAX_RIMAGES) {
+            memset(vk.sky_images, 0, sizeof(vk.sky_images));
+            return;
+        }
+
+        vk.sky_images[i] = image->texnum;
+    }
 }
 
 void VKR_EndRegistration(void)
@@ -3320,6 +3461,9 @@ void VKR_RenderFrame(const refdef_t *fd)
 {
     if (!fd)
         return;
+
+    if (!(fd->rdflags & RDF_NOWORLDMODEL))
+        vk_draw_skybox(fd);
 
     if (!(fd->rdflags & RDF_NOWORLDMODEL) && vk.world.mesh.index_count) {
         mat4_t mvp;
