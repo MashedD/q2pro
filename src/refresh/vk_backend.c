@@ -188,6 +188,7 @@ typedef struct {
     bool color_set;
     clipRect_t clip;
     bool clip_set;
+    vk_texture_t raw_texture;
     vk_texture_t textures[MAX_RIMAGES];
 } vk_state_t;
 
@@ -195,6 +196,9 @@ static vk_state_t vk;
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static void vk_destroy_texture(image_t *image);
+static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
+                                   uint32_t height, const void *pixels);
+static void vk_destroy_texture_resource(vk_texture_t *texture);
 
 static void vk_upload_image(image_t *image, byte *pic)
 {
@@ -401,19 +405,15 @@ static void vk_texture_barrier(VkCommandBuffer cmd, VkImage image,
                           0, 0, NULL, 0, NULL, 1, &barrier);
 }
 
-static bool vk_upload_texture(image_t *image, byte *pic)
+static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
+                                   uint32_t height, const void *pixels)
 {
-    uintptr_t first = (uintptr_t)r_images;
-    uintptr_t last = (uintptr_t)(r_images + MAX_RIMAGES);
-    uintptr_t ptr = (uintptr_t)image;
-    if (ptr < first || ptr >= last || !pic)
-        return true;
-
-    uint32_t index = image - r_images;
-    VkDeviceSize upload_size = (VkDeviceSize)image->upload_width *
-                               image->upload_height * 4;
+    VkDeviceSize upload_size = (VkDeviceSize)width * height * 4;
     VkBuffer staging = VK_NULL_HANDLE;
     VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+
+    if (!pixels || !width || !height)
+        return true;
 
     if (!vk_create_buffer(upload_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
@@ -427,14 +427,12 @@ static bool vk_upload_texture(image_t *image, byte *pic)
         vk_fail_result("vkMapMemory", result);
         goto fail;
     }
-    memcpy(mapped, pic, upload_size);
+    memcpy(mapped, pixels, upload_size);
     vk.UnmapMemory(vk.device, staging_memory);
 
-    vk_texture_t *texture = &vk.textures[index];
-    vk_destroy_texture(image);
-    image->texnum = index;
+    vk_destroy_texture_resource(texture);
 
-    if (!vk_create_texture_image(image->upload_width, image->upload_height,
+    if (!vk_create_texture_image(width, height,
                                  &texture->image, &texture->memory))
         goto fail;
 
@@ -458,8 +456,8 @@ static bool vk_upload_texture(image_t *image, byte *pic)
             .layerCount = 1,
         },
         .imageExtent = {
-            .width = image->upload_width,
-            .height = image->upload_height,
+            .width = width,
+            .height = height,
             .depth = 1,
         },
     };
@@ -529,13 +527,8 @@ static bool vk_upload_texture(image_t *image, byte *pic)
     };
     vk.UpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
 
-    texture->width = image->upload_width;
-    texture->height = image->upload_height;
-    image->texnum = index;
-    image->sl = 0;
-    image->sh = 1;
-    image->tl = 0;
-    image->th = 1;
+    texture->width = width;
+    texture->height = height;
 
     if (staging)
         vk.DestroyBuffer(vk.device, staging, NULL);
@@ -548,17 +541,41 @@ fail:
         vk.DestroyBuffer(vk.device, staging, NULL);
     if (staging_memory)
         vk.FreeMemory(vk.device, staging_memory, NULL);
-    vk_destroy_texture(image);
+    vk_destroy_texture_resource(texture);
     return false;
 }
 
-static void vk_destroy_texture(image_t *image)
+static bool vk_upload_texture(image_t *image, byte *pic)
 {
-    unsigned index = image->texnum;
-    if (!index || index >= MAX_RIMAGES || !vk.device)
+    uintptr_t first = (uintptr_t)r_images;
+    uintptr_t last = (uintptr_t)(r_images + MAX_RIMAGES);
+    uintptr_t ptr = (uintptr_t)image;
+    if (ptr < first || ptr >= last || !pic)
+        return true;
+
+    uint32_t index = image - r_images;
+    vk_texture_t *texture = &vk.textures[index];
+
+    if (!vk_upload_texture_data(texture, image->upload_width,
+                                image->upload_height, pic)) {
+        image->texnum = 0;
+        return false;
+    }
+
+    image->texnum = index;
+    image->sl = 0;
+    image->sh = 1;
+    image->tl = 0;
+    image->th = 1;
+
+    return true;
+}
+
+static void vk_destroy_texture_resource(vk_texture_t *texture)
+{
+    if (!vk.device)
         return;
 
-    vk_texture_t *texture = &vk.textures[index];
     if (!texture->image && !texture->view && !texture->memory)
         return;
 
@@ -576,6 +593,15 @@ static void vk_destroy_texture(image_t *image)
         vk.FreeMemory(vk.device, texture->memory, NULL);
 
     memset(texture, 0, sizeof(*texture));
+}
+
+static void vk_destroy_texture(image_t *image)
+{
+    unsigned index = image->texnum;
+    if (!index || index >= MAX_RIMAGES)
+        return;
+
+    vk_destroy_texture_resource(&vk.textures[index]);
     image->texnum = image->texnum2 = 0;
 }
 
@@ -930,12 +956,12 @@ static bool vk_create_frame_resources(void)
 
     VkDescriptorPoolSize pool_size = {
         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = MAX_RIMAGES,
+        .descriptorCount = MAX_RIMAGES + 1,
     };
     VkDescriptorPoolCreateInfo pool_info_desc = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-        .maxSets = MAX_RIMAGES,
+        .maxSets = MAX_RIMAGES + 1,
         .poolSizeCount = 1,
         .pPoolSizes = &pool_size,
     };
@@ -1672,21 +1698,12 @@ static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
     vk.CmdDraw(cmd, 6, 1, 0, 0);
 }
 
-static void vk_draw_texture_rect(int x, int y, int w, int h,
-                                 float s1, float t1, float s2, float t2,
-                                 qhandle_t pic)
+static void vk_draw_texture_resource(int x, int y, int w, int h,
+                                     float s1, float t1, float s2, float t2,
+                                     const vk_texture_t *texture)
 {
     if (!vk.render_pass_active || !vk.texture_pipeline || w <= 0 || h <= 0)
         return;
-    if (pic <= 0 || pic >= r_numImages)
-        return;
-
-    const image_t *image = IMG_ForHandle(pic);
-    unsigned index = image->texnum;
-    if (!index || index >= MAX_RIMAGES)
-        return;
-
-    const vk_texture_t *texture = &vk.textures[index];
     if (!texture->descriptor_set)
         return;
 
@@ -1768,6 +1785,22 @@ static void vk_draw_texture_rect(int x, int y, int w, int h,
     vk.CmdDraw(cmd, 6, 1, 0, 0);
 }
 
+static void vk_draw_texture_rect(int x, int y, int w, int h,
+                                 float s1, float t1, float s2, float t2,
+                                 qhandle_t pic)
+{
+    if (pic <= 0 || pic >= r_numImages)
+        return;
+
+    const image_t *image = IMG_ForHandle(pic);
+    unsigned index = image->texnum;
+    if (!index || index >= MAX_RIMAGES)
+        return;
+
+    vk_draw_texture_resource(x, y, w, h, s1, t1, s2, t2,
+                             &vk.textures[index]);
+}
+
 bool VKR_Init(bool total)
 {
     if (!total)
@@ -1789,6 +1822,7 @@ bool VKR_Init(bool total)
         return false;
     }
 
+    r_registration_sequence = 1;
     IMG_Init();
     IMG_SetUploadBackend(&vk_image_upload);
     IMG_GetPalette();
@@ -1806,6 +1840,8 @@ void VKR_Shutdown(bool total)
         IMG_FreeAll();
         IMG_Shutdown();
     }
+
+    vk_destroy_texture_resource(&vk.raw_texture);
 
     vk_destroy_swapchain();
 
@@ -1880,10 +1916,16 @@ void VKR_Shutdown(bool total)
 
 void VKR_BeginRegistration(const char *map)
 {
+    r_registration_sequence++;
+    (void)map;
 }
 
 qhandle_t VKR_RegisterModel(const char *name)
 {
+    if (!name || !*name)
+        return 0;
+    if (*name == '*')
+        return ~Q_atoi(name + 1);
     return 0;
 }
 
@@ -1898,6 +1940,7 @@ void VKR_SetSky(const char *name, float rotate, bool autorotate, const vec3_t ax
 
 void VKR_EndRegistration(void)
 {
+    IMG_FreeUnused();
 }
 
 void VKR_RenderFrame(const refdef_t *fd)
@@ -2021,10 +2064,18 @@ void VKR_DrawKeepAspectPic(int x, int y, int w, int h, qhandle_t pic)
 
 void VKR_DrawStretchRaw(int x, int y, int w, int h)
 {
+    vk_draw_texture_resource(x, y, w, h, 0, 0, 1, 1, &vk.raw_texture);
 }
 
 void VKR_UpdateRawPic(int pic_w, int pic_h, const uint32_t *pic)
 {
+    if (pic_w <= 0 || pic_h <= 0 || !pic)
+        return;
+
+    if (!vk_upload_texture_data(&vk.raw_texture, pic_w, pic_h, pic)) {
+        Com_WPrintf("Couldn't upload Vulkan raw texture: %s\n",
+                    Com_GetLastError());
+    }
 }
 
 void VKR_TileClear(int x, int y, int w, int h, qhandle_t pic)
