@@ -80,6 +80,7 @@ typedef struct {
     PFN_vkEnumeratePhysicalDevices EnumeratePhysicalDevices;
     PFN_vkGetPhysicalDeviceProperties GetPhysicalDeviceProperties;
     PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties;
+    PFN_vkGetPhysicalDeviceFormatProperties GetPhysicalDeviceFormatProperties;
     PFN_vkGetPhysicalDeviceQueueFamilyProperties GetPhysicalDeviceQueueFamilyProperties;
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR GetPhysicalDeviceSurfaceSupportKHR;
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR GetPhysicalDeviceSurfaceCapabilitiesKHR;
@@ -169,7 +170,11 @@ typedef struct {
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
     VkFormat swapchain_format;
+    VkFormat depth_format;
     VkExtent2D swapchain_extent;
+    VkImage depth_image;
+    VkDeviceMemory depth_memory;
+    VkImageView depth_view;
     VkImage *swapchain_images;
     VkImageView *swapchain_views;
     VkFramebuffer *framebuffers;
@@ -199,6 +204,7 @@ static void vk_destroy_texture(image_t *image);
 static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, const void *pixels);
 static void vk_destroy_texture_resource(vk_texture_t *texture);
+static bool vk_create_swapchain(int width, int height);
 
 static void vk_upload_image(image_t *image, byte *pic)
 {
@@ -329,6 +335,28 @@ static bool vk_create_texture_image(uint32_t width, uint32_t height,
         return vk_fail_result("vkBindImageMemory", result);
 
     return true;
+}
+
+static VkFormat vk_choose_depth_format(void)
+{
+    static const VkFormat candidates[] = {
+        VK_FORMAT_D32_SFLOAT,
+        VK_FORMAT_D24_UNORM_S8_UINT,
+        VK_FORMAT_D16_UNORM,
+    };
+
+    for (size_t i = 0; i < q_countof(candidates); i++) {
+        VkFormatProperties props;
+
+        vk.GetPhysicalDeviceFormatProperties(vk.physical_device,
+                                             candidates[i], &props);
+        if (props.optimalTilingFeatures &
+            VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+            return candidates[i];
+        }
+    }
+
+    return VK_FORMAT_UNDEFINED;
 }
 
 static bool vk_begin_immediate(VkCommandBuffer *cmd)
@@ -650,6 +678,7 @@ static bool vk_load_instance(void)
     LOAD(EnumeratePhysicalDevices);
     LOAD(GetPhysicalDeviceProperties);
     LOAD(GetPhysicalDeviceMemoryProperties);
+    LOAD(GetPhysicalDeviceFormatProperties);
     LOAD(GetPhysicalDeviceQueueFamilyProperties);
     LOAD(GetPhysicalDeviceSurfaceSupportKHR);
     LOAD(GetPhysicalDeviceSurfaceCapabilitiesKHR);
@@ -1103,6 +1132,21 @@ static void vk_destroy_swapchain(void)
         vk.framebuffers = NULL;
     }
 
+    if (vk.depth_view) {
+        vk.DestroyImageView(vk.device, vk.depth_view, NULL);
+        vk.depth_view = VK_NULL_HANDLE;
+    }
+
+    if (vk.depth_image) {
+        vk.DestroyImage(vk.device, vk.depth_image, NULL);
+        vk.depth_image = VK_NULL_HANDLE;
+    }
+
+    if (vk.depth_memory) {
+        vk.FreeMemory(vk.device, vk.depth_memory, NULL);
+        vk.depth_memory = VK_NULL_HANDLE;
+    }
+
     if (vk.render_pass) {
         vk.DestroyRenderPass(vk.device, vk.render_pass, NULL);
         vk.render_pass = VK_NULL_HANDLE;
@@ -1135,6 +1179,23 @@ static void vk_destroy_swapchain(void)
     vk.swapchain_image_count = 0;
 }
 
+static bool vk_recreate_swapchain(void)
+{
+    if (!vk.device)
+        return false;
+
+    int width = r_config.width;
+    int height = r_config.height;
+
+    vk_destroy_swapchain();
+    if (!vk_create_swapchain(width, height)) {
+        Com_EPrintf("Couldn't recreate Vulkan swapchain: %s\n", Com_GetLastError());
+        return false;
+    }
+
+    return true;
+}
+
 static bool vk_allocate_swapchain_commands(void)
 {
     vk.command_buffers = Z_Malloc(sizeof(*vk.command_buffers) * vk.swapchain_image_count);
@@ -1155,32 +1216,49 @@ static bool vk_allocate_swapchain_commands(void)
 
 static bool vk_create_render_pass(void)
 {
-    VkAttachmentDescription color_attachment = {
-        .format = vk.swapchain_format,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    VkAttachmentDescription attachments[] = {
+        {
+            .format = vk.swapchain_format,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        },
+        {
+            .format = vk.depth_format,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        },
     };
 
     VkAttachmentReference color_ref = {
         .attachment = 0,
         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
     };
+    VkAttachmentReference depth_ref = {
+        .attachment = 1,
+        .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
 
     VkSubpassDescription subpass = {
         .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
         .colorAttachmentCount = 1,
         .pColorAttachments = &color_ref,
+        .pDepthStencilAttachment = &depth_ref,
     };
 
     VkRenderPassCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments = &color_attachment,
+        .attachmentCount = q_countof(attachments),
+        .pAttachments = attachments,
         .subpassCount = 1,
         .pSubpasses = &subpass,
     };
@@ -1192,16 +1270,88 @@ static bool vk_create_render_pass(void)
     return true;
 }
 
+static bool vk_create_depth_resources(void)
+{
+    if (vk.depth_format == VK_FORMAT_UNDEFINED) {
+        Com_SetLastError("No supported Vulkan depth format");
+        return false;
+    }
+
+    VkImageCreateInfo image_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = vk.depth_format,
+        .extent = {
+            .width = vk.swapchain_extent.width,
+            .height = vk.swapchain_extent.height,
+            .depth = 1,
+        },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+
+    VkResult result = vk.CreateImage(vk.device, &image_info, NULL, &vk.depth_image);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateImage", result);
+
+    VkMemoryRequirements req;
+    vk.GetImageMemoryRequirements(vk.device, vk.depth_image, &req);
+
+    uint32_t memory_type = vk_find_memory_type(req.memoryTypeBits,
+                                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (memory_type == UINT32_MAX) {
+        Com_SetLastError("No suitable Vulkan depth memory type");
+        return false;
+    }
+
+    VkMemoryAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = req.size,
+        .memoryTypeIndex = memory_type,
+    };
+    result = vk.AllocateMemory(vk.device, &alloc_info, NULL, &vk.depth_memory);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkAllocateMemory", result);
+
+    result = vk.BindImageMemory(vk.device, vk.depth_image, vk.depth_memory, 0);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkBindImageMemory", result);
+
+    VkImageViewCreateInfo view_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = vk.depth_image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = vk.depth_format,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    result = vk.CreateImageView(vk.device, &view_info, NULL, &vk.depth_view);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateImageView", result);
+
+    return true;
+}
+
 static bool vk_create_framebuffers(void)
 {
     vk.framebuffers = Z_Mallocz(sizeof(*vk.framebuffers) * vk.swapchain_image_count);
 
     for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
-        VkImageView attachments[] = { vk.swapchain_views[i] };
+        VkImageView attachments[] = { vk.swapchain_views[i], vk.depth_view };
         VkFramebufferCreateInfo create_info = {
             .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
             .renderPass = vk.render_pass,
-            .attachmentCount = 1,
+            .attachmentCount = q_countof(attachments),
             .pAttachments = attachments,
             .width = vk.swapchain_extent.width,
             .height = vk.swapchain_extent.height,
@@ -1314,6 +1464,11 @@ static bool vk_create_rect_pipeline(void)
         .attachmentCount = 1,
         .pAttachments = &color_blend_attachment,
     };
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_FALSE,
+        .depthWriteEnable = VK_FALSE,
+    };
 
     VkGraphicsPipelineCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -1324,6 +1479,7 @@ static bool vk_create_rect_pipeline(void)
         .pViewportState = &viewport_state,
         .pRasterizationState = &raster,
         .pMultisampleState = &multisample,
+        .pDepthStencilState = &depth_stencil,
         .pColorBlendState = &color_blend,
         .layout = vk.rect_pipeline_layout,
         .renderPass = vk.render_pass,
@@ -1421,6 +1577,11 @@ static bool vk_create_texture_pipeline(void)
         .attachmentCount = 1,
         .pAttachments = &color_blend_attachment,
     };
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_FALSE,
+        .depthWriteEnable = VK_FALSE,
+    };
 
     VkGraphicsPipelineCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -1431,6 +1592,7 @@ static bool vk_create_texture_pipeline(void)
         .pViewportState = &viewport_state,
         .pRasterizationState = &raster,
         .pMultisampleState = &multisample,
+        .pDepthStencilState = &depth_stencil,
         .pColorBlendState = &color_blend,
         .layout = vk.rect_pipeline_layout,
         .renderPass = vk.render_pass,
@@ -1525,6 +1687,11 @@ static bool vk_create_swapchain(int width, int height)
         return vk_fail_result("vkCreateSwapchainKHR", result);
 
     vk.swapchain_format = surface_format.format;
+    vk.depth_format = vk_choose_depth_format();
+    if (vk.depth_format == VK_FORMAT_UNDEFINED) {
+        Com_SetLastError("No supported Vulkan depth format");
+        return false;
+    }
     vk.swapchain_extent = extent;
 
     result = vk.GetSwapchainImagesKHR(vk.device, vk.swapchain, &vk.swapchain_image_count, NULL);
@@ -1571,6 +1738,7 @@ static bool vk_create_swapchain(int width, int height)
     if (!vk_create_render_pass() ||
         !vk_create_rect_pipeline() ||
         !vk_create_texture_pipeline() ||
+        !vk_create_depth_resources() ||
         !vk_create_framebuffers())
         return false;
 
@@ -2113,8 +2281,10 @@ void VKR_BeginFrame(void)
     result = vk.AcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX,
                                     vk.image_available, VK_NULL_HANDLE,
                                     &vk.current_image);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR)
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+        vk_recreate_swapchain();
         return;
+    }
     if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
         Com_EPrintf("vkAcquireNextImageKHR failed: Vulkan error %d\n", result);
         return;
@@ -2149,8 +2319,13 @@ void VKR_BeginFrame(void)
                         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 
-    VkClearValue clear = {
-        .color = { .float32 = { 0.015f, 0.025f, 0.035f, 1.0f } },
+    VkClearValue clear[] = {
+        {
+            .color = { .float32 = { 0.015f, 0.025f, 0.035f, 1.0f } },
+        },
+        {
+            .depthStencil = { .depth = 1.0f, .stencil = 0 },
+        },
     };
     VkRenderPassBeginInfo render_pass_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -2160,8 +2335,8 @@ void VKR_BeginFrame(void)
             .offset = { 0, 0 },
             .extent = vk.swapchain_extent,
         },
-        .clearValueCount = 1,
-        .pClearValues = &clear,
+        .clearValueCount = q_countof(clear),
+        .pClearValues = clear,
     };
 
     vk.CmdBeginRenderPass(cmd, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
@@ -2223,8 +2398,9 @@ void VKR_EndFrame(void)
     };
 
     result = vk.QueuePresentKHR(vk.present_queue, &present_info);
-    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR &&
-        result != VK_ERROR_OUT_OF_DATE_KHR) {
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+        vk_recreate_swapchain();
+    } else if (result != VK_SUCCESS) {
         Com_EPrintf("vkQueuePresentKHR failed: Vulkan error %d\n", result);
     }
 
@@ -2240,10 +2416,7 @@ void VKR_ModeChanged(int width, int height, int flags)
     if (!vk.device)
         return;
 
-    vk_destroy_swapchain();
-    if (!vk_create_swapchain(width, height)) {
-        Com_EPrintf("Couldn't recreate Vulkan swapchain: %s\n", Com_GetLastError());
-    }
+    vk_recreate_swapchain();
 }
 
 bool VKR_VideoSync(void)
