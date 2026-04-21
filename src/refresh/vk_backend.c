@@ -20,6 +20,20 @@ the Free Software Foundation; either version 2 of the License, or
 
 #define VK_MAX_INSTANCE_EXTENSIONS 16
 
+static const uint32_t vk_rect_vert_spv[] =
+#include "vk_rect_vert_spv.h"
+;
+
+static const uint32_t vk_rect_frag_spv[] =
+#include "vk_rect_frag_spv.h"
+;
+
+typedef struct {
+    float rect[4];
+    float color[4];
+    float screen[2];
+} vk_rect_push_t;
+
 typedef struct {
     uint32_t graphics_family;
     uint32_t present_family;
@@ -59,6 +73,12 @@ typedef struct {
     PFN_vkDestroyRenderPass DestroyRenderPass;
     PFN_vkCreateFramebuffer CreateFramebuffer;
     PFN_vkDestroyFramebuffer DestroyFramebuffer;
+    PFN_vkCreateShaderModule CreateShaderModule;
+    PFN_vkDestroyShaderModule DestroyShaderModule;
+    PFN_vkCreatePipelineLayout CreatePipelineLayout;
+    PFN_vkDestroyPipelineLayout DestroyPipelineLayout;
+    PFN_vkCreateGraphicsPipelines CreateGraphicsPipelines;
+    PFN_vkDestroyPipeline DestroyPipeline;
     PFN_vkCreateCommandPool CreateCommandPool;
     PFN_vkDestroyCommandPool DestroyCommandPool;
     PFN_vkAllocateCommandBuffers AllocateCommandBuffers;
@@ -70,6 +90,9 @@ typedef struct {
     PFN_vkCmdBeginRenderPass CmdBeginRenderPass;
     PFN_vkCmdEndRenderPass CmdEndRenderPass;
     PFN_vkCmdClearAttachments CmdClearAttachments;
+    PFN_vkCmdBindPipeline CmdBindPipeline;
+    PFN_vkCmdPushConstants CmdPushConstants;
+    PFN_vkCmdDraw CmdDraw;
     PFN_vkCreateSemaphore CreateSemaphore;
     PFN_vkDestroySemaphore DestroySemaphore;
     PFN_vkCreateFence CreateFence;
@@ -87,6 +110,8 @@ typedef struct {
     VkQueue graphics_queue;
     VkQueue present_queue;
     VkCommandPool command_pool;
+    VkPipelineLayout rect_pipeline_layout;
+    VkPipeline rect_pipeline;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
     VkFormat swapchain_format;
@@ -198,6 +223,12 @@ static bool vk_load_device(void)
     LOAD(DestroyRenderPass);
     LOAD(CreateFramebuffer);
     LOAD(DestroyFramebuffer);
+    LOAD(CreateShaderModule);
+    LOAD(DestroyShaderModule);
+    LOAD(CreatePipelineLayout);
+    LOAD(DestroyPipelineLayout);
+    LOAD(CreateGraphicsPipelines);
+    LOAD(DestroyPipeline);
     LOAD(CreateCommandPool);
     LOAD(DestroyCommandPool);
     LOAD(AllocateCommandBuffers);
@@ -209,6 +240,9 @@ static bool vk_load_device(void)
     LOAD(CmdBeginRenderPass);
     LOAD(CmdEndRenderPass);
     LOAD(CmdClearAttachments);
+    LOAD(CmdBindPipeline);
+    LOAD(CmdPushConstants);
+    LOAD(CmdDraw);
     LOAD(CreateSemaphore);
     LOAD(DestroySemaphore);
     LOAD(CreateFence);
@@ -418,12 +452,27 @@ static bool vk_create_device(void)
 
 static bool vk_create_frame_resources(void)
 {
+    VkPushConstantRange push_range = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset = 0,
+        .size = sizeof(vk_rect_push_t),
+    };
+    VkPipelineLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &push_range,
+    };
+    VkResult result = vk.CreatePipelineLayout(vk.device, &layout_info,
+                                              NULL, &vk.rect_pipeline_layout);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreatePipelineLayout", result);
+
     VkCommandPoolCreateInfo pool_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         .queueFamilyIndex = vk.queues.graphics_family,
     };
-    VkResult result = vk.CreateCommandPool(vk.device, &pool_info, NULL, &vk.command_pool);
+    result = vk.CreateCommandPool(vk.device, &pool_info, NULL, &vk.command_pool);
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreateCommandPool", result);
 
@@ -499,6 +548,11 @@ static void vk_destroy_swapchain(void)
                               vk.swapchain_image_count, vk.command_buffers);
         Z_Free(vk.command_buffers);
         vk.command_buffers = NULL;
+    }
+
+    if (vk.rect_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.rect_pipeline, NULL);
+        vk.rect_pipeline = VK_NULL_HANDLE;
     }
 
     if (vk.framebuffers) {
@@ -623,6 +677,132 @@ static bool vk_create_framebuffers(void)
     return true;
 }
 
+static VkShaderModule vk_create_shader_module(const uint32_t *code, size_t code_size)
+{
+    VkShaderModule module;
+    VkShaderModuleCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = code_size,
+        .pCode = code,
+    };
+
+    VkResult result = vk.CreateShaderModule(vk.device, &create_info, NULL, &module);
+    if (result != VK_SUCCESS) {
+        vk_fail_result("vkCreateShaderModule", result);
+        return VK_NULL_HANDLE;
+    }
+
+    return module;
+}
+
+static bool vk_create_rect_pipeline(void)
+{
+    VkShaderModule vert = vk_create_shader_module(vk_rect_vert_spv, sizeof(vk_rect_vert_spv));
+    if (!vert)
+        return false;
+
+    VkShaderModule frag = vk_create_shader_module(vk_rect_frag_spv, sizeof(vk_rect_frag_spv));
+    if (!frag) {
+        vk.DestroyShaderModule(vk.device, vert, NULL);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vert,
+            .pName = "main",
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = frag,
+            .pName = "main",
+        },
+    };
+
+    VkPipelineVertexInputStateCreateInfo vertex_input = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+    };
+    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = vk.swapchain_extent.width,
+        .height = vk.swapchain_extent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    VkRect2D scissor = {
+        .offset = { 0, 0 },
+        .extent = vk.swapchain_extent,
+    };
+    VkPipelineViewportStateCreateInfo viewport_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = &viewport,
+        .scissorCount = 1,
+        .pScissors = &scissor,
+    };
+    VkPipelineRasterizationStateCreateInfo raster = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth = 1.0f,
+    };
+    VkPipelineMultisampleStateCreateInfo multisample = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    VkPipelineColorBlendAttachmentState color_blend_attachment = {
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    VkPipelineColorBlendStateCreateInfo color_blend = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &color_blend_attachment,
+    };
+
+    VkGraphicsPipelineCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = q_countof(stages),
+        .pStages = stages,
+        .pVertexInputState = &vertex_input,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &raster,
+        .pMultisampleState = &multisample,
+        .pColorBlendState = &color_blend,
+        .layout = vk.rect_pipeline_layout,
+        .renderPass = vk.render_pass,
+        .subpass = 0,
+    };
+
+    VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
+                                                 &create_info, NULL,
+                                                 &vk.rect_pipeline);
+    vk.DestroyShaderModule(vk.device, frag, NULL);
+    vk.DestroyShaderModule(vk.device, vert, NULL);
+
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateGraphicsPipelines", result);
+
+    return true;
+}
+
 static bool vk_create_swapchain(int width, int height)
 {
     VkSurfaceCapabilitiesKHR caps;
@@ -742,7 +922,7 @@ static bool vk_create_swapchain(int width, int height)
             return vk_fail_result("vkCreateImageView", result);
     }
 
-    if (!vk_create_render_pass() || !vk_create_framebuffers())
+    if (!vk_create_render_pass() || !vk_create_rect_pipeline() || !vk_create_framebuffers())
         return false;
 
     if (!vk_allocate_swapchain_commands())
@@ -816,7 +996,7 @@ static VkClearColorValue vk_color_to_clear(uint32_t color)
 
 static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
 {
-    if (!vk.render_pass_active || w <= 0 || h <= 0)
+    if (!vk.render_pass_active || !vk.rect_pipeline || w <= 0 || h <= 0)
         return;
 
     if (vk.scale != 0 && vk.scale != 1.0f) {
@@ -846,21 +1026,27 @@ static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
     if (w <= 0 || h <= 0)
         return;
 
-    VkClearAttachment attachment = {
-        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-        .colorAttachment = 0,
-        .clearValue.color = vk_color_to_clear(color),
-    };
-    VkClearRect rect = {
-        .rect = {
-            .offset = { x, y },
-            .extent = { w, h },
+    VkClearColorValue clear = vk_color_to_clear(color);
+    vk_rect_push_t push = {
+        .rect = { x, y, w, h },
+        .color = {
+            clear.float32[0],
+            clear.float32[1],
+            clear.float32[2],
+            clear.float32[3],
         },
-        .baseArrayLayer = 0,
-        .layerCount = 1,
+        .screen = {
+            vk.swapchain_extent.width,
+            vk.swapchain_extent.height,
+        },
     };
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
 
-    vk.CmdClearAttachments(vk.command_buffers[vk.current_image], 1, &attachment, 1, &rect);
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.rect_pipeline);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDraw(cmd, 6, 1, 0, 0);
 }
 
 bool VKR_Init(bool total)
@@ -916,6 +1102,11 @@ void VKR_Shutdown(bool total)
     if (vk.command_pool) {
         vk.DestroyCommandPool(vk.device, vk.command_pool, NULL);
         vk.command_pool = VK_NULL_HANDLE;
+    }
+
+    if (vk.rect_pipeline_layout) {
+        vk.DestroyPipelineLayout(vk.device, vk.rect_pipeline_layout, NULL);
+        vk.rect_pipeline_layout = VK_NULL_HANDLE;
     }
 
     if (vk.device && vk.DestroyDevice) {

@@ -356,8 +356,17 @@ game_deps = [zlib]
 
 vulkan = dependency('vulkan', required: get_option('vulkan'))
 if vulkan.found()
+  glslc = find_program('glslc', required: get_option('vulkan'))
+  vk_shader_headers = []
+  foreach shader : ['vk_rect.vert', 'vk_rect.frag']
+    vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
+      input: 'src/refresh' / shader,
+      output: shader.underscorify() + '_spv.h',
+      command: [glslc, '-mfmt=c', '@INPUT@', '-o', '@OUTPUT@'],
+    )
+  endforeach
   client_deps += vulkan.partial_dependency(compile_args: true, includes: true)
-  refresh_src += 'src/refresh/vk_backend.c'
+  refresh_src += ['src/refresh/vk_backend.c', vk_shader_headers]
   config.set10('USE_VULKAN', true)
 endif
 
