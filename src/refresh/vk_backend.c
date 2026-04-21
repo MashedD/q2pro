@@ -8,6 +8,7 @@ the Free Software Foundation; either version 2 of the License, or
 */
 
 #include "shared/shared.h"
+#include "common/bsp.h"
 #include "common/common.h"
 #include "common/zone.h"
 #include "client/client.h"
@@ -77,6 +78,11 @@ typedef struct {
     vk_buffer_t indices;
     uint32_t index_count;
 } vk_mesh_t;
+
+typedef struct {
+    bsp_t *cache;
+    vk_mesh_t mesh;
+} vk_world_t;
 
 typedef struct {
     float rect[4];
@@ -230,6 +236,7 @@ typedef struct {
     bool clip_set;
     vk_texture_t raw_texture;
     vk_mesh_t test_triangle;
+    vk_world_t world;
     vk_texture_t textures[MAX_RIMAGES];
 } vk_state_t;
 
@@ -244,6 +251,8 @@ static void vk_destroy_texture_resource(vk_texture_t *texture);
 static bool vk_create_swapchain(int width, int height);
 static bool vk_create_test_triangle(void);
 static void vk_destroy_mesh(vk_mesh_t *mesh);
+static void vk_free_world(void);
+static void vk_load_world(const char *name);
 
 static void vk_upload_image(image_t *image, byte *pic)
 {
@@ -526,6 +535,44 @@ static void vk_destroy_mesh(vk_mesh_t *mesh)
     vk_destroy_buffer(&mesh->vertices);
     vk_destroy_buffer(&mesh->indices);
     mesh->index_count = 0;
+}
+
+static void vk_free_world(void)
+{
+    vk_destroy_mesh(&vk.world.mesh);
+
+    if (vk.world.cache) {
+        BSP_Free(vk.world.cache);
+        vk.world.cache = NULL;
+    }
+}
+
+static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_color3d_vertex_t *vertices,
+                           uint32_t vertex_count, const uint32_t *indices,
+                           uint32_t index_count)
+{
+    vk_mesh_t uploaded = { 0 };
+
+    if (!vertex_count || !index_count)
+        return true;
+
+    if (!vk_upload_buffer(&uploaded.vertices, vertices,
+                          sizeof(*vertices) * vertex_count,
+                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
+        goto fail;
+    if (!vk_upload_buffer(&uploaded.indices, indices,
+                          sizeof(*indices) * index_count,
+                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT))
+        goto fail;
+
+    uploaded.index_count = index_count;
+    vk_destroy_mesh(mesh);
+    *mesh = uploaded;
+    return true;
+
+fail:
+    vk_destroy_mesh(&uploaded);
+    return false;
 }
 
 static void vk_texture_barrier(VkCommandBuffer cmd, VkImage image,
@@ -2249,6 +2296,57 @@ static void vk_projection_matrix(mat4_t m, float fov_x, float fov_y)
     m[14] = (znear * zfar) / (znear - zfar);
 }
 
+static void vk_view_matrix(mat4_t matrix, const refdef_t *fd)
+{
+    vec3_t axis[3];
+
+    AnglesToAxis(fd->viewangles, axis);
+
+    memset(matrix, 0, sizeof(mat4_t));
+    matrix[0] = -axis[1][0];
+    matrix[4] = -axis[1][1];
+    matrix[8] = -axis[1][2];
+    matrix[12] = DotProduct(axis[1], fd->vieworg);
+
+    matrix[1] = axis[2][0];
+    matrix[5] = axis[2][1];
+    matrix[9] = axis[2][2];
+    matrix[13] = -DotProduct(axis[2], fd->vieworg);
+
+    matrix[2] = -axis[0][0];
+    matrix[6] = -axis[0][1];
+    matrix[10] = -axis[0][2];
+    matrix[14] = DotProduct(axis[0], fd->vieworg);
+
+    matrix[15] = 1.0f;
+}
+
+static void vk_matrix_multiply(mat4_t out, const mat4_t a, const mat4_t b)
+{
+    mat4_t tmp;
+
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            tmp[i + j * 4] =
+                a[i + 0 * 4] * b[0 + j * 4] +
+                a[i + 1 * 4] * b[1 + j * 4] +
+                a[i + 2 * 4] * b[2 + j * 4] +
+                a[i + 3 * 4] * b[3 + j * 4];
+        }
+    }
+
+    memcpy(out, tmp, sizeof(tmp));
+}
+
+static void vk_world_mvp(mat4_t out, const refdef_t *fd)
+{
+    mat4_t proj, view;
+
+    vk_projection_matrix(proj, fd->fov_x, fd->fov_y);
+    vk_view_matrix(view, fd);
+    vk_matrix_multiply(out, proj, view);
+}
+
 static bool vk_create_test_triangle(void)
 {
     static const vk_color3d_vertex_t vertices[] = {
@@ -2256,19 +2354,148 @@ static bool vk_create_test_triangle(void)
         { {  24.0f, -16.0f, -96.0f }, { 0.1f, 0.85f, 0.25f, 1.0f } },
         { {   0.0f,  24.0f, -96.0f }, { 0.1f, 0.35f, 1.00f, 1.0f } },
     };
-    static const uint16_t indices[] = { 0, 1, 2 };
+    static const uint32_t indices[] = { 0, 1, 2 };
 
-    if (!vk_upload_buffer(&vk.test_triangle.vertices, vertices, sizeof(vertices),
-                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
+    if (!vk_upload_mesh(&vk.test_triangle, vertices, q_countof(vertices),
+                        indices, q_countof(indices)))
         return false;
-    if (!vk_upload_buffer(&vk.test_triangle.indices, indices, sizeof(indices),
-                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
-        vk_destroy_mesh(&vk.test_triangle);
+
+    return true;
+}
+
+static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float color[4])
+{
+    if (!vk.render_pass_active || !vk.color3d_pipeline ||
+        !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count)
+        return;
+
+    vk_color3d_push_t push;
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    memcpy(push.color, color, sizeof(push.color));
+
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.color3d_pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, mesh->index_count, 1, 0, 0, 0);
+}
+
+static void vk_surface_color(const mface_t *face, float color[4])
+{
+    uint32_t hash = FS_HashPath(face->texinfo->name, UINT32_MAX);
+    float shade = 0.35f + fabsf(face->plane->normal[2]) * 0.35f;
+
+    color[0] = (0.35f + ((hash >> 0) & 255) / 255.0f * 0.55f) * shade;
+    color[1] = (0.35f + ((hash >> 8) & 255) / 255.0f * 0.55f) * shade;
+    color[2] = (0.35f + ((hash >> 16) & 255) / 255.0f * 0.55f) * shade;
+    color[3] = 1.0f;
+}
+
+static bool vk_face_is_drawable(mface_t *face)
+{
+    face->drawflags |= face->texinfo->c.flags & ~DSURF_PLANEBACK;
+
+    if (face->numsurfedges < 3)
+        return false;
+    if (face->drawflags & SURF_SKY)
+        return false;
+    if (face->drawflags & SURF_NODRAW)
+        return false;
+
+    return true;
+}
+
+static bool vk_build_world_mesh(bsp_t *bsp)
+{
+    uint64_t vertex_count = 0;
+    uint64_t index_count = 0;
+
+    for (int i = 0; i < bsp->numfaces; i++) {
+        mface_t *face = &bsp->faces[i];
+        if (!vk_face_is_drawable(face))
+            continue;
+
+        vertex_count += face->numsurfedges;
+        index_count += (face->numsurfedges - 2) * 3;
+    }
+
+    if (!vertex_count || !index_count)
+        return true;
+    if (vertex_count > UINT32_MAX || index_count > UINT32_MAX) {
+        Com_SetLastError("Vulkan world mesh is too large");
         return false;
     }
 
-    vk.test_triangle.index_count = q_countof(indices);
-    return true;
+    vk_color3d_vertex_t *vertices = Z_Malloc(sizeof(*vertices) * vertex_count);
+    uint32_t *indices = Z_Malloc(sizeof(*indices) * index_count);
+    uint32_t v = 0;
+    uint32_t idx = 0;
+
+    for (int i = 0; i < bsp->numfaces; i++) {
+        mface_t *face = &bsp->faces[i];
+        if (!vk_face_is_drawable(face))
+            continue;
+
+        uint32_t first = v;
+        float color[4];
+        vk_surface_color(face, color);
+
+        for (int j = 0; j < face->numsurfedges; j++) {
+            const msurfedge_t *surfedge = face->firstsurfedge + j;
+            const medge_t *edge = bsp->edges + surfedge->edge;
+            const mvertex_t *src = bsp->vertices + edge->v[surfedge->vert];
+
+            VectorCopy(src->point, vertices[v].position);
+            memcpy(vertices[v].color, color, sizeof(vertices[v].color));
+            v++;
+        }
+
+        for (int j = 0; j < face->numsurfedges - 2; j++) {
+            indices[idx++] = first;
+            indices[idx++] = first + j + 1;
+            indices[idx++] = first + j + 2;
+        }
+    }
+
+    bool ok = vk_upload_mesh(&vk.world.mesh, vertices, v, indices, idx);
+
+    Z_Free(vertices);
+    Z_Free(indices);
+    return ok;
+}
+
+static void vk_load_world(const char *name)
+{
+    char buffer[MAX_QPATH];
+    bsp_t *bsp;
+    int ret;
+
+    if (!name || !*name)
+        return;
+
+    Q_concat(buffer, sizeof(buffer), "maps/", name, ".bsp");
+    ret = BSP_Load(buffer, &bsp);
+    if (!bsp)
+        Com_Error(ERR_DROP, "%s: couldn't load %s: %s",
+                  __func__, buffer, BSP_ErrorString(ret));
+
+    if (vk.world.cache == bsp) {
+        bsp->refcount--;
+        return;
+    }
+
+    vk_free_world();
+    vk.world.cache = bsp;
+
+    if (!vk_build_world_mesh(bsp))
+        Com_WPrintf("Couldn't build Vulkan world mesh: %s\n", Com_GetLastError());
+    else
+        Com_DPrintf("Vulkan world mesh: %u indices\n", vk.world.mesh.index_count);
 }
 
 static void vk_draw_test_triangle(const refdef_t *fd)
@@ -2277,8 +2504,6 @@ static void vk_draw_test_triangle(const refdef_t *fd)
         !vk_show_test_triangle || !vk_show_test_triangle->integer)
         return;
     if (fd->rdflags & RDF_NOWORLDMODEL)
-        return;
-    if (!vk.test_triangle.vertices.buffer || !vk.test_triangle.indices.buffer)
         return;
 
     vk_color3d_push_t push;
@@ -2295,7 +2520,7 @@ static void vk_draw_test_triangle(const refdef_t *fd)
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.color3d_pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.test_triangle.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.test_triangle.indices.buffer, 0,
-                          VK_INDEX_TYPE_UINT16);
+                          VK_INDEX_TYPE_UINT32);
     vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(push), &push);
@@ -2374,6 +2599,7 @@ void VKR_Shutdown(bool total)
         vk.command_pool = VK_NULL_HANDLE;
     }
 
+    vk_free_world();
     vk_destroy_mesh(&vk.test_triangle);
 
     if (vk.sampler) {
@@ -2425,7 +2651,7 @@ void VKR_Shutdown(bool total)
 void VKR_BeginRegistration(const char *map)
 {
     r_registration_sequence++;
-    (void)map;
+    vk_load_world(map);
 }
 
 qhandle_t VKR_RegisterModel(const char *name)
@@ -2455,6 +2681,14 @@ void VKR_RenderFrame(const refdef_t *fd)
 {
     if (!fd)
         return;
+
+    if (!(fd->rdflags & RDF_NOWORLDMODEL) && vk.world.mesh.index_count) {
+        mat4_t mvp;
+        const float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+
+        vk_world_mvp(mvp, fd);
+        vk_draw_mesh(&vk.world.mesh, mvp, color);
+    }
 
     vk_draw_test_triangle(fd);
 }
