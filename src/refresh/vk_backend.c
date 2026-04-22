@@ -387,6 +387,7 @@ static cvar_t *vk_cull_models;
 static cvar_t *vk_dotshading;
 static cvar_t *vk_draworder;
 static cvar_t *vk_showorigins;
+static cvar_t *vk_showtearing;
 static cvar_t *vk_modulate;
 static cvar_t *vk_modulate_entities;
 static cvar_t *vk_doublelight_entities;
@@ -3308,6 +3309,25 @@ static void vk_blend_vignette(int x, int y, int w, int h, const vec4_t color,
     vk_blend_rect(x + w - distance, y + distance, distance, h, color);
 }
 
+static void vk_draw_tearing(void)
+{
+    static int frame;
+    bool clip_set;
+    float scale;
+
+    if (!vk_showtearing || !vk_showtearing->integer)
+        return;
+
+    clip_set = vk.clip_set;
+    scale = vk.scale;
+    vk.clip_set = false;
+    vk.scale = 1.0f;
+    vk_clear_rect(0, 0, vk.swapchain_extent.width, vk.swapchain_extent.height,
+                  (++frame & 1) ? U32_WHITE : MakeColor(255, 0, 0, 255));
+    vk.scale = scale;
+    vk.clip_set = clip_set;
+}
+
 static void vk_draw_texture_resource(int x, int y, int w, int h,
                                      float s1, float t1, float s2, float t2,
                                      const vk_texture_t *texture)
@@ -5593,6 +5613,7 @@ bool VKR_Init(bool total)
     vk_dotshading = Cvar_Get("gl_dotshading", "1", 0);
     vk_draworder = Cvar_Get("gl_draworder", "1", 0);
     vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
+    vk_showtearing = Cvar_Get("gl_showtearing", "0", CVAR_CHEAT);
     vk_modulate = Cvar_Get("gl_modulate", "1", CVAR_ARCHIVE);
     vk_modulate_entities = Cvar_Get("gl_modulate_entities", "1", 0);
     vk_doublelight_entities = Cvar_Get("gl_doublelight_entities", "1", 0);
@@ -6134,6 +6155,8 @@ void VKR_EndFrame(void)
 {
     if (!vk.frame_active)
         return;
+
+    vk_draw_tearing();
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     if (vk.render_pass_active) {
