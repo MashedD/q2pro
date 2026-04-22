@@ -41,9 +41,10 @@ features include:
 
 # Changes
 
-- added win32/win64 cross compilation settings
-- win64 build uses now `OpenAL64.dll` instead of `OpenAL32.dll`,
-  so now win32 and win64 binaries can live next to each other
+- building: added win32/win64 cross compilation settings
+- building: win64 build uses now `OpenAL64.dll` instead of `OpenAL32.dll`,
+  so now win32 and win64 binaries can live next to each other (optional)
+- building: win build has OpenAL library hard linked now
 - lin64 build now looks for game files in current folder
   instead of `$HOME/.q2pro` as it was not XDG Base Directory Specification
   compliant
@@ -51,7 +52,8 @@ features include:
   instead of config.cfg)
 - textures: when missing, replaced red dot on black screen to pink/black
   checkerboard similar to one seen in original Quake 2
-- win build have OpenAL library hard linked
+- sound: added `al_hrtf` option to menu
+- sound: added `al_reverb` option to menu. 1 - softer, 2 - stronger
 
 # TODO
 
