@@ -362,6 +362,9 @@ static cvar_t *vk_fullbright;
 static cvar_t *vk_cull_models;
 static cvar_t *vk_dotshading;
 static cvar_t *vk_draworder;
+static cvar_t *vk_modulate;
+static cvar_t *vk_modulate_world;
+static cvar_t *vk_brightness;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_world_cull;
@@ -3483,6 +3486,26 @@ static void vk_world_face_scroll(const mface_t *face, float time, float scroll[4
         scroll[0] = -speed;
 }
 
+static void vk_world_light_params(const mface_t *face, float color[4], float scroll[4])
+{
+    bool fullbright = vk_fullbright && vk_fullbright->integer;
+
+    color[0] = 1.0f;
+    color[1] = 1.0f;
+    color[2] = 1.0f;
+    scroll[2] = fullbright ? 1.0f : 0.0f;
+    scroll[3] = 0.0f;
+
+    if (fullbright || (face->drawflags & SURF_COLOR_MASK))
+        return;
+
+    color[0] = Cvar_ClampValue(vk_modulate, 0.0f, 1e6f) *
+        Cvar_ClampValue(vk_modulate_world, 0.0f, 1e6f);
+    color[1] = color[0];
+    color[2] = color[0];
+    scroll[3] = Cvar_ClampValue(vk_brightness, -1.0f, 1.0f);
+}
+
 static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                VkPipeline pipeline, vk_world_pass_t pass,
                                float entity_alpha, float time)
@@ -3503,7 +3526,6 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     push.color[2] = 1.0f;
     push.color[3] = entity_alpha;
     Vector4Clear(push.scroll);
-    push.scroll[2] = (vk_fullbright && vk_fullbright->integer) ? 1.0f : 0.0f;
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
@@ -3538,7 +3560,8 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
 
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
             vk_world_face_scroll(face->face, time, push.scroll);
-            push.scroll[2] = (vk_fullbright && vk_fullbright->integer) ? 1.0f : 0.0f;
+            vk_world_light_params(face->face, push.color, push.scroll);
+            push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
             vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
                                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                 0, sizeof(push), &push);
@@ -4519,18 +4542,25 @@ static void vk_surface_color(const mface_t *face, float color[4])
     color[3] = 1.0f;
 }
 
-static bool vk_sample_surface_light(const mface_t *face, const vec3_t point,
-                                    float color[4])
+static bool vk_sample_surface_light(const bsp_t *bsp, const mface_t *face,
+                                    const vec3_t point, float color[4])
 {
     float s, t, fracs, fract;
     int s0, t0, s1, t1;
     int smax = face->lm_width;
     int tmax = face->lm_height;
     int size = smax * tmax * 3;
+    ptrdiff_t offset;
 
     if (!face->lightmap || !face->numstyles || smax < 1 || tmax < 1)
         return false;
     if (face->drawflags & SURF_COLOR_MASK)
+        return false;
+    if (!bsp->lightmap || face->lightmap < bsp->lightmap)
+        return false;
+
+    offset = face->lightmap - bsp->lightmap;
+    if (offset < 0 || offset + size > bsp->numlightmapbytes)
         return false;
 
     s = DotProduct(point, face->lm_axis[0]) + face->lm_offset[0];
@@ -4546,21 +4576,19 @@ static bool vk_sample_surface_light(const mface_t *face, const vec3_t point,
     fract = t - t0;
 
     Vector4Clear(color);
-    for (int i = 0; i < face->numstyles; i++) {
-        const byte *lightmap = face->lightmap + i * size;
-        const byte *b1 = &lightmap[3 * (t0 * smax + s0)];
-        const byte *b2 = &lightmap[3 * (t0 * smax + s1)];
-        const byte *b3 = &lightmap[3 * (t1 * smax + s1)];
-        const byte *b4 = &lightmap[3 * (t1 * smax + s0)];
-        float w1 = (1.0f - fracs) * (1.0f - fract);
-        float w2 = fracs * (1.0f - fract);
-        float w3 = fracs * fract;
-        float w4 = (1.0f - fracs) * fract;
+    const byte *lightmap = face->lightmap;
+    const byte *b1 = &lightmap[3 * (t0 * smax + s0)];
+    const byte *b2 = &lightmap[3 * (t0 * smax + s1)];
+    const byte *b3 = &lightmap[3 * (t1 * smax + s1)];
+    const byte *b4 = &lightmap[3 * (t1 * smax + s0)];
+    float w1 = (1.0f - fracs) * (1.0f - fract);
+    float w2 = fracs * (1.0f - fract);
+    float w3 = fracs * fract;
+    float w4 = (1.0f - fracs) * fract;
 
-        color[0] += w1 * b1[0] + w2 * b2[0] + w3 * b3[0] + w4 * b4[0];
-        color[1] += w1 * b1[1] + w2 * b2[1] + w3 * b3[1] + w4 * b4[1];
-        color[2] += w1 * b1[2] + w2 * b2[2] + w3 * b3[2] + w4 * b4[2];
-    }
+    color[0] = w1 * b1[0] + w2 * b2[0] + w3 * b3[0] + w4 * b4[0];
+    color[1] = w1 * b1[1] + w2 * b2[1] + w3 * b3[1] + w4 * b4[1];
+    color[2] = w1 * b1[2] + w2 * b2[2] + w3 * b3[2] + w4 * b4[2];
 
     color[0] = Q_clipf(color[0] / 255.0f, 0.0f, 1.0f);
     color[1] = Q_clipf(color[1] / 255.0f, 0.0f, 1.0f);
@@ -4569,15 +4597,16 @@ static bool vk_sample_surface_light(const mface_t *face, const vec3_t point,
     return true;
 }
 
-static void vk_surface_vertex_color(const mface_t *face, const vec3_t point,
-                                    const float fallback[4], float color[4])
+static void vk_surface_vertex_color(const bsp_t *bsp, const mface_t *face,
+                                    const vec3_t point, const float fallback[4],
+                                    float color[4])
 {
     if (face->drawflags & SURF_COLOR_MASK) {
         Vector4Set(color, 1.0f, 1.0f, 1.0f, 1.0f);
         return;
     }
 
-    if (!vk_sample_surface_light(face, point, color))
+    if (!vk_sample_surface_light(bsp, face, point, color))
         memcpy(color, fallback, sizeof(float) * 4);
 }
 
@@ -4650,7 +4679,7 @@ static bool vk_build_world_mesh(bsp_t *bsp)
             float color[4];
 
             VectorCopy(src->point, vertices[v].position);
-            vk_surface_vertex_color(face, src->point, fallback_color, color);
+            vk_surface_vertex_color(bsp, face, src->point, fallback_color, color);
             memcpy(vertices[v].color, color, sizeof(vertices[v].color));
             vertices[v].uv[0] = (DotProduct(src->point, face->texinfo->axis[0]) +
                                  face->texinfo->offset[0]) * scale_s;
@@ -4824,6 +4853,9 @@ bool VKR_Init(bool total)
     vk_cull_models = Cvar_Get("gl_cull_models", "1", 0);
     vk_dotshading = Cvar_Get("gl_dotshading", "1", 0);
     vk_draworder = Cvar_Get("gl_draworder", "1", 0);
+    vk_modulate = Cvar_Get("gl_modulate", "1", CVAR_ARCHIVE);
+    vk_modulate_world = Cvar_Get("gl_modulate_world", "1", 0);
+    vk_brightness = Cvar_Get("gl_brightness", "0", 0);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
