@@ -367,7 +367,9 @@ typedef struct {
 static vk_state_t vk;
 static cvar_t *vk_show_test_triangle;
 static cvar_t *vk_drawentities;
+static cvar_t *vk_gl_drawentities;
 static cvar_t *vk_drawsky;
+static cvar_t *vk_gl_drawsky;
 static cvar_t *vk_partscale;
 static cvar_t *vk_partstyle;
 static cvar_t *vk_beamstyle;
@@ -3956,7 +3958,8 @@ static void vk_sky_mvp(mat4_t out, const refdef_t *fd)
 
 static void vk_draw_skybox(const refdef_t *fd)
 {
-    if (!vk_drawsky || !vk_drawsky->integer)
+    if ((vk_drawsky && !vk_drawsky->integer) ||
+        (vk_gl_drawsky && !vk_gl_drawsky->integer))
         return;
     if (!vk.render_pass_active || !vk.sky_pipeline ||
         !vk.skybox.vertices.buffer || !vk.skybox.indices.buffer)
@@ -5010,7 +5013,8 @@ static void vk_draw_entity(const entity_t *ent, const refdef_t *fd,
 
 static void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass)
 {
-    if (!vk_drawentities || !vk_drawentities->integer)
+    if ((vk_drawentities && !vk_drawentities->integer) ||
+        (vk_gl_drawentities && !vk_gl_drawentities->integer))
         return;
 
     for (int i = 0; i < fd->num_entities; i++) {
@@ -5359,7 +5363,9 @@ bool VKR_Init(bool total)
 
     vk_show_test_triangle = Cvar_Get("vk_show_test_triangle", "0", 0);
     vk_drawentities = Cvar_Get("vk_drawentities", "1", CVAR_CHEAT);
+    vk_gl_drawentities = Cvar_Get("gl_drawentities", "1", CVAR_CHEAT);
     vk_drawsky = Cvar_Get("vk_drawsky", "1", 0);
+    vk_gl_drawsky = Cvar_Get("gl_drawsky", "1", 0);
     vk_partscale = Cvar_Get("gl_partscale", "2", 0);
     vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
     vk_beamstyle = Cvar_Get("gl_beamstyle", "0", 0);
@@ -5586,7 +5592,9 @@ void VKR_SetSky(const char *name, float rotate, bool autorotate, const vec3_t ax
 
     memset(vk.sky_images, 0, sizeof(vk.sky_images));
 
-    if (!name || !*name || (vk_drawsky && !vk_drawsky->integer))
+    if (!name || !*name ||
+        (vk_drawsky && !vk_drawsky->integer) ||
+        (vk_gl_drawsky && !vk_gl_drawsky->integer))
         return;
 
     for (uint32_t i = 0; i < 6; i++) {
