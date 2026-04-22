@@ -356,6 +356,7 @@ typedef struct {
     vk_mesh_t skybox;
     vk_mesh_t sprite_quad;
     vk_mesh_t null_model;
+    vk_mesh_t beam_cylinder;
     uint32_t sky_images[6];
     vk_world_t world;
     vk_model_t models[MAX_MODELS];
@@ -3498,6 +3499,41 @@ static bool vk_create_sprite_quad(void)
                           indices, q_countof(indices));
 }
 
+#define VK_BEAM_POINTS 12
+
+static bool vk_create_beam_cylinder(void)
+{
+    vk_vertex_t vertices[VK_BEAM_POINTS * 2];
+    uint32_t indices[VK_BEAM_POINTS * 6];
+    const float white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+
+    for (uint32_t i = 0; i < VK_BEAM_POINTS; i++) {
+        float a = (2.0f * M_PIf * i) / VK_BEAM_POINTS;
+        float y = cosf(a);
+        float z = sinf(a);
+
+        VectorSet(vertices[i].position, 0.0f, y, z);
+        memcpy(vertices[i].color, white, sizeof(vertices[i].color));
+        VectorSet(vertices[i + VK_BEAM_POINTS].position, 1.0f, y, z);
+        memcpy(vertices[i + VK_BEAM_POINTS].color, white,
+               sizeof(vertices[i + VK_BEAM_POINTS].color));
+    }
+
+    for (uint32_t i = 0; i < VK_BEAM_POINTS; i++) {
+        uint32_t j = (i + 1) % VK_BEAM_POINTS;
+
+        indices[i * 6 + 0] = i;
+        indices[i * 6 + 1] = i + VK_BEAM_POINTS;
+        indices[i * 6 + 2] = j + VK_BEAM_POINTS;
+        indices[i * 6 + 3] = i;
+        indices[i * 6 + 4] = j + VK_BEAM_POINTS;
+        indices[i * 6 + 5] = j;
+    }
+
+    return vk_upload_mesh(&vk.beam_cylinder, vertices, q_countof(vertices),
+                          indices, q_countof(indices));
+}
+
 static bool vk_create_null_model(void)
 {
     static const vk_vertex_t vertices[] = {
@@ -4543,13 +4579,63 @@ static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
 }
 
+static void vk_draw_poly_beam_segment(const vec3_t start, const vec3_t end,
+                                      const refdef_t *fd, const float color[4],
+                                      float width)
+{
+    if (!vk.beam_cylinder.vertices.buffer || !vk.beam_cylinder.indices.buffer)
+        return;
+
+    vec3_t dir, right, up;
+    mat4_t model_matrix, mvp;
+    vk_color3d_push_t push;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    VectorSubtract(end, start, dir);
+    if (VectorNormalize(dir) < 0.1f)
+        return;
+
+    MakeNormalVectors(dir, right, up);
+    VectorScale(right, width, right);
+    VectorScale(up, width, up);
+
+    memset(model_matrix, 0, sizeof(model_matrix));
+    VectorSubtract(end, start, dir);
+    model_matrix[0] = dir[0];
+    model_matrix[1] = dir[1];
+    model_matrix[2] = dir[2];
+    model_matrix[4] = right[0];
+    model_matrix[5] = right[1];
+    model_matrix[6] = right[2];
+    model_matrix[8] = up[0];
+    model_matrix[9] = up[1];
+    model_matrix[10] = up[2];
+    model_matrix[12] = start[0];
+    model_matrix[13] = start[1];
+    model_matrix[14] = start[2];
+    model_matrix[15] = 1.0f;
+
+    vk_model_mvp(mvp, fd, model_matrix);
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    memcpy(push.color, color, sizeof(push.color));
+
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.beam_cylinder.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.beam_cylinder.indices.buffer, 0,
+                          VK_INDEX_TYPE_UINT32);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, vk.beam_cylinder.index_count, 1, 0, 0, 0);
+}
+
 #define VK_MIN_LIGHTNING_SEGMENTS   3
 #define VK_MAX_LIGHTNING_SEGMENTS   7
 #define VK_MIN_SEGMENT_LENGTH       16
 
 static void vk_draw_lightning_beam(const vec3_t start, const vec3_t end,
                                    const refdef_t *fd, const float color[4],
-                                   float width)
+                                   float width, bool poly)
 {
     vec3_t dir, segments[VK_MAX_LIGHTNING_SEGMENTS + 1];
     vec3_t right, up;
@@ -4588,8 +4674,12 @@ static void vk_draw_lightning_beam(const vec3_t start, const vec3_t end,
     VectorCopy(start, segments[0]);
     VectorCopy(end, segments[num_segments]);
 
-    for (int i = 0; i < num_segments; i++)
-        vk_draw_beam_segment(segments[i], segments[i + 1], fd, color, width);
+    for (int i = 0; i < num_segments; i++) {
+        if (poly)
+            vk_draw_poly_beam_segment(segments[i], segments[i + 1], fd, color, width);
+        else
+            vk_draw_beam_segment(segments[i], segments[i + 1], fd, color, width);
+    }
 }
 
 static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
@@ -4617,10 +4707,14 @@ static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.beam_pipeline);
 
-    if (ent->flags & RF_GLOW)
-        vk_draw_lightning_beam(ent->origin, ent->oldorigin, fd, push_color, width);
-    else
+    if (ent->flags & RF_GLOW) {
+        vk_draw_lightning_beam(ent->origin, ent->oldorigin, fd, push_color,
+                               width, vk_beamstyle && vk_beamstyle->integer);
+    } else if (vk_beamstyle && vk_beamstyle->integer) {
+        vk_draw_poly_beam_segment(ent->origin, ent->oldorigin, fd, push_color, width);
+    } else {
         vk_draw_beam_segment(ent->origin, ent->oldorigin, fd, push_color, width);
+    }
 }
 
 static float vk_lightstyle_value(const refdef_t *fd, byte style)
@@ -5204,6 +5298,8 @@ bool VKR_Init(bool total)
         Com_WPrintf("Couldn't create Vulkan skybox mesh: %s\n", Com_GetLastError());
     if (!vk_create_sprite_quad())
         Com_WPrintf("Couldn't create Vulkan sprite quad: %s\n", Com_GetLastError());
+    if (!vk_create_beam_cylinder())
+        Com_WPrintf("Couldn't create Vulkan beam cylinder: %s\n", Com_GetLastError());
     if (!vk_create_null_model())
         Com_WPrintf("Couldn't create Vulkan null model: %s\n", Com_GetLastError());
     if (!vk_create_particle_texture())
@@ -5262,6 +5358,7 @@ void VKR_Shutdown(bool total)
     vk_destroy_mesh(&vk.skybox);
     vk_destroy_mesh(&vk.sprite_quad);
     vk_destroy_mesh(&vk.null_model);
+    vk_destroy_mesh(&vk.beam_cylinder);
 
     if (vk.sampler) {
         vk.DestroySampler(vk.device, vk.sampler, NULL);
