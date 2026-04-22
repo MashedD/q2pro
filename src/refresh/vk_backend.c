@@ -391,6 +391,7 @@ static cvar_t *vk_modulate;
 static cvar_t *vk_modulate_entities;
 static cvar_t *vk_doublelight_entities;
 static cvar_t *vk_modulate_world;
+static cvar_t *vk_coloredlightmaps;
 static cvar_t *vk_dynamic;
 static cvar_t *vk_dlight_falloff;
 static cvar_t *vk_brightness;
@@ -5218,6 +5219,12 @@ static bool vk_sample_surface_light(const bsp_t *bsp, const mface_t *face,
     color[0] = Q_clipf(color[0] / 255.0f, 0.0f, 1.0f);
     color[1] = Q_clipf(color[1] / 255.0f, 0.0f, 1.0f);
     color[2] = Q_clipf(color[2] / 255.0f, 0.0f, 1.0f);
+    if (vk_coloredlightmaps && !vk_coloredlightmaps->integer) {
+        float y = LUMINANCE(color[0], color[1], color[2]);
+        color[0] = y;
+        color[1] = y;
+        color[2] = y;
+    }
     color[3] = 1.0f;
     return true;
 }
@@ -5519,6 +5526,7 @@ bool VKR_Init(bool total)
     vk_modulate_entities = Cvar_Get("gl_modulate_entities", "1", 0);
     vk_doublelight_entities = Cvar_Get("gl_doublelight_entities", "1", 0);
     vk_modulate_world = Cvar_Get("gl_modulate_world", "1", 0);
+    vk_coloredlightmaps = Cvar_Get("gl_coloredlightmaps", "1", 0);
     vk_dynamic = Cvar_Get("gl_dynamic", "1", 0);
     vk_dlight_falloff = Cvar_Get("gl_dlight_falloff", "1", 0);
     vk_brightness = Cvar_Get("gl_brightness", "0", 0);
