@@ -95,6 +95,7 @@ static const alsection_t sections[] = {
             QAL_FN(Listenerf),
             QAL_FN(Listenerfv),
             QAL_FN(Source3f),
+            QAL_FN(Source3i),
             QAL_FN(SourcePause),
             QAL_FN(SourcePlay),
             QAL_FN(SourceQueueBuffers),
@@ -113,6 +114,13 @@ static const alsection_t sections[] = {
             QAL_FN(Filterf),
             QAL_FN(Filteri),
             QAL_FN(GenFilters),
+            QAL_FN(DeleteEffects),
+            QAL_FN(Effectf),
+            QAL_FN(Effecti),
+            QAL_FN(GenEffects),
+            QAL_FN(DeleteAuxiliaryEffectSlots),
+            QAL_FN(AuxiliaryEffectSloti),
+            QAL_FN(GenAuxiliaryEffectSlots),
             { NULL }
         }
     },

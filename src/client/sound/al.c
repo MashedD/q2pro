@@ -27,6 +27,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define MIN_CHANNELS    16
 
 static cvar_t       *al_merge_looping;
+static cvar_t       *al_reverb;
 
 static ALuint       s_srcnums[MAX_CHANNELS];
 static ALuint       s_stream;
@@ -39,6 +40,8 @@ static ALint        s_merge_looping_minval;
 
 static ALuint       s_underwater_filter;
 static bool         s_underwater_flag;
+static ALuint       s_reverb_effect;
+static ALuint       s_reverb_slot;
 
 static void AL_StreamStop(void);
 static void AL_StopChannel(channel_t *ch);
@@ -61,6 +64,11 @@ static void s_underwater_gain_hf_changed(cvar_t *self)
     }
 
     qalFilterf(s_underwater_filter, AL_LOWPASS_GAINHF, Cvar_ClampValue(self, 0.001f, 1.0f));
+}
+
+static void al_reverb_changed(cvar_t *self)
+{
+    S_StopAllSounds();
 }
 
 static void al_merge_looping_changed(cvar_t *self)
@@ -117,6 +125,8 @@ static bool AL_Init(void)
 
     al_merge_looping = Cvar_Get("al_merge_looping", "1", 0);
     al_merge_looping->changed = al_merge_looping_changed;
+    al_reverb = Cvar_Get("al_reverb", "0", CVAR_ARCHIVE);
+    al_reverb->changed = al_reverb_changed;
 
     s_loop_points = qalIsExtensionPresent("AL_SOFT_loop_points");
     s_source_spatialize = qalIsExtensionPresent("AL_SOFT_source_spatialize");
@@ -142,6 +152,17 @@ static bool AL_Init(void)
         qalFilteri(s_underwater_filter, AL_FILTER_TYPE, AL_FILTER_LOWPASS);
         s_underwater_gain_hf->changed = s_underwater_gain_hf_changed;
         s_underwater_gain_hf_changed(s_underwater_gain_hf);
+    }
+
+    if (qalGenEffects && qalGetEnumValue("AL_EFFECT_EAXREVERB")) {
+        qalGenEffects(1, &s_reverb_effect);
+        qalGenAuxiliaryEffectSlots(1, &s_reverb_slot);
+        qalEffecti(s_reverb_effect, AL_EFFECT_TYPE, AL_EFFECT_EAXREVERB);
+        qalEffectf(s_reverb_effect, AL_EAXREVERB_GAIN, 0.20f);
+        qalEffectf(s_reverb_effect, AL_EAXREVERB_GAINHF, 0.70f);
+        qalEffectf(s_reverb_effect, AL_EAXREVERB_DECAY_TIME, 1.49f);
+        qalEffectf(s_reverb_effect, AL_EAXREVERB_LATE_REVERB_GAIN, 1.26f);
+        qalAuxiliaryEffectSloti(s_reverb_slot, AL_EFFECTSLOT_EFFECT, s_reverb_effect);
     }
 
     Com_Printf("OpenAL initialized.\n");
@@ -176,10 +197,22 @@ static void AL_Shutdown(void)
         s_underwater_filter = 0;
     }
 
+    if (s_reverb_slot) {
+        qalAuxiliaryEffectSloti(s_reverb_slot, AL_EFFECTSLOT_EFFECT, AL_EFFECT_NULL);
+        qalDeleteAuxiliaryEffectSlots(1, &s_reverb_slot);
+        s_reverb_slot = 0;
+    }
+
+    if (s_reverb_effect) {
+        qalDeleteEffects(1, &s_reverb_effect);
+        s_reverb_effect = 0;
+    }
+
     s_underwater_flag = false;
     s_underwater_gain_hf->changed = NULL;
     s_volume->changed = NULL;
     al_merge_looping->changed = NULL;
+    al_reverb->changed = NULL;
 
     QAL_Shutdown();
 }
@@ -333,6 +366,10 @@ static void AL_PlayChannel(channel_t *ch)
     qalSourcef(ch->srcnum, AL_REFERENCE_DISTANCE, ref_dist);
     qalSourcef(ch->srcnum, AL_MAX_DISTANCE, max_distance);
     qalSourcef(ch->srcnum, AL_ROLLOFF_FACTOR, rolloff_factor);
+    if (s_reverb_slot && al_reverb->integer && !S_IsFullVolume(ch))
+        qalSource3i(ch->srcnum, AL_AUXILIARY_SEND_FILTER, s_reverb_slot, 0, AL_FILTER_NULL);
+    else if (s_reverb_slot)
+        qalSource3i(ch->srcnum, AL_AUXILIARY_SEND_FILTER, AL_EFFECT_NULL, 0, AL_FILTER_NULL);
 
     // force update
     ch->fullvolume = -1;

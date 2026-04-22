@@ -55,6 +55,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define qalListenerf alListenerf
 #define qalListenerfv alListenerfv
 #define qalSource3f alSource3f
+#define qalSource3i alSource3i
 #define qalSourcePlay alSourcePlay
 #define qalSourcePause alSourcePause
 #define qalSourceQueueBuffers alSourceQueueBuffers
@@ -86,6 +87,7 @@ QALAPI LPALLISTENER3F qalListener3f;
 QALAPI LPALLISTENERF qalListenerf;
 QALAPI LPALLISTENERFV qalListenerfv;
 QALAPI LPALSOURCE3F qalSource3f;
+QALAPI LPALSOURCE3I qalSource3i;
 QALAPI LPALSOURCEPAUSE qalSourcePause;
 QALAPI LPALSOURCEPLAY qalSourcePlay;
 QALAPI LPALSOURCEQUEUEBUFFERS qalSourceQueueBuffers;
@@ -100,6 +102,13 @@ QALAPI LPALDELETEFILTERS qalDeleteFilters;
 QALAPI LPALFILTERF qalFilterf;
 QALAPI LPALFILTERI qalFilteri;
 QALAPI LPALGENFILTERS qalGenFilters;
+QALAPI LPALDELETEEFFECTS qalDeleteEffects;
+QALAPI LPALEFFECTF qalEffectf;
+QALAPI LPALEFFECTI qalEffecti;
+QALAPI LPALGENEFFECTS qalGenEffects;
+QALAPI LPALDELETEAUXILIARYEFFECTSLOTS qalDeleteAuxiliaryEffectSlots;
+QALAPI LPALAUXILIARYEFFECTSLOTI qalAuxiliaryEffectSloti;
+QALAPI LPALGENAUXILIARYEFFECTSLOTS qalGenAuxiliaryEffectSlots;
 
 int QAL_Init(void);
 void QAL_Shutdown(void);
