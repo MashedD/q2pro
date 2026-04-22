@@ -386,6 +386,7 @@ static cvar_t *vk_lightgrid;
 static cvar_t *vk_gl_lightgrid;
 static cvar_t *vk_fullbright;
 static cvar_t *vk_cull_models;
+static cvar_t *vk_shadows;
 static cvar_t *vk_dotshading;
 static cvar_t *vk_draworder;
 static cvar_t *vk_showorigins;
@@ -3533,6 +3534,25 @@ static void vk_matrix_multiply(mat4_t out, const mat4_t a, const mat4_t b)
     memcpy(out, tmp, sizeof(tmp));
 }
 
+static void vk_entity_model_matrix(mat4_t model, const entity_t *ent,
+                                   const vec3_t axis[3])
+{
+    memset(model, 0, sizeof(mat4_t));
+    model[0] = axis[0][0];
+    model[1] = axis[0][1];
+    model[2] = axis[0][2];
+    model[4] = axis[1][0];
+    model[5] = axis[1][1];
+    model[6] = axis[1][2];
+    model[8] = axis[2][0];
+    model[9] = axis[2][1];
+    model[10] = axis[2][2];
+    model[12] = ent->origin[0];
+    model[13] = ent->origin[1];
+    model[14] = ent->origin[2];
+    model[15] = 1.0f;
+}
+
 static void vk_world_mvp(mat4_t out, const refdef_t *fd)
 {
     mat4_t proj, view;
@@ -3564,20 +3584,7 @@ static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
 {
     mat4_t proj, view, model, view_model;
 
-    memset(model, 0, sizeof(model));
-    model[0] = axis[0][0];
-    model[1] = axis[0][1];
-    model[2] = axis[0][2];
-    model[4] = axis[1][0];
-    model[5] = axis[1][1];
-    model[6] = axis[1][2];
-    model[8] = axis[2][0];
-    model[9] = axis[2][1];
-    model[10] = axis[2][2];
-    model[12] = ent->origin[0];
-    model[13] = ent->origin[1];
-    model[14] = ent->origin[2];
-    model[15] = 1.0f;
+    vk_entity_model_matrix(model, ent, axis);
 
     vk_entity_projection_matrix(proj, fd, ent);
     vk_view_matrix(view, fd);
@@ -4603,6 +4610,117 @@ static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
     vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0, 0, 0);
 }
 
+static bool vk_alias_shadow_point(const entity_t *ent, lightpoint_t *point)
+{
+    const bsp_t *bsp = vk.world.cache;
+    vec3_t end;
+
+    if (!bsp || !bsp->nodes)
+        return false;
+
+    VectorCopy(ent->origin, end);
+    end[2] -= 8192.0f;
+    BSP_LightPoint(point, ent->origin, end, bsp->nodes,
+                   SURF_SKY | SURF_NODRAW | SURF_TRANS_MASK);
+    return point->surf != NULL;
+}
+
+static void vk_shadow_projection_matrix(mat4_t matrix, const cplane_t *plane,
+                                        const vec3_t dir)
+{
+    matrix[ 0] =  plane->normal[1] * dir[1] + plane->normal[2] * dir[2];
+    matrix[ 4] = -plane->normal[1] * dir[0];
+    matrix[ 8] = -plane->normal[2] * dir[0];
+    matrix[12] =  plane->dist * dir[0];
+
+    matrix[ 1] = -plane->normal[0] * dir[1];
+    matrix[ 5] =  plane->normal[0] * dir[0] + plane->normal[2] * dir[2];
+    matrix[ 9] = -plane->normal[2] * dir[1];
+    matrix[13] =  plane->dist * dir[1];
+
+    matrix[ 2] = -plane->normal[0] * dir[2];
+    matrix[ 6] = -plane->normal[1] * dir[2];
+    matrix[10] =  plane->normal[0] * dir[0] + plane->normal[1] * dir[1];
+    matrix[14] =  plane->dist * dir[2];
+
+    matrix[ 3] = 0.0f;
+    matrix[ 7] = 0.0f;
+    matrix[11] = 0.0f;
+    matrix[15] = DotProduct(plane->normal, dir);
+}
+
+static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
+                                 const vec3_t axis[3],
+                                 const vk_model_t *model,
+                                 const vk_texture_t *texture,
+                                 const VkBuffer buffers[2],
+                                 const VkDeviceSize offsets[2],
+                                 float backlerp)
+{
+    lightpoint_t point;
+    vec3_t dir;
+    float w, radius, alpha = 0.5f;
+    mat4_t proj, view, model_matrix, shadow_proj, shadow_model, view_model;
+    vk_alias_push_t push;
+
+    if (!vk_shadows || !vk_shadows->integer || !vk.alias_blend_pipeline)
+        return;
+    if (ent->flags & (RF_WEAPONMODEL | RF_NOSHADOW))
+        return;
+    if (!model->alias_frames || !vk_alias_shadow_point(ent, &point))
+        return;
+
+    w = point.plane.normal[2];
+    if (point.surf->drawflags & DSURF_PLANEBACK)
+        w = -w;
+    if (w < 0.5f)
+        return;
+
+    uint32_t frame = ent->frame % model->frame_count;
+    uint32_t oldframe = ent->oldframe % model->frame_count;
+    radius = model->alias_frames[frame].radius * (1.0f - backlerp) +
+        model->alias_frames[oldframe].radius * backlerp;
+    radius *= ent->scale ? ent->scale : 1.0f;
+
+    if (vk_shadows->integer >= 2) {
+        float dist = ent->origin[2] - point.pos[2] - radius;
+        if (dist > radius * 4.0f)
+            return;
+        if (dist > 0.0f)
+            alpha = 0.5f - dist / (radius * 8.0f);
+    }
+
+    if (vk_cull_models && vk_cull_models->integer) {
+        float min_d = -radius / w;
+        for (int i = 0; i < 4; i++) {
+            if (PlaneDiff(point.pos, &vk.world.frustum[i]) < min_d)
+                return;
+        }
+    }
+
+    if (point.surf->drawflags & DSURF_PLANEBACK)
+        VectorSet(dir, 0.0f, 0.0f, -1.0f);
+    else
+        VectorSet(dir, 0.0f, 0.0f, 1.0f);
+
+    vk_shadow_projection_matrix(shadow_proj, &point.plane, dir);
+    vk_entity_model_matrix(model_matrix, ent, axis);
+    vk_matrix_multiply(shadow_model, shadow_proj, model_matrix);
+    vk_projection_matrix(proj, fd->fov_x, fd->fov_y, fd->rdflags);
+    vk_view_matrix(view, fd);
+    vk_matrix_multiply(view_model, view, shadow_model);
+    vk_matrix_multiply(push.mvp, proj, view_model);
+
+    Vector4Set(push.color, 0.0f, 0.0f, 0.0f, alpha);
+    Vector4Clear(push.shadedir);
+    push.backlerp = backlerp;
+    push.shellscale = 0.0f;
+    push.depthscale = 1.0f;
+
+    vk_draw_alias_pass(vk.command_buffers[vk.current_image], vk.alias_blend_pipeline,
+                       buffers, offsets, model, texture, &push);
+}
+
 static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 {
     vk_model_t *model = vk_model_for_handle(ent->model);
@@ -4666,6 +4784,8 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
                            model, texture, &push);
 
     vk_draw_alias_pass(cmd, pipeline, buffers, offsets, model, texture, &push);
+    vk_draw_alias_shadow(ent, fd, axis, model, texture, buffers, offsets,
+                         push.backlerp);
 }
 
 static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
@@ -5643,6 +5763,7 @@ bool VKR_Init(bool total)
     vk_gl_lightgrid = Cvar_Get("gl_lightgrid", "1", 0);
     vk_fullbright = Cvar_Get("r_fullbright", "0", CVAR_CHEAT);
     vk_cull_models = Cvar_Get("gl_cull_models", "1", 0);
+    vk_shadows = Cvar_Get("gl_shadows", "0", CVAR_ARCHIVE);
     vk_dotshading = Cvar_Get("gl_dotshading", "1", 0);
     vk_draworder = Cvar_Get("gl_draworder", "1", 0);
     vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
