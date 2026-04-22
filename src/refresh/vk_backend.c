@@ -312,11 +312,13 @@ typedef struct {
     VkPipeline rect_pipeline;
     VkPipeline texture_pipeline;
     VkPipeline color3d_pipeline;
+    VkPipeline line3d_pipeline;
     VkPipeline beam_pipeline;
     VkPipeline world_pipeline;
     VkPipeline world_alpha_pipeline;
     VkPipeline sky_pipeline;
     VkPipeline sprite_pipeline;
+    VkPipeline sprite_alpha_pipeline;
     VkPipeline alias_pipeline;
     VkPipeline alias_alpha_pipeline;
     VkPipeline alias_depth_pipeline;
@@ -352,6 +354,7 @@ typedef struct {
     vk_mesh_t test_triangle;
     vk_mesh_t skybox;
     vk_mesh_t sprite_quad;
+    vk_mesh_t null_model;
     uint32_t sky_images[6];
     vk_world_t world;
     vk_model_t models[MAX_MODELS];
@@ -371,6 +374,7 @@ static cvar_t *vk_fullbright;
 static cvar_t *vk_cull_models;
 static cvar_t *vk_dotshading;
 static cvar_t *vk_draworder;
+static cvar_t *vk_showorigins;
 static cvar_t *vk_modulate;
 static cvar_t *vk_modulate_world;
 static cvar_t *vk_brightness;
@@ -386,6 +390,9 @@ static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
 static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, const void *pixels);
 static void vk_destroy_texture_resource(vk_texture_t *texture);
+static void vk_entity_axis(const entity_t *ent, vec3_t axis[3]);
+static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
+                          const entity_t *ent, const vec3_t axis[3]);
 static bool vk_create_swapchain(int width, int height);
 static bool vk_create_test_triangle(void);
 static void vk_destroy_mesh(vk_mesh_t *mesh);
@@ -1782,6 +1789,11 @@ static void vk_destroy_swapchain(void)
         vk.color3d_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.line3d_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.line3d_pipeline, NULL);
+        vk.line3d_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.beam_pipeline) {
         vk.DestroyPipeline(vk.device, vk.beam_pipeline, NULL);
         vk.beam_pipeline = VK_NULL_HANDLE;
@@ -1805,6 +1817,11 @@ static void vk_destroy_swapchain(void)
     if (vk.sprite_pipeline) {
         vk.DestroyPipeline(vk.device, vk.sprite_pipeline, NULL);
         vk.sprite_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.sprite_alpha_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.sprite_alpha_pipeline, NULL);
+        vk.sprite_alpha_pipeline = VK_NULL_HANDLE;
     }
 
     if (vk.alias_pipeline) {
@@ -2315,7 +2332,8 @@ static bool vk_create_texture_pipeline(void)
     return true;
 }
 
-static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_write, bool blend)
+static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_write,
+                                       bool blend, VkPrimitiveTopology topology)
 {
     VkShaderModule vert = vk_create_shader_module(vk_color3d_vert_spv,
                                                   sizeof(vk_color3d_vert_spv));
@@ -2371,7 +2389,7 @@ static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_write, b
     };
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .topology = topology,
     };
     VkViewport viewport = {
         .x = 0.0f,
@@ -2906,12 +2924,17 @@ static bool vk_create_swapchain(int width, int height)
     if (!vk_create_render_pass() ||
         !vk_create_rect_pipeline() ||
         !vk_create_texture_pipeline() ||
-        !vk_create_color3d_pipeline(&vk.color3d_pipeline, VK_TRUE, VK_FALSE) ||
-        !vk_create_color3d_pipeline(&vk.beam_pipeline, VK_FALSE, VK_TRUE) ||
+        !vk_create_color3d_pipeline(&vk.color3d_pipeline, VK_TRUE, VK_FALSE,
+                                    VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
+        !vk_create_color3d_pipeline(&vk.line3d_pipeline, VK_TRUE, VK_FALSE,
+                                    VK_PRIMITIVE_TOPOLOGY_LINE_LIST) ||
+        !vk_create_color3d_pipeline(&vk.beam_pipeline, VK_FALSE, VK_TRUE,
+                                    VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
         !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE) ||
         !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
         !vk_create_alias_pipeline(&vk.alias_alpha_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE) ||
         !vk_create_alias_pipeline(&vk.alias_depth_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
@@ -3428,6 +3451,22 @@ static bool vk_create_sprite_quad(void)
                           indices, q_countof(indices));
 }
 
+static bool vk_create_null_model(void)
+{
+    static const vk_vertex_t vertices[] = {
+        { {  0.0f,  0.0f,  0.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+        { { 16.0f,  0.0f,  0.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+        { {  0.0f,  0.0f,  0.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
+        { {  0.0f, 16.0f,  0.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
+        { {  0.0f,  0.0f,  0.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } },
+        { {  0.0f,  0.0f, 16.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } },
+    };
+    static const uint32_t indices[] = { 0, 1, 2, 3, 4, 5 };
+
+    return vk_upload_mesh(&vk.null_model, vertices, q_countof(vertices),
+                          indices, q_countof(indices));
+}
+
 static bool vk_create_particle_texture(void)
 {
     uint32_t pixels[16 * 16];
@@ -3468,6 +3507,37 @@ static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float co
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, mesh->index_count, 1, 0, 0, 0);
+}
+
+static void vk_draw_null_model(const entity_t *ent, const refdef_t *fd)
+{
+    if ((ent->flags & RF_WEAPONMODEL) || !vk.render_pass_active ||
+        !vk.line3d_pipeline || !vk.null_model.vertices.buffer ||
+        !vk.null_model.indices.buffer)
+        return;
+
+    vec3_t axis[3];
+    mat4_t mvp;
+    vk_color3d_push_t push;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    vk_entity_axis(ent, axis);
+    vk_entity_mvp(mvp, fd, ent, axis);
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    push.color[0] = 1.0f;
+    push.color[1] = 1.0f;
+    push.color[2] = 1.0f;
+    push.color[3] = 1.0f;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.line3d_pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.null_model.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.null_model.indices.buffer, 0,
+                          VK_INDEX_TYPE_UINT32);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, vk.null_model.index_count, 1, 0, 0, 0);
 }
 
 static float vk_world_face_alpha(const mface_t *face)
@@ -4200,6 +4270,16 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     if (!texture->descriptor_set)
         return;
 
+    bool translucent = ent->flags & RF_TRANSLUCENT;
+    VkPipeline pipeline = vk.sprite_pipeline;
+
+    if (!translucent &&
+        (frame->image->flags & (IF_TRANSPARENT | IF_PALETTED)) ==
+            (IF_TRANSPARENT | IF_PALETTED) &&
+        vk.sprite_alpha_pipeline) {
+        pipeline = vk.sprite_alpha_pipeline;
+    }
+
     vec3_t viewaxis[3], left, right, down, up, xaxis, yaxis, origin;
     float scale = ent->scale ? ent->scale : 1.0f;
     mat4_t model_matrix, mvp;
@@ -4234,9 +4314,9 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     push.color[0] = 1.0f;
     push.color[1] = 1.0f;
     push.color[2] = 1.0f;
-    push.color[3] = (ent->flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f;
+    push.color[3] = translucent ? ent->alpha : 1.0f;
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sprite_pipeline);
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -4637,12 +4717,17 @@ static void vk_draw_entity(const entity_t *ent, const refdef_t *fd,
 
     vk_model_t *model = vk_model_for_handle(ent->model);
 
-    if (!model)
+    if (!model) {
+        vk_draw_null_model(ent, fd);
         return;
+    }
     if (model->type == VK_MODEL_SPRITE)
         vk_draw_sprite(ent, fd);
     else if (model->type == VK_MODEL_ALIAS)
         vk_draw_alias_model(ent, fd);
+
+    if (vk_showorigins && vk_showorigins->integer)
+        vk_draw_null_model(ent, fd);
 }
 
 static void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass)
@@ -4988,6 +5073,7 @@ bool VKR_Init(bool total)
     vk_cull_models = Cvar_Get("gl_cull_models", "1", 0);
     vk_dotshading = Cvar_Get("gl_dotshading", "1", 0);
     vk_draworder = Cvar_Get("gl_draworder", "1", 0);
+    vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
     vk_modulate = Cvar_Get("gl_modulate", "1", CVAR_ARCHIVE);
     vk_modulate_world = Cvar_Get("gl_modulate_world", "1", 0);
     vk_brightness = Cvar_Get("gl_brightness", "0", 0);
@@ -5014,6 +5100,8 @@ bool VKR_Init(bool total)
         Com_WPrintf("Couldn't create Vulkan skybox mesh: %s\n", Com_GetLastError());
     if (!vk_create_sprite_quad())
         Com_WPrintf("Couldn't create Vulkan sprite quad: %s\n", Com_GetLastError());
+    if (!vk_create_null_model())
+        Com_WPrintf("Couldn't create Vulkan null model: %s\n", Com_GetLastError());
     if (!vk_create_particle_texture())
         Com_WPrintf("Couldn't create Vulkan particle texture: %s\n", Com_GetLastError());
 
@@ -5069,6 +5157,7 @@ void VKR_Shutdown(bool total)
     vk_destroy_mesh(&vk.test_triangle);
     vk_destroy_mesh(&vk.skybox);
     vk_destroy_mesh(&vk.sprite_quad);
+    vk_destroy_mesh(&vk.null_model);
 
     if (vk.sampler) {
         vk.DestroySampler(vk.device, vk.sampler, NULL);
