@@ -400,6 +400,7 @@ static cvar_t *vk_novis;
 static cvar_t *vk_lockpvs;
 static cvar_t *vk_lightmap;
 static cvar_t *vk_vertexlight;
+static cvar_t *vk_nobind;
 static cvar_t *vk_clear;
 static cvar_t *vk_clearcolor;
 static cvar_t *vk_polyblend;
@@ -710,6 +711,19 @@ static void vk_destroy_mesh(vk_mesh_t *mesh)
     vk_destroy_buffer(&mesh->vertices);
     vk_destroy_buffer(&mesh->indices);
     mesh->index_count = 0;
+}
+
+static const vk_texture_t *vk_texture_for_index(unsigned index, bool allow_nobind)
+{
+    if (allow_nobind && vk_nobind && vk_nobind->integer &&
+        vk.textures[0].descriptor_set) {
+        return &vk.textures[0];
+    }
+
+    if (index >= MAX_RIMAGES || !vk.textures[index].descriptor_set)
+        return NULL;
+
+    return &vk.textures[index];
 }
 
 static void vk_free_world(void)
@@ -3390,11 +3404,11 @@ static void vk_draw_texture_rect(int x, int y, int w, int h,
 
     const image_t *image = IMG_ForHandle(pic);
     unsigned index = image->texnum;
-    if (!index || index >= MAX_RIMAGES)
+    const vk_texture_t *texture = vk_texture_for_index(index, true);
+    if (!texture)
         return;
 
-    vk_draw_texture_resource(x, y, w, h, s1, t1, s2, t2,
-                             &vk.textures[index]);
+    vk_draw_texture_resource(x, y, w, h, s1, t1, s2, t2, texture);
 }
 
 static void vk_projection_matrix(mat4_t m, float fov_x, float fov_y)
@@ -3782,6 +3796,36 @@ static bool vk_create_particle_texture(void)
     return vk_upload_texture_data(&vk.particle_texture, 16, 16, pixels);
 }
 
+static bool vk_create_default_texture(void)
+{
+    image_t *image = R_NOTEXTURE;
+    uint32_t pixels[8 * 8];
+
+    for (int y = 0; y < 8; y++) {
+        for (int x = 0; x < 8; x++) {
+            bool bright = ((x < 4) ^ (y < 4));
+            pixels[y * 8 + x] = bright ?
+                MakeColor(255, 0, 255, 255) :
+                MakeColor(0, 0, 0, 255);
+        }
+    }
+
+    if (!vk_upload_texture_data(&vk.textures[0], 8, 8, pixels))
+        return false;
+
+    strcpy(image->name, "NOTEXTURE");
+    image->width = image->upload_width = 8;
+    image->height = image->upload_height = 8;
+    image->type = IT_WALL;
+    image->flags = 0;
+    image->texnum = 0;
+    image->sl = 0;
+    image->sh = 1;
+    image->tl = 0;
+    image->th = 1;
+    return true;
+}
+
 static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float color[4])
 {
     if (!vk.render_pass_active || !vk.color3d_pipeline ||
@@ -4041,8 +4085,8 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         if (batch->texture_index >= MAX_RIMAGES)
             continue;
 
-        const vk_texture_t *texture = &vk.textures[batch->texture_index];
-        if (!texture->descriptor_set)
+        const vk_texture_t *texture = vk_texture_for_index(batch->texture_index, true);
+        if (!texture)
             continue;
 
         vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -4123,8 +4167,8 @@ static void vk_draw_skybox(const refdef_t *fd)
         if (!texture_index || texture_index >= MAX_RIMAGES)
             continue;
 
-        const vk_texture_t *texture = &vk.textures[texture_index];
-        if (!texture->descriptor_set)
+        const vk_texture_t *texture = vk_texture_for_index(texture_index, true);
+        if (!texture)
             continue;
 
         vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -4540,11 +4584,11 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         return;
 
     const image_t *skin = vk_skin_for_model(model, ent);
-    if (!skin || !skin->texnum || skin->texnum >= MAX_RIMAGES)
+    if (!skin || skin->texnum >= MAX_RIMAGES)
         return;
 
-    const vk_texture_t *texture = &vk.textures[skin->texnum];
-    if (!texture->descriptor_set)
+    const vk_texture_t *texture = vk_texture_for_index(skin->texnum, true);
+    if (!texture)
         return;
 
     if (translucent)
@@ -4601,11 +4645,11 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
         return;
 
     const vk_sprite_frame_t *frame = &model->frames[ent->frame % model->frame_count];
-    if (!frame->image || !frame->image->texnum || frame->image->texnum >= MAX_RIMAGES)
+    if (!frame->image || frame->image->texnum >= MAX_RIMAGES)
         return;
 
-    const vk_texture_t *texture = &vk.textures[frame->image->texnum];
-    if (!texture->descriptor_set)
+    const vk_texture_t *texture = vk_texture_for_index(frame->image->texnum, true);
+    if (!texture)
         return;
 
     bool translucent = ent->flags & RF_TRANSLUCENT;
@@ -5562,6 +5606,7 @@ bool VKR_Init(bool total)
     vk_lockpvs = Cvar_Get("gl_lockpvs", "0", CVAR_CHEAT);
     vk_lightmap = Cvar_Get("gl_lightmap", "0", CVAR_CHEAT);
     vk_vertexlight = Cvar_Get("gl_vertexlight", "0", 0);
+    vk_nobind = Cvar_Get("gl_nobind", "0", CVAR_CHEAT);
     vk_clear = Cvar_Get("gl_clear", "0", 0);
     vk_clearcolor = Cvar_Get("gl_clearcolor", "black", 0);
     vk_clearcolor->generator = Com_Color_g;
@@ -5601,6 +5646,8 @@ bool VKR_Init(bool total)
     r_registration_sequence = 1;
     IMG_Init();
     IMG_SetUploadBackend(&vk_image_upload);
+    if (!vk_create_default_texture())
+        Com_WPrintf("Couldn't create Vulkan default texture: %s\n", Com_GetLastError());
     IMG_GetPalette();
 
     Com_Printf("------------------------\n");
@@ -5614,6 +5661,7 @@ void VKR_Shutdown(bool total)
 
     if (r_numImages) {
         IMG_FreeAll();
+        vk_destroy_texture_resource(&vk.textures[0]);
         IMG_Shutdown();
     }
 
