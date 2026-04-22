@@ -370,6 +370,7 @@ static cvar_t *vk_drawentities;
 static cvar_t *vk_gl_drawentities;
 static cvar_t *vk_drawsky;
 static cvar_t *vk_gl_drawsky;
+static cvar_t *vk_texturemode;
 static cvar_t *vk_partscale;
 static cvar_t *vk_partstyle;
 static cvar_t *vk_beamstyle;
@@ -1677,10 +1678,39 @@ static bool vk_create_frame_resources(void)
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreateDescriptorPool", result);
 
+    VkFilter min_filter = VK_FILTER_LINEAR;
+    VkFilter mag_filter = VK_FILTER_LINEAR;
+
+    if (vk_texturemode) {
+        const char *mode = vk_texturemode->string;
+
+        if (!Q_stricmp(mode, "GL_NEAREST")) {
+            min_filter = VK_FILTER_NEAREST;
+            mag_filter = VK_FILTER_NEAREST;
+        } else if (!Q_stricmp(mode, "GL_LINEAR")) {
+            min_filter = VK_FILTER_LINEAR;
+            mag_filter = VK_FILTER_LINEAR;
+        } else if (!Q_stricmp(mode, "GL_NEAREST_MIPMAP_NEAREST") ||
+                   !Q_stricmp(mode, "GL_NEAREST_MIPMAP_LINEAR")) {
+            min_filter = VK_FILTER_NEAREST;
+            mag_filter = VK_FILTER_NEAREST;
+        } else if (!Q_stricmp(mode, "GL_LINEAR_MIPMAP_NEAREST") ||
+                   !Q_stricmp(mode, "GL_LINEAR_MIPMAP_LINEAR")) {
+            min_filter = VK_FILTER_LINEAR;
+            mag_filter = VK_FILTER_LINEAR;
+        } else if (!Q_stricmp(mode, "MAG_NEAREST")) {
+            min_filter = VK_FILTER_LINEAR;
+            mag_filter = VK_FILTER_NEAREST;
+        } else {
+            Com_WPrintf("Bad texture mode: %s\n", mode);
+            Cvar_Reset(vk_texturemode);
+        }
+    }
+
     VkSamplerCreateInfo sampler_info = {
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .magFilter = VK_FILTER_LINEAR,
-        .minFilter = VK_FILTER_LINEAR,
+        .magFilter = mag_filter,
+        .minFilter = min_filter,
         .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
         .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
         .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
@@ -5366,6 +5396,8 @@ bool VKR_Init(bool total)
     vk_gl_drawentities = Cvar_Get("gl_drawentities", "1", CVAR_CHEAT);
     vk_drawsky = Cvar_Get("vk_drawsky", "1", 0);
     vk_gl_drawsky = Cvar_Get("gl_drawsky", "1", 0);
+    vk_texturemode = Cvar_Get("gl_texturemode", "GL_LINEAR_MIPMAP_LINEAR",
+                              CVAR_ARCHIVE);
     vk_partscale = Cvar_Get("gl_partscale", "2", 0);
     vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
     vk_beamstyle = Cvar_Get("gl_beamstyle", "0", 0);
