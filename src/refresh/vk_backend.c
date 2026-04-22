@@ -88,6 +88,7 @@ typedef struct {
     float position[3];
     float color[4];
     float uv[2];
+    float normal[3];
 } vk_vertex_t;
 
 typedef struct {
@@ -168,6 +169,7 @@ typedef struct {
     mat4_t mvp;
     float color[4];
     float backlerp;
+    float shellscale;
 } vk_alias_push_t;
 
 typedef struct {
@@ -335,6 +337,7 @@ static cvar_t *vk_partscale;
 static cvar_t *vk_partstyle;
 static cvar_t *vk_beamstyle;
 static cvar_t *vk_lightgrid;
+static cvar_t *vk_fullbright;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_world_cull;
@@ -352,6 +355,7 @@ static bool vk_create_test_triangle(void);
 static void vk_destroy_mesh(vk_mesh_t *mesh);
 static void vk_free_world(void);
 static void vk_load_world(const char *name);
+static bool vk_static_light_point(const vec3_t origin, vec3_t light);
 
 static void vk_upload_image(image_t *image, byte *pic)
 {
@@ -915,6 +919,10 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
             dst->color[3] = 1.0f;
             dst->uv[0] = (int16_t)LittleShort(src_tc[tc_indices[i]].s) * scale_s;
             dst->uv[1] = (int16_t)LittleShort(src_tc[tc_indices[i]].t) * scale_t;
+            if (src_vert->lightnormalindex < NUMVERTEXNORMALS)
+                VectorCopy(bytedirs[src_vert->lightnormalindex], dst->normal);
+            else
+                VectorSet(dst->normal, 0.0f, 0.0f, 1.0f);
         }
     }
 
@@ -2590,6 +2598,18 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write, boo
             .format = VK_FORMAT_R32G32B32_SFLOAT,
             .offset = offsetof(vk_vertex_t, position),
         },
+        {
+            .location = 4,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, normal),
+        },
+        {
+            .location = 5,
+            .binding = 1,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, normal),
+        },
     };
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -3636,6 +3656,8 @@ static vk_model_t *vk_model_for_handle(qhandle_t handle)
 
 static const image_t *vk_skin_for_model(const vk_model_t *model, const entity_t *ent)
 {
+    if (ent->flags & RF_SHELL_MASK)
+        return R_SHELLTEXTURE;
     if (ent->skin)
         return IMG_ForHandle(ent->skin);
     if (!model->skin_count)
@@ -3645,6 +3667,80 @@ static const image_t *vk_skin_for_model(const vk_model_t *model, const entity_t 
     if (model->skins[ent->skinnum] == R_NOTEXTURE)
         return model->skins[0];
     return model->skins[ent->skinnum];
+}
+
+static void vk_add_dynamic_lights(const refdef_t *fd, const vec3_t origin, vec3_t color)
+{
+    const dlight_t *light = fd->dlights;
+
+    for (int i = 0; i < fd->num_dlights; i++, light++) {
+        float f = light->intensity - DLIGHT_CUTOFF - Distance(light->origin, origin);
+        if (f > 0.0f) {
+            f *= 1.0f / 255.0f;
+            VectorMA(color, f, light->color, color);
+        }
+    }
+}
+
+static void vk_entity_light_color(const entity_t *ent, const refdef_t *fd, vec4_t color)
+{
+    uint64_t flags = ent->flags;
+    float f, m;
+
+    if (flags & RF_SHELL_MASK) {
+        VectorClear(color);
+        if (flags & RF_SHELL_LITE_GREEN)
+            VectorSet(color, 0.56f, 0.93f, 0.56f);
+        if (flags & RF_SHELL_HALF_DAM)
+            VectorSet(color, 0.56f, 0.59f, 0.45f);
+        if (flags & RF_SHELL_DOUBLE) {
+            color[0] = 0.9f;
+            color[1] = 0.7f;
+        }
+        if (flags & RF_SHELL_RED)
+            color[0] = 1.0f;
+        if (flags & RF_SHELL_GREEN)
+            color[1] = 1.0f;
+        if (flags & RF_SHELL_BLUE)
+            color[2] = 1.0f;
+    } else if (flags & RF_FULLBRIGHT) {
+        VectorSet(color, 1.0f, 1.0f, 1.0f);
+    } else if ((flags & RF_IR_VISIBLE) && (fd->rdflags & RDF_IRGOGGLES)) {
+        VectorSet(color, 1.0f, 0.0f, 0.0f);
+    } else if (flags & RF_TRACKER) {
+        VectorClear(color);
+    } else {
+        if ((vk_fullbright && vk_fullbright->integer) ||
+            !vk_static_light_point(ent->origin, color)) {
+            VectorSet(color, 1.0f, 1.0f, 1.0f);
+        }
+
+        vk_add_dynamic_lights(fd, ent->origin, color);
+
+        if (flags & RF_MINLIGHT) {
+            f = VectorLength(color);
+            if (!f)
+                VectorSet(color, 0.1f, 0.1f, 0.1f);
+            else if (f < 0.1f)
+                VectorScale(color, 0.1f / f, color);
+        }
+
+        if (flags & RF_GLOW) {
+            f = 0.1f * sinf(fd->time * 7.0f);
+            for (int i = 0; i < 3; i++) {
+                m = color[i] * 0.8f;
+                color[i] += f;
+                if (color[i] < m)
+                    color[i] = m;
+            }
+        }
+
+        color[0] = Q_clipf(color[0], 0.0f, 1.0f);
+        color[1] = Q_clipf(color[1], 0.0f, 1.0f);
+        color[2] = Q_clipf(color[2], 0.0f, 1.0f);
+    }
+
+    color[3] = (flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f;
 }
 
 static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
@@ -3685,11 +3781,10 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     vk_entity_axis(ent, axis);
     vk_entity_mvp(mvp, fd, ent, axis);
     memcpy(push.mvp, mvp, sizeof(push.mvp));
-    push.color[0] = 1.0f;
-    push.color[1] = 1.0f;
-    push.color[2] = 1.0f;
-    push.color[3] = translucent ? ent->alpha : 1.0f;
+    vk_entity_light_color(ent, fd, push.color);
     push.backlerp = Q_clip(ent->backlerp, 0.0f, 1.0f);
+    push.shellscale = (ent->flags & RF_SHELL_MASK) ?
+        ((ent->flags & RF_WEAPONMODEL) ? WEAPONSHELL_SCALE : POWERSUIT_SCALE) : 0.0f;
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, q_countof(buffers), buffers, offsets);
@@ -4391,6 +4486,7 @@ bool VKR_Init(bool total)
     vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
     vk_beamstyle = Cvar_Get("gl_beamstyle", "0", 0);
     vk_lightgrid = Cvar_Get("vk_lightgrid", "1", 0);
+    vk_fullbright = Cvar_Get("r_fullbright", "0", CVAR_CHEAT);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
