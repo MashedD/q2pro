@@ -385,6 +385,8 @@ static cvar_t *vk_dynamic;
 static cvar_t *vk_dlight_falloff;
 static cvar_t *vk_brightness;
 static cvar_t *vk_drawworld;
+static cvar_t *vk_novis;
+static cvar_t *vk_lockpvs;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_world_cull;
@@ -4004,6 +4006,9 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
     if (!bsp)
         return;
 
+    if (vk_lockpvs && vk_lockpvs->integer)
+        return;
+
     vk.world.visframe++;
 
     leaf = BSP_PointLeaf(bsp->nodes, fd->vieworg);
@@ -4017,7 +4022,7 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
     if (!(leaf->contents[0] & CONTENTS_SOLID))
         cluster2 = leaf->cluster;
 
-    if (!bsp->vis || cluster1 == -1) {
+    if (!bsp->vis || (vk_novis && vk_novis->integer) || cluster1 == -1) {
         for (int i = 0; i < bsp->numleafs; i++)
             bsp->leafs[i].visframe = vk.world.visframe;
         for (int i = 0; i < bsp->numnodes; i++)
@@ -5277,6 +5282,8 @@ bool VKR_Init(bool total)
     vk_dlight_falloff = Cvar_Get("gl_dlight_falloff", "1", 0);
     vk_brightness = Cvar_Get("gl_brightness", "0", 0);
     vk_drawworld = Cvar_Get("gl_drawworld", "1", CVAR_CHEAT);
+    vk_novis = Cvar_Get("gl_novis", "0", 0);
+    vk_lockpvs = Cvar_Get("gl_lockpvs", "0", CVAR_CHEAT);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
