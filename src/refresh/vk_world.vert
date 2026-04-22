@@ -15,6 +15,6 @@ layout(location = 1) out vec2 v_uv;
 void main()
 {
     gl_Position = pc.mvp * vec4(in_position, 1.0);
-    v_color = in_color * pc.color;
+    v_color = mix(in_color * pc.color, pc.color, pc.scroll.z);
     v_uv = in_uv + pc.scroll.xy;
 }

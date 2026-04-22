@@ -3503,6 +3503,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     push.color[2] = 1.0f;
     push.color[3] = entity_alpha;
     Vector4Clear(push.scroll);
+    push.scroll[2] = (vk_fullbright && vk_fullbright->integer) ? 1.0f : 0.0f;
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
@@ -3537,6 +3538,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
 
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
             vk_world_face_scroll(face->face, time, push.scroll);
+            push.scroll[2] = (vk_fullbright && vk_fullbright->integer) ? 1.0f : 0.0f;
             vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
                                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                 0, sizeof(push), &push);
@@ -4517,6 +4519,68 @@ static void vk_surface_color(const mface_t *face, float color[4])
     color[3] = 1.0f;
 }
 
+static bool vk_sample_surface_light(const mface_t *face, const vec3_t point,
+                                    float color[4])
+{
+    float s, t, fracs, fract;
+    int s0, t0, s1, t1;
+    int smax = face->lm_width;
+    int tmax = face->lm_height;
+    int size = smax * tmax * 3;
+
+    if (!face->lightmap || !face->numstyles || smax < 1 || tmax < 1)
+        return false;
+    if (face->drawflags & SURF_COLOR_MASK)
+        return false;
+
+    s = DotProduct(point, face->lm_axis[0]) + face->lm_offset[0];
+    t = DotProduct(point, face->lm_axis[1]) + face->lm_offset[1];
+
+    s = Q_clipf(s, 0.0f, smax - 1.0f);
+    t = Q_clipf(t, 0.0f, tmax - 1.0f);
+    s0 = floorf(s);
+    t0 = floorf(t);
+    s1 = min(s0 + 1, smax - 1);
+    t1 = min(t0 + 1, tmax - 1);
+    fracs = s - s0;
+    fract = t - t0;
+
+    Vector4Clear(color);
+    for (int i = 0; i < face->numstyles; i++) {
+        const byte *lightmap = face->lightmap + i * size;
+        const byte *b1 = &lightmap[3 * (t0 * smax + s0)];
+        const byte *b2 = &lightmap[3 * (t0 * smax + s1)];
+        const byte *b3 = &lightmap[3 * (t1 * smax + s1)];
+        const byte *b4 = &lightmap[3 * (t1 * smax + s0)];
+        float w1 = (1.0f - fracs) * (1.0f - fract);
+        float w2 = fracs * (1.0f - fract);
+        float w3 = fracs * fract;
+        float w4 = (1.0f - fracs) * fract;
+
+        color[0] += w1 * b1[0] + w2 * b2[0] + w3 * b3[0] + w4 * b4[0];
+        color[1] += w1 * b1[1] + w2 * b2[1] + w3 * b3[1] + w4 * b4[1];
+        color[2] += w1 * b1[2] + w2 * b2[2] + w3 * b3[2] + w4 * b4[2];
+    }
+
+    color[0] = Q_clipf(color[0] / 255.0f, 0.0f, 1.0f);
+    color[1] = Q_clipf(color[1] / 255.0f, 0.0f, 1.0f);
+    color[2] = Q_clipf(color[2] / 255.0f, 0.0f, 1.0f);
+    color[3] = 1.0f;
+    return true;
+}
+
+static void vk_surface_vertex_color(const mface_t *face, const vec3_t point,
+                                    const float fallback[4], float color[4])
+{
+    if (face->drawflags & SURF_COLOR_MASK) {
+        Vector4Set(color, 1.0f, 1.0f, 1.0f, 1.0f);
+        return;
+    }
+
+    if (!vk_sample_surface_light(face, point, color))
+        memcpy(color, fallback, sizeof(float) * 4);
+}
+
 static bool vk_face_is_drawable(mface_t *face)
 {
     face->drawflags |= face->texinfo->c.flags & ~DSURF_PLANEBACK;
@@ -4574,8 +4638,8 @@ static bool vk_build_world_mesh(bsp_t *bsp)
             continue;
 
         uint32_t first = v;
-        float color[4];
-        vk_surface_color(face, color);
+        float fallback_color[4];
+        vk_surface_color(face, fallback_color);
         float scale_s = image->width ? 1.0f / image->width : 1.0f;
         float scale_t = image->height ? 1.0f / image->height : 1.0f;
 
@@ -4583,8 +4647,10 @@ static bool vk_build_world_mesh(bsp_t *bsp)
             const msurfedge_t *surfedge = face->firstsurfedge + j;
             const medge_t *edge = bsp->edges + surfedge->edge;
             const mvertex_t *src = bsp->vertices + edge->v[surfedge->vert];
+            float color[4];
 
             VectorCopy(src->point, vertices[v].position);
+            vk_surface_vertex_color(face, src->point, fallback_color, color);
             memcpy(vertices[v].color, color, sizeof(vertices[v].color));
             vertices[v].uv[0] = (DotProduct(src->point, face->texinfo->axis[0]) +
                                  face->texinfo->offset[0]) * scale_s;
