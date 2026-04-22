@@ -374,6 +374,7 @@ static cvar_t *vk_gl_drawentities;
 static cvar_t *vk_drawsky;
 static cvar_t *vk_gl_drawsky;
 static cvar_t *vk_swapinterval;
+static cvar_t *vk_finish;
 static cvar_t *vk_texturemode;
 static cvar_t *vk_anisotropy;
 static cvar_t *vk_partscale;
@@ -5496,6 +5497,7 @@ bool VKR_Init(bool total)
     vk_gl_drawsky = Cvar_Get("gl_drawsky", "1", 0);
     vk_swapinterval = Cvar_Get("gl_swapinterval", "1", CVAR_ARCHIVE);
     vk_swapinterval->changed = vk_swapinterval_changed;
+    vk_finish = Cvar_Get("gl_finish", "0", 0);
     vk_texturemode = Cvar_Get("gl_texturemode", "GL_LINEAR_MIPMAP_LINEAR",
                               CVAR_ARCHIVE);
     vk_texturemode->changed = vk_texturemode_changed;
@@ -6097,6 +6099,9 @@ void VKR_EndFrame(void)
     } else if (result != VK_SUCCESS) {
         Com_EPrintf("vkQueuePresentKHR failed: Vulkan error %d\n", result);
     }
+
+    if (vk_finish && vk_finish->integer)
+        vk.DeviceWaitIdle(vk.device);
 
     vk.frame_active = false;
 }
