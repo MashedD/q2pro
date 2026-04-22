@@ -399,6 +399,7 @@ static cvar_t *vk_drawworld;
 static cvar_t *vk_novis;
 static cvar_t *vk_lockpvs;
 static cvar_t *vk_lightmap;
+static cvar_t *vk_vertexlight;
 static cvar_t *vk_clear;
 static cvar_t *vk_clearcolor;
 static cvar_t *vk_polyblend;
@@ -5409,6 +5410,31 @@ static bool vk_build_world_mesh(bsp_t *bsp)
     return ok;
 }
 
+static bool vk_world_lighting_modified(void)
+{
+    return (vk_coloredlightmaps && vk_coloredlightmaps->modified) ||
+           (vk_vertexlight && vk_vertexlight->modified);
+}
+
+static void vk_clear_world_lighting_modified(void)
+{
+    if (vk_coloredlightmaps)
+        vk_coloredlightmaps->modified = false;
+    if (vk_vertexlight)
+        vk_vertexlight->modified = false;
+}
+
+static void vk_rebuild_world_lighting(void)
+{
+    if (!vk.world.cache || !vk_world_lighting_modified())
+        return;
+
+    if (!vk_build_world_mesh(vk.world.cache))
+        Com_WPrintf("Couldn't rebuild Vulkan world mesh: %s\n", Com_GetLastError());
+
+    vk_clear_world_lighting_modified();
+}
+
 static void vk_register_world_images(bsp_t *bsp)
 {
     char buffer[MAX_QPATH];
@@ -5457,6 +5483,7 @@ static void vk_load_world(const char *name)
     else
         Com_DPrintf("Vulkan world mesh: %u indices, %u faces, %u batches\n",
                     vk.world.mesh.index_count, vk.world.face_count, vk.world.batch_count);
+    vk_clear_world_lighting_modified();
 }
 
 static void vk_draw_test_triangle(const refdef_t *fd)
@@ -5534,6 +5561,7 @@ bool VKR_Init(bool total)
     vk_novis = Cvar_Get("gl_novis", "0", 0);
     vk_lockpvs = Cvar_Get("gl_lockpvs", "0", CVAR_CHEAT);
     vk_lightmap = Cvar_Get("gl_lightmap", "0", CVAR_CHEAT);
+    vk_vertexlight = Cvar_Get("gl_vertexlight", "0", 0);
     vk_clear = Cvar_Get("gl_clear", "0", 0);
     vk_clearcolor = Cvar_Get("gl_clearcolor", "black", 0);
     vk_clearcolor->generator = Com_Color_g;
@@ -5776,6 +5804,7 @@ void VKR_RenderFrame(const refdef_t *fd)
     if (!fd)
         return;
 
+    vk_rebuild_world_lighting();
     vk_setup_world_frustum(fd);
 
     bool drawworld = !(fd->rdflags & RDF_NOWORLDMODEL) &&
