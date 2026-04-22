@@ -117,7 +117,7 @@ begin sound
     range "sound volume" s_volume 0 1
     range "music volume" ogg_volume 0 1
     values "HRTF mixing" al_hrtf "off" "default" "on"
-    toggle "reverb" al_reverb
+    pairs "reverb" al_reverb "off" 0 "light" 1 "strong" 2
     toggle "enable music" ogg_enable
     toggle "shuffle tracks" ogg_shuffle
     toggle "underwater effect" s_underwater

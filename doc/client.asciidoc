@@ -325,8 +325,9 @@ s_underwater_gain_hf::
     Specifies HF gain value for lowpass sound filter. Default value is 0.25.
 
 al_reverb::
-    Enables OpenAL EFX reverb for positional sounds. Default value is 0
-    (disabled). This requires an OpenAL implementation with EAX reverb support.
+    Selects OpenAL EFX reverb preset for positional sounds: 0 disables reverb,
+    1 enables light reverb and 2 enables strong reverb. Default value is 0.
+    This requires an OpenAL implementation with EAX reverb support.
 
 s_auto_focus::
     Specifies the minimum focus level main Q2PRO window should have for sound

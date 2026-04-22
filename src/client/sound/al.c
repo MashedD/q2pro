@@ -46,6 +46,28 @@ static ALuint       s_reverb_slot;
 static void AL_StreamStop(void);
 static void AL_StopChannel(channel_t *ch);
 
+static void AL_ApplyReverbPreset(void)
+{
+    int preset;
+
+    if (!s_reverb_effect)
+        return;
+
+    preset = Cvar_ClampInteger(al_reverb, 0, 2);
+
+    if (preset == 2) {
+        qalEffectf(s_reverb_effect, AL_EAXREVERB_GAIN, 0.36f);
+        qalEffectf(s_reverb_effect, AL_EAXREVERB_GAINHF, 0.78f);
+        qalEffectf(s_reverb_effect, AL_EAXREVERB_DECAY_TIME, 2.65f);
+        qalEffectf(s_reverb_effect, AL_EAXREVERB_LATE_REVERB_GAIN, 1.75f);
+    } else {
+        qalEffectf(s_reverb_effect, AL_EAXREVERB_GAIN, 0.20f);
+        qalEffectf(s_reverb_effect, AL_EAXREVERB_GAINHF, 0.70f);
+        qalEffectf(s_reverb_effect, AL_EAXREVERB_DECAY_TIME, 1.49f);
+        qalEffectf(s_reverb_effect, AL_EAXREVERB_LATE_REVERB_GAIN, 1.26f);
+    }
+}
+
 static void AL_SoundInfo(void)
 {
     Com_Printf("AL_VENDOR: %s\n", qalGetString(AL_VENDOR));
@@ -68,6 +90,7 @@ static void s_underwater_gain_hf_changed(cvar_t *self)
 
 static void al_reverb_changed(cvar_t *self)
 {
+    AL_ApplyReverbPreset();
     S_StopAllSounds();
 }
 
@@ -126,7 +149,6 @@ static bool AL_Init(void)
     al_merge_looping = Cvar_Get("al_merge_looping", "1", 0);
     al_merge_looping->changed = al_merge_looping_changed;
     al_reverb = Cvar_Get("al_reverb", "0", CVAR_ARCHIVE);
-    al_reverb->changed = al_reverb_changed;
 
     s_loop_points = qalIsExtensionPresent("AL_SOFT_loop_points");
     s_source_spatialize = qalIsExtensionPresent("AL_SOFT_source_spatialize");
@@ -158,12 +180,10 @@ static bool AL_Init(void)
         qalGenEffects(1, &s_reverb_effect);
         qalGenAuxiliaryEffectSlots(1, &s_reverb_slot);
         qalEffecti(s_reverb_effect, AL_EFFECT_TYPE, AL_EFFECT_EAXREVERB);
-        qalEffectf(s_reverb_effect, AL_EAXREVERB_GAIN, 0.20f);
-        qalEffectf(s_reverb_effect, AL_EAXREVERB_GAINHF, 0.70f);
-        qalEffectf(s_reverb_effect, AL_EAXREVERB_DECAY_TIME, 1.49f);
-        qalEffectf(s_reverb_effect, AL_EAXREVERB_LATE_REVERB_GAIN, 1.26f);
+        AL_ApplyReverbPreset();
         qalAuxiliaryEffectSloti(s_reverb_slot, AL_EFFECTSLOT_EFFECT, s_reverb_effect);
     }
+    al_reverb->changed = al_reverb_changed;
 
     Com_Printf("OpenAL initialized.\n");
     return true;
