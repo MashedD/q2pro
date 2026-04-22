@@ -3210,6 +3210,39 @@ static void vk_view_matrix(mat4_t matrix, const refdef_t *fd)
     matrix[15] = 1.0f;
 }
 
+static void vk_entity_projection_matrix(mat4_t matrix, const refdef_t *fd,
+                                        const entity_t *ent)
+{
+    extern cvar_t *cl_adjustfov;
+    extern cvar_t *cl_gun;
+    extern cvar_t *cl_gunfov;
+    extern cvar_t *info_hand;
+    extern float V_CalcFov(float fov_x, float width, float height);
+
+    float fov_x = fd->fov_x;
+    float fov_y = fd->fov_y;
+    float reflect_x = 1.0f;
+
+    if (ent->flags & RF_WEAPONMODEL) {
+        if (cl_gunfov && cl_gunfov->value > 0.0f) {
+            fov_x = Cvar_ClampValue(cl_gunfov, 30.0f, 160.0f);
+            if (cl_adjustfov && cl_adjustfov->integer) {
+                fov_y = V_CalcFov(fov_x, 4.0f, 3.0f);
+                fov_x = V_CalcFov(fov_y, fd->height, fd->width);
+            } else {
+                fov_y = V_CalcFov(fov_x, fd->width, fd->height);
+            }
+        }
+
+        if ((info_hand && cl_gun && info_hand->integer == 1 && cl_gun->integer == 1) ||
+            (cl_gun && cl_gun->integer == 3))
+            reflect_x = -1.0f;
+    }
+
+    vk_projection_matrix(matrix, fov_x, fov_y);
+    matrix[0] *= reflect_x;
+}
+
 static void vk_matrix_multiply(mat4_t out, const mat4_t a, const mat4_t b)
 {
     mat4_t tmp;
@@ -3273,7 +3306,7 @@ static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
     model[14] = ent->origin[2];
     model[15] = 1.0f;
 
-    vk_projection_matrix(proj, fd->fov_x, fd->fov_y);
+    vk_entity_projection_matrix(proj, fd, ent);
     vk_view_matrix(view, fd);
     vk_matrix_multiply(view_model, view, model);
     vk_matrix_multiply(out, proj, view_model);
