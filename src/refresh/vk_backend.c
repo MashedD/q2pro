@@ -391,6 +391,7 @@ static cvar_t *vk_lockpvs;
 static cvar_t *vk_clear;
 static cvar_t *vk_clearcolor;
 static cvar_t *vk_polyblend;
+static cvar_t *vk_damageblend_frac;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_cull_nodes;
@@ -3138,6 +3139,27 @@ static void vk_blend_rect(int x, int y, int w, int h, const vec4_t color)
     vk.CmdDraw(cmd, 6, 1, 0, 0);
 }
 
+static void vk_blend_vignette(int x, int y, int w, int h, const vec4_t color,
+                              float frac)
+{
+    int distance = min(w, h) * Q_clipf(frac, 0.0f, 0.5f);
+
+    if (distance <= 0) {
+        vk_blend_rect(x, y, w, h, color);
+        return;
+    }
+
+    vk_blend_rect(x, y, w, distance, color);
+    vk_blend_rect(x, y + h - distance, w, distance, color);
+
+    h -= distance * 2;
+    if (h <= 0)
+        return;
+
+    vk_blend_rect(x, y + distance, distance, h, color);
+    vk_blend_rect(x + w - distance, y + distance, distance, h, color);
+}
+
 static void vk_draw_texture_resource(int x, int y, int w, int h,
                                      float s1, float t1, float s2, float t2,
                                      const vk_texture_t *texture)
@@ -5319,7 +5341,11 @@ static void vk_draw_polyblend(const refdef_t *fd)
         vk_blend_rect(fd->x, fd->y, fd->width, fd->height, fd->screen_blend);
 
     if (fd->damage_blend[3]) {
-        vk_blend_rect(fd->x, fd->y, fd->width, fd->height, fd->damage_blend);
+        float frac = vk_damageblend_frac ?
+            Cvar_ClampValue(vk_damageblend_frac, 0.0f, 0.5f) : 0.2f;
+
+        vk_blend_vignette(fd->x, fd->y, fd->width, fd->height,
+                          fd->damage_blend, frac);
     }
 }
 
@@ -5358,6 +5384,7 @@ bool VKR_Init(bool total)
     vk_clearcolor = Cvar_Get("gl_clearcolor", "black", 0);
     vk_clearcolor->generator = Com_Color_g;
     vk_polyblend = Cvar_Get("gl_polyblend", "1", 0);
+    vk_damageblend_frac = Cvar_Get("gl_damageblend_frac", "0.2", 0);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_cull_nodes = Cvar_Get("gl_cull_nodes", "1", 0);
