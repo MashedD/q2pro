@@ -372,6 +372,7 @@ static cvar_t *vk_partscale;
 static cvar_t *vk_partstyle;
 static cvar_t *vk_beamstyle;
 static cvar_t *vk_lightgrid;
+static cvar_t *vk_gl_lightgrid;
 static cvar_t *vk_fullbright;
 static cvar_t *vk_cull_models;
 static cvar_t *vk_dotshading;
@@ -4781,7 +4782,9 @@ static bool vk_lightgrid_point(const lightgrid_t *grid, const vec3_t start,
     int mask = 0;
     int numsamples = 0;
 
-    if (!grid->numleafs || (vk_lightgrid && !vk_lightgrid->integer))
+    if (!grid->numleafs ||
+        (vk_lightgrid && !vk_lightgrid->integer) ||
+        (vk_gl_lightgrid && !vk_gl_lightgrid->integer))
         return false;
 
     point[0] = (start[0] - grid->mins[0]) * grid->scale[0];
@@ -5271,6 +5274,7 @@ bool VKR_Init(bool total)
     vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
     vk_beamstyle = Cvar_Get("gl_beamstyle", "0", 0);
     vk_lightgrid = Cvar_Get("vk_lightgrid", "1", 0);
+    vk_gl_lightgrid = Cvar_Get("gl_lightgrid", "1", 0);
     vk_fullbright = Cvar_Get("r_fullbright", "0", CVAR_CHEAT);
     vk_cull_models = Cvar_Get("gl_cull_models", "1", 0);
     vk_dotshading = Cvar_Get("gl_dotshading", "1", 0);
