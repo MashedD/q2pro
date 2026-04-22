@@ -388,6 +388,8 @@ static cvar_t *vk_brightness;
 static cvar_t *vk_drawworld;
 static cvar_t *vk_novis;
 static cvar_t *vk_lockpvs;
+static cvar_t *vk_clear;
+static cvar_t *vk_clearcolor;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_cull_nodes;
@@ -3032,6 +3034,26 @@ static VkClearColorValue vk_color_to_clear(uint32_t color)
     return clear;
 }
 
+static VkClearColorValue vk_frame_clear_color(void)
+{
+    VkClearColorValue clear = {
+        .float32 = { 0.015f, 0.025f, 0.035f, 1.0f },
+    };
+    color_t color;
+
+    if (!vk_clear || !vk_clear->integer || !vk_clearcolor)
+        return clear;
+
+    if (!SCR_ParseColor(vk_clearcolor->string, &color)) {
+        Com_WPrintf("Invalid value '%s' for '%s'\n",
+                    vk_clearcolor->string, vk_clearcolor->name);
+        Cvar_Reset(vk_clearcolor);
+        return vk_color_to_clear(U32_BLACK);
+    }
+
+    return vk_color_to_clear(color.u32);
+}
+
 static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
 {
     if (!vk.render_pass_active || !vk.rect_pipeline || w <= 0 || h <= 0)
@@ -5290,6 +5312,9 @@ bool VKR_Init(bool total)
     vk_drawworld = Cvar_Get("gl_drawworld", "1", CVAR_CHEAT);
     vk_novis = Cvar_Get("gl_novis", "0", 0);
     vk_lockpvs = Cvar_Get("gl_lockpvs", "0", CVAR_CHEAT);
+    vk_clear = Cvar_Get("gl_clear", "0", 0);
+    vk_clearcolor = Cvar_Get("gl_clearcolor", "black", 0);
+    vk_clearcolor->generator = Com_Color_g;
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_cull_nodes = Cvar_Get("gl_cull_nodes", "1", 0);
@@ -5776,7 +5801,7 @@ void VKR_BeginFrame(void)
 
     VkClearValue clear[] = {
         {
-            .color = { .float32 = { 0.015f, 0.025f, 0.035f, 1.0f } },
+            .color = vk_frame_clear_color(),
         },
         {
             .depthStencil = { .depth = 1.0f, .stencil = 0 },
