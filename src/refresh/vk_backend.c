@@ -167,6 +167,7 @@ typedef struct {
     vk_world_face_t *faces;
     uint32_t batch_count;
     uint32_t face_count;
+    float size;
     cplane_t frustum[4];
     unsigned drawframe;
     unsigned visframe;
@@ -742,6 +743,7 @@ static void vk_free_world(void)
     }
     vk.world.batch_count = 0;
     vk.world.face_count = 0;
+    vk.world.size = 0.0f;
     vk.world.drawframe = 0;
     vk.world.visframe = 0;
 
@@ -3433,10 +3435,18 @@ static void vk_draw_texture_rect(int x, int y, int w, int h,
     vk_draw_texture_resource(x, y, w, h, s1, t1, s2, t2, texture);
 }
 
-static void vk_projection_matrix(mat4_t m, float fov_x, float fov_y)
+static float vk_projection_zfar(int rdflags)
+{
+    if ((rdflags & RDF_NOWORLDMODEL) || vk.world.size <= 0.0f)
+        return 2048.0f;
+
+    return vk.world.size * 2.0f;
+}
+
+static void vk_projection_matrix(mat4_t m, float fov_x, float fov_y, int rdflags)
 {
     const float znear = vk_znear ? Cvar_ClampValue(vk_znear, 0.1f, 4095.0f) : 2.0f;
-    const float zfar = 4096.0f;
+    const float zfar = max(vk_projection_zfar(rdflags), znear + 1.0f);
     float xmax = tanf(fov_x * (M_PIf / 360.0f));
     float ymax = tanf(fov_y * (M_PIf / 360.0f));
 
@@ -3502,7 +3512,7 @@ static void vk_entity_projection_matrix(mat4_t matrix, const refdef_t *fd,
             reflect_x = -1.0f;
     }
 
-    vk_projection_matrix(matrix, fov_x, fov_y);
+    vk_projection_matrix(matrix, fov_x, fov_y, fd->rdflags);
     matrix[0] *= reflect_x;
 }
 
@@ -3527,7 +3537,7 @@ static void vk_world_mvp(mat4_t out, const refdef_t *fd)
 {
     mat4_t proj, view;
 
-    vk_projection_matrix(proj, fd->fov_x, fd->fov_y);
+    vk_projection_matrix(proj, fd->fov_x, fd->fov_y, fd->rdflags);
     vk_view_matrix(view, fd);
     vk_matrix_multiply(out, proj, view);
 }
@@ -3579,7 +3589,7 @@ static void vk_model_mvp(mat4_t out, const refdef_t *fd, const mat4_t model)
 {
     mat4_t proj, view, view_model;
 
-    vk_projection_matrix(proj, fd->fov_x, fd->fov_y);
+    vk_projection_matrix(proj, fd->fov_x, fd->fov_y, fd->rdflags);
     vk_view_matrix(view, fd);
     vk_matrix_multiply(view_model, view, model);
     vk_matrix_multiply(out, proj, view_model);
@@ -4150,7 +4160,7 @@ static void vk_sky_mvp(mat4_t out, const refdef_t *fd)
     mat4_t proj, view;
 
     VectorClear(sky_fd.vieworg);
-    vk_projection_matrix(proj, sky_fd.fov_x, sky_fd.fov_y);
+    vk_projection_matrix(proj, sky_fd.fov_x, sky_fd.fov_y, sky_fd.rdflags);
     vk_view_matrix(view, &sky_fd);
     vk_matrix_multiply(out, proj, view);
 }
@@ -5476,6 +5486,22 @@ static bool vk_build_world_mesh(bsp_t *bsp)
     return ok;
 }
 
+static float vk_world_size_for_bsp(const bsp_t *bsp)
+{
+    if (!bsp || !bsp->nodes)
+        return 0.0f;
+
+    vec_t size = 0.0f;
+    for (int i = 0; i < 3; i++)
+        size = max(size, bsp->nodes->maxs[i] - bsp->nodes->mins[i]);
+
+    if (size > 4096.0f)
+        return 8192.0f;
+    if (size > 2048.0f)
+        return 4096.0f;
+    return 2048.0f;
+}
+
 static bool vk_world_lighting_modified(void)
 {
     return (vk_coloredlightmaps && vk_coloredlightmaps->modified) ||
@@ -5541,6 +5567,7 @@ static void vk_load_world(const char *name)
 
     vk_free_world();
     vk.world.cache = bsp;
+    vk.world.size = vk_world_size_for_bsp(bsp);
 
     vk_register_world_images(bsp);
 
@@ -5566,7 +5593,7 @@ static void vk_draw_test_triangle(const refdef_t *fd)
     mat4_t mvp;
     const float color[4] = { 0.1f, 0.9f, 0.55f, 1.0f };
 
-    vk_projection_matrix(mvp, fd->fov_x, fd->fov_y);
+    vk_projection_matrix(mvp, fd->fov_x, fd->fov_y, fd->rdflags);
     vk_draw_mesh(&vk.test_triangle, mvp, color);
 }
 
