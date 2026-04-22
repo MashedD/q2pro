@@ -397,6 +397,7 @@ static cvar_t *vk_coloredlightmaps;
 static cvar_t *vk_dynamic;
 static cvar_t *vk_dlight_falloff;
 static cvar_t *vk_brightness;
+static cvar_t *vk_znear;
 static cvar_t *vk_drawworld;
 static cvar_t *vk_novis;
 static cvar_t *vk_lockpvs;
@@ -3434,7 +3435,7 @@ static void vk_draw_texture_rect(int x, int y, int w, int h,
 
 static void vk_projection_matrix(mat4_t m, float fov_x, float fov_y)
 {
-    const float znear = 4.0f;
+    const float znear = vk_znear ? Cvar_ClampValue(vk_znear, 0.1f, 4095.0f) : 2.0f;
     const float zfar = 4096.0f;
     float xmax = tanf(fov_x * (M_PIf / 360.0f));
     float ymax = tanf(fov_y * (M_PIf / 360.0f));
@@ -5627,6 +5628,7 @@ bool VKR_Init(bool total)
     vk_dynamic = Cvar_Get("gl_dynamic", "1", 0);
     vk_dlight_falloff = Cvar_Get("gl_dlight_falloff", "1", 0);
     vk_brightness = Cvar_Get("gl_brightness", "0", 0);
+    vk_znear = Cvar_Get("gl_znear", "2", CVAR_CHEAT);
     vk_drawworld = Cvar_Get("gl_drawworld", "1", CVAR_CHEAT);
     vk_novis = Cvar_Get("gl_novis", "0", 0);
     vk_lockpvs = Cvar_Get("gl_lockpvs", "0", CVAR_CHEAT);
