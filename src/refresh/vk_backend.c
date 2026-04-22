@@ -318,6 +318,7 @@ typedef struct {
     VkPipeline sky_pipeline;
     VkPipeline sprite_pipeline;
     VkPipeline alias_pipeline;
+    VkPipeline alias_alpha_pipeline;
     VkPipeline alias_depth_pipeline;
     VkPipeline alias_blend_pipeline;
     VkSwapchainKHR swapchain;
@@ -1811,6 +1812,11 @@ static void vk_destroy_swapchain(void)
         vk.alias_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.alias_alpha_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_alpha_pipeline, NULL);
+        vk.alias_alpha_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.alias_depth_pipeline) {
         vk.DestroyPipeline(vk.device, vk.alias_depth_pipeline, NULL);
         vk.alias_depth_pipeline = VK_NULL_HANDLE;
@@ -2599,15 +2605,19 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
 }
 
 static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
-                                     bool blend, bool color_write)
+                                     bool blend, bool color_write,
+                                     bool alpha_test)
 {
     VkShaderModule vert = vk_create_shader_module(vk_alias_vert_spv,
                                                   sizeof(vk_alias_vert_spv));
     if (!vert)
         return false;
 
-    VkShaderModule frag = vk_create_shader_module(vk_world_frag_spv,
-                                                  sizeof(vk_world_frag_spv));
+    VkShaderModule frag = alpha_test ?
+        vk_create_shader_module(vk_world_alpha_frag_spv,
+                                sizeof(vk_world_alpha_frag_spv)) :
+        vk_create_shader_module(vk_world_frag_spv,
+                                sizeof(vk_world_frag_spv));
     if (!frag) {
         vk.DestroyShaderModule(vk.device, vert, NULL);
         return false;
@@ -2902,9 +2912,10 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
-        !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE) ||
-        !vk_create_alias_pipeline(&vk.alias_depth_pipeline, VK_TRUE, VK_FALSE, VK_FALSE) ||
-        !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE) ||
+        !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
+        !vk_create_alias_pipeline(&vk.alias_alpha_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE) ||
+        !vk_create_alias_pipeline(&vk.alias_depth_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE) ||
         !vk_create_depth_resources() ||
         !vk_create_framebuffers())
         return false;
@@ -4113,9 +4124,9 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     vk_model_t *model = vk_model_for_handle(ent->model);
 
     bool translucent = ent->flags & RF_TRANSLUCENT;
-    VkPipeline pipeline = translucent ? vk.alias_blend_pipeline : vk.alias_pipeline;
+    VkPipeline pipeline;
 
-    if (!model || model->type != VK_MODEL_ALIAS || !pipeline ||
+    if (!model || model->type != VK_MODEL_ALIAS ||
         !model->mesh.vertices.buffer || !model->mesh.indices.buffer ||
         !model->vertex_count)
         return;
@@ -4126,6 +4137,16 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 
     const vk_texture_t *texture = &vk.textures[skin->texnum];
     if (!texture->descriptor_set)
+        return;
+
+    if (translucent)
+        pipeline = vk.alias_blend_pipeline;
+    else if ((skin->flags & IF_TRANSPARENT) && vk.alias_alpha_pipeline)
+        pipeline = vk.alias_alpha_pipeline;
+    else
+        pipeline = vk.alias_pipeline;
+
+    if (!pipeline)
         return;
 
     vec3_t axis[3];
