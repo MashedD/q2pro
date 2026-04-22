@@ -3848,23 +3848,18 @@ static void vk_draw_particles(const refdef_t *fd)
     }
 }
 
-static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
+static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
+                                 const refdef_t *fd, const float color[4],
+                                 float width)
 {
-    if (!vk.beam_pipeline || !vk.sprite_quad.vertices.buffer ||
-        !vk.sprite_quad.indices.buffer || !ent->frame)
-        return;
-
     vec3_t dir, to_view, normal, xaxis, yaxis, origin;
     mat4_t model_matrix, mvp;
     vk_color3d_push_t push;
-    color_t color;
-    float scale = (vk_beamstyle && vk_beamstyle->integer) ? 0.5f : 1.2f;
-    float width = abs((int16_t)ent->frame) * scale;
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
 
-    VectorSubtract(ent->oldorigin, ent->origin, dir);
-    VectorSubtract(fd->vieworg, ent->origin, to_view);
+    VectorSubtract(end, start, dir);
+    VectorSubtract(fd->vieworg, start, to_view);
     CrossProduct(dir, to_view, normal);
     if (VectorNormalize(normal) < 0.1f)
         return;
@@ -3872,7 +3867,7 @@ static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
     VectorScale(normal, width, normal);
     VectorCopy(dir, xaxis);
     VectorScale(normal, -2.0f, yaxis);
-    VectorAdd(ent->origin, normal, origin);
+    VectorAdd(start, normal, origin);
 
     memset(model_matrix, 0, sizeof(model_matrix));
     model_matrix[0] = xaxis[0];
@@ -3882,6 +3877,7 @@ static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
     model_matrix[5] = yaxis[1];
     model_matrix[6] = yaxis[2];
     model_matrix[10] = 1.0f;
+    VectorAdd(start, normal, origin);
     model_matrix[12] = origin[0];
     model_matrix[13] = origin[1];
     model_matrix[14] = origin[2];
@@ -3889,6 +3885,76 @@ static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
 
     vk_model_mvp(mvp, fd, model_matrix);
     memcpy(push.mvp, mvp, sizeof(push.mvp));
+    memcpy(push.color, color, sizeof(push.color));
+
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+}
+
+#define VK_MIN_LIGHTNING_SEGMENTS   3
+#define VK_MAX_LIGHTNING_SEGMENTS   7
+#define VK_MIN_SEGMENT_LENGTH       16
+
+static void vk_draw_lightning_beam(const vec3_t start, const vec3_t end,
+                                   const refdef_t *fd, const float color[4],
+                                   float width)
+{
+    vec3_t dir, segments[VK_MAX_LIGHTNING_SEGMENTS + 1];
+    vec3_t right, up;
+    vec_t length, segment_length;
+    int num_segments, max_segments;
+
+    VectorSubtract(end, start, dir);
+    length = VectorNormalize(dir);
+    if (length < 0.1f)
+        return;
+
+    max_segments = Q_clip(length / VK_MIN_SEGMENT_LENGTH, 1, VK_MAX_LIGHTNING_SEGMENTS);
+    if (max_segments <= VK_MIN_LIGHTNING_SEGMENTS)
+        num_segments = max_segments;
+    else
+        num_segments = VK_MIN_LIGHTNING_SEGMENTS +
+            Com_SlowRand() % (max_segments - VK_MIN_LIGHTNING_SEGMENTS + 1);
+
+    if (num_segments > 1)
+        MakeNormalVectors(dir, right, up);
+
+    segment_length = length / num_segments;
+    for (int i = 1; i < num_segments; i++) {
+        vec3_t point;
+        float offs;
+
+        VectorMA(start, i * segment_length, dir, point);
+
+        offs = Com_SlowCrand() * (segment_length * 0.35f);
+        VectorMA(point, offs, right, point);
+
+        offs = Com_SlowCrand() * (segment_length * 0.35f);
+        VectorMA(point, offs, up, segments[i]);
+    }
+
+    VectorCopy(start, segments[0]);
+    VectorCopy(end, segments[num_segments]);
+
+    for (int i = 0; i < num_segments; i++)
+        vk_draw_beam_segment(segments[i], segments[i + 1], fd, color, width);
+}
+
+static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
+{
+    if (!vk.beam_pipeline || !vk.sprite_quad.vertices.buffer ||
+        !vk.sprite_quad.indices.buffer || !ent->frame)
+        return;
+
+    color_t color;
+    float push_color[4];
+    float scale = (vk_beamstyle && vk_beamstyle->integer) ? 0.5f : 1.2f;
+    float width = abs((int16_t)ent->frame) * scale;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
 
     if (ent->skinnum == -1)
         color.u32 = ent->rgba.u32;
@@ -3896,18 +3962,17 @@ static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
         color.u32 = d_8to24table[ent->skinnum & 0xff];
     color.u8[3] *= ent->alpha;
 
-    push.color[0] = color.u8[0] / 255.0f;
-    push.color[1] = color.u8[1] / 255.0f;
-    push.color[2] = color.u8[2] / 255.0f;
-    push.color[3] = color.u8[3] / 255.0f;
+    push_color[0] = color.u8[0] / 255.0f;
+    push_color[1] = color.u8[1] / 255.0f;
+    push_color[2] = color.u8[2] / 255.0f;
+    push_color[3] = color.u8[3] / 255.0f;
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.beam_pipeline);
-    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
-    vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
-    vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+
+    if (ent->flags & RF_GLOW)
+        vk_draw_lightning_beam(ent->origin, ent->oldorigin, fd, push_color, width);
+    else
+        vk_draw_beam_segment(ent->origin, ent->oldorigin, fd, push_color, width);
 }
 
 static void vk_draw_entities(const refdef_t *fd)
