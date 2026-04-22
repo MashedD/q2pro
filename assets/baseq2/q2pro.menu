@@ -116,6 +116,7 @@ begin sound
     range "sound latency" s_mixahead 0.05 0.2
     range "sound volume" s_volume 0 1
     range "music volume" ogg_volume 0 1
+    values "HRTF mixing" al_hrtf "off" "default" "on"
     toggle "enable music" ogg_enable
     toggle "shuffle tracks" ogg_shuffle
     toggle "underwater effect" s_underwater

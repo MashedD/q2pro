@@ -204,8 +204,8 @@ int QAL_Init(void)
     ALCint major, minor;
     int i;
 
-    al_device = Cvar_Get("al_device", "", 0);
-    al_hrtf = Cvar_Get("al_hrtf", "0", 0);
+    al_device = Cvar_Get("al_device", "", CVAR_ARCHIVE | CVAR_SOUND);
+    al_hrtf = Cvar_Get("al_hrtf", "0", CVAR_ARCHIVE);
 
 #ifndef QAL_HARD_LINKED
     for (i = 0; i < q_countof(al_drivers); i++) {
