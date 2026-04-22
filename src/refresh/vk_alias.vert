@@ -5,6 +5,7 @@ layout(push_constant) uniform Push {
     vec4 color;
     float backlerp;
     float shellscale;
+    float depthscale;
 } pc;
 
 layout(location = 0) in vec3 in_position;
@@ -24,6 +25,7 @@ void main()
         position += normal * pc.shellscale;
     }
     gl_Position = pc.mvp * vec4(position, 1.0);
+    gl_Position.z *= pc.depthscale;
     v_color = in_color * pc.color;
     v_uv = in_uv;
 }

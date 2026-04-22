@@ -127,6 +127,11 @@ typedef struct {
 } vk_sprite_frame_t;
 
 typedef struct {
+    vec3_t bounds[2];
+    float radius;
+} vk_alias_frame_t;
+
+typedef struct {
     enum {
         VK_MODEL_FREE,
         VK_MODEL_ALIAS,
@@ -135,6 +140,7 @@ typedef struct {
     char name[MAX_QPATH];
     unsigned registration_sequence;
     vk_sprite_frame_t *frames;
+    vk_alias_frame_t *alias_frames;
     int frame_count;
     vk_mesh_t mesh;
     image_t **skins;
@@ -170,6 +176,7 @@ typedef struct {
     float color[4];
     float backlerp;
     float shellscale;
+    float depthscale;
 } vk_alias_push_t;
 
 typedef struct {
@@ -338,6 +345,7 @@ static cvar_t *vk_partstyle;
 static cvar_t *vk_beamstyle;
 static cvar_t *vk_lightgrid;
 static cvar_t *vk_fullbright;
+static cvar_t *vk_cull_models;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_world_cull;
@@ -668,6 +676,10 @@ static void vk_free_model(vk_model_t *model)
         Z_Free(model->frames);
         model->frames = NULL;
     }
+    if (model->alias_frames) {
+        Z_Free(model->alias_frames);
+        model->alias_frames = NULL;
+    }
     if (model->skins) {
         Z_Free(model->skins);
         model->skins = NULL;
@@ -805,6 +817,7 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
     uint16_t *remap = NULL;
     vk_vertex_t *vertices = NULL;
     uint32_t *indices = NULL;
+    vk_alias_frame_t *alias_frames = NULL;
     uint32_t numindices = 0;
     uint32_t numverts = 0;
     qhandle_t handle = 0;
@@ -889,6 +902,7 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
 
     vertices = Z_Malloc(sizeof(*vertices) * numverts * header.num_frames);
     indices = Z_Malloc(sizeof(*indices) * numindices);
+    alias_frames = Z_Mallocz(sizeof(*alias_frames) * header.num_frames);
 
     for (uint32_t i = 0; i < numindices; i++)
         indices[i] = final_indices[i];
@@ -902,6 +916,7 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
 
         LittleVector(src_frame->scale, scale);
         LittleVector(src_frame->translate, translate);
+        ClearBounds(alias_frames[frame].bounds[0], alias_frames[frame].bounds[1]);
 
         for (uint32_t i = 0; i < numindices; i++) {
             if (remap[i] != i)
@@ -913,6 +928,8 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
             dst->position[0] = src_vert->v[0] * scale[0] + translate[0];
             dst->position[1] = src_vert->v[1] * scale[1] + translate[1];
             dst->position[2] = src_vert->v[2] * scale[2] + translate[2];
+            AddPointToBounds(dst->position, alias_frames[frame].bounds[0],
+                             alias_frames[frame].bounds[1]);
             dst->color[0] = 1.0f;
             dst->color[1] = 1.0f;
             dst->color[2] = 1.0f;
@@ -924,6 +941,9 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
             else
                 VectorSet(dst->normal, 0.0f, 0.0f, 1.0f);
         }
+
+        alias_frames[frame].radius = RadiusFromBounds(alias_frames[frame].bounds[0],
+                                                      alias_frames[frame].bounds[1]);
     }
 
     model = vk_alloc_model();
@@ -934,6 +954,8 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
     model->type = VK_MODEL_ALIAS;
     model->registration_sequence = r_registration_sequence;
     model->frame_count = header.num_frames;
+    model->alias_frames = alias_frames;
+    alias_frames = NULL;
     model->vertex_count = numverts;
     model->skin_count = header.num_skins;
     if (model->skin_count)
@@ -971,6 +993,8 @@ out:
         Z_Free(vertices);
     if (indices)
         Z_Free(indices);
+    if (alias_frames)
+        Z_Free(alias_frames);
     return handle;
 }
 
@@ -3186,6 +3210,96 @@ static void vk_model_mvp(mat4_t out, const refdef_t *fd, const mat4_t model)
     vk_matrix_multiply(out, proj, view_model);
 }
 
+static bool vk_cull_box(const vec3_t bounds[2])
+{
+    if (!vk_cull_models || !vk_cull_models->integer)
+        return false;
+
+    for (int i = 0; i < 4; i++) {
+        if (BoxOnPlaneSide(bounds[0], bounds[1], &vk.world.frustum[i]) == BOX_BEHIND)
+            return true;
+    }
+
+    return false;
+}
+
+static bool vk_cull_sphere(const vec3_t origin, float radius)
+{
+    if (!vk_cull_models || !vk_cull_models->integer)
+        return false;
+
+    for (int i = 0; i < 4; i++) {
+        if (PlaneDiff(origin, &vk.world.frustum[i]) < -radius)
+            return true;
+    }
+
+    return false;
+}
+
+static bool vk_cull_local_box(const vec3_t origin, const vec3_t bounds[2],
+                              const vec3_t axis[3])
+{
+    vec3_t points[8];
+
+    if (!vk_cull_models || !vk_cull_models->integer)
+        return false;
+
+    for (int i = 0; i < 8; i++) {
+        VectorCopy(origin, points[i]);
+        VectorMA(points[i], bounds[(i >> 0) & 1][0], axis[0], points[i]);
+        VectorMA(points[i], bounds[(i >> 1) & 1][1], axis[1], points[i]);
+        VectorMA(points[i], bounds[(i >> 2) & 1][2], axis[2], points[i]);
+    }
+
+    for (int i = 0; i < 4; i++) {
+        bool infront = false;
+
+        for (int j = 0; j < 8; j++) {
+            if (PlaneDiff(points[j], &vk.world.frustum[i]) >= 0.0f) {
+                infront = true;
+                break;
+            }
+        }
+        if (!infront)
+            return true;
+    }
+
+    return false;
+}
+
+static bool vk_alias_model_culled(const vk_model_t *model, const entity_t *ent,
+                                  const vec3_t axis[3], uint32_t frame,
+                                  uint32_t oldframe)
+{
+    vec3_t bounds[2];
+
+    if (!model->alias_frames || (ent->flags & RF_WEAPONMODEL))
+        return false;
+
+    if (frame == oldframe) {
+        VectorCopy(model->alias_frames[frame].bounds[0], bounds[0]);
+        VectorCopy(model->alias_frames[frame].bounds[1], bounds[1]);
+    } else {
+        UnionBounds(model->alias_frames[frame].bounds,
+                    model->alias_frames[oldframe].bounds, bounds);
+    }
+
+    if (!VectorEmpty(ent->angles) || (ent->scale && ent->scale != 1.0f)) {
+        float scale = ent->scale ? ent->scale : 1.0f;
+        float radius = frame == oldframe ?
+            model->alias_frames[frame].radius :
+            max(model->alias_frames[frame].radius, model->alias_frames[oldframe].radius);
+
+        if (vk_cull_sphere(ent->origin, radius * scale))
+            return true;
+        return vk_cull_local_box(ent->origin, bounds, axis);
+    }
+
+    VectorAdd(bounds[0], ent->origin, bounds[0]);
+    VectorAdd(bounds[1], ent->origin, bounds[1]);
+    return vk_cull_box(bounds);
+}
+
 static bool vk_create_test_triangle(void)
 {
     static const vk_vertex_t vertices[] = {
@@ -3779,12 +3893,16 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     };
 
     vk_entity_axis(ent, axis);
+    if (vk_alias_model_culled(model, ent, axis, frame, oldframe))
+        return;
+
     vk_entity_mvp(mvp, fd, ent, axis);
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     vk_entity_light_color(ent, fd, push.color);
     push.backlerp = Q_clip(ent->backlerp, 0.0f, 1.0f);
     push.shellscale = (ent->flags & RF_SHELL_MASK) ?
         ((ent->flags & RF_WEAPONMODEL) ? WEAPONSHELL_SCALE : POWERSUIT_SCALE) : 0.0f;
+    push.depthscale = (ent->flags & RF_DEPTHHACK) ? 0.25f : 1.0f;
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, q_countof(buffers), buffers, offsets);
@@ -4487,6 +4605,7 @@ bool VKR_Init(bool total)
     vk_beamstyle = Cvar_Get("gl_beamstyle", "0", 0);
     vk_lightgrid = Cvar_Get("vk_lightgrid", "1", 0);
     vk_fullbright = Cvar_Get("r_fullbright", "0", CVAR_CHEAT);
+    vk_cull_models = Cvar_Get("gl_cull_models", "1", 0);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
@@ -4714,6 +4833,8 @@ void VKR_RenderFrame(const refdef_t *fd)
 {
     if (!fd)
         return;
+
+    vk_setup_world_frustum(fd);
 
     if (!(fd->rdflags & RDF_NOWORLDMODEL))
         vk_draw_skybox(fd);
