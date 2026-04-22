@@ -334,6 +334,7 @@ static cvar_t *vk_drawsky;
 static cvar_t *vk_partscale;
 static cvar_t *vk_partstyle;
 static cvar_t *vk_beamstyle;
+static cvar_t *vk_lightgrid;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_world_cull;
@@ -3975,6 +3976,146 @@ static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
         vk_draw_beam_segment(ent->origin, ent->oldorigin, fd, push_color, width);
 }
 
+static void vk_sample_lightpoint(const lightpoint_t *point, vec3_t color)
+{
+    const mface_t *surf = point->surf;
+    const byte *lightmap = surf->lightmap;
+    int s = point->s;
+    int t = point->t;
+    int smax = surf->lm_width;
+    int tmax = surf->lm_height;
+    int size = smax * tmax * 3;
+    float fracu = point->s - s;
+    float fracv = point->t - t;
+    float w1 = (1.0f - fracu) * (1.0f - fracv);
+    float w2 = fracu * (1.0f - fracv);
+    float w3 = fracu * fracv;
+    float w4 = (1.0f - fracu) * fracv;
+
+    VectorClear(color);
+
+    if (!lightmap || s < 0 || t < 0 || s + 1 >= smax || t + 1 >= tmax)
+        return;
+
+    for (int i = 0; i < surf->numstyles; i++) {
+        const byte *b1 = &lightmap[3 * ((t + 0) * smax + (s + 0))];
+        const byte *b2 = &lightmap[3 * ((t + 0) * smax + (s + 1))];
+        const byte *b3 = &lightmap[3 * ((t + 1) * smax + (s + 1))];
+        const byte *b4 = &lightmap[3 * ((t + 1) * smax + (s + 0))];
+
+        color[0] += w1 * b1[0] + w2 * b2[0] + w3 * b3[0] + w4 * b4[0];
+        color[1] += w1 * b1[1] + w2 * b2[1] + w3 * b3[1] + w4 * b4[1];
+        color[2] += w1 * b1[2] + w2 * b2[2] + w3 * b3[2] + w4 * b4[2];
+
+        lightmap += size;
+    }
+
+    VectorScale(color, 1.0f / 255.0f, color);
+}
+
+static bool vk_lightgrid_point(const lightgrid_t *grid, const vec3_t start, vec3_t color)
+{
+    vec3_t point, avg;
+    uint32_t point_i[3];
+    vec3_t samples[8];
+    int mask = 0;
+    int numsamples = 0;
+
+    if (!grid->numleafs || (vk_lightgrid && !vk_lightgrid->integer))
+        return false;
+
+    point[0] = (start[0] - grid->mins[0]) * grid->scale[0];
+    point[1] = (start[1] - grid->mins[1]) * grid->scale[1];
+    point[2] = (start[2] - grid->mins[2]) * grid->scale[2];
+
+    point_i[0] = point[0];
+    point_i[1] = point[1];
+    point_i[2] = point[2];
+    VectorClear(avg);
+
+    for (int i = 0; i < 8; i++) {
+        uint32_t tmp[3];
+        const lightgrid_sample_t *sample;
+        int j;
+
+        tmp[0] = point_i[0] + ((i >> 0) & 1);
+        tmp[1] = point_i[1] + ((i >> 1) & 1);
+        tmp[2] = point_i[2] + ((i >> 2) & 1);
+
+        sample = BSP_LookupLightgrid(grid, tmp);
+        if (!sample)
+            continue;
+
+        VectorClear(samples[i]);
+        for (j = 0; j < grid->numstyles && sample->style != 255; j++, sample++) {
+            samples[i][0] += sample->rgb[0];
+            samples[i][1] += sample->rgb[1];
+            samples[i][2] += sample->rgb[2];
+        }
+
+        if (j) {
+            mask |= BIT(i);
+            VectorAdd(avg, samples[i], avg);
+            numsamples++;
+        }
+    }
+
+    if (!mask)
+        return false;
+
+    if (mask != 255) {
+        VectorScale(avg, 1.0f / numsamples, avg);
+        for (int i = 0; i < 8; i++) {
+            if (!(mask & BIT(i)))
+                VectorCopy(avg, samples[i]);
+        }
+    }
+
+    float fx = point[0] - point_i[0];
+    float fy = point[1] - point_i[1];
+    float fz = point[2] - point_i[2];
+    vec3_t lerp_x[4];
+    vec3_t lerp_y[2];
+
+    LerpVector2(samples[0], samples[1], 1.0f - fx, fx, lerp_x[0]);
+    LerpVector2(samples[2], samples[3], 1.0f - fx, fx, lerp_x[1]);
+    LerpVector2(samples[4], samples[5], 1.0f - fx, fx, lerp_x[2]);
+    LerpVector2(samples[6], samples[7], 1.0f - fx, fx, lerp_x[3]);
+    LerpVector2(lerp_x[0], lerp_x[1], 1.0f - fy, fy, lerp_y[0]);
+    LerpVector2(lerp_x[2], lerp_x[3], 1.0f - fy, fy, lerp_y[1]);
+    LerpVector2(lerp_y[0], lerp_y[1], 1.0f - fz, fz, color);
+    VectorScale(color, 1.0f / 255.0f, color);
+    return true;
+}
+
+static bool vk_static_light_point(const vec3_t origin, vec3_t light)
+{
+    const bsp_t *bsp = vk.world.cache;
+    lightpoint_t point;
+    vec3_t end;
+
+    if (!bsp)
+        return false;
+
+    if (vk_lightgrid_point(&bsp->lightgrid, origin, light))
+        return true;
+
+    if (!bsp->lightmap)
+        return false;
+
+    end[0] = origin[0];
+    end[1] = origin[1];
+    end[2] = origin[2] - 8192.0f;
+
+    BSP_LightPoint(&point, origin, end, bsp->nodes,
+                   SURF_SKY | SURF_NODRAW | SURF_TRANS_MASK);
+    if (!point.surf)
+        return false;
+
+    vk_sample_lightpoint(&point, light);
+    return true;
+}
+
 static void vk_draw_entities(const refdef_t *fd)
 {
     if (!vk_drawentities || !vk_drawentities->integer)
@@ -4249,6 +4390,7 @@ bool VKR_Init(bool total)
     vk_partscale = Cvar_Get("gl_partscale", "2", 0);
     vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
     vk_beamstyle = Cvar_Get("gl_beamstyle", "0", 0);
+    vk_lightgrid = Cvar_Get("vk_lightgrid", "1", 0);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
@@ -4501,7 +4643,12 @@ void VKR_RenderFrame(const refdef_t *fd)
 
 void VKR_LightPoint(const vec3_t origin, vec3_t light)
 {
-    VectorClear(light);
+    if (!vk_static_light_point(origin, light))
+        VectorSet(light, 1.0f, 1.0f, 1.0f);
+
+    light[0] = Q_clipf(light[0], 0.0f, 1.0f);
+    light[1] = Q_clipf(light[1], 0.0f, 1.0f);
+    light[2] = Q_clipf(light[2], 0.0f, 1.0f);
 }
 
 void VKR_ClearColor(void)
