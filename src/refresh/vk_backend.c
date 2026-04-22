@@ -219,6 +219,7 @@ typedef struct {
     PFN_vkDestroySurfaceKHR DestroySurfaceKHR;
     PFN_vkEnumeratePhysicalDevices EnumeratePhysicalDevices;
     PFN_vkGetPhysicalDeviceProperties GetPhysicalDeviceProperties;
+    PFN_vkGetPhysicalDeviceFeatures GetPhysicalDeviceFeatures;
     PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties;
     PFN_vkGetPhysicalDeviceFormatProperties GetPhysicalDeviceFormatProperties;
     PFN_vkGetPhysicalDeviceQueueFamilyProperties GetPhysicalDeviceQueueFamilyProperties;
@@ -301,6 +302,8 @@ typedef struct {
     VkInstance instance;
     VkSurfaceKHR surface;
     VkPhysicalDevice physical_device;
+    VkPhysicalDeviceProperties physical_device_properties;
+    VkPhysicalDeviceFeatures physical_device_features;
     VkDevice device;
     VkQueue graphics_queue;
     VkQueue present_queue;
@@ -371,6 +374,7 @@ static cvar_t *vk_gl_drawentities;
 static cvar_t *vk_drawsky;
 static cvar_t *vk_gl_drawsky;
 static cvar_t *vk_texturemode;
+static cvar_t *vk_anisotropy;
 static cvar_t *vk_partscale;
 static cvar_t *vk_partstyle;
 static cvar_t *vk_beamstyle;
@@ -1370,6 +1374,7 @@ static bool vk_load_instance(void)
     LOAD(DestroySurfaceKHR);
     LOAD(EnumeratePhysicalDevices);
     LOAD(GetPhysicalDeviceProperties);
+    LOAD(GetPhysicalDeviceFeatures);
     LOAD(GetPhysicalDeviceMemoryProperties);
     LOAD(GetPhysicalDeviceFormatProperties);
     LOAD(GetPhysicalDeviceQueueFamilyProperties);
@@ -1613,9 +1618,12 @@ static bool vk_pick_physical_device(void)
         return false;
     }
 
-    VkPhysicalDeviceProperties props;
-    vk.GetPhysicalDeviceProperties(vk.physical_device, &props);
-    Com_Printf("Using Vulkan device: %s\n", props.deviceName);
+    vk.GetPhysicalDeviceProperties(vk.physical_device,
+                                   &vk.physical_device_properties);
+    vk.GetPhysicalDeviceFeatures(vk.physical_device,
+                                 &vk.physical_device_features);
+    Com_Printf("Using Vulkan device: %s\n",
+               vk.physical_device_properties.deviceName);
     return true;
 }
 
@@ -1625,6 +1633,7 @@ static bool vk_create_device(void)
     VkDeviceQueueCreateInfo queue_infos[2];
     uint32_t queue_info_count = 0;
     const char *extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    VkPhysicalDeviceFeatures features = { 0 };
 
     queue_infos[queue_info_count++] = (VkDeviceQueueCreateInfo) {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -1642,12 +1651,16 @@ static bool vk_create_device(void)
         };
     }
 
+    if (vk.physical_device_features.samplerAnisotropy)
+        features.samplerAnisotropy = VK_TRUE;
+
     VkDeviceCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = queue_info_count,
         .pQueueCreateInfos = queue_infos,
         .enabledExtensionCount = q_countof(extensions),
         .ppEnabledExtensionNames = extensions,
+        .pEnabledFeatures = &features,
     };
 
     VkResult result = vk.CreateDevice(vk.physical_device, &create_info, NULL, &vk.device);
@@ -1698,8 +1711,14 @@ static void vk_texturemode_filters(VkFilter *min_filter, VkFilter *mag_filter)
 static bool vk_create_sampler(VkSampler *sampler)
 {
     VkFilter min_filter, mag_filter;
+    float anisotropy = 1.0f;
 
     vk_texturemode_filters(&min_filter, &mag_filter);
+
+    if (vk_anisotropy && vk.physical_device_features.samplerAnisotropy) {
+        anisotropy = Cvar_ClampValue(vk_anisotropy, 1.0f,
+                                     vk.physical_device_properties.limits.maxSamplerAnisotropy);
+    }
 
     VkSamplerCreateInfo sampler_info = {
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -1709,6 +1728,8 @@ static bool vk_create_sampler(VkSampler *sampler)
         .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
         .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
         .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .anisotropyEnable = anisotropy > 1.0f,
+        .maxAnisotropy = anisotropy,
         .maxLod = 0.0f,
     };
     VkResult result = vk.CreateSampler(vk.device, &sampler_info, NULL, sampler);
@@ -5456,6 +5477,8 @@ bool VKR_Init(bool total)
     vk_texturemode = Cvar_Get("gl_texturemode", "GL_LINEAR_MIPMAP_LINEAR",
                               CVAR_ARCHIVE);
     vk_texturemode->changed = vk_texturemode_changed;
+    vk_anisotropy = Cvar_Get("gl_anisotropy", "1", 0);
+    vk_anisotropy->changed = vk_texturemode_changed;
     vk_partscale = Cvar_Get("gl_partscale", "2", 0);
     vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
     vk_beamstyle = Cvar_Get("gl_beamstyle", "0", 0);
