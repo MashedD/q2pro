@@ -384,6 +384,7 @@ static cvar_t *vk_modulate_world;
 static cvar_t *vk_dynamic;
 static cvar_t *vk_dlight_falloff;
 static cvar_t *vk_brightness;
+static cvar_t *vk_drawworld;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_world_cull;
@@ -5275,6 +5276,7 @@ bool VKR_Init(bool total)
     vk_dynamic = Cvar_Get("gl_dynamic", "1", 0);
     vk_dlight_falloff = Cvar_Get("gl_dlight_falloff", "1", 0);
     vk_brightness = Cvar_Get("gl_brightness", "0", 0);
+    vk_drawworld = Cvar_Get("gl_drawworld", "1", CVAR_CHEAT);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
@@ -5511,10 +5513,13 @@ void VKR_RenderFrame(const refdef_t *fd)
 
     vk_setup_world_frustum(fd);
 
-    if (!(fd->rdflags & RDF_NOWORLDMODEL))
+    bool drawworld = !(fd->rdflags & RDF_NOWORLDMODEL) &&
+        (!vk_drawworld || vk_drawworld->integer);
+
+    if (drawworld)
         vk_draw_skybox(fd);
 
-    if (!(fd->rdflags & RDF_NOWORLDMODEL) && vk.world.mesh.index_count) {
+    if (drawworld && vk.world.mesh.index_count) {
         mat4_t mvp;
 
         vk_world_mvp(mvp, fd);
@@ -5532,7 +5537,7 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk_draw_entities(fd, VK_ENTITY_BMODEL);
     vk_draw_entities(fd, VK_ENTITY_OPAQUE);
     vk_draw_entities(fd, VK_ENTITY_ALPHA_BACK);
-    if (!(fd->rdflags & RDF_NOWORLDMODEL) && vk.world.mesh.index_count &&
+    if (drawworld && vk.world.mesh.index_count &&
         vk_world_textures && vk_world_textures->integer) {
         mat4_t mvp;
 
