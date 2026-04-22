@@ -3,6 +3,7 @@
 layout(push_constant) uniform Push {
     mat4 mvp;
     vec4 color;
+    vec4 shadedir;
     float backlerp;
     float shellscale;
     float depthscale;
@@ -20,12 +21,19 @@ layout(location = 1) out vec2 v_uv;
 void main()
 {
     vec3 position = mix(in_position, in_old_position, pc.backlerp);
+    vec3 normal = normalize(mix(in_normal, in_old_normal, pc.backlerp));
     if (pc.shellscale != 0.0) {
-        vec3 normal = normalize(mix(in_normal, in_old_normal, pc.backlerp));
         position += normal * pc.shellscale;
     }
     gl_Position = pc.mvp * vec4(position, 1.0);
     gl_Position.z *= pc.depthscale;
     v_color = in_color * pc.color;
+    if (pc.shadedir.w != 0.0) {
+        float d = dot(normal, pc.shadedir.xyz);
+        if (d < 0.0) {
+            d *= 0.3;
+        }
+        v_color.rgb *= d + 1.0;
+    }
     v_uv = in_uv;
 }

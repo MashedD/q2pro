@@ -174,6 +174,7 @@ typedef struct {
 typedef struct {
     mat4_t mvp;
     float color[4];
+    float shadedir[4];
     float backlerp;
     float shellscale;
     float depthscale;
@@ -297,6 +298,7 @@ typedef struct {
     VkPipeline sky_pipeline;
     VkPipeline sprite_pipeline;
     VkPipeline alias_pipeline;
+    VkPipeline alias_depth_pipeline;
     VkPipeline alias_blend_pipeline;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
@@ -346,6 +348,7 @@ static cvar_t *vk_beamstyle;
 static cvar_t *vk_lightgrid;
 static cvar_t *vk_fullbright;
 static cvar_t *vk_cull_models;
+static cvar_t *vk_dotshading;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_world_cull;
@@ -1779,6 +1782,11 @@ static void vk_destroy_swapchain(void)
         vk.alias_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.alias_depth_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_depth_pipeline, NULL);
+        vk.alias_depth_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.alias_blend_pipeline) {
         vk.DestroyPipeline(vk.device, vk.alias_blend_pipeline, NULL);
         vk.alias_blend_pipeline = VK_NULL_HANDLE;
@@ -2557,7 +2565,8 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
     return true;
 }
 
-static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write, bool blend)
+static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
+                                     bool blend, bool color_write)
 {
     VkShaderModule vert = vk_create_shader_module(vk_alias_vert_spv,
                                                   sizeof(vk_alias_vert_spv));
@@ -2684,8 +2693,9 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write, boo
         .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .alphaBlendOp = VK_BLEND_OP_ADD,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        .colorWriteMask = color_write ?
+            (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT) : 0,
     };
     VkPipelineColorBlendStateCreateInfo color_blend = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -2858,8 +2868,9 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE) ||
-        !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE) ||
-        !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE) ||
+        !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE) ||
+        !vk_create_alias_pipeline(&vk.alias_depth_pipeline, VK_TRUE, VK_FALSE, VK_FALSE) ||
+        !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE) ||
         !vk_create_depth_resources() ||
         !vk_create_framebuffers())
         return false;
@@ -3857,6 +3868,48 @@ static void vk_entity_light_color(const entity_t *ent, const refdef_t *fd, vec4_
     color[3] = (flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f;
 }
 
+static void vk_alias_shadedir(const entity_t *ent, vec4_t shadedir)
+{
+    float yaw, cy, sy, cp, sp;
+
+    Vector4Clear(shadedir);
+
+    if (!vk_dotshading || !vk_dotshading->integer)
+        return;
+    if (ent->flags & (RF_SHELL_MASK | RF_TRACKER))
+        return;
+
+    yaw = -DEG2RAD(ent->angles[YAW]);
+    cy = cosf(yaw);
+    sy = sinf(yaw);
+    cp = cosf(-M_PIf / 4.0f);
+    sp = sinf(-M_PIf / 4.0f);
+
+    shadedir[0] = cp * cy;
+    shadedir[1] = cp * sy;
+    shadedir[2] = -sp;
+    shadedir[3] = 1.0f;
+}
+
+static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
+                               const VkBuffer buffers[2],
+                               const VkDeviceSize offsets[2],
+                               const vk_model_t *model,
+                               const vk_texture_t *texture,
+                               const vk_alias_push_t *push)
+{
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 2, buffers, offsets);
+    vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.rect_pipeline_layout, 0, 1,
+                             &texture->descriptor_set, 0, NULL);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(*push), push);
+    vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0, 0, 0);
+}
+
 static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 {
     vk_model_t *model = vk_model_for_handle(ent->model);
@@ -3899,21 +3952,17 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     vk_entity_mvp(mvp, fd, ent, axis);
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     vk_entity_light_color(ent, fd, push.color);
+    vk_alias_shadedir(ent, push.shadedir);
     push.backlerp = Q_clip(ent->backlerp, 0.0f, 1.0f);
     push.shellscale = (ent->flags & RF_SHELL_MASK) ?
         ((ent->flags & RF_WEAPONMODEL) ? WEAPONSHELL_SCALE : POWERSUIT_SCALE) : 0.0f;
     push.depthscale = (ent->flags & RF_DEPTHHACK) ? 0.25f : 1.0f;
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vk.CmdBindVertexBuffers(cmd, 0, q_countof(buffers), buffers, offsets);
-    vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                             vk.rect_pipeline_layout, 0, 1,
-                             &texture->descriptor_set, 0, NULL);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
-    vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0, 0, 0);
+    if (translucent && !(ent->flags & RF_FULLBRIGHT) && vk.alias_depth_pipeline)
+        vk_draw_alias_pass(cmd, vk.alias_depth_pipeline, buffers, offsets,
+                           model, texture, &push);
+
+    vk_draw_alias_pass(cmd, pipeline, buffers, offsets, model, texture, &push);
 }
 
 static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
@@ -4606,6 +4655,7 @@ bool VKR_Init(bool total)
     vk_lightgrid = Cvar_Get("vk_lightgrid", "1", 0);
     vk_fullbright = Cvar_Get("r_fullbright", "0", CVAR_CHEAT);
     vk_cull_models = Cvar_Get("gl_cull_models", "1", 0);
+    vk_dotshading = Cvar_Get("gl_dotshading", "1", 0);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
