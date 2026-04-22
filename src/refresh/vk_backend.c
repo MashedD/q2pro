@@ -373,6 +373,7 @@ static cvar_t *vk_drawentities;
 static cvar_t *vk_gl_drawentities;
 static cvar_t *vk_drawsky;
 static cvar_t *vk_gl_drawsky;
+static cvar_t *vk_swapinterval;
 static cvar_t *vk_texturemode;
 static cvar_t *vk_anisotropy;
 static cvar_t *vk_partscale;
@@ -416,6 +417,7 @@ static void vk_entity_axis(const entity_t *ent, vec3_t axis[3]);
 static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
                           const entity_t *ent, const vec3_t axis[3]);
 static bool vk_create_swapchain(int width, int height);
+static bool vk_recreate_swapchain(void);
 static bool vk_create_test_triangle(void);
 static void vk_destroy_mesh(vk_mesh_t *mesh);
 static void vk_free_world(void);
@@ -1762,6 +1764,16 @@ static void vk_texturemode_changed(cvar_t *self)
     vk_update_texture_descriptors();
 }
 
+static void vk_swapinterval_changed(cvar_t *self)
+{
+    (void)self;
+
+    if (!vk.device || !vk.swapchain)
+        return;
+
+    vk_recreate_swapchain();
+}
+
 static bool vk_create_frame_resources(void)
 {
     VkDescriptorSetLayoutBinding sampler_binding = {
@@ -1863,6 +1875,14 @@ static VkSurfaceFormatKHR vk_choose_surface_format(const VkSurfaceFormatKHR *for
 static VkPresentModeKHR vk_choose_present_mode(const VkPresentModeKHR *modes,
                                                uint32_t count)
 {
+    if (!vk_swapinterval || vk_swapinterval->integer)
+        return VK_PRESENT_MODE_FIFO_KHR;
+
+    for (uint32_t i = 0; i < count; i++) {
+        if (modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR)
+            return modes[i];
+    }
+
     for (uint32_t i = 0; i < count; i++) {
         if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR)
             return modes[i];
@@ -5474,6 +5494,8 @@ bool VKR_Init(bool total)
     vk_gl_drawentities = Cvar_Get("gl_drawentities", "1", CVAR_CHEAT);
     vk_drawsky = Cvar_Get("vk_drawsky", "1", 0);
     vk_gl_drawsky = Cvar_Get("gl_drawsky", "1", 0);
+    vk_swapinterval = Cvar_Get("gl_swapinterval", "1", CVAR_ARCHIVE);
+    vk_swapinterval->changed = vk_swapinterval_changed;
     vk_texturemode = Cvar_Get("gl_texturemode", "GL_LINEAR_MIPMAP_LINEAR",
                               CVAR_ARCHIVE);
     vk_texturemode->changed = vk_texturemode_changed;
