@@ -1108,6 +1108,37 @@ static void vk_texture_barrier(VkCommandBuffer cmd, VkImage image,
                           0, 0, NULL, 0, NULL, 1, &barrier);
 }
 
+static void vk_update_texture_descriptor(vk_texture_t *texture)
+{
+    if (!texture->descriptor_set || !texture->view || !vk.sampler)
+        return;
+
+    VkDescriptorImageInfo image_info = {
+        .sampler = vk.sampler,
+        .imageView = texture->view,
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    VkWriteDescriptorSet write = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = texture->descriptor_set,
+        .dstBinding = 0,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo = &image_info,
+    };
+
+    vk.UpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
+}
+
+static void vk_update_texture_descriptors(void)
+{
+    for (uint32_t i = 0; i < MAX_RIMAGES; i++)
+        vk_update_texture_descriptor(&vk.textures[i]);
+
+    vk_update_texture_descriptor(&vk.raw_texture);
+    vk_update_texture_descriptor(&vk.particle_texture);
+}
+
 static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, const void *pixels)
 {
@@ -1215,20 +1246,7 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
         goto fail;
     }
 
-    VkDescriptorImageInfo image_info = {
-        .sampler = vk.sampler,
-        .imageView = texture->view,
-        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-    };
-    VkWriteDescriptorSet write = {
-        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet = texture->descriptor_set,
-        .dstBinding = 0,
-        .descriptorCount = 1,
-        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .pImageInfo = &image_info,
-    };
-    vk.UpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
+    vk_update_texture_descriptor(texture);
 
     texture->width = width;
     texture->height = height;
@@ -1644,6 +1662,85 @@ static bool vk_create_device(void)
     return true;
 }
 
+static void vk_texturemode_filters(VkFilter *min_filter, VkFilter *mag_filter)
+{
+    *min_filter = VK_FILTER_LINEAR;
+    *mag_filter = VK_FILTER_LINEAR;
+
+    if (!vk_texturemode)
+        return;
+
+    const char *mode = vk_texturemode->string;
+
+    if (!Q_stricmp(mode, "GL_NEAREST")) {
+        *min_filter = VK_FILTER_NEAREST;
+        *mag_filter = VK_FILTER_NEAREST;
+    } else if (!Q_stricmp(mode, "GL_LINEAR")) {
+        *min_filter = VK_FILTER_LINEAR;
+        *mag_filter = VK_FILTER_LINEAR;
+    } else if (!Q_stricmp(mode, "GL_NEAREST_MIPMAP_NEAREST") ||
+               !Q_stricmp(mode, "GL_NEAREST_MIPMAP_LINEAR")) {
+        *min_filter = VK_FILTER_NEAREST;
+        *mag_filter = VK_FILTER_NEAREST;
+    } else if (!Q_stricmp(mode, "GL_LINEAR_MIPMAP_NEAREST") ||
+               !Q_stricmp(mode, "GL_LINEAR_MIPMAP_LINEAR")) {
+        *min_filter = VK_FILTER_LINEAR;
+        *mag_filter = VK_FILTER_LINEAR;
+    } else if (!Q_stricmp(mode, "MAG_NEAREST")) {
+        *min_filter = VK_FILTER_LINEAR;
+        *mag_filter = VK_FILTER_NEAREST;
+    } else {
+        Com_WPrintf("Bad texture mode: %s\n", mode);
+        Cvar_Reset(vk_texturemode);
+    }
+}
+
+static bool vk_create_sampler(VkSampler *sampler)
+{
+    VkFilter min_filter, mag_filter;
+
+    vk_texturemode_filters(&min_filter, &mag_filter);
+
+    VkSamplerCreateInfo sampler_info = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = mag_filter,
+        .minFilter = min_filter,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .maxLod = 0.0f,
+    };
+    VkResult result = vk.CreateSampler(vk.device, &sampler_info, NULL, sampler);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateSampler", result);
+
+    return true;
+}
+
+static void vk_texturemode_changed(cvar_t *self)
+{
+    (void)self;
+
+    if (!vk.device || !vk.CreateSampler || !vk.DestroySampler)
+        return;
+
+    VkSampler sampler = VK_NULL_HANDLE;
+    if (!vk_create_sampler(&sampler)) {
+        Com_WPrintf("Couldn't recreate Vulkan sampler: %s\n", Com_GetLastError());
+        return;
+    }
+
+    if (vk.DeviceWaitIdle)
+        vk.DeviceWaitIdle(vk.device);
+
+    if (vk.sampler)
+        vk.DestroySampler(vk.device, vk.sampler, NULL);
+
+    vk.sampler = sampler;
+    vk_update_texture_descriptors();
+}
+
 static bool vk_create_frame_resources(void)
 {
     VkDescriptorSetLayoutBinding sampler_binding = {
@@ -1678,48 +1775,8 @@ static bool vk_create_frame_resources(void)
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreateDescriptorPool", result);
 
-    VkFilter min_filter = VK_FILTER_LINEAR;
-    VkFilter mag_filter = VK_FILTER_LINEAR;
-
-    if (vk_texturemode) {
-        const char *mode = vk_texturemode->string;
-
-        if (!Q_stricmp(mode, "GL_NEAREST")) {
-            min_filter = VK_FILTER_NEAREST;
-            mag_filter = VK_FILTER_NEAREST;
-        } else if (!Q_stricmp(mode, "GL_LINEAR")) {
-            min_filter = VK_FILTER_LINEAR;
-            mag_filter = VK_FILTER_LINEAR;
-        } else if (!Q_stricmp(mode, "GL_NEAREST_MIPMAP_NEAREST") ||
-                   !Q_stricmp(mode, "GL_NEAREST_MIPMAP_LINEAR")) {
-            min_filter = VK_FILTER_NEAREST;
-            mag_filter = VK_FILTER_NEAREST;
-        } else if (!Q_stricmp(mode, "GL_LINEAR_MIPMAP_NEAREST") ||
-                   !Q_stricmp(mode, "GL_LINEAR_MIPMAP_LINEAR")) {
-            min_filter = VK_FILTER_LINEAR;
-            mag_filter = VK_FILTER_LINEAR;
-        } else if (!Q_stricmp(mode, "MAG_NEAREST")) {
-            min_filter = VK_FILTER_LINEAR;
-            mag_filter = VK_FILTER_NEAREST;
-        } else {
-            Com_WPrintf("Bad texture mode: %s\n", mode);
-            Cvar_Reset(vk_texturemode);
-        }
-    }
-
-    VkSamplerCreateInfo sampler_info = {
-        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .magFilter = mag_filter,
-        .minFilter = min_filter,
-        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .maxLod = 0.0f,
-    };
-    result = vk.CreateSampler(vk.device, &sampler_info, NULL, &vk.sampler);
-    if (result != VK_SUCCESS)
-        return vk_fail_result("vkCreateSampler", result);
+    if (!vk_create_sampler(&vk.sampler))
+        return false;
 
     VkPushConstantRange push_range = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -5398,6 +5455,7 @@ bool VKR_Init(bool total)
     vk_gl_drawsky = Cvar_Get("gl_drawsky", "1", 0);
     vk_texturemode = Cvar_Get("gl_texturemode", "GL_LINEAR_MIPMAP_LINEAR",
                               CVAR_ARCHIVE);
+    vk_texturemode->changed = vk_texturemode_changed;
     vk_partscale = Cvar_Get("gl_partscale", "2", 0);
     vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
     vk_beamstyle = Cvar_Get("gl_beamstyle", "0", 0);
