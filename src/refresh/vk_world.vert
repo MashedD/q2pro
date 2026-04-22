@@ -12,12 +12,15 @@ layout(location = 1) in vec4 in_color;
 layout(location = 2) in vec2 in_uv;
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_uv;
+layout(location = 2) flat out float v_mode;
 
 void main()
 {
     vec3 lit = clamp((in_color.rgb + vec3(pc.scroll.w)) * pc.color.rgb + pc.dlight.rgb, 0.0, 1.0);
+    vec3 color = pc.scroll.z > 0.5 && pc.scroll.z < 1.5 ? vec3(1.0) : lit;
 
     gl_Position = pc.mvp * vec4(in_position, 1.0);
-    v_color = vec4(mix(lit, vec3(1.0), pc.scroll.z), in_color.a * pc.color.a);
+    v_color = vec4(color, in_color.a * pc.color.a);
     v_uv = in_uv + pc.scroll.xy;
+    v_mode = pc.scroll.z;
 }

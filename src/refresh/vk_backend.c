@@ -397,6 +397,7 @@ static cvar_t *vk_brightness;
 static cvar_t *vk_drawworld;
 static cvar_t *vk_novis;
 static cvar_t *vk_lockpvs;
+static cvar_t *vk_lightmap;
 static cvar_t *vk_clear;
 static cvar_t *vk_clearcolor;
 static cvar_t *vk_polyblend;
@@ -3890,12 +3891,13 @@ static void vk_world_face_scroll(const mface_t *face, float time, float scroll[4
 
 static void vk_world_light_params(const mface_t *face, float color[4], float scroll[4])
 {
-    bool fullbright = vk_fullbright && vk_fullbright->integer;
+    bool lightmap = vk_lightmap && vk_lightmap->integer;
+    bool fullbright = !lightmap && vk_fullbright && vk_fullbright->integer;
 
     color[0] = 1.0f;
     color[1] = 1.0f;
     color[2] = 1.0f;
-    scroll[2] = fullbright ? 1.0f : 0.0f;
+    scroll[2] = lightmap ? 2.0f : fullbright ? 1.0f : 0.0f;
     scroll[3] = 0.0f;
 
     if (fullbright || (face->drawflags & SURF_COLOR_MASK))
@@ -5523,6 +5525,7 @@ bool VKR_Init(bool total)
     vk_drawworld = Cvar_Get("gl_drawworld", "1", CVAR_CHEAT);
     vk_novis = Cvar_Get("gl_novis", "0", 0);
     vk_lockpvs = Cvar_Get("gl_lockpvs", "0", CVAR_CHEAT);
+    vk_lightmap = Cvar_Get("gl_lightmap", "0", CVAR_CHEAT);
     vk_clear = Cvar_Get("gl_clear", "0", 0);
     vk_clearcolor = Cvar_Get("gl_clearcolor", "black", 0);
     vk_clearcolor->generator = Com_Color_g;
