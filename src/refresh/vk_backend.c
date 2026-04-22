@@ -390,6 +390,7 @@ static cvar_t *vk_novis;
 static cvar_t *vk_lockpvs;
 static cvar_t *vk_clear;
 static cvar_t *vk_clearcolor;
+static cvar_t *vk_polyblend;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_cull_nodes;
@@ -3109,6 +3110,34 @@ static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
     vk.CmdDraw(cmd, 6, 1, 0, 0);
 }
 
+static void vk_blend_rect(int x, int y, int w, int h, const vec4_t color)
+{
+    if (!vk.render_pass_active || !vk.rect_pipeline || w <= 0 || h <= 0 ||
+        color[3] <= 0.0f)
+        return;
+
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    vk_rect_push_t push = {
+        .rect = { x, y, w, h },
+        .color = {
+            Q_clipf(color[0], 0.0f, 1.0f),
+            Q_clipf(color[1], 0.0f, 1.0f),
+            Q_clipf(color[2], 0.0f, 1.0f),
+            Q_clipf(color[3], 0.0f, 1.0f),
+        },
+        .screen = {
+            vk.swapchain_extent.width,
+            vk.swapchain_extent.height,
+        },
+    };
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.rect_pipeline);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDraw(cmd, 6, 1, 0, 0);
+}
+
 static void vk_draw_texture_resource(int x, int y, int w, int h,
                                      float s1, float t1, float s2, float t2,
                                      const vk_texture_t *texture)
@@ -5281,6 +5310,19 @@ static void vk_draw_test_triangle(const refdef_t *fd)
     vk_draw_mesh(&vk.test_triangle, mvp, color);
 }
 
+static void vk_draw_polyblend(const refdef_t *fd)
+{
+    if (!vk_polyblend || !vk_polyblend->integer)
+        return;
+
+    if (fd->screen_blend[3])
+        vk_blend_rect(fd->x, fd->y, fd->width, fd->height, fd->screen_blend);
+
+    if (fd->damage_blend[3]) {
+        vk_blend_rect(fd->x, fd->y, fd->width, fd->height, fd->damage_blend);
+    }
+}
+
 bool VKR_Init(bool total)
 {
     if (!total)
@@ -5315,6 +5357,7 @@ bool VKR_Init(bool total)
     vk_clear = Cvar_Get("gl_clear", "0", 0);
     vk_clearcolor = Cvar_Get("gl_clearcolor", "black", 0);
     vk_clearcolor->generator = Com_Color_g;
+    vk_polyblend = Cvar_Get("gl_polyblend", "1", 0);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_cull_nodes = Cvar_Get("gl_cull_nodes", "1", 0);
@@ -5588,6 +5631,7 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk_draw_particles(fd);
     vk_draw_entities(fd, VK_ENTITY_ALPHA_FRONT);
     vk_draw_test_triangle(fd);
+    vk_draw_polyblend(fd);
 }
 
 void VKR_LightPoint(const vec3_t origin, vec3_t light)
