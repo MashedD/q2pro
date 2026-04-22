@@ -369,6 +369,7 @@ typedef struct {
 
 static vk_state_t vk;
 static cvar_t *vk_show_test_triangle;
+static cvar_t *vk_gl_test;
 static cvar_t *vk_drawentities;
 static cvar_t *vk_gl_drawentities;
 static cvar_t *vk_drawsky;
@@ -5552,8 +5553,11 @@ static void vk_load_world(const char *name)
 
 static void vk_draw_test_triangle(const refdef_t *fd)
 {
+    bool enabled = (vk_show_test_triangle && vk_show_test_triangle->integer) ||
+        (vk_gl_test && vk_gl_test->integer);
+
     if (!vk.render_pass_active || !vk.color3d_pipeline ||
-        !vk_show_test_triangle || !vk_show_test_triangle->integer)
+        !enabled)
         return;
     if (fd->rdflags & RDF_NOWORLDMODEL)
         return;
@@ -5591,6 +5595,7 @@ bool VKR_Init(bool total)
     Com_Printf("Using video driver: %s\n", vid->name);
 
     vk_show_test_triangle = Cvar_Get("vk_show_test_triangle", "0", 0);
+    vk_gl_test = Cvar_Get("gl_test", "0", 0);
     vk_drawentities = Cvar_Get("vk_drawentities", "1", CVAR_CHEAT);
     vk_gl_drawentities = Cvar_Get("gl_drawentities", "1", CVAR_CHEAT);
     vk_drawsky = Cvar_Get("vk_drawsky", "1", 0);
