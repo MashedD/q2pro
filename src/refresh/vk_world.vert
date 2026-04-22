@@ -3,6 +3,7 @@
 layout(push_constant) uniform Push {
     mat4 mvp;
     vec4 color;
+    vec4 scroll;
 } pc;
 
 layout(location = 0) in vec3 in_position;
@@ -15,5 +16,5 @@ void main()
 {
     gl_Position = pc.mvp * vec4(in_position, 1.0);
     v_color = in_color * pc.color;
-    v_uv = in_uv;
+    v_uv = in_uv + pc.scroll.xy;
 }

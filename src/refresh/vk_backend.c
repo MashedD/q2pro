@@ -112,6 +112,12 @@ typedef struct {
     mface_t *face;
 } vk_world_build_face_t;
 
+typedef enum {
+    VK_WORLD_OPAQUE,
+    VK_WORLD_ALPHA,
+    VK_WORLD_ENTITY_ALPHA,
+} vk_world_pass_t;
+
 typedef struct {
     mface_t *face;
     uint32_t first_index;
@@ -170,6 +176,12 @@ typedef struct {
     mat4_t mvp;
     float color[4];
 } vk_color3d_push_t;
+
+typedef struct {
+    mat4_t mvp;
+    float color[4];
+    float scroll[4];
+} vk_world_push_t;
 
 typedef struct {
     mat4_t mvp;
@@ -1645,8 +1657,8 @@ static bool vk_create_frame_resources(void)
     VkPushConstantRange push_range = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
-        .size = max(max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
-                    sizeof(vk_alias_push_t)),
+        .size = max(max(max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
+                        sizeof(vk_world_push_t)), sizeof(vk_alias_push_t)),
     };
     VkPipelineLayoutCreateInfo layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -3426,8 +3438,54 @@ static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float co
     vk.CmdDrawIndexed(cmd, mesh->index_count, 1, 0, 0, 0);
 }
 
+static float vk_world_face_alpha(const mface_t *face)
+{
+    if (face->drawflags & SURF_TRANS33)
+        return 0.33f;
+    if (face->drawflags & SURF_TRANS66)
+        return 0.66f;
+    return 1.0f;
+}
+
+static bool vk_world_face_in_pass(const mface_t *face, vk_world_pass_t pass)
+{
+    bool translucent = face->drawflags & SURF_TRANS_MASK;
+
+    if (pass == VK_WORLD_ENTITY_ALPHA)
+        return true;
+    return pass == VK_WORLD_ALPHA ? translucent : !translucent;
+}
+
+static void vk_world_face_scroll(const mface_t *face, float time, float scroll[4])
+{
+    float speed;
+
+    Vector4Clear(scroll);
+
+    if (!(face->drawflags & (SURF_FLOWING | SURF_N64_SCROLL_X | SURF_N64_SCROLL_Y)))
+        return;
+
+    if (face->drawflags & (SURF_N64_SCROLL_X | SURF_N64_SCROLL_Y))
+        speed = 0.78125f;
+    else if (face->drawflags & SURF_WARP)
+        speed = 0.5f;
+    else
+        speed = 1.6f;
+
+    if (face->drawflags & SURF_N64_SCROLL_FLIP)
+        speed = -speed;
+
+    speed *= time;
+
+    if (face->drawflags & SURF_N64_SCROLL_Y)
+        scroll[1] = speed;
+    else
+        scroll[0] = -speed;
+}
+
 static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
-                               VkPipeline pipeline, float alpha)
+                               VkPipeline pipeline, vk_world_pass_t pass,
+                               float entity_alpha, float time)
 {
     const vk_mesh_t *mesh = &vk.world.mesh;
     bool use_marked = marked_only ||
@@ -3438,12 +3496,13 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         !vk.world.batch_count)
         return;
 
-    vk_color3d_push_t push;
+    vk_world_push_t push;
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     push.color[0] = 1.0f;
     push.color[1] = 1.0f;
     push.color[2] = 1.0f;
-    push.color[3] = alpha;
+    push.color[3] = entity_alpha;
+    Vector4Clear(push.scroll);
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
@@ -3468,17 +3527,19 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                  vk.rect_pipeline_layout, 0, 1,
                                  &texture->descriptor_set, 0, NULL);
 
-        if (!use_marked) {
-            vk.CmdDrawIndexed(cmd, batch->index_count, 1, batch->first_index, 0, 0);
-            continue;
-        }
-
         for (uint32_t j = 0; j < batch->face_count; j++) {
             const vk_world_face_t *face = &vk.world.faces[batch->first_face + j];
 
-            if (face->face->drawframe != vk.world.drawframe)
+            if (use_marked && face->face->drawframe != vk.world.drawframe)
+                continue;
+            if (!vk_world_face_in_pass(face->face, pass))
                 continue;
 
+            push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
+            vk_world_face_scroll(face->face, time, push.scroll);
+            vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                0, sizeof(push), &push);
             vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
         }
     }
@@ -3769,7 +3830,8 @@ static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd)
     vk_mark_bmodel_faces(model, ent, fd, axis, translucent);
     vk_draw_world_mesh(mvp, true,
                        translucent ? vk.sprite_pipeline : vk.world_pipeline,
-                       translucent ? ent->alpha : 1.0f);
+                       translucent ? VK_WORLD_ENTITY_ALPHA : VK_WORLD_OPAQUE,
+                       translucent ? ent->alpha : 1.0f, fd->time);
 }
 
 static vk_model_t *vk_model_for_handle(qhandle_t handle)
@@ -4936,7 +4998,8 @@ void VKR_RenderFrame(const refdef_t *fd)
         if (vk_world_textures && vk_world_textures->integer) {
             if (vk_world_vis && vk_world_vis->integer)
                 vk_mark_world_faces(fd);
-            vk_draw_world_mesh(mvp, false, vk.world_pipeline, 1.0f);
+            vk_draw_world_mesh(mvp, false, vk.world_pipeline, VK_WORLD_OPAQUE,
+                               1.0f, fd->time);
         } else {
             const float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
             vk_draw_mesh(&vk.world.mesh, mvp, color);
@@ -4946,6 +5009,14 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk_draw_entities(fd, VK_ENTITY_BMODEL);
     vk_draw_entities(fd, VK_ENTITY_OPAQUE);
     vk_draw_entities(fd, VK_ENTITY_ALPHA_BACK);
+    if (!(fd->rdflags & RDF_NOWORLDMODEL) && vk.world.mesh.index_count &&
+        vk_world_textures && vk_world_textures->integer) {
+        mat4_t mvp;
+
+        vk_world_mvp(mvp, fd);
+        vk_draw_world_mesh(mvp, false, vk.sprite_pipeline, VK_WORLD_ALPHA,
+                           1.0f, fd->time);
+    }
     vk_draw_entities(fd, VK_ENTITY_BEAM);
     vk_draw_particles(fd);
     vk_draw_entities(fd, VK_ENTITY_ALPHA_FRONT);
