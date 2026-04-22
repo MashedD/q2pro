@@ -109,6 +109,7 @@ typedef struct {
     uint32_t first_vertex;
     uint32_t edge_count;
     uint32_t texture_index;
+    vec3_t center;
     mface_t *face;
 } vk_world_build_face_t;
 
@@ -122,6 +123,7 @@ typedef struct {
     mface_t *face;
     uint32_t first_index;
     uint32_t index_count;
+    vec3_t center;
 } vk_world_face_t;
 
 typedef struct {
@@ -181,6 +183,7 @@ typedef struct {
     mat4_t mvp;
     float color[4];
     float scroll[4];
+    float dlight[4];
 } vk_world_push_t;
 
 typedef struct {
@@ -3506,9 +3509,34 @@ static void vk_world_light_params(const mface_t *face, float color[4], float scr
     scroll[3] = Cvar_ClampValue(vk_brightness, -1.0f, 1.0f);
 }
 
+static void vk_world_dynamic_light(const vk_world_face_t *face,
+                                   const refdef_t *fd, float dlight[4])
+{
+    Vector4Clear(dlight);
+
+    if (!fd || (face->face->drawflags & SURF_COLOR_MASK))
+        return;
+
+    for (int i = 0; i < fd->num_dlights; i++) {
+        const dlight_t *light = &fd->dlights[i];
+        float f = light->intensity - DLIGHT_CUTOFF -
+            Distance(light->origin, face->center);
+
+        if (f <= 0.0f)
+            continue;
+
+        f *= 1.0f / 255.0f;
+        VectorMA(dlight, f, light->color, dlight);
+    }
+
+    dlight[0] = Q_clipf(dlight[0], 0.0f, 1.0f);
+    dlight[1] = Q_clipf(dlight[1], 0.0f, 1.0f);
+    dlight[2] = Q_clipf(dlight[2], 0.0f, 1.0f);
+}
+
 static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                VkPipeline pipeline, vk_world_pass_t pass,
-                               float entity_alpha, float time)
+                               float entity_alpha, const refdef_t *fd)
 {
     const vk_mesh_t *mesh = &vk.world.mesh;
     bool use_marked = marked_only ||
@@ -3526,6 +3554,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     push.color[2] = 1.0f;
     push.color[3] = entity_alpha;
     Vector4Clear(push.scroll);
+    Vector4Clear(push.dlight);
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
@@ -3559,8 +3588,9 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 continue;
 
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
-            vk_world_face_scroll(face->face, time, push.scroll);
+            vk_world_face_scroll(face->face, fd ? fd->time : 0.0f, push.scroll);
             vk_world_light_params(face->face, push.color, push.scroll);
+            vk_world_dynamic_light(face, fd, push.dlight);
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
             vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
                                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -3856,7 +3886,7 @@ static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd)
     vk_draw_world_mesh(mvp, true,
                        translucent ? vk.sprite_pipeline : vk.world_pipeline,
                        translucent ? VK_WORLD_ENTITY_ALPHA : VK_WORLD_OPAQUE,
-                       translucent ? ent->alpha : 1.0f, fd->time);
+                       translucent ? ent->alpha : 1.0f, NULL);
 }
 
 static vk_model_t *vk_model_for_handle(qhandle_t handle)
@@ -4671,6 +4701,9 @@ static bool vk_build_world_mesh(bsp_t *bsp)
         vk_surface_color(face, fallback_color);
         float scale_s = image->width ? 1.0f / image->width : 1.0f;
         float scale_t = image->height ? 1.0f / image->height : 1.0f;
+        vec3_t center;
+
+        VectorClear(center);
 
         for (int j = 0; j < face->numsurfedges; j++) {
             const msurfedge_t *surfedge = face->firstsurfedge + j;
@@ -4679,6 +4712,7 @@ static bool vk_build_world_mesh(bsp_t *bsp)
             float color[4];
 
             VectorCopy(src->point, vertices[v].position);
+            VectorAdd(center, src->point, center);
             vk_surface_vertex_color(bsp, face, src->point, fallback_color, color);
             memcpy(vertices[v].color, color, sizeof(vertices[v].color));
             vertices[v].uv[0] = (DotProduct(src->point, face->texinfo->axis[0]) +
@@ -4688,10 +4722,13 @@ static bool vk_build_world_mesh(bsp_t *bsp)
             v++;
         }
 
+        VectorScale(center, 1.0f / face->numsurfedges, center);
+
         build_faces[face_index++] = (vk_world_build_face_t) {
             .first_vertex = first,
             .edge_count = face->numsurfedges,
             .texture_index = image->texnum,
+            .center = { center[0], center[1], center[2] },
             .face = face,
         };
         texture_index_counts[image->texnum] += (face->numsurfedges - 2) * 3;
@@ -4739,6 +4776,7 @@ static bool vk_build_world_mesh(bsp_t *bsp)
                 .face = face->face,
                 .first_index = first_index,
                 .index_count = face_index_count,
+                .center = { face->center[0], face->center[1], face->center[2] },
             };
             world_batch->face_count++;
         }
@@ -5097,7 +5135,7 @@ void VKR_RenderFrame(const refdef_t *fd)
             if (vk_world_vis && vk_world_vis->integer)
                 vk_mark_world_faces(fd);
             vk_draw_world_mesh(mvp, false, vk.world_pipeline, VK_WORLD_OPAQUE,
-                               1.0f, fd->time);
+                               1.0f, fd);
         } else {
             const float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
             vk_draw_mesh(&vk.world.mesh, mvp, color);
@@ -5113,7 +5151,7 @@ void VKR_RenderFrame(const refdef_t *fd)
 
         vk_world_mvp(mvp, fd);
         vk_draw_world_mesh(mvp, false, vk.sprite_pipeline, VK_WORLD_ALPHA,
-                           1.0f, fd->time);
+                           1.0f, fd);
     }
     vk_draw_entities(fd, VK_ENTITY_BEAM);
     vk_draw_particles(fd);

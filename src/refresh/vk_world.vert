@@ -4,6 +4,7 @@ layout(push_constant) uniform Push {
     mat4 mvp;
     vec4 color;
     vec4 scroll;
+    vec4 dlight;
 } pc;
 
 layout(location = 0) in vec3 in_position;
@@ -14,7 +15,7 @@ layout(location = 1) out vec2 v_uv;
 
 void main()
 {
-    vec3 lit = clamp((in_color.rgb + vec3(pc.scroll.w)) * pc.color.rgb, 0.0, 1.0);
+    vec3 lit = clamp((in_color.rgb + vec3(pc.scroll.w)) * pc.color.rgb + pc.dlight.rgb, 0.0, 1.0);
 
     gl_Position = pc.mvp * vec4(in_position, 1.0);
     v_color = vec4(mix(lit, vec3(1.0), pc.scroll.z), in_color.a * pc.color.a);
