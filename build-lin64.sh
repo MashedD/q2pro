@@ -5,3 +5,5 @@ meson setup build-lin64 --buildtype=release -Dsystem-wide=false -Danticheat-serv
 meson compile -C build-lin64
 sstrip build-lin64/gamex86_64.so
 sstrip build-lin64/q2pro
+
+cp build-lin64/q2pro ../../q2pro-vulkan

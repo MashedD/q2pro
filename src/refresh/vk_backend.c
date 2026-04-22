@@ -379,6 +379,7 @@ static cvar_t *vk_modulate;
 static cvar_t *vk_modulate_entities;
 static cvar_t *vk_doublelight_entities;
 static cvar_t *vk_modulate_world;
+static cvar_t *vk_dynamic;
 static cvar_t *vk_brightness;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
@@ -3690,7 +3691,8 @@ static void vk_world_dynamic_light(const vk_world_face_t *face,
 
     Vector4Clear(dlight);
 
-    if (!fd || (face->face->drawflags & SURF_COLOR_MASK))
+    if (!fd || (vk_dynamic && !vk_dynamic->integer) ||
+        (face->face->drawflags & SURF_COLOR_MASK))
         return;
 
     vk_world_face_center(face, ent, axis, center);
@@ -4111,6 +4113,9 @@ static const image_t *vk_skin_for_model(const vk_model_t *model, const entity_t 
 
 static void vk_add_dynamic_lights(const refdef_t *fd, const vec3_t origin, vec3_t color)
 {
+    if (vk_dynamic && !vk_dynamic->integer)
+        return;
+
     const dlight_t *light = fd->dlights;
 
     for (int i = 0; i < fd->num_dlights; i++, light++) {
@@ -5137,6 +5142,7 @@ bool VKR_Init(bool total)
     vk_modulate_entities = Cvar_Get("gl_modulate_entities", "1", 0);
     vk_doublelight_entities = Cvar_Get("gl_doublelight_entities", "1", 0);
     vk_modulate_world = Cvar_Get("gl_modulate_world", "1", 0);
+    vk_dynamic = Cvar_Get("gl_dynamic", "1", 0);
     vk_brightness = Cvar_Get("gl_brightness", "0", 0);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
