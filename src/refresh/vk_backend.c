@@ -380,6 +380,7 @@ static cvar_t *vk_modulate_entities;
 static cvar_t *vk_doublelight_entities;
 static cvar_t *vk_modulate_world;
 static cvar_t *vk_dynamic;
+static cvar_t *vk_dlight_falloff;
 static cvar_t *vk_brightness;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
@@ -3683,6 +3684,34 @@ static float vk_world_face_light_plane_dist(const mface_t *face, const dlight_t 
     return PlaneDiffFast(local, face->plane);
 }
 
+static float vk_world_dynamic_light_fraction(const dlight_t *light,
+                                             const vec3_t center,
+                                             float plane_dist)
+{
+    float rad = light->intensity - fabsf(plane_dist);
+    float minlight, scale, dist, dist2;
+
+    if (rad < DLIGHT_CUTOFF)
+        return 0.0f;
+
+    if (vk_dlight_falloff && vk_dlight_falloff->integer) {
+        minlight = rad - DLIGHT_CUTOFF * 0.8f;
+        scale = rad / minlight;
+    } else {
+        minlight = rad - DLIGHT_CUTOFF;
+        scale = 1.0f;
+    }
+
+    dist = Distance(light->origin, center);
+    dist2 = dist * dist - plane_dist * plane_dist;
+    dist = dist2 > 0.0f ? sqrtf(dist2) : 0.0f;
+
+    if (dist >= minlight)
+        return 0.0f;
+
+    return rad - dist * scale;
+}
+
 static void vk_world_dynamic_light(const vk_world_face_t *face,
                                    const refdef_t *fd, const entity_t *ent,
                                    const vec3_t axis[3], float dlight[4])
@@ -3703,11 +3732,7 @@ static void vk_world_dynamic_light(const vk_world_face_t *face,
                                                                 ent, axis));
         float f;
 
-        if (plane_dist > light->intensity - DLIGHT_CUTOFF)
-            continue;
-
-        f = light->intensity - DLIGHT_CUTOFF - Distance(light->origin, center);
-
+        f = vk_world_dynamic_light_fraction(light, center, plane_dist);
         if (f <= 0.0f)
             continue;
 
@@ -5143,6 +5168,7 @@ bool VKR_Init(bool total)
     vk_doublelight_entities = Cvar_Get("gl_doublelight_entities", "1", 0);
     vk_modulate_world = Cvar_Get("gl_modulate_world", "1", 0);
     vk_dynamic = Cvar_Get("gl_dynamic", "1", 0);
+    vk_dlight_falloff = Cvar_Get("gl_dlight_falloff", "1", 0);
     vk_brightness = Cvar_Get("gl_brightness", "0", 0);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
