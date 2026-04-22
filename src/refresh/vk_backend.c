@@ -376,6 +376,8 @@ static cvar_t *vk_dotshading;
 static cvar_t *vk_draworder;
 static cvar_t *vk_showorigins;
 static cvar_t *vk_modulate;
+static cvar_t *vk_modulate_entities;
+static cvar_t *vk_doublelight_entities;
 static cvar_t *vk_modulate_world;
 static cvar_t *vk_brightness;
 static cvar_t *vk_world_textures;
@@ -398,7 +400,8 @@ static bool vk_create_test_triangle(void);
 static void vk_destroy_mesh(vk_mesh_t *mesh);
 static void vk_free_world(void);
 static void vk_load_world(const char *name);
-static bool vk_static_light_point(const vec3_t origin, vec3_t light);
+static bool vk_static_light_point(const vec3_t origin, const refdef_t *fd,
+                                  vec3_t light);
 
 static void vk_upload_image(image_t *image, byte *pic)
 {
@@ -4119,6 +4122,12 @@ static void vk_add_dynamic_lights(const refdef_t *fd, const vec3_t origin, vec3_
     }
 }
 
+static float vk_entity_light_modulate(void)
+{
+    return Cvar_ClampValue(vk_modulate, 0.0f, 1e6f) *
+           Cvar_ClampValue(vk_modulate_entities, 0.0f, 1e6f);
+}
+
 static void vk_entity_light_color(const entity_t *ent, const refdef_t *fd, vec4_t color)
 {
     uint64_t flags = ent->flags;
@@ -4148,11 +4157,14 @@ static void vk_entity_light_color(const entity_t *ent, const refdef_t *fd, vec4_
         VectorClear(color);
     } else {
         if ((vk_fullbright && vk_fullbright->integer) ||
-            !vk_static_light_point(ent->origin, color)) {
+            !vk_static_light_point(ent->origin, fd, color)) {
             VectorSet(color, 1.0f, 1.0f, 1.0f);
         }
 
         vk_add_dynamic_lights(fd, ent->origin, color);
+
+        if (vk_doublelight_entities && vk_doublelight_entities->integer)
+            VectorScale(color, vk_entity_light_modulate(), color);
 
         if (flags & RF_MINLIGHT) {
             f = VectorLength(color);
@@ -4570,7 +4582,15 @@ static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
         vk_draw_beam_segment(ent->origin, ent->oldorigin, fd, push_color, width);
 }
 
-static void vk_sample_lightpoint(const lightpoint_t *point, vec3_t color)
+static float vk_lightstyle_value(const refdef_t *fd, byte style)
+{
+    if (!fd || !fd->lightstyles || style >= MAX_LIGHTSTYLES)
+        return 1.0f;
+    return fd->lightstyles[style].white;
+}
+
+static void vk_sample_lightpoint(const lightpoint_t *point, const refdef_t *fd,
+                                 vec3_t color)
 {
     const mface_t *surf = point->surf;
     const byte *lightmap = surf->lightmap;
@@ -4597,17 +4617,20 @@ static void vk_sample_lightpoint(const lightpoint_t *point, vec3_t color)
         const byte *b3 = &lightmap[3 * ((t + 1) * smax + (s + 1))];
         const byte *b4 = &lightmap[3 * ((t + 1) * smax + (s + 0))];
 
-        color[0] += w1 * b1[0] + w2 * b2[0] + w3 * b3[0] + w4 * b4[0];
-        color[1] += w1 * b1[1] + w2 * b2[1] + w3 * b3[1] + w4 * b4[1];
-        color[2] += w1 * b1[2] + w2 * b2[2] + w3 * b3[2] + w4 * b4[2];
+        float style = vk_lightstyle_value(fd, surf->styles[i]);
+
+        color[0] += style * (w1 * b1[0] + w2 * b2[0] + w3 * b3[0] + w4 * b4[0]);
+        color[1] += style * (w1 * b1[1] + w2 * b2[1] + w3 * b3[1] + w4 * b4[1]);
+        color[2] += style * (w1 * b1[2] + w2 * b2[2] + w3 * b3[2] + w4 * b4[2]);
 
         lightmap += size;
     }
 
-    VectorScale(color, 1.0f / 255.0f, color);
+    VectorScale(color, vk_entity_light_modulate() * (1.0f / 255.0f), color);
 }
 
-static bool vk_lightgrid_point(const lightgrid_t *grid, const vec3_t start, vec3_t color)
+static bool vk_lightgrid_point(const lightgrid_t *grid, const vec3_t start,
+                               const refdef_t *fd, vec3_t color)
 {
     vec3_t point, avg;
     uint32_t point_i[3];
@@ -4642,9 +4665,11 @@ static bool vk_lightgrid_point(const lightgrid_t *grid, const vec3_t start, vec3
 
         VectorClear(samples[i]);
         for (j = 0; j < grid->numstyles && sample->style != 255; j++, sample++) {
-            samples[i][0] += sample->rgb[0];
-            samples[i][1] += sample->rgb[1];
-            samples[i][2] += sample->rgb[2];
+            float style = vk_lightstyle_value(fd, sample->style);
+
+            samples[i][0] += style * sample->rgb[0];
+            samples[i][1] += style * sample->rgb[1];
+            samples[i][2] += style * sample->rgb[2];
         }
 
         if (j) {
@@ -4678,11 +4703,12 @@ static bool vk_lightgrid_point(const lightgrid_t *grid, const vec3_t start, vec3
     LerpVector2(lerp_x[0], lerp_x[1], 1.0f - fy, fy, lerp_y[0]);
     LerpVector2(lerp_x[2], lerp_x[3], 1.0f - fy, fy, lerp_y[1]);
     LerpVector2(lerp_y[0], lerp_y[1], 1.0f - fz, fz, color);
-    VectorScale(color, 1.0f / 255.0f, color);
+    VectorScale(color, vk_entity_light_modulate() * (1.0f / 255.0f), color);
     return true;
 }
 
-static bool vk_static_light_point(const vec3_t origin, vec3_t light)
+static bool vk_static_light_point(const vec3_t origin, const refdef_t *fd,
+                                  vec3_t light)
 {
     const bsp_t *bsp = vk.world.cache;
     lightpoint_t point;
@@ -4691,7 +4717,7 @@ static bool vk_static_light_point(const vec3_t origin, vec3_t light)
     if (!bsp)
         return false;
 
-    if (vk_lightgrid_point(&bsp->lightgrid, origin, light))
+    if (vk_lightgrid_point(&bsp->lightgrid, origin, fd, light))
         return true;
 
     if (!bsp->lightmap)
@@ -4706,7 +4732,7 @@ static bool vk_static_light_point(const vec3_t origin, vec3_t light)
     if (!point.surf)
         return false;
 
-    vk_sample_lightpoint(&point, light);
+    vk_sample_lightpoint(&point, fd, light);
     return true;
 }
 
@@ -5108,6 +5134,8 @@ bool VKR_Init(bool total)
     vk_draworder = Cvar_Get("gl_draworder", "1", 0);
     vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
     vk_modulate = Cvar_Get("gl_modulate", "1", CVAR_ARCHIVE);
+    vk_modulate_entities = Cvar_Get("gl_modulate_entities", "1", 0);
+    vk_doublelight_entities = Cvar_Get("gl_doublelight_entities", "1", 0);
     vk_modulate_world = Cvar_Get("gl_modulate_world", "1", 0);
     vk_brightness = Cvar_Get("gl_brightness", "0", 0);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
@@ -5380,7 +5408,7 @@ void VKR_RenderFrame(const refdef_t *fd)
 
 void VKR_LightPoint(const vec3_t origin, vec3_t light)
 {
-    if (!vk_static_light_point(origin, light))
+    if (!vk_static_light_point(origin, NULL, light))
         VectorSet(light, 1.0f, 1.0f, 1.0f);
 
     light[0] = Q_clipf(light[0], 0.0f, 1.0f);
