@@ -58,6 +58,10 @@ static const uint32_t vk_world_frag_spv[] =
 #include "vk_world_frag_spv.h"
 ;
 
+static const uint32_t vk_world_alpha_frag_spv[] =
+#include "vk_world_alpha_frag_spv.h"
+;
+
 static const uint32_t vk_alias_vert_spv[] =
 #include "vk_alias_vert_spv.h"
 ;
@@ -310,6 +314,7 @@ typedef struct {
     VkPipeline color3d_pipeline;
     VkPipeline beam_pipeline;
     VkPipeline world_pipeline;
+    VkPipeline world_alpha_pipeline;
     VkPipeline sky_pipeline;
     VkPipeline sprite_pipeline;
     VkPipeline alias_pipeline;
@@ -1786,6 +1791,11 @@ static void vk_destroy_swapchain(void)
         vk.world_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.world_alpha_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.world_alpha_pipeline, NULL);
+        vk.world_alpha_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.sky_pipeline) {
         vk.DestroyPipeline(vk.device, vk.sky_pipeline, NULL);
         vk.sky_pipeline = VK_NULL_HANDLE;
@@ -2439,15 +2449,19 @@ static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_write, b
 }
 
 static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
-                                     bool depth_write, bool blend)
+                                     bool depth_write, bool blend,
+                                     bool alpha_test)
 {
     VkShaderModule vert = vk_create_shader_module(vk_world_vert_spv,
                                                   sizeof(vk_world_vert_spv));
     if (!vert)
         return false;
 
-    VkShaderModule frag = vk_create_shader_module(vk_world_frag_spv,
-                                                  sizeof(vk_world_frag_spv));
+    VkShaderModule frag = alpha_test ?
+        vk_create_shader_module(vk_world_alpha_frag_spv,
+                                sizeof(vk_world_alpha_frag_spv)) :
+        vk_create_shader_module(vk_world_frag_spv,
+                                sizeof(vk_world_frag_spv));
     if (!frag) {
         vk.DestroyShaderModule(vk.device, vert, NULL);
         return false;
@@ -2884,9 +2898,10 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_texture_pipeline() ||
         !vk_create_color3d_pipeline(&vk.color3d_pipeline, VK_TRUE, VK_FALSE) ||
         !vk_create_color3d_pipeline(&vk.beam_pipeline, VK_FALSE, VK_TRUE) ||
-        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
         !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE) ||
         !vk_create_alias_pipeline(&vk.alias_depth_pipeline, VK_TRUE, VK_FALSE, VK_FALSE) ||
         !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE) ||
@@ -3462,6 +3477,17 @@ static bool vk_world_face_in_pass(const mface_t *face, vk_world_pass_t pass)
     return pass == VK_WORLD_ALPHA ? translucent : !translucent;
 }
 
+static VkPipeline vk_world_face_pipeline(const mface_t *face, VkPipeline pipeline,
+                                         vk_world_pass_t pass)
+{
+    if (pass == VK_WORLD_OPAQUE && (face->drawflags & SURF_ALPHATEST) &&
+        vk.world_alpha_pipeline) {
+        return vk.world_alpha_pipeline;
+    }
+
+    return pipeline;
+}
+
 static void vk_world_face_scroll(const mface_t *face, float time, float scroll[4])
 {
     float speed;
@@ -3623,11 +3649,16 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
 
         for (uint32_t j = 0; j < batch->face_count; j++) {
             const vk_world_face_t *face = &vk.world.faces[batch->first_face + j];
+            VkPipeline face_pipeline;
 
             if (use_marked && face->face->drawframe != vk.world.drawframe)
                 continue;
             if (!vk_world_face_in_pass(face->face, pass))
                 continue;
+
+            face_pipeline = vk_world_face_pipeline(face->face, pipeline, pass);
+            if (face_pipeline != pipeline)
+                vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, face_pipeline);
 
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
             vk_world_face_scroll(face->face, fd ? fd->time : 0.0f, push.scroll);
@@ -3638,6 +3669,9 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                 0, sizeof(push), &push);
             vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
+
+            if (face_pipeline != pipeline)
+                vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         }
     }
 }
