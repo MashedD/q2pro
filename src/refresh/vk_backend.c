@@ -319,6 +319,7 @@ typedef struct {
     VkPipeline sky_pipeline;
     VkPipeline sprite_pipeline;
     VkPipeline sprite_alpha_pipeline;
+    VkPipeline particle_add_pipeline;
     VkPipeline alias_pipeline;
     VkPipeline alias_alpha_pipeline;
     VkPipeline alias_depth_pipeline;
@@ -1829,6 +1830,11 @@ static void vk_destroy_swapchain(void)
         vk.sprite_alpha_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.particle_add_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.particle_add_pipeline, NULL);
+        vk.particle_add_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.alias_pipeline) {
         vk.DestroyPipeline(vk.device, vk.alias_pipeline, NULL);
         vk.alias_pipeline = VK_NULL_HANDLE;
@@ -2479,7 +2485,7 @@ static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_write,
 
 static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
                                      bool depth_write, bool blend,
-                                     bool alpha_test)
+                                     bool alpha_test, bool additive)
 {
     VkShaderModule vert = vk_create_shader_module(vk_world_vert_spv,
                                                   sizeof(vk_world_vert_spv));
@@ -2579,10 +2585,12 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
     VkPipelineColorBlendAttachmentState color_blend_attachment = {
         .blendEnable = blend,
         .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
-        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .dstColorBlendFactor = additive ?
+            VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .colorBlendOp = VK_BLEND_OP_ADD,
         .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .dstAlphaBlendFactor = additive ?
+            VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .alphaBlendOp = VK_BLEND_OP_ADD,
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
@@ -2935,11 +2943,12 @@ static bool vk_create_swapchain(int width, int height)
                                     VK_PRIMITIVE_TOPOLOGY_LINE_LIST) ||
         !vk_create_color3d_pipeline(&vk.beam_pipeline, VK_FALSE, VK_TRUE,
                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
-        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE) ||
-        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.particle_add_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE) ||
         !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
         !vk_create_alias_pipeline(&vk.alias_alpha_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE) ||
         !vk_create_alias_pipeline(&vk.alias_depth_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
@@ -4414,12 +4423,14 @@ static void vk_draw_particles(const refdef_t *fd)
         return;
 
     vec3_t viewaxis[3];
+    VkPipeline pipeline = (vk_partstyle && vk_partstyle->integer &&
+        vk.particle_add_pipeline) ? vk.particle_add_pipeline : vk.sprite_pipeline;
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
 
     AnglesToAxis(fd->viewangles, viewaxis);
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sprite_pipeline);
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
