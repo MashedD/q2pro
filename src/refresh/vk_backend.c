@@ -389,6 +389,7 @@ static cvar_t *vk_novis;
 static cvar_t *vk_lockpvs;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
+static cvar_t *vk_cull_nodes;
 static cvar_t *vk_world_cull;
 
 static bool vk_upload_texture(image_t *image, byte *pic);
@@ -4090,7 +4091,8 @@ static void vk_mark_world_faces(const refdef_t *fd)
     vk_mark_world_visible_nodes(fd);
     vk_setup_world_frustum(fd);
 
-    clipflags = (vk_world_cull && vk_world_cull->integer) ?
+    clipflags = (!vk_cull_nodes || vk_cull_nodes->integer) &&
+        (!vk_world_cull || vk_world_cull->integer) ?
         VK_NODE_CLIPPED : VK_NODE_UNCLIPPED;
     vk_mark_world_node_faces(bsp->nodes, fd, clipflags);
 }
@@ -5286,6 +5288,7 @@ bool VKR_Init(bool total)
     vk_lockpvs = Cvar_Get("gl_lockpvs", "0", CVAR_CHEAT);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
+    vk_cull_nodes = Cvar_Get("gl_cull_nodes", "1", 0);
     vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
 
     if (!vid->init())
