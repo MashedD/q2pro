@@ -3509,18 +3509,59 @@ static void vk_world_light_params(const mface_t *face, float color[4], float scr
     scroll[3] = Cvar_ClampValue(vk_brightness, -1.0f, 1.0f);
 }
 
-static void vk_world_dynamic_light(const vk_world_face_t *face,
-                                   const refdef_t *fd, float dlight[4])
+static void vk_world_face_center(const vk_world_face_t *face, const entity_t *ent,
+                                 const vec3_t axis[3], vec3_t center)
 {
+    if (!ent || !axis) {
+        VectorCopy(face->center, center);
+        return;
+    }
+
+    VectorCopy(ent->origin, center);
+    VectorMA(center, face->center[0], axis[0], center);
+    VectorMA(center, face->center[1], axis[1], center);
+    VectorMA(center, face->center[2], axis[2], center);
+}
+
+static float vk_world_face_light_plane_dist(const mface_t *face, const dlight_t *light,
+                                            const entity_t *ent, const vec3_t axis[3])
+{
+    if (!ent || !axis)
+        return PlaneDiffFast(light->origin, face->plane);
+
+    vec3_t local;
+    vec3_t delta;
+
+    VectorSubtract(light->origin, ent->origin, delta);
+    local[0] = DotProduct(delta, axis[0]) / DotProduct(axis[0], axis[0]);
+    local[1] = DotProduct(delta, axis[1]) / DotProduct(axis[1], axis[1]);
+    local[2] = DotProduct(delta, axis[2]) / DotProduct(axis[2], axis[2]);
+    return PlaneDiffFast(local, face->plane);
+}
+
+static void vk_world_dynamic_light(const vk_world_face_t *face,
+                                   const refdef_t *fd, const entity_t *ent,
+                                   const vec3_t axis[3], float dlight[4])
+{
+    vec3_t center;
+
     Vector4Clear(dlight);
 
     if (!fd || (face->face->drawflags & SURF_COLOR_MASK))
         return;
 
+    vk_world_face_center(face, ent, axis, center);
+
     for (int i = 0; i < fd->num_dlights; i++) {
         const dlight_t *light = &fd->dlights[i];
-        float f = light->intensity - DLIGHT_CUTOFF -
-            Distance(light->origin, face->center);
+        float plane_dist = fabsf(vk_world_face_light_plane_dist(face->face, light,
+                                                                ent, axis));
+        float f;
+
+        if (plane_dist > light->intensity - DLIGHT_CUTOFF)
+            continue;
+
+        f = light->intensity - DLIGHT_CUTOFF - Distance(light->origin, center);
 
         if (f <= 0.0f)
             continue;
@@ -3536,7 +3577,8 @@ static void vk_world_dynamic_light(const vk_world_face_t *face,
 
 static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                VkPipeline pipeline, vk_world_pass_t pass,
-                               float entity_alpha, const refdef_t *fd)
+                               float entity_alpha, const refdef_t *fd,
+                               const entity_t *ent, const vec3_t axis[3])
 {
     const vk_mesh_t *mesh = &vk.world.mesh;
     bool use_marked = marked_only ||
@@ -3590,7 +3632,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
             vk_world_face_scroll(face->face, fd ? fd->time : 0.0f, push.scroll);
             vk_world_light_params(face->face, push.color, push.scroll);
-            vk_world_dynamic_light(face, fd, push.dlight);
+            vk_world_dynamic_light(face, fd, ent, axis, push.dlight);
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
             vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
                                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -3886,7 +3928,7 @@ static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd)
     vk_draw_world_mesh(mvp, true,
                        translucent ? vk.sprite_pipeline : vk.world_pipeline,
                        translucent ? VK_WORLD_ENTITY_ALPHA : VK_WORLD_OPAQUE,
-                       translucent ? ent->alpha : 1.0f, NULL);
+                       translucent ? ent->alpha : 1.0f, fd, ent, axis);
 }
 
 static vk_model_t *vk_model_for_handle(qhandle_t handle)
@@ -5135,7 +5177,7 @@ void VKR_RenderFrame(const refdef_t *fd)
             if (vk_world_vis && vk_world_vis->integer)
                 vk_mark_world_faces(fd);
             vk_draw_world_mesh(mvp, false, vk.world_pipeline, VK_WORLD_OPAQUE,
-                               1.0f, fd);
+                               1.0f, fd, NULL, NULL);
         } else {
             const float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
             vk_draw_mesh(&vk.world.mesh, mvp, color);
@@ -5151,7 +5193,7 @@ void VKR_RenderFrame(const refdef_t *fd)
 
         vk_world_mvp(mvp, fd);
         vk_draw_world_mesh(mvp, false, vk.sprite_pipeline, VK_WORLD_ALPHA,
-                           1.0f, fd);
+                           1.0f, fd, NULL, NULL);
     }
     vk_draw_entities(fd, VK_ENTITY_BEAM);
     vk_draw_particles(fd);
