@@ -3242,6 +3242,16 @@ static VkClearColorValue vk_frame_clear_color(void)
     return vk_color_to_clear(color.u32);
 }
 
+static int vk_2d_width(void)
+{
+    return r_config.width > 0 ? r_config.width : (int)vk.swapchain_extent.width;
+}
+
+static int vk_2d_height(void)
+{
+    return r_config.height > 0 ? r_config.height : (int)vk.swapchain_extent.height;
+}
+
 static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
 {
     if (!vk.render_pass_active || !vk.rect_pipeline || w <= 0 || h <= 0)
@@ -3265,8 +3275,10 @@ static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
             return;
     }
 
-    int x2 = min(x + w, (int)vk.swapchain_extent.width);
-    int y2 = min(y + h, (int)vk.swapchain_extent.height);
+    int screen_w = vk_2d_width();
+    int screen_h = vk_2d_height();
+    int x2 = min(x + w, screen_w);
+    int y2 = min(y + h, screen_h);
     x = max(x, 0);
     y = max(y, 0);
     w = x2 - x;
@@ -3284,8 +3296,8 @@ static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
             clear.float32[3],
         },
         .screen = {
-            vk.swapchain_extent.width,
-            vk.swapchain_extent.height,
+            screen_w,
+            screen_h,
         },
     };
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
@@ -3304,6 +3316,8 @@ static void vk_blend_rect(int x, int y, int w, int h, const vec4_t color)
         return;
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    int screen_w = vk_2d_width();
+    int screen_h = vk_2d_height();
     vk_rect_push_t push = {
         .rect = { x, y, w, h },
         .color = {
@@ -3313,8 +3327,8 @@ static void vk_blend_rect(int x, int y, int w, int h, const vec4_t color)
             Q_clipf(color[3], 0.0f, 1.0f),
         },
         .screen = {
-            vk.swapchain_extent.width,
-            vk.swapchain_extent.height,
+            screen_w,
+            screen_h,
         },
     };
 
@@ -3359,7 +3373,7 @@ static void vk_draw_tearing(void)
     scale = vk.scale;
     vk.clip_set = false;
     vk.scale = 1.0f;
-    vk_clear_rect(0, 0, vk.swapchain_extent.width, vk.swapchain_extent.height,
+    vk_clear_rect(0, 0, vk_2d_width(), vk_2d_height(),
                   (++frame & 1) ? U32_WHITE : MakeColor(255, 0, 0, 255));
     vk.scale = scale;
     vk.clip_set = clip_set;
@@ -3407,8 +3421,10 @@ static void vk_draw_texture_resource(int x, int y, int w, int h,
         h = ny2 - ny1;
     }
 
-    int x2i = min(x + w, (int)vk.swapchain_extent.width);
-    int y2i = min(y + h, (int)vk.swapchain_extent.height);
+    int screen_w = vk_2d_width();
+    int screen_h = vk_2d_height();
+    int x2i = min(x + w, screen_w);
+    int y2i = min(y + h, screen_h);
     int nx = max(x, 0);
     int ny = max(y, 0);
     if (x2i <= nx || y2i <= ny)
@@ -3435,8 +3451,8 @@ static void vk_draw_texture_resource(int x, int y, int w, int h,
             c.u8[3] / 255.0f,
         },
         .screen = {
-            vk.swapchain_extent.width,
-            vk.swapchain_extent.height,
+            screen_w,
+            screen_h,
         },
         .uv = { s1, t1, s2, t2 },
     };
@@ -4407,7 +4423,7 @@ static void vk_mark_world_node_faces(const mnode_t *node, const refdef_t *fd, in
     if (!node)
         return;
 
-    while (node->visframe == vk.world.visframe) {
+    while (node && node->visframe == vk.world.visframe) {
         int side;
         vec_t dot;
 
@@ -4422,7 +4438,8 @@ static void vk_mark_world_node_faces(const mnode_t *node, const refdef_t *fd, in
         dot = PlaneDiffFast(fd->vieworg, node->plane);
         side = dot < 0;
 
-        vk_mark_world_node_faces(node->children[side], fd, clipflags);
+        if (node->children[side])
+            vk_mark_world_node_faces(node->children[side], fd, clipflags);
 
         node = node->children[side ^ 1];
     }
@@ -6275,7 +6292,7 @@ void VKR_DrawKeepAspectPic(int x, int y, int w, int h, qhandle_t pic)
     float s = (1.0f - scale_w / scale) * 0.5f;
     float t = (1.0f - scale_h / scale) * 0.5f;
 
-    vk_draw_texture_rect(x, y, w, h, s, t, 1.0f - s, 1.0f - t, pic);
+    vk_draw_texture_rect(x, y, w, h, s, 1.0f - t, 1.0f - s, t, pic);
 }
 
 void VKR_DrawStretchRaw(int x, int y, int w, int h)
