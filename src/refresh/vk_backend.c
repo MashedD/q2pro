@@ -6263,8 +6263,6 @@ void VKR_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
 
     float s = (ch & 15) * 0.0625f;
     float t = ((ch & 255) >> 4) * 0.0625f;
-    float t1 = 1.0f - (t + 0.0625f);
-    float t2 = 1.0f - t;
 
     if ((flags & UI_DROPSHADOW) && ch != 0x83) {
         color_t saved = vk.color;
@@ -6274,10 +6272,10 @@ void VKR_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
         vk.color.u32 = MakeColor(0, 0, 0, alpha);
         vk.color_set = true;
         vk_draw_texture_rect(x + 1, y + 1, CONCHAR_WIDTH, CONCHAR_HEIGHT,
-                             s, t1, s + 0.0625f, t2, font);
+                             s, t, s + 0.0625f, t + 0.0625f, font);
         if (vk_fontshadow && vk_fontshadow->integer > 1) {
             vk_draw_texture_rect(x + 2, y + 2, CONCHAR_WIDTH, CONCHAR_HEIGHT,
-                                 s, t1, s + 0.0625f, t2, font);
+                                 s, t, s + 0.0625f, t + 0.0625f, font);
         }
 
         vk.color = saved;
@@ -6285,7 +6283,7 @@ void VKR_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
     }
 
     vk_draw_texture_rect(x, y, CONCHAR_WIDTH, CONCHAR_HEIGHT,
-                         s, t1, s + 0.0625f, t2, font);
+                         s, t, s + 0.0625f, t + 0.0625f, font);
 }
 
 int VKR_DrawString(int x, int y, int flags, size_t max_chars,
