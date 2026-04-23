@@ -312,6 +312,7 @@ typedef struct {
     VkDescriptorSetLayout texture_set_layout;
     VkDescriptorPool descriptor_pool;
     VkSampler sampler;
+    VkSampler nearest_sampler;
     VkPipelineLayout rect_pipeline_layout;
     VkPipeline rect_pipeline;
     VkPipeline texture_pipeline;
@@ -1152,13 +1153,14 @@ static void vk_texture_barrier(VkCommandBuffer cmd, VkImage image,
                           0, 0, NULL, 0, NULL, 1, &barrier);
 }
 
-static void vk_update_texture_descriptor(vk_texture_t *texture)
+static void vk_update_texture_descriptor_with_sampler(vk_texture_t *texture,
+                                                      VkSampler sampler)
 {
-    if (!texture->descriptor_set || !texture->view || !vk.sampler)
+    if (!texture->descriptor_set || !texture->view || !sampler)
         return;
 
     VkDescriptorImageInfo image_info = {
-        .sampler = vk.sampler,
+        .sampler = sampler,
         .imageView = texture->view,
         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
     };
@@ -1174,10 +1176,19 @@ static void vk_update_texture_descriptor(vk_texture_t *texture)
     vk.UpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
 }
 
+static void vk_update_texture_descriptor(vk_texture_t *texture)
+{
+    vk_update_texture_descriptor_with_sampler(texture, vk.sampler);
+}
+
 static void vk_update_texture_descriptors(void)
 {
-    for (uint32_t i = 0; i < MAX_RIMAGES; i++)
-        vk_update_texture_descriptor(&vk.textures[i]);
+    for (uint32_t i = 0; i < MAX_RIMAGES; i++) {
+        VkSampler sampler = (i < (uint32_t)r_numImages &&
+                             r_images[i].type == IT_FONT &&
+                             vk.nearest_sampler) ? vk.nearest_sampler : vk.sampler;
+        vk_update_texture_descriptor_with_sampler(&vk.textures[i], sampler);
+    }
 
     vk_update_texture_descriptor(&vk.raw_texture);
     vk_update_texture_descriptor(&vk.particle_texture);
@@ -1338,6 +1349,8 @@ static bool vk_upload_texture(image_t *image, byte *pic)
     image->sh = 1;
     image->tl = 0;
     image->th = 1;
+    if (image->type == IT_FONT && vk.nearest_sampler)
+        vk_update_texture_descriptor_with_sampler(texture, vk.nearest_sampler);
 
     return true;
 }
@@ -1786,6 +1799,25 @@ static bool vk_create_sampler(VkSampler *sampler)
     return true;
 }
 
+static bool vk_create_nearest_sampler(VkSampler *sampler)
+{
+    VkSamplerCreateInfo sampler_info = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_NEAREST,
+        .minFilter = VK_FILTER_NEAREST,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .maxLod = 0.0f,
+    };
+    VkResult result = vk.CreateSampler(vk.device, &sampler_info, NULL, sampler);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateSampler", result);
+
+    return true;
+}
+
 static void vk_texturemode_changed(cvar_t *self)
 {
     (void)self;
@@ -1855,6 +1887,8 @@ static bool vk_create_frame_resources(void)
         return vk_fail_result("vkCreateDescriptorPool", result);
 
     if (!vk_create_sampler(&vk.sampler))
+        return false;
+    if (!vk_create_nearest_sampler(&vk.nearest_sampler))
         return false;
 
     VkPushConstantRange push_range = {
@@ -5965,6 +5999,10 @@ void VKR_Shutdown(bool total)
     if (vk.sampler) {
         vk.DestroySampler(vk.device, vk.sampler, NULL);
         vk.sampler = VK_NULL_HANDLE;
+    }
+    if (vk.nearest_sampler) {
+        vk.DestroySampler(vk.device, vk.nearest_sampler, NULL);
+        vk.nearest_sampler = VK_NULL_HANDLE;
     }
 
     if (vk.descriptor_pool) {
