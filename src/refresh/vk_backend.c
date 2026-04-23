@@ -4197,7 +4197,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
 
     if (!vk.render_pass_active || !pipeline ||
         !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count ||
-        !vk.world.batch_count)
+        !vk.world.batch_count || !vk.world.batches || !vk.world.faces)
         return;
 
     vk_world_push_t push;
@@ -4232,10 +4232,16 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                  vk.rect_pipeline_layout, 0, 1,
                                  &texture->descriptor_set, 0, NULL);
 
+        if (batch->first_face > vk.world.face_count ||
+            batch->face_count > vk.world.face_count - batch->first_face)
+            continue;
+
         for (uint32_t j = 0; j < batch->face_count; j++) {
             const vk_world_face_t *face = &vk.world.faces[batch->first_face + j];
             VkPipeline face_pipeline;
 
+            if (!face->face || !face->face->texinfo || !face->face->plane)
+                continue;
             if (use_marked && face->face->drawframe != vk.world.drawframe)
                 continue;
             if (!vk_world_face_in_pass(face->face, pass))
@@ -4387,8 +4393,10 @@ static void vk_mark_world_leaf(const mleaf_t *leaf, const refdef_t *fd)
     if (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area))
         return;
 
-    for (int i = 0; i < leaf->numleaffaces; i++)
-        leaf->firstleafface[i]->drawframe = vk.world.drawframe;
+    for (int i = 0; i < leaf->numleaffaces; i++) {
+        if (leaf->firstleafface[i])
+            leaf->firstleafface[i]->drawframe = vk.world.drawframe;
+    }
 }
 
 static void vk_mark_world_visible_nodes(const refdef_t *fd)
@@ -4408,6 +4416,8 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
     vk.world.visframe++;
 
     leaf = BSP_PointLeaf(bsp->nodes, fd->vieworg);
+    if (!leaf)
+        return;
     cluster1 = cluster2 = leaf->cluster;
     VectorCopy(fd->vieworg, tmp);
     if (!leaf->contents[0])
@@ -4415,6 +4425,8 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
     else
         tmp[2] += 16;
     leaf = BSP_PointLeaf(bsp->nodes, tmp);
+    if (!leaf)
+        return;
     if (!(leaf->contents[0] & CONTENTS_SOLID))
         cluster2 = leaf->cluster;
 
@@ -4518,6 +4530,8 @@ static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
         mface_t *face = model->firstface + i;
         vec_t dot;
 
+        if (!face->texinfo || !face->plane)
+            continue;
         if (face->drawflags & (SURF_SKY | SURF_NODRAW))
             continue;
         if (!translucent && (face->drawflags & SURF_TRANS_MASK))
@@ -5569,16 +5583,57 @@ static bool vk_face_is_drawable(mface_t *face)
     return true;
 }
 
+static bool vk_face_edges_are_valid(const bsp_t *bsp, const mface_t *face)
+{
+    if (!bsp || !face || !face->firstsurfedge || !bsp->surfedges ||
+        !bsp->edges || !bsp->vertices || bsp->numsurfedges <= 0 ||
+        bsp->numedges <= 0 || bsp->numvertices <= 0)
+        return false;
+
+    uintptr_t surfedges_begin = (uintptr_t)bsp->surfedges;
+    uintptr_t surfedges_end = surfedges_begin +
+        sizeof(*bsp->surfedges) * (uintptr_t)bsp->numsurfedges;
+    uintptr_t first = (uintptr_t)face->firstsurfedge;
+    uintptr_t last = first +
+        sizeof(*face->firstsurfedge) * (uintptr_t)face->numsurfedges;
+
+    if (first < surfedges_begin || first >= surfedges_end ||
+        last < first || last > surfedges_end)
+        return false;
+
+    for (int j = 0; j < face->numsurfedges; j++) {
+        const msurfedge_t *surfedge = face->firstsurfedge + j;
+        if (surfedge->edge >= (uint32_t)bsp->numedges)
+            return false;
+
+        const medge_t *edge = &bsp->edges[surfedge->edge];
+        if (edge->v[surfedge->vert] >= (uint32_t)bsp->numvertices)
+            return false;
+    }
+
+    return true;
+}
+
 static bool vk_build_world_mesh(bsp_t *bsp)
 {
+    if (!bsp || !bsp->faces) {
+        Com_SetLastError("No BSP faces for Vulkan world mesh");
+        return false;
+    }
+
     uint64_t vertex_count = 0;
     uint64_t index_count = 0;
     uint32_t face_count = 0;
+    uint32_t skipped_bad_edges = 0;
 
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *face = &bsp->faces[i];
         if (!vk_face_is_drawable(face))
             continue;
+        if (!vk_face_edges_are_valid(bsp, face)) {
+            skipped_bad_edges++;
+            continue;
+        }
         if (!face->texinfo->image ||
             face->texinfo->image->texnum >= MAX_RIMAGES)
             continue;
@@ -5606,6 +5661,8 @@ static bool vk_build_world_mesh(bsp_t *bsp)
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *face = &bsp->faces[i];
         if (!vk_face_is_drawable(face))
+            continue;
+        if (!vk_face_edges_are_valid(bsp, face))
             continue;
         image_t *image = face->texinfo->image;
         if (!image || image->texnum >= MAX_RIMAGES)
@@ -5719,6 +5776,9 @@ static bool vk_build_world_mesh(bsp_t *bsp)
         Z_Free(batches);
     if (draw_faces)
         Z_Free(draw_faces);
+    if (skipped_bad_edges)
+        Com_WPrintf("Skipped %u Vulkan world faces with invalid edges\n",
+                    skipped_bad_edges);
     return ok;
 }
 
@@ -5766,6 +5826,9 @@ static void vk_rebuild_world_lighting(void)
 static void vk_register_world_images(bsp_t *bsp)
 {
     char buffer[MAX_QPATH];
+
+    if (!bsp || !bsp->texinfo)
+        return;
 
     for (int i = 0; i < bsp->numtexinfo; i++) {
         mtexinfo_t *info = &bsp->texinfo[i];
