@@ -70,6 +70,7 @@ typedef struct {
     float rect[4];
     float color[4];
     float screen[2];
+    float _pad[2];
     float uv[4];
 } vk_draw_push_t;
 
