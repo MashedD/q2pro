@@ -4464,7 +4464,7 @@ static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
             continue;
         if (!translucent && (face->drawflags & SURF_TRANS_MASK))
             continue;
-        if (!face->texinfo->image || !face->texinfo->image->texnum ||
+        if (!face->texinfo->image ||
             face->texinfo->image->texnum >= MAX_RIMAGES)
             continue;
 
@@ -5514,7 +5514,7 @@ static bool vk_build_world_mesh(bsp_t *bsp)
         mface_t *face = &bsp->faces[i];
         if (!vk_face_is_drawable(face))
             continue;
-        if (!face->texinfo->image || !face->texinfo->image->texnum ||
+        if (!face->texinfo->image ||
             face->texinfo->image->texnum >= MAX_RIMAGES)
             continue;
 
@@ -5543,7 +5543,7 @@ static bool vk_build_world_mesh(bsp_t *bsp)
         if (!vk_face_is_drawable(face))
             continue;
         image_t *image = face->texinfo->image;
-        if (!image || !image->texnum || image->texnum >= MAX_RIMAGES)
+        if (!image || image->texnum >= MAX_RIMAGES)
             continue;
 
         uint32_t first = v;
