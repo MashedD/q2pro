@@ -18,6 +18,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include "format/md2.h"
 #include "format/sp2.h"
 #include "images.h"
+#include "gl.h"
 #include "refresh/refresh.h"
 #include "system/system.h"
 #include "vk_backend.h"
@@ -5959,6 +5960,10 @@ bool VKR_Init(bool total)
     vk_dynamic = Cvar_Get("gl_dynamic", "1", 0);
     vk_dlight_falloff = Cvar_Get("gl_dlight_falloff", "1", 0);
     vk_brightness = Cvar_Get("gl_brightness", "0", 0);
+
+    gl_modulate_world = vk_modulate_world;
+    gl_modulate_entities = vk_modulate_entities;
+    gl_brightness = vk_brightness;
     vk_znear = Cvar_Get("gl_znear", "2", CVAR_CHEAT);
     vk_drawworld = Cvar_Get("gl_drawworld", "1", CVAR_CHEAT);
     vk_novis = Cvar_Get("gl_novis", "0", 0);

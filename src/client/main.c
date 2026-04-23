@@ -691,9 +691,12 @@ void CL_ClearState(void)
 
 #if USE_REF
     // unprotect our custom modulate cvars
-    gl_modulate_world->flags &= ~CVAR_CHEAT;
-    gl_modulate_entities->flags &= ~CVAR_CHEAT;
-    gl_brightness->flags &= ~CVAR_CHEAT;
+    if (gl_modulate_world)
+        gl_modulate_world->flags &= ~CVAR_CHEAT;
+    if (gl_modulate_entities)
+        gl_modulate_entities->flags &= ~CVAR_CHEAT;
+    if (gl_brightness)
+        gl_brightness->flags &= ~CVAR_CHEAT;
 #endif
 }
 
@@ -1683,9 +1686,12 @@ void CL_Begin(void)
 #if USE_REF
     if (!Q_stricmp(cl.gamedir, "gloom")) {
         // cheat protect our custom modulate cvars
-        gl_modulate_world->flags |= CVAR_CHEAT;
-        gl_modulate_entities->flags |= CVAR_CHEAT;
-        gl_brightness->flags |= CVAR_CHEAT;
+        if (gl_modulate_world)
+            gl_modulate_world->flags |= CVAR_CHEAT;
+        if (gl_modulate_entities)
+            gl_modulate_entities->flags |= CVAR_CHEAT;
+        if (gl_brightness)
+            gl_brightness->flags |= CVAR_CHEAT;
     }
 #endif
 
