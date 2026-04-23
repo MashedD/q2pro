@@ -6295,7 +6295,7 @@ void VKR_DrawKeepAspectPic(int x, int y, int w, int h, qhandle_t pic)
     float s = (1.0f - scale_w / scale) * 0.5f;
     float t = (1.0f - scale_h / scale) * 0.5f;
 
-    vk_draw_texture_rect(x, y, w, h, s, 1.0f - t, 1.0f - s, t, pic);
+    vk_draw_texture_rect(x, y, w, h, s, t, 1.0f - s, 1.0f - t, pic);
 }
 
 void VKR_DrawStretchRaw(int x, int y, int w, int h)

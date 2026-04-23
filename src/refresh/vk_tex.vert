@@ -20,6 +20,7 @@ void main()
                     p.y / pc.screen.y * 2.0 - 1.0);
 
     gl_Position = vec4(ndc, 0.0, 1.0);
-    v_uv = mix(pc.uv.xy, pc.uv.zw, pos[gl_VertexIndex]);
+    vec2 uv = mix(pc.uv.xy, pc.uv.zw, pos[gl_VertexIndex]);
+    v_uv = vec2(uv.x, 1.0 - uv.y);
     v_color = pc.color;
 }
