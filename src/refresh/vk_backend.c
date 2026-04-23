@@ -3485,7 +3485,7 @@ static void vk_projection_matrix(mat4_t m, float fov_x, float fov_y, int rdflags
 
     memset(m, 0, sizeof(mat4_t));
     m[0] = xmax ? 1.0f / xmax : 1.0f;
-    m[5] = ymax ? 1.0f / ymax : 1.0f;
+    m[5] = ymax ? -1.0f / ymax : -1.0f;
     m[10] = zfar / (znear - zfar);
     m[11] = -1.0f;
     m[14] = (znear * zfar) / (znear - zfar);
@@ -4330,6 +4330,8 @@ static bool vk_clip_world_node(const mnode_t *node, int *clipflags)
 
 static void vk_mark_world_leaf(const mleaf_t *leaf, const refdef_t *fd)
 {
+    if (!leaf || (leaf->numleaffaces > 0 && !leaf->firstleafface))
+        return;
     if (leaf->contents[0] == CONTENTS_SOLID)
         return;
 
@@ -4348,7 +4350,7 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
     int cluster1, cluster2;
     vec3_t tmp;
 
-    if (!bsp)
+    if (!bsp || !bsp->nodes || !bsp->leafs)
         return;
 
     if (vk_lockpvs && vk_lockpvs->integer)
@@ -4402,6 +4404,9 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
 
 static void vk_mark_world_node_faces(const mnode_t *node, const refdef_t *fd, int clipflags)
 {
+    if (!node)
+        return;
+
     while (node->visframe == vk.world.visframe) {
         int side;
         vec_t dot;
@@ -4428,7 +4433,7 @@ static void vk_mark_world_faces(const refdef_t *fd)
     const bsp_t *bsp = vk.world.cache;
     int clipflags;
 
-    if (!bsp)
+    if (!bsp || !bsp->nodes)
         return;
 
     vk.world.drawframe++;
@@ -4448,6 +4453,9 @@ static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
                                  bool translucent)
 {
     vec3_t transformed;
+
+    if (!model || (model->numfaces > 0 && !model->firstface))
+        return;
 
     VectorSubtract(fd->vieworg, ent->origin, transformed);
     if (!VectorEmpty(ent->angles) || (ent->scale && ent->scale != 1.0f)) {
@@ -4536,6 +4544,8 @@ static const image_t *vk_skin_for_model(const vk_model_t *model, const entity_t 
 static void vk_add_dynamic_lights(const refdef_t *fd, const vec3_t origin, vec3_t color)
 {
     if (vk_dynamic && !vk_dynamic->integer)
+        return;
+    if (!fd || fd->num_dlights <= 0 || !fd->dlights)
         return;
 
     const dlight_t *light = fd->dlights;
@@ -5395,6 +5405,8 @@ static void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass)
 {
     if ((vk_drawentities && !vk_drawentities->integer) ||
         (vk_gl_drawentities && !vk_gl_drawentities->integer))
+        return;
+    if (fd->num_entities <= 0 || !fd->entities)
         return;
 
     for (int i = 0; i < fd->num_entities; i++) {

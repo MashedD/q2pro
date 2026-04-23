@@ -15,7 +15,7 @@ void main()
         vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0));
     vec2 p = pc.rect.xy + pos[gl_VertexIndex] * pc.rect.zw;
     vec2 ndc = vec2(p.x / pc.screen.x * 2.0 - 1.0,
-                    1.0 - p.y / pc.screen.y * 2.0);
+                    p.y / pc.screen.y * 2.0 - 1.0);
 
     gl_Position = vec4(ndc, 0.0, 1.0);
     v_color = pc.color;
