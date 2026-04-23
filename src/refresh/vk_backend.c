@@ -3244,25 +3244,28 @@ static VkClearColorValue vk_frame_clear_color(void)
 
 static int vk_2d_width(void)
 {
-    return r_config.width > 0 ? r_config.width : (int)vk.swapchain_extent.width;
+    int width = r_config.width > 0 ? r_config.width : (int)vk.swapchain_extent.width;
+
+    if (vk.scale > 0.0f && vk.scale != 1.0f)
+        width = Q_rint(width * vk.scale);
+
+    return max(width, 1);
 }
 
 static int vk_2d_height(void)
 {
-    return r_config.height > 0 ? r_config.height : (int)vk.swapchain_extent.height;
+    int height = r_config.height > 0 ? r_config.height : (int)vk.swapchain_extent.height;
+
+    if (vk.scale > 0.0f && vk.scale != 1.0f)
+        height = Q_rint(height * vk.scale);
+
+    return max(height, 1);
 }
 
 static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
 {
     if (!vk.render_pass_active || !vk.rect_pipeline || w <= 0 || h <= 0)
         return;
-
-    if (vk.scale != 0 && vk.scale != 1.0f) {
-        x = Q_rint(x * vk.scale);
-        y = Q_rint(y * vk.scale);
-        w = Q_rint(w * vk.scale);
-        h = Q_rint(h * vk.scale);
-    }
 
     if (vk.clip_set) {
         int x2 = min(x + w, vk.clip.right);
@@ -3387,13 +3390,6 @@ static void vk_draw_texture_resource(int x, int y, int w, int h,
         return;
     if (!texture->descriptor_set)
         return;
-
-    if (vk.scale != 0 && vk.scale != 1.0f) {
-        x = Q_rint(x * vk.scale);
-        y = Q_rint(y * vk.scale);
-        w = Q_rint(w * vk.scale);
-        h = Q_rint(h * vk.scale);
-    }
 
     float rw = w;
     float rh = h;
@@ -5345,7 +5341,7 @@ static bool vk_static_light_point(const vec3_t origin, const refdef_t *fd,
     lightpoint_t point;
     vec3_t end;
 
-    if (!bsp)
+    if (!bsp || !bsp->nodes)
         return false;
 
     if (vk_lightgrid_point(&bsp->lightgrid, origin, fd, light))
@@ -5760,6 +5756,7 @@ static void vk_load_world(const char *name)
         return;
 
     Q_concat(buffer, sizeof(buffer), "maps/", name, ".bsp");
+    Com_Printf("Vulkan world: loading %s\n", buffer);
     ret = BSP_Load(buffer, &bsp);
     if (!bsp)
         Com_Error(ERR_DROP, "%s: couldn't load %s: %s",
@@ -5779,8 +5776,8 @@ static void vk_load_world(const char *name)
     if (!vk_build_world_mesh(bsp))
         Com_WPrintf("Couldn't build Vulkan world mesh: %s\n", Com_GetLastError());
     else
-        Com_DPrintf("Vulkan world mesh: %u indices, %u faces, %u batches\n",
-                    vk.world.mesh.index_count, vk.world.face_count, vk.world.batch_count);
+        Com_Printf("Vulkan world mesh: %u indices, %u faces, %u batches\n",
+                   vk.world.mesh.index_count, vk.world.face_count, vk.world.batch_count);
     vk_clear_world_lighting_modified();
 }
 
@@ -6013,6 +6010,7 @@ void VKR_Shutdown(bool total)
 
 void VKR_BeginRegistration(const char *map)
 {
+    Com_Printf("Vulkan registration: %s\n", map && *map ? map : "<none>");
     r_registration_sequence++;
     vk_load_world(map);
 }

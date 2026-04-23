@@ -107,6 +107,26 @@ static void swap_interval(int val)
         Com_EPrintf("Couldn't set swap interval %d: %s\n", val, SDL_GetError());
 }
 
+#if USE_VULKAN
+static bool use_vulkan_desktop_geometry(vrect_t *rc)
+{
+    SDL_DisplayMode mode;
+
+    if (R_GetVideoAPI() != REF_VIDEO_VULKAN || vid_fullscreen->integer ||
+        !vid_geometry || strcmp(vid_geometry->string, VID_GEOMETRY))
+        return false;
+
+    if (SDL_GetCurrentDisplayMode(0, &mode) < 0 || mode.w < 320 || mode.h < 240)
+        return false;
+
+    rc->x = SDL_WINDOWPOS_UNDEFINED;
+    rc->y = SDL_WINDOWPOS_UNDEFINED;
+    rc->width = mode.w;
+    rc->height = mode.h;
+    return true;
+}
+#endif
+
 /*
 ===============================================================================
 
@@ -161,7 +181,11 @@ static void set_mode(void)
             flags = SDL_WINDOW_FULLSCREEN_DESKTOP;
         }
     } else {
-        if (VID_GetGeometry(&rc)) {
+        if (
+#if USE_VULKAN
+            use_vulkan_desktop_geometry(&rc) ||
+#endif
+            VID_GetGeometry(&rc)) {
             SDL_SetWindowSize(sdl.window, rc.width, rc.height);
             SDL_SetWindowPosition(sdl.window, rc.x, rc.y);
         }
@@ -320,17 +344,7 @@ static bool init(void)
     }
 
 #if USE_VULKAN
-    if (R_GetVideoAPI() == REF_VIDEO_VULKAN && !vid_fullscreen->integer &&
-        vid_geometry && !strcmp(vid_geometry->string, VID_GEOMETRY)) {
-        SDL_DisplayMode mode;
-
-        if (SDL_GetCurrentDisplayMode(0, &mode) == 0 && mode.w >= 320 && mode.h >= 240) {
-            rc.x = SDL_WINDOWPOS_UNDEFINED;
-            rc.y = SDL_WINDOWPOS_UNDEFINED;
-            rc.width = mode.w;
-            rc.height = mode.h;
-        }
-    }
+    use_vulkan_desktop_geometry(&rc);
 #endif
 
     if (!create_window_and_context(&rc)) {
