@@ -394,6 +394,7 @@ static cvar_t *vk_showtearing;
 static cvar_t *vk_modulate;
 static cvar_t *vk_modulate_entities;
 static cvar_t *vk_doublelight_entities;
+static cvar_t *vk_fontshadow;
 static cvar_t *vk_modulate_world;
 static cvar_t *vk_coloredlightmaps;
 static cvar_t *vk_dynamic;
@@ -5771,6 +5772,7 @@ bool VKR_Init(bool total)
     vk_modulate = Cvar_Get("gl_modulate", "1", CVAR_ARCHIVE);
     vk_modulate_entities = Cvar_Get("gl_modulate_entities", "1", 0);
     vk_doublelight_entities = Cvar_Get("gl_doublelight_entities", "1", 0);
+    vk_fontshadow = Cvar_Get("gl_fontshadow", "0", 0);
     vk_modulate_world = Cvar_Get("gl_modulate_world", "1", 0);
     vk_coloredlightmaps = Cvar_Get("gl_coloredlightmaps", "1", 0);
     vk_dynamic = Cvar_Get("gl_dynamic", "1", 0);
@@ -6128,6 +6130,9 @@ void VKR_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
     if ((ch & 127) == 32)
         return;
 
+    if (vk_fontshadow && vk_fontshadow->integer > 0)
+        flags |= UI_DROPSHADOW;
+
     if (flags & UI_ALTCOLOR)
         ch |= 0x80;
     if (flags & UI_XORCOLOR)
@@ -6135,6 +6140,25 @@ void VKR_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
 
     float s = (ch & 15) * 0.0625f;
     float t = ((ch & 255) >> 4) * 0.0625f;
+
+    if ((flags & UI_DROPSHADOW) && ch != 0x83) {
+        color_t saved = vk.color;
+        bool saved_set = vk.color_set;
+        byte alpha = saved_set ? saved.u8[3] : 255;
+
+        vk.color.u32 = MakeColor(0, 0, 0, alpha);
+        vk.color_set = true;
+        vk_draw_texture_rect(x + 1, y + 1, CONCHAR_WIDTH, CONCHAR_HEIGHT,
+                             s, t, s + 0.0625f, t + 0.0625f, font);
+        if (vk_fontshadow && vk_fontshadow->integer > 1) {
+            vk_draw_texture_rect(x + 2, y + 2, CONCHAR_WIDTH, CONCHAR_HEIGHT,
+                                 s, t, s + 0.0625f, t + 0.0625f, font);
+        }
+
+        vk.color = saved;
+        vk.color_set = saved_set;
+    }
+
     vk_draw_texture_rect(x, y, CONCHAR_WIDTH, CONCHAR_HEIGHT,
                          s, t, s + 0.0625f, t + 0.0625f, font);
 }
