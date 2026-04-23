@@ -1325,7 +1325,11 @@ static bool vk_upload_texture(image_t *image, byte *pic)
 
     if (!vk_upload_texture_data(texture, image->upload_width,
                                 image->upload_height, pic)) {
-        image->texnum = 0;
+        image->texnum = texture->descriptor_set ? index : 0;
+        image->sl = 0;
+        image->sh = 1;
+        image->tl = 0;
+        image->th = 1;
         return false;
     }
 
@@ -2104,6 +2108,7 @@ static bool vk_recreate_swapchain(void)
     vk_destroy_swapchain();
     if (!vk_create_swapchain(width, height)) {
         Com_EPrintf("Couldn't recreate Vulkan swapchain: %s\n", Com_GetLastError());
+        vk_destroy_swapchain();
         return false;
     }
 
@@ -3037,6 +3042,11 @@ static bool vk_create_swapchain(int width, int height)
         image_count = caps.maxImageCount;
 
     VkExtent2D extent = vk_choose_extent(&caps, width, height);
+    if (!extent.width || !extent.height) {
+        Com_SetLastError("Vulkan surface has zero extent");
+        return false;
+    }
+
     uint32_t queue_indices[] = { vk.queues.graphics_family, vk.queues.present_family };
 
     VkSwapchainCreateInfoKHR create_info = {
@@ -3078,6 +3088,10 @@ static bool vk_create_swapchain(int width, int height)
     result = vk.GetSwapchainImagesKHR(vk.device, vk.swapchain, &vk.swapchain_image_count, NULL);
     if (result != VK_SUCCESS)
         return vk_fail_result("vkGetSwapchainImagesKHR", result);
+    if (!vk.swapchain_image_count) {
+        Com_SetLastError("Vulkan swapchain has no images");
+        return false;
+    }
 
     vk.swapchain_images = Z_Malloc(sizeof(*vk.swapchain_images) * vk.swapchain_image_count);
     result = vk.GetSwapchainImagesKHR(vk.device, vk.swapchain,
