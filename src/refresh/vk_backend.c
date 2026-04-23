@@ -381,6 +381,7 @@ static cvar_t *vk_texturemode;
 static cvar_t *vk_anisotropy;
 static cvar_t *vk_partscale;
 static cvar_t *vk_partstyle;
+static cvar_t *vk_partshape;
 static cvar_t *vk_beamstyle;
 static cvar_t *vk_lightgrid;
 static cvar_t *vk_gl_lightgrid;
@@ -424,6 +425,7 @@ static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
 static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, const void *pixels);
 static void vk_destroy_texture_resource(vk_texture_t *texture);
+static bool vk_create_particle_texture(void);
 static void vk_entity_axis(const entity_t *ent, vec3_t axis[3]);
 static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
                           const entity_t *ent, const vec3_t axis[3]);
@@ -3819,21 +3821,40 @@ static bool vk_create_null_model(void)
 static bool vk_create_particle_texture(void)
 {
     uint32_t pixels[16 * 16];
+    int shape = vk_partshape ? Cvar_ClampInteger(vk_partshape, 0, 2) : 0;
 
-    for (int y = 0; y < 16; y++) {
-        for (int x = 0; x < 16; x++) {
-            float fx = x - 16 / 2 + 0.5f;
-            float fy = y - 16 / 2 + 0.5f;
-            float f = sqrtf(fx * fx + fy * fy);
-            byte alpha;
+    if (shape == 1) {
+        memset(pixels, 0, sizeof(pixels));
+        for (int y = 3; y <= 12; y++) {
+            for (int x = 3; x <= 12; x++) {
+                pixels[y * 16 + x] = MakeColor(255, 255, 255, 255 * 0.6f);
+            }
+        }
+    } else {
+        for (int y = 0; y < 16; y++) {
+            for (int x = 0; x < 16; x++) {
+                float fx = x - 16 / 2 + 0.5f;
+                float fy = y - 16 / 2 + 0.5f;
+                float f = sqrtf(fx * fx + fy * fy);
+                byte alpha;
 
-            f = 1.0f - f / (16 / 2 - 0.5f);
-            alpha = 255 * Q_clipf(f, 0.0f, 1.0f);
-            pixels[y * 16 + x] = MakeColor(255, 255, 255, alpha);
+                f = 1.0f - f / ((16 - shape) / 2.0f - 0.5f);
+                f *= 1 << shape;
+                alpha = 255 * Q_clipf(f, 0.0f, 1.0f - shape * 0.2f);
+                pixels[y * 16 + x] = MakeColor(255, 255, 255, alpha);
+            }
         }
     }
 
     return vk_upload_texture_data(&vk.particle_texture, 16, 16, pixels);
+}
+
+static void vk_partshape_changed(cvar_t *self)
+{
+    if (vk.device && !vk_create_particle_texture()) {
+        Com_WPrintf("Couldn't recreate Vulkan particle texture: %s\n",
+                    Com_GetLastError());
+    }
 }
 
 static bool vk_create_default_texture(void)
@@ -5759,6 +5780,8 @@ bool VKR_Init(bool total)
     vk_anisotropy->changed = vk_texturemode_changed;
     vk_partscale = Cvar_Get("gl_partscale", "2", 0);
     vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
+    vk_partshape = Cvar_Get("gl_partshape", "0", 0);
+    vk_partshape->changed = vk_partshape_changed;
     vk_beamstyle = Cvar_Get("gl_beamstyle", "0", 0);
     vk_lightgrid = Cvar_Get("vk_lightgrid", "1", 0);
     vk_gl_lightgrid = Cvar_Get("gl_lightgrid", "1", 0);
