@@ -593,6 +593,8 @@ static VkFormat vk_choose_depth_format(void)
 
 static bool vk_begin_immediate(VkCommandBuffer *cmd)
 {
+    *cmd = VK_NULL_HANDLE;
+
     VkCommandBufferAllocateInfo alloc_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = vk.command_pool,
@@ -608,8 +610,11 @@ static bool vk_begin_immediate(VkCommandBuffer *cmd)
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
     result = vk.BeginCommandBuffer(*cmd, &begin_info);
-    if (result != VK_SUCCESS)
+    if (result != VK_SUCCESS) {
+        vk.FreeCommandBuffers(vk.device, vk.command_pool, 1, cmd);
+        *cmd = VK_NULL_HANDLE;
         return vk_fail_result("vkBeginCommandBuffer", result);
+    }
 
     return true;
 }
@@ -617,8 +622,10 @@ static bool vk_begin_immediate(VkCommandBuffer *cmd)
 static bool vk_end_immediate(VkCommandBuffer cmd)
 {
     VkResult result = vk.EndCommandBuffer(cmd);
-    if (result != VK_SUCCESS)
+    if (result != VK_SUCCESS) {
+        vk.FreeCommandBuffers(vk.device, vk.command_pool, 1, &cmd);
         return vk_fail_result("vkEndCommandBuffer", result);
+    }
 
     VkSubmitInfo submit_info = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -626,12 +633,16 @@ static bool vk_end_immediate(VkCommandBuffer cmd)
         .pCommandBuffers = &cmd,
     };
     result = vk.QueueSubmit(vk.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
-    if (result != VK_SUCCESS)
+    if (result != VK_SUCCESS) {
+        vk.FreeCommandBuffers(vk.device, vk.command_pool, 1, &cmd);
         return vk_fail_result("vkQueueSubmit", result);
+    }
 
     result = vk.QueueWaitIdle(vk.graphics_queue);
-    if (result != VK_SUCCESS)
+    if (result != VK_SUCCESS) {
+        vk.FreeCommandBuffers(vk.device, vk.command_pool, 1, &cmd);
         return vk_fail_result("vkQueueWaitIdle", result);
+    }
 
     vk.FreeCommandBuffers(vk.device, vk.command_pool, 1, &cmd);
     return true;
@@ -1178,6 +1189,7 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
     VkDeviceSize upload_size = (VkDeviceSize)width * height * 4;
     VkBuffer staging = VK_NULL_HANDLE;
     VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+    vk_texture_t uploaded = { 0 };
 
     if (!pixels || !width || !height)
         return true;
@@ -1197,17 +1209,15 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
     memcpy(mapped, pixels, upload_size);
     vk.UnmapMemory(vk.device, staging_memory);
 
-    vk_destroy_texture_resource(texture);
-
     if (!vk_create_texture_image(width, height,
-                                 &texture->image, &texture->memory))
+                                 &uploaded.image, &uploaded.memory))
         goto fail;
 
     VkCommandBuffer cmd;
     if (!vk_begin_immediate(&cmd))
         goto fail;
 
-    vk_texture_barrier(cmd, texture->image,
+    vk_texture_barrier(cmd, uploaded.image,
                        VK_IMAGE_LAYOUT_UNDEFINED,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                        0,
@@ -1228,10 +1238,10 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
             .depth = 1,
         },
     };
-    vk.CmdCopyBufferToImage(cmd, staging, texture->image,
+    vk.CmdCopyBufferToImage(cmd, staging, uploaded.image,
                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
 
-    vk_texture_barrier(cmd, texture->image,
+    vk_texture_barrier(cmd, uploaded.image,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                        VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -1249,7 +1259,7 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
 #endif
     VkImageViewCreateInfo view_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image = texture->image,
+        .image = uploaded.image,
         .viewType = VK_IMAGE_VIEW_TYPE_2D,
         .format = format,
         .subresourceRange = {
@@ -1260,7 +1270,7 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
             .layerCount = 1,
         },
     };
-    result = vk.CreateImageView(vk.device, &view_info, NULL, &texture->view);
+    result = vk.CreateImageView(vk.device, &view_info, NULL, &uploaded.view);
     if (result != VK_SUCCESS) {
         vk_fail_result("vkCreateImageView", result);
         goto fail;
@@ -1273,21 +1283,24 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
         .pSetLayouts = &vk.texture_set_layout,
     };
     result = vk.AllocateDescriptorSets(vk.device, &descriptor_info,
-                                       &texture->descriptor_set);
+                                       &uploaded.descriptor_set);
     if (result != VK_SUCCESS) {
         vk_fail_result("vkAllocateDescriptorSets", result);
         goto fail;
     }
 
-    vk_update_texture_descriptor(texture);
+    vk_update_texture_descriptor(&uploaded);
 
-    texture->width = width;
-    texture->height = height;
+    uploaded.width = width;
+    uploaded.height = height;
 
     if (staging)
         vk.DestroyBuffer(vk.device, staging, NULL);
     if (staging_memory)
         vk.FreeMemory(vk.device, staging_memory, NULL);
+
+    vk_destroy_texture_resource(texture);
+    *texture = uploaded;
     return true;
 
 fail:
@@ -1295,7 +1308,7 @@ fail:
         vk.DestroyBuffer(vk.device, staging, NULL);
     if (staging_memory)
         vk.FreeMemory(vk.device, staging_memory, NULL);
-    vk_destroy_texture_resource(texture);
+    vk_destroy_texture_resource(&uploaded);
     return false;
 }
 
@@ -1330,7 +1343,8 @@ static void vk_destroy_texture_resource(vk_texture_t *texture)
     if (!vk.device)
         return;
 
-    if (!texture->image && !texture->view && !texture->memory)
+    if (!texture->image && !texture->view && !texture->memory &&
+        !texture->descriptor_set)
         return;
 
     if (vk.DeviceWaitIdle)
@@ -1819,14 +1833,15 @@ static bool vk_create_frame_resources(void)
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreateDescriptorSetLayout", result);
 
+    const uint32_t texture_descriptor_count = MAX_RIMAGES * 2 + 8;
     VkDescriptorPoolSize pool_size = {
         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = MAX_RIMAGES + 4,
+        .descriptorCount = texture_descriptor_count,
     };
     VkDescriptorPoolCreateInfo pool_info_desc = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-        .maxSets = MAX_RIMAGES + 4,
+        .maxSets = texture_descriptor_count,
         .poolSizeCount = 1,
         .pPoolSizes = &pool_size,
     };
@@ -6274,9 +6289,30 @@ void VKR_DrawFill32(int x, int y, int w, int h, uint32_t color)
     vk_clear_rect(x, y, w, h, color);
 }
 
+static void vk_recreate_signaled_frame_fence(void)
+{
+    if (!vk.device || !vk.CreateFence || !vk.DestroyFence)
+        return;
+
+    if (vk.frame_fence) {
+        vk.DestroyFence(vk.device, vk.frame_fence, NULL);
+        vk.frame_fence = VK_NULL_HANDLE;
+    }
+
+    VkFenceCreateInfo fence_info = {
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+    };
+    VkResult result = vk.CreateFence(vk.device, &fence_info, NULL, &vk.frame_fence);
+    if (result != VK_SUCCESS) {
+        vk.frame_fence = VK_NULL_HANDLE;
+        Com_EPrintf("vkCreateFence failed while recovering submit failure: Vulkan error %d\n", result);
+    }
+}
+
 void VKR_BeginFrame(void)
 {
-    if (!vk.swapchain || vk.frame_active)
+    if (!vk.swapchain || !vk.frame_fence || vk.frame_active)
         return;
 
     VkResult result = vk.WaitForFences(vk.device, 1, &vk.frame_fence, VK_TRUE, UINT64_MAX);
@@ -6294,12 +6330,6 @@ void VKR_BeginFrame(void)
     }
     if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
         Com_EPrintf("vkAcquireNextImageKHR failed: Vulkan error %d\n", result);
-        return;
-    }
-
-    result = vk.ResetFences(vk.device, 1, &vk.frame_fence);
-    if (result != VK_SUCCESS) {
-        Com_EPrintf("vkResetFences failed: Vulkan error %d\n", result);
         return;
     }
 
@@ -6390,9 +6420,17 @@ void VKR_EndFrame(void)
         .pSignalSemaphores = &vk.render_finished,
     };
 
+    result = vk.ResetFences(vk.device, 1, &vk.frame_fence);
+    if (result != VK_SUCCESS) {
+        Com_EPrintf("vkResetFences failed: Vulkan error %d\n", result);
+        vk.frame_active = false;
+        return;
+    }
+
     result = vk.QueueSubmit(vk.graphics_queue, 1, &submit_info, vk.frame_fence);
     if (result != VK_SUCCESS) {
         Com_EPrintf("vkQueueSubmit failed: Vulkan error %d\n", result);
+        vk_recreate_signaled_frame_fence();
         vk.frame_active = false;
         return;
     }
