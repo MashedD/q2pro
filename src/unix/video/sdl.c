@@ -134,6 +134,8 @@ static void mode_changed(void)
     else
         sdl.flags &= ~QVF_FULLSCREEN;
 
+    Com_Printf("SDL window: %dx%d, drawable: %dx%d\n",
+               sdl.win_width, sdl.win_height, sdl.width, sdl.height);
     R_ModeChanged(sdl.width, sdl.height, sdl.flags);
     SCR_ModeChanged();
 }
@@ -316,6 +318,20 @@ static bool init(void)
         rc.x = SDL_WINDOWPOS_UNDEFINED;
         rc.y = SDL_WINDOWPOS_UNDEFINED;
     }
+
+#if USE_VULKAN
+    if (R_GetVideoAPI() == REF_VIDEO_VULKAN && !vid_fullscreen->integer &&
+        vid_geometry && !strcmp(vid_geometry->string, VID_GEOMETRY)) {
+        SDL_DisplayMode mode;
+
+        if (SDL_GetCurrentDisplayMode(0, &mode) == 0 && mode.w >= 320 && mode.h >= 240) {
+            rc.x = SDL_WINDOWPOS_UNDEFINED;
+            rc.y = SDL_WINDOWPOS_UNDEFINED;
+            rc.width = mode.w;
+            rc.height = mode.h;
+        }
+    }
+#endif
 
     if (!create_window_and_context(&rc)) {
 #if USE_VULKAN

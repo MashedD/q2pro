@@ -3156,9 +3156,9 @@ static bool vk_create_swapchain(int width, int height)
     if (!vk_allocate_swapchain_commands())
         return false;
 
-    Com_Printf("Vulkan swapchain: %ux%u, %u images\n",
-               vk.swapchain_extent.width, vk.swapchain_extent.height,
-               vk.swapchain_image_count);
+    Com_Printf("Vulkan swapchain: requested %dx%d, actual %ux%u, %u images\n",
+               width, height, vk.swapchain_extent.width,
+               vk.swapchain_extent.height, vk.swapchain_image_count);
     return true;
 }
 
@@ -4128,7 +4128,9 @@ static void vk_world_dynamic_light(const vk_world_face_t *face,
 
     Vector4Clear(dlight);
 
-    if (!fd || (vk_dynamic && !vk_dynamic->integer) ||
+    if (!face || !face->face || !face->face->plane ||
+        !fd || fd->num_dlights <= 0 || !fd->dlights ||
+        (vk_dynamic && !vk_dynamic->integer) ||
         (face->face->drawflags & SURF_COLOR_MASK))
         return;
 
@@ -5521,6 +5523,9 @@ static void vk_surface_vertex_color(const bsp_t *bsp, const mface_t *face,
 
 static bool vk_face_is_drawable(mface_t *face)
 {
+    if (!face || !face->texinfo || !face->plane)
+        return false;
+
     face->drawflags |= face->texinfo->c.flags & ~DSURF_PLANEBACK;
 
     if (face->numsurfedges < 3)
