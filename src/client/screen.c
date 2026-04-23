@@ -2523,7 +2523,7 @@ static void SCR_DrawOpenTDMTeamScore(int x, int y, const stream_team_t *team)
                  STREAM_SCOREBOARD_COLUMN_CHARS * CONCHAR_WIDTH + 8,
                  height + 8, MakeColor(80, 100, 10, 40));
 
-    Q_snprintf(buf, sizeof(buf), "%s (%d ping) %s",
+    Q_snprintf(buf, sizeof(buf), "%s (avg ping %d) %s",
                team->name, team->avg_ping, team->skin);
     HUD_DrawAltString(x, y, buf);
     HUD_DrawAltString(x, y + CONCHAR_HEIGHT, STREAM_SCOREBOARD_COLUMNS);
