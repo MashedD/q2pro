@@ -16,6 +16,9 @@ the Free Software Foundation; either version 2 of the License, or
 #include "client/client.h"
 #include "client/video.h"
 #include "format/md2.h"
+#if USE_MD3
+#include "format/md3.h"
+#endif
 #include "format/sp2.h"
 #include "images.h"
 #include "gl.h"
@@ -146,6 +149,13 @@ typedef struct {
 } vk_alias_frame_t;
 
 typedef struct {
+    uint32_t first_index;
+    uint32_t index_count;
+    int skin_start;
+    int skin_count;
+} vk_alias_batch_t;
+
+typedef struct {
     enum {
         VK_MODEL_FREE,
         VK_MODEL_ALIAS,
@@ -155,7 +165,9 @@ typedef struct {
     unsigned registration_sequence;
     vk_sprite_frame_t *frames;
     vk_alias_frame_t *alias_frames;
+    vk_alias_batch_t *alias_batches;
     int frame_count;
+    int alias_batch_count;
     vk_mesh_t mesh;
     image_t **skins;
     int skin_count;
@@ -781,6 +793,10 @@ static void vk_free_model(vk_model_t *model)
         Z_Free(model->alias_frames);
         model->alias_frames = NULL;
     }
+    if (model->alias_batches) {
+        Z_Free(model->alias_batches);
+        model->alias_batches = NULL;
+    }
     if (model->skins) {
         Z_Free(model->skins);
         model->skins = NULL;
@@ -1057,6 +1073,14 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
     model->frame_count = header.num_frames;
     model->alias_frames = alias_frames;
     alias_frames = NULL;
+    model->alias_batch_count = 1;
+    model->alias_batches = Z_Mallocz(sizeof(model->alias_batches[0]));
+    model->alias_batches[0] = (vk_alias_batch_t) {
+        .first_index = 0,
+        .index_count = numindices,
+        .skin_start = 0,
+        .skin_count = header.num_skins,
+    };
     model->vertex_count = numverts;
     model->skin_count = header.num_skins;
     if (model->skin_count)
@@ -1098,6 +1122,282 @@ out:
         Z_Free(alias_frames);
     return handle;
 }
+
+#if USE_MD3
+static bool vk_check_md3_bounds(const dmd3header_t *header, size_t length)
+{
+    if (header->num_frames < 1 || header->num_frames > MD3_MAX_FRAMES ||
+        header->num_meshes < 1 || header->num_meshes > MD3_MAX_MESHES)
+        return false;
+    if ((uint64_t)header->ofs_frames +
+        header->num_frames * sizeof(dmd3frame_t) > length)
+        return false;
+    if (header->ofs_meshes > length)
+        return false;
+
+    return true;
+}
+
+static bool vk_check_md3_mesh_bounds(const dmd3mesh_t *mesh, uint32_t frame_count,
+                                     size_t length)
+{
+    if (mesh->ident != MD3_IDENT)
+        return false;
+    if (mesh->meshsize < sizeof(*mesh) || mesh->meshsize > length)
+        return false;
+    if (mesh->num_frames != frame_count)
+        return false;
+    if (mesh->num_verts < 3 || mesh->num_verts > MD3_MAX_VERTS ||
+        mesh->num_tris < 1 || mesh->num_tris > MD3_MAX_TRIANGLES ||
+        mesh->num_skins > MD3_MAX_SKINS)
+        return false;
+    if ((uint64_t)mesh->ofs_indexes +
+        mesh->num_tris * 3 * sizeof(uint32_t) > mesh->meshsize ||
+        (uint64_t)mesh->ofs_skins +
+        mesh->num_skins * sizeof(dmd3skin_t) > mesh->meshsize ||
+        (uint64_t)mesh->ofs_tcs +
+        mesh->num_verts * sizeof(dmd3coord_t) > mesh->meshsize ||
+        (uint64_t)mesh->ofs_verts +
+        mesh->num_verts * frame_count * sizeof(dmd3vertex_t) > mesh->meshsize)
+        return false;
+
+    return true;
+}
+
+static void vk_md3_normal(uint8_t lat_byte, uint8_t lng_byte, vec3_t normal)
+{
+    float lat = lat_byte * (2.0f * M_PIf / 255.0f);
+    float lng = lng_byte * (2.0f * M_PIf / 255.0f);
+
+    normal[0] = sinf(lat) * cosf(lng);
+    normal[1] = sinf(lat) * sinf(lng);
+    normal[2] = cosf(lat);
+}
+
+static qhandle_t vk_load_md3_model(const char *name, const byte *rawdata, size_t length)
+{
+    typedef struct {
+        dmd3mesh_t header;
+        const byte *data;
+        uint32_t vertex_base;
+        uint32_t first_index;
+        int skin_start;
+    } vk_md3_mesh_info_t;
+
+    dmd3header_t header;
+    vk_md3_mesh_info_t mesh_info[MD3_MAX_MESHES];
+    vk_vertex_t *vertices = NULL;
+    uint32_t *indices = NULL;
+    vk_alias_frame_t *alias_frames = NULL;
+    vk_alias_batch_t *batches = NULL;
+    image_t **skins = NULL;
+    vk_model_t *model = NULL;
+    uint32_t vertex_count = 0;
+    uint32_t index_count = 0;
+    int skin_count = 0;
+    qhandle_t handle = 0;
+
+    if (length < sizeof(header))
+        return 0;
+
+    const dmd3header_t *src_header = (const dmd3header_t *)rawdata;
+    header.ident = LittleLong(src_header->ident);
+    header.version = LittleLong(src_header->version);
+    header.flags = LittleLong(src_header->flags);
+    header.num_frames = LittleLong(src_header->num_frames);
+    header.num_tags = LittleLong(src_header->num_tags);
+    header.num_meshes = LittleLong(src_header->num_meshes);
+    header.num_skins = LittleLong(src_header->num_skins);
+    header.ofs_frames = LittleLong(src_header->ofs_frames);
+    header.ofs_tags = LittleLong(src_header->ofs_tags);
+    header.ofs_meshes = LittleLong(src_header->ofs_meshes);
+    header.ofs_end = LittleLong(src_header->ofs_end);
+
+    if (header.ident != MD3_IDENT || header.version != MD3_VERSION ||
+        !vk_check_md3_bounds(&header, length))
+        return 0;
+
+    const byte *mesh_data = rawdata + header.ofs_meshes;
+    size_t remaining = length - header.ofs_meshes;
+    for (uint32_t i = 0; i < header.num_meshes; i++) {
+        if (remaining < sizeof(dmd3mesh_t))
+            goto out;
+
+        const dmd3mesh_t *src_mesh = (const dmd3mesh_t *)mesh_data;
+        dmd3mesh_t *mesh = &mesh_info[i].header;
+
+        mesh->ident = LittleLong(src_mesh->ident);
+        mesh->flags = LittleLong(src_mesh->flags);
+        mesh->num_frames = LittleLong(src_mesh->num_frames);
+        mesh->num_skins = LittleLong(src_mesh->num_skins);
+        mesh->num_verts = LittleLong(src_mesh->num_verts);
+        mesh->num_tris = LittleLong(src_mesh->num_tris);
+        mesh->ofs_indexes = LittleLong(src_mesh->ofs_indexes);
+        mesh->ofs_skins = LittleLong(src_mesh->ofs_skins);
+        mesh->ofs_tcs = LittleLong(src_mesh->ofs_tcs);
+        mesh->ofs_verts = LittleLong(src_mesh->ofs_verts);
+        mesh->meshsize = LittleLong(src_mesh->meshsize);
+
+        if (!vk_check_md3_mesh_bounds(mesh, header.num_frames, remaining))
+            goto out;
+        if (UINT32_MAX - vertex_count < mesh->num_verts ||
+            UINT32_MAX - index_count < mesh->num_tris * 3)
+            goto out;
+        if (skin_count > INT_MAX - (int)mesh->num_skins)
+            goto out;
+
+        mesh_info[i].data = mesh_data;
+        mesh_info[i].vertex_base = vertex_count;
+        mesh_info[i].first_index = index_count;
+        mesh_info[i].skin_start = skin_count;
+        vertex_count += mesh->num_verts;
+        index_count += mesh->num_tris * 3;
+        skin_count += mesh->num_skins;
+
+        mesh_data += mesh->meshsize;
+        remaining -= mesh->meshsize;
+    }
+
+    if (!vertex_count || !index_count ||
+        (uint64_t)vertex_count * header.num_frames > UINT32_MAX)
+        goto out;
+
+    vertices = Z_Malloc(sizeof(*vertices) * vertex_count * header.num_frames);
+    indices = Z_Malloc(sizeof(*indices) * index_count);
+    alias_frames = Z_Mallocz(sizeof(*alias_frames) * header.num_frames);
+    batches = Z_Mallocz(sizeof(*batches) * header.num_meshes);
+    if (skin_count)
+        skins = Z_Mallocz(sizeof(*skins) * skin_count);
+
+    const dmd3frame_t *src_frame =
+        (const dmd3frame_t *)(rawdata + header.ofs_frames);
+    for (uint32_t frame = 0; frame < header.num_frames; frame++) {
+        vec3_t mins, maxs, translate;
+
+        LittleVector(src_frame[frame].mins, mins);
+        LittleVector(src_frame[frame].maxs, maxs);
+        LittleVector(src_frame[frame].translate, translate);
+        VectorScale(mins, MD3_XYZ_SCALE, alias_frames[frame].bounds[0]);
+        VectorScale(maxs, MD3_XYZ_SCALE, alias_frames[frame].bounds[1]);
+        VectorAdd(alias_frames[frame].bounds[0], translate,
+                  alias_frames[frame].bounds[0]);
+        VectorAdd(alias_frames[frame].bounds[1], translate,
+                  alias_frames[frame].bounds[1]);
+        alias_frames[frame].radius =
+            RadiusFromBounds(alias_frames[frame].bounds[0],
+                             alias_frames[frame].bounds[1]);
+    }
+
+    for (uint32_t mesh_index = 0; mesh_index < header.num_meshes; mesh_index++) {
+        const vk_md3_mesh_info_t *info = &mesh_info[mesh_index];
+        const dmd3mesh_t *mesh = &info->header;
+        const dmd3coord_t *src_tc =
+            (const dmd3coord_t *)(info->data + mesh->ofs_tcs);
+        const uint32_t *src_index =
+            (const uint32_t *)(info->data + mesh->ofs_indexes);
+        const dmd3skin_t *src_skin =
+            (const dmd3skin_t *)(info->data + mesh->ofs_skins);
+
+        batches[mesh_index] = (vk_alias_batch_t) {
+            .first_index = info->first_index,
+            .index_count = mesh->num_tris * 3,
+            .skin_start = info->skin_start,
+            .skin_count = mesh->num_skins,
+        };
+
+        for (uint32_t skin = 0; skin < mesh->num_skins; skin++) {
+            char skin_name[MD3_MAX_PATH];
+
+            if (!Q_memccpy(skin_name, src_skin[skin].name, 0, sizeof(skin_name)))
+                skins[info->skin_start + skin] = R_NOTEXTURE;
+            else
+                skins[info->skin_start + skin] =
+                    IMG_Find(skin_name, IT_SKIN, IF_NONE);
+        }
+
+        for (uint32_t i = 0; i < mesh->num_tris * 3; i++) {
+            uint32_t index = LittleLong(src_index[i]);
+
+            if (index >= mesh->num_verts)
+                goto out;
+            indices[info->first_index + i] = info->vertex_base + index;
+        }
+
+        for (uint32_t frame = 0; frame < header.num_frames; frame++) {
+            const dmd3frame_t *frame_info =
+                (const dmd3frame_t *)(rawdata + header.ofs_frames) + frame;
+            const dmd3vertex_t *src_vert =
+                (const dmd3vertex_t *)(info->data + mesh->ofs_verts) +
+                frame * mesh->num_verts;
+            vec3_t translate;
+
+            LittleVector(frame_info->translate, translate);
+            for (uint32_t vert = 0; vert < mesh->num_verts; vert++) {
+                vk_vertex_t *dst =
+                    &vertices[frame * vertex_count + info->vertex_base + vert];
+
+                dst->position[0] =
+                    (int16_t)LittleShort(src_vert[vert].point[0]) * MD3_XYZ_SCALE +
+                    translate[0];
+                dst->position[1] =
+                    (int16_t)LittleShort(src_vert[vert].point[1]) * MD3_XYZ_SCALE +
+                    translate[1];
+                dst->position[2] =
+                    (int16_t)LittleShort(src_vert[vert].point[2]) * MD3_XYZ_SCALE +
+                    translate[2];
+                dst->color[0] = 1.0f;
+                dst->color[1] = 1.0f;
+                dst->color[2] = 1.0f;
+                dst->color[3] = 1.0f;
+                dst->uv[0] = LittleFloat(src_tc[vert].st[0]);
+                dst->uv[1] = LittleFloat(src_tc[vert].st[1]);
+                vk_md3_normal(src_vert[vert].norm[0], src_vert[vert].norm[1],
+                              dst->normal);
+            }
+        }
+    }
+
+    model = vk_alloc_model();
+    if (!model)
+        goto out;
+
+    Q_strlcpy(model->name, name, sizeof(model->name));
+    model->type = VK_MODEL_ALIAS;
+    model->registration_sequence = r_registration_sequence;
+    model->frame_count = header.num_frames;
+    model->alias_frames = alias_frames;
+    alias_frames = NULL;
+    model->alias_batch_count = header.num_meshes;
+    model->alias_batches = batches;
+    batches = NULL;
+    model->vertex_count = vertex_count;
+    model->skin_count = skin_count;
+    model->skins = skins;
+    skins = NULL;
+
+    if (!vk_upload_mesh(&model->mesh, vertices, vertex_count * header.num_frames,
+                        indices, index_count)) {
+        vk_free_model(model);
+        goto out;
+    }
+
+    handle = (model - vk.models) + 1;
+
+out:
+    if (vertices)
+        Z_Free(vertices);
+    if (indices)
+        Z_Free(indices);
+    if (alias_frames)
+        Z_Free(alias_frames);
+    if (batches)
+        Z_Free(batches);
+    if (skins)
+        Z_Free(skins);
+
+    return handle;
+}
+#endif
 
 static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
                            uint32_t vertex_count, const uint32_t *indices,
@@ -4606,6 +4906,30 @@ static const image_t *vk_skin_for_model(const vk_model_t *model, const entity_t 
     return model->skins[ent->skinnum];
 }
 
+static const image_t *vk_skin_for_alias_batch(const vk_model_t *model,
+                                              const vk_alias_batch_t *batch,
+                                              const entity_t *ent)
+{
+    if (ent->flags & RF_SHELL_MASK)
+        return R_SHELLTEXTURE;
+    if (ent->skin)
+        return IMG_ForHandle(ent->skin);
+    if (!batch || !batch->skin_count)
+        return vk_skin_for_model(model, ent);
+
+    int skin = ent->skinnum;
+    if (skin < 0 || skin >= batch->skin_count)
+        skin = 0;
+
+    const image_t *image = model->skins[batch->skin_start + skin];
+    if (image == R_NOTEXTURE && batch->skin_count > 0)
+        image = model->skins[batch->skin_start];
+    if (!image)
+        image = R_NOTEXTURE;
+
+    return image;
+}
+
 static void vk_add_dynamic_lights(const refdef_t *fd, const vec3_t origin, vec3_t color)
 {
     if (vk_dynamic && !vk_dynamic->integer)
@@ -4721,9 +5045,13 @@ static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
                                const VkBuffer buffers[2],
                                const VkDeviceSize offsets[2],
                                const vk_model_t *model,
+                               const vk_alias_batch_t *batch,
                                const vk_texture_t *texture,
                                const vk_alias_push_t *push)
 {
+    uint32_t first_index = batch ? batch->first_index : 0;
+    uint32_t index_count = batch ? batch->index_count : model->mesh.index_count;
+
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, 2, buffers, offsets);
     vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
@@ -4733,7 +5061,7 @@ static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
     vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(*push), push);
-    vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0, 0, 0);
+    vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
 }
 
 static bool vk_alias_shadow_point(const entity_t *ent, lightpoint_t *point)
@@ -4778,7 +5106,6 @@ static void vk_shadow_projection_matrix(mat4_t matrix, const cplane_t *plane,
 static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
                                  const vec3_t axis[3],
                                  const vk_model_t *model,
-                                 const vk_texture_t *texture,
                                  const VkBuffer buffers[2],
                                  const VkDeviceSize offsets[2],
                                  float backlerp)
@@ -4843,8 +5170,21 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     push.shellscale = 0.0f;
     push.depthscale = 1.0f;
 
-    vk_draw_alias_pass(vk.command_buffers[vk.current_image], vk.alias_blend_pipeline,
-                       buffers, offsets, model, texture, &push);
+    for (int i = 0; i < model->alias_batch_count; i++) {
+        const vk_alias_batch_t *batch = &model->alias_batches[i];
+        const image_t *skin = vk_skin_for_alias_batch(model, batch, ent);
+
+        if (!skin || skin->texnum >= MAX_RIMAGES)
+            continue;
+
+        const vk_texture_t *texture = vk_texture_for_index(skin->texnum, true);
+        if (!texture)
+            continue;
+
+        vk_draw_alias_pass(vk.command_buffers[vk.current_image],
+                           vk.alias_blend_pipeline, buffers, offsets, model,
+                           batch, texture, &push);
+    }
 }
 
 static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
@@ -4852,29 +5192,10 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     vk_model_t *model = vk_model_for_handle(ent->model);
 
     bool translucent = ent->flags & RF_TRANSLUCENT;
-    VkPipeline pipeline;
 
     if (!model || model->type != VK_MODEL_ALIAS ||
         !model->mesh.vertices.buffer || !model->mesh.indices.buffer ||
-        !model->vertex_count)
-        return;
-
-    const image_t *skin = vk_skin_for_model(model, ent);
-    if (!skin || skin->texnum >= MAX_RIMAGES)
-        return;
-
-    const vk_texture_t *texture = vk_texture_for_index(skin->texnum, true);
-    if (!texture)
-        return;
-
-    if (translucent)
-        pipeline = vk.alias_blend_pipeline;
-    else if ((skin->flags & IF_TRANSPARENT) && vk.alias_alpha_pipeline)
-        pipeline = vk.alias_alpha_pipeline;
-    else
-        pipeline = vk.alias_pipeline;
-
-    if (!pipeline)
+        !model->vertex_count || !model->alias_batch_count)
         return;
 
     vec3_t axis[3];
@@ -4905,13 +5226,39 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         ((ent->flags & RF_WEAPONMODEL) ? WEAPONSHELL_SCALE : POWERSUIT_SCALE) : 0.0f;
     push.depthscale = (ent->flags & RF_DEPTHHACK) ? 0.25f : 1.0f;
 
-    if (translucent && !(ent->flags & RF_FULLBRIGHT) && vk.alias_depth_pipeline)
-        vk_draw_alias_pass(cmd, vk.alias_depth_pipeline, buffers, offsets,
-                           model, texture, &push);
+    for (int i = 0; i < model->alias_batch_count; i++) {
+        const vk_alias_batch_t *batch = &model->alias_batches[i];
+        const image_t *skin = vk_skin_for_alias_batch(model, batch, ent);
+        VkPipeline pipeline;
 
-    vk_draw_alias_pass(cmd, pipeline, buffers, offsets, model, texture, &push);
-    vk_draw_alias_shadow(ent, fd, axis, model, texture, buffers, offsets,
-                         push.backlerp);
+        if (!skin || skin->texnum >= MAX_RIMAGES)
+            continue;
+
+        const vk_texture_t *texture = vk_texture_for_index(skin->texnum, true);
+        if (!texture)
+            continue;
+
+        if (translucent)
+            pipeline = vk.alias_blend_pipeline;
+        else if ((skin->flags & IF_TRANSPARENT) && vk.alias_alpha_pipeline)
+            pipeline = vk.alias_alpha_pipeline;
+        else
+            pipeline = vk.alias_pipeline;
+
+        if (!pipeline)
+            continue;
+
+        if (translucent && !(ent->flags & RF_FULLBRIGHT) &&
+            vk.alias_depth_pipeline) {
+            vk_draw_alias_pass(cmd, vk.alias_depth_pipeline, buffers, offsets,
+                               model, batch, texture, &push);
+        }
+
+        vk_draw_alias_pass(cmd, pipeline, buffers, offsets, model, batch,
+                           texture, &push);
+    }
+
+    vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, push.backlerp);
 }
 
 static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
@@ -6163,6 +6510,10 @@ qhandle_t VKR_RegisterModel(const char *name)
         handle = vk_load_sprite_model(normalized, rawdata, ret);
     else if (ret >= 4 && LittleLong(*(uint32_t *)rawdata) == MD2_IDENT)
         handle = vk_load_md2_model(normalized, rawdata, ret);
+#if USE_MD3
+    else if (ret >= 4 && LittleLong(*(uint32_t *)rawdata) == MD3_IDENT)
+        handle = vk_load_md3_model(normalized, rawdata, ret);
+#endif
 
     FS_FreeFile(rawdata);
     if (!handle)
