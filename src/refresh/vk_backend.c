@@ -9,6 +9,7 @@ the Free Software Foundation; either version 2 of the License, or
 
 #include "shared/shared.h"
 #include "common/bsp.h"
+#include "common/cmd.h"
 #include "common/common.h"
 #include "common/math.h"
 #include "common/utils.h"
@@ -821,6 +822,37 @@ static void vk_free_models(bool all)
 
     if (all)
         vk.model_count = 0;
+}
+
+static void vk_model_list_f(void)
+{
+    static const char types[] = "FAS";
+    int count = 0;
+
+    Com_Printf("------------------\n");
+    for (uint32_t i = 0; i < vk.model_count; i++) {
+        const vk_model_t *model = &vk.models[i];
+
+        if (model->type == VK_MODEL_FREE)
+            continue;
+
+        Com_Printf("%c %5u verts %5u idx",
+                   types[model->type],
+                   model->vertex_count,
+                   model->mesh.index_count);
+        if (model->type == VK_MODEL_ALIAS) {
+            Com_Printf(" %2d frm %2d bat %2d skin",
+                       model->frame_count,
+                       model->alias_batch_count,
+                       model->skin_count);
+        } else if (model->type == VK_MODEL_SPRITE) {
+            Com_Printf(" %2d frm", model->frame_count);
+        }
+        Com_Printf(" : %s\n", model->name);
+        count++;
+    }
+    Com_Printf("Total Vulkan models: %d (out of %u slots)\n",
+               count, vk.model_count);
 }
 
 static vk_model_t *vk_find_model(const char *name)
@@ -1987,6 +2019,51 @@ static bool vk_pick_physical_device(void)
     Com_Printf("Using Vulkan device: %s\n",
                vk.physical_device_properties.deviceName);
     return true;
+}
+
+static const char *vk_device_type_string(VkPhysicalDeviceType type)
+{
+    switch (type) {
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+        return "integrated GPU";
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+        return "discrete GPU";
+    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+        return "virtual GPU";
+    case VK_PHYSICAL_DEVICE_TYPE_CPU:
+        return "CPU";
+    default:
+        return "other";
+    }
+}
+
+static void vk_strings_f(void)
+{
+    const VkPhysicalDeviceProperties *props = &vk.physical_device_properties;
+
+    if (!vk.physical_device) {
+        Com_Printf("Vulkan renderer is not initialized\n");
+        return;
+    }
+
+    Com_Printf("Vulkan device: %s\n", props->deviceName);
+    Com_Printf("Vulkan type: %s\n",
+               vk_device_type_string(props->deviceType));
+    Com_Printf("Vulkan API: %u.%u.%u\n",
+               VK_VERSION_MAJOR(props->apiVersion),
+               VK_VERSION_MINOR(props->apiVersion),
+               VK_VERSION_PATCH(props->apiVersion));
+    Com_Printf("Vulkan driver: %u.%u.%u\n",
+               VK_VERSION_MAJOR(props->driverVersion),
+               VK_VERSION_MINOR(props->driverVersion),
+               VK_VERSION_PATCH(props->driverVersion));
+    Com_Printf("Vulkan vendor/device: 0x%04x/0x%04x\n",
+               props->vendorID, props->deviceID);
+    Com_Printf("Vulkan queue families: graphics=%u present=%u\n",
+               vk.queues.graphics_family, vk.queues.present_family);
+    Com_Printf("Vulkan swapchain: %ux%u, %u images\n",
+               vk.swapchain_extent.width, vk.swapchain_extent.height,
+               vk.swapchain_image_count);
 }
 
 static bool vk_create_device(void)
@@ -6361,6 +6438,9 @@ bool VKR_Init(bool total)
         Com_WPrintf("Couldn't create Vulkan default texture: %s\n", Com_GetLastError());
     IMG_GetPalette();
 
+    Cmd_AddCommand("strings", vk_strings_f);
+    Cmd_AddCommand("modellist", vk_model_list_f);
+
     Com_Printf("------------------------\n");
     return true;
 }
@@ -6369,6 +6449,9 @@ void VKR_Shutdown(bool total)
 {
     if (!total)
         return;
+
+    Cmd_RemoveCommand("strings");
+    Cmd_RemoveCommand("modellist");
 
     if (r_numImages) {
         IMG_FreeAll();
@@ -6477,6 +6560,7 @@ qhandle_t VKR_RegisterModel(const char *name)
     int ret;
     vk_model_t *model;
     qhandle_t handle;
+    bool supported;
 
     if (!name || !*name)
         return 0;
@@ -6506,17 +6590,25 @@ qhandle_t VKR_RegisterModel(const char *name)
         return 0;
 
     handle = 0;
-    if (ret >= 4 && LittleLong(*(uint32_t *)rawdata) == SP2_IDENT)
+    supported = false;
+    if (ret >= 4 && LittleLong(*(uint32_t *)rawdata) == SP2_IDENT) {
+        supported = true;
         handle = vk_load_sprite_model(normalized, rawdata, ret);
-    else if (ret >= 4 && LittleLong(*(uint32_t *)rawdata) == MD2_IDENT)
+    } else if (ret >= 4 && LittleLong(*(uint32_t *)rawdata) == MD2_IDENT) {
+        supported = true;
         handle = vk_load_md2_model(normalized, rawdata, ret);
+    }
 #if USE_MD3
-    else if (ret >= 4 && LittleLong(*(uint32_t *)rawdata) == MD3_IDENT)
+    else if (ret >= 4 && LittleLong(*(uint32_t *)rawdata) == MD3_IDENT) {
+        supported = true;
         handle = vk_load_md3_model(normalized, rawdata, ret);
+    }
 #endif
 
     FS_FreeFile(rawdata);
-    if (!handle)
+    if (!handle && supported)
+        Com_WPrintf("Couldn't load Vulkan model %s\n", normalized);
+    else if (!handle)
         Com_DPrintf("Vulkan renderer skipped unsupported model %s\n", normalized);
     return handle;
 }
