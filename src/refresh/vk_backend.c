@@ -304,6 +304,7 @@ typedef struct {
     PFN_vkUnmapMemory UnmapMemory;
     PFN_vkCmdCopyBuffer CmdCopyBuffer;
     PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage;
+    PFN_vkCmdCopyImageToBuffer CmdCopyImageToBuffer;
     PFN_vkCreateSemaphore CreateSemaphore;
     PFN_vkDestroySemaphore DestroySemaphore;
     PFN_vkCreateFence CreateFence;
@@ -358,6 +359,7 @@ typedef struct {
     VkImageLayout *swapchain_layouts;
     VkCommandBuffer *command_buffers;
     uint32_t swapchain_image_count;
+    bool swapchain_transfer_src;
     vk_queue_families_t queues;
     VkSemaphore image_available;
     VkSemaphore render_finished;
@@ -1853,6 +1855,7 @@ static bool vk_load_device(void)
     LOAD(UnmapMemory);
     LOAD(CmdCopyBuffer);
     LOAD(CmdCopyBufferToImage);
+    LOAD(CmdCopyImageToBuffer);
     LOAD(CreateSemaphore);
     LOAD(DestroySemaphore);
     LOAD(CreateFence);
@@ -3462,6 +3465,13 @@ static bool vk_create_swapchain(int width, int height)
 
     uint32_t queue_indices[] = { vk.queues.graphics_family, vk.queues.present_family };
 
+    vk.swapchain_transfer_src =
+        (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+    VkImageUsageFlags image_usage =
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (vk.swapchain_transfer_src)
+        image_usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+
     VkSwapchainCreateInfoKHR create_info = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .surface = vk.surface,
@@ -3470,7 +3480,7 @@ static bool vk_create_swapchain(int width, int height)
         .imageColorSpace = surface_format.colorSpace,
         .imageExtent = extent,
         .imageArrayLayers = 1,
-        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .imageUsage = image_usage,
         .preTransform = caps.currentTransform,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
         .presentMode = present_mode,
@@ -6904,6 +6914,157 @@ static void vk_recreate_signaled_frame_fence(void)
         vk.frame_fence = VK_NULL_HANDLE;
         Com_EPrintf("vkCreateFence failed while recovering submit failure: Vulkan error %d\n", result);
     }
+}
+
+static bool vk_screenshot_format_offsets(int offsets[3])
+{
+    switch (vk.swapchain_format) {
+    case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_B8G8R8A8_SRGB:
+        offsets[0] = 2;
+        offsets[1] = 1;
+        offsets[2] = 0;
+        return true;
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_SRGB:
+        offsets[0] = 0;
+        offsets[1] = 1;
+        offsets[2] = 2;
+        return true;
+    default:
+        return false;
+    }
+}
+
+int VKR_ReadPixels(screenshot_t *s)
+{
+    if (!vk.swapchain || !vk.swapchain_transfer_src ||
+        !vk.swapchain_images || !vk.swapchain_layouts)
+        return Q_ERR(ENOTSUP);
+    if (vk.frame_active)
+        return Q_ERR(EBUSY);
+    if (!vk.swapchain_extent.width || !vk.swapchain_extent.height)
+        return Q_ERR(EINVAL);
+
+    int offsets[3];
+    if (!vk_screenshot_format_offsets(offsets))
+        return Q_ERR(ENOTSUP);
+
+    if (vk.swapchain_extent.width > INT_MAX ||
+        vk.swapchain_extent.height > INT_MAX)
+        return Q_ERR(EOVERFLOW);
+
+    int width = vk.swapchain_extent.width;
+    int height = vk.swapchain_extent.height;
+
+    if (width > INT_MAX / 4)
+        return Q_ERR(EOVERFLOW);
+
+    int src_rowbytes = width * 4;
+    if (height > INT_MAX / src_rowbytes)
+        return Q_ERR(EOVERFLOW);
+
+    int src_size = src_rowbytes * height;
+    int dst_rowbytes = width * 3;
+    if (height > INT_MAX / dst_rowbytes)
+        return Q_ERR(EOVERFLOW);
+
+    int dst_size = dst_rowbytes * height;
+    vk_buffer_t readback = { 0 };
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    void *mapped = NULL;
+    int ret = Q_ERR_FAILURE;
+
+    if (!vk_create_buffer(src_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          &readback.buffer, &readback.memory))
+        return Q_ERR_FAILURE;
+
+    if (vk.DeviceWaitIdle(vk.device) != VK_SUCCESS)
+        goto out;
+
+    VkImageLayout old_layout = vk.swapchain_layouts[vk.current_image];
+    if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED) {
+        ret = Q_ERR(ENOTSUP);
+        goto out;
+    }
+    if (!vk_begin_immediate(&cmd))
+        goto out;
+
+    vk_transition_image(cmd, vk.current_image,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_ACCESS_TRANSFER_READ_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+    VkBufferImageCopy copy = {
+        .bufferOffset = 0,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+        .imageExtent = {
+            .width = width,
+            .height = height,
+            .depth = 1,
+        },
+    };
+    vk.CmdCopyImageToBuffer(cmd, vk.swapchain_images[vk.current_image],
+                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            readback.buffer, 1, &copy);
+
+    VkAccessFlags dst_access = 0;
+    VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    if (old_layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        dst_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dst_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    }
+    vk_transition_image(cmd, vk.current_image, old_layout, dst_access, dst_stage);
+
+    bool copied = vk_end_immediate(cmd);
+    cmd = VK_NULL_HANDLE;
+    if (!copied)
+        goto out;
+
+    VkResult result = vk.MapMemory(vk.device, readback.memory, 0,
+                                   readback.size, 0, &mapped);
+    if (result != VK_SUCCESS) {
+        vk_fail_result("vkMapMemory", result);
+        goto out;
+    }
+
+    s->bpp = 3;
+    s->rowbytes = dst_rowbytes;
+    s->pixels = R_Malloc(dst_size);
+    s->width = width;
+    s->height = height;
+
+    const byte *src = mapped;
+    byte *dst = s->pixels;
+    for (int y = 0; y < height; y++) {
+        const byte *src_pixel = src + y * src_rowbytes;
+        byte *dst_pixel = dst + y * dst_rowbytes;
+
+        for (int x = 0; x < width; x++, src_pixel += 4, dst_pixel += 3) {
+            dst_pixel[0] = src_pixel[offsets[0]];
+            dst_pixel[1] = src_pixel[offsets[1]];
+            dst_pixel[2] = src_pixel[offsets[2]];
+        }
+    }
+
+    ret = Q_ERR_SUCCESS;
+
+out:
+    if (mapped)
+        vk.UnmapMemory(vk.device, readback.memory);
+    if (cmd)
+        vk.FreeCommandBuffers(vk.device, vk.command_pool, 1, &cmd);
+    vk_destroy_buffer(&readback);
+    return ret;
 }
 
 void VKR_BeginFrame(void)

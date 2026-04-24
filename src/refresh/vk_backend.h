@@ -12,6 +12,8 @@ the Free Software Foundation; either version 2 of the License, or
 #include "refresh/refresh.h"
 
 #if USE_VULKAN
+struct screenshot_s;
+
 bool VKR_Init(bool total);
 void VKR_Shutdown(bool total);
 void VKR_BeginRegistration(const char *map);
@@ -45,4 +47,5 @@ void VKR_BeginFrame(void);
 void VKR_EndFrame(void);
 void VKR_ModeChanged(int width, int height, int flags);
 bool VKR_VideoSync(void);
+int VKR_ReadPixels(struct screenshot_s *s);
 #endif
