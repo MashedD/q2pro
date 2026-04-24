@@ -88,12 +88,6 @@ static void s_underwater_gain_hf_changed(cvar_t *self)
     qalFilterf(s_underwater_filter, AL_LOWPASS_GAINHF, Cvar_ClampValue(self, 0.001f, 1.0f));
 }
 
-static void al_reverb_changed(cvar_t *self)
-{
-    AL_ApplyReverbPreset();
-    S_StopAllSounds();
-}
-
 static void al_merge_looping_changed(cvar_t *self)
 {
     int         i;
@@ -148,7 +142,7 @@ static bool AL_Init(void)
 
     al_merge_looping = Cvar_Get("al_merge_looping", "1", 0);
     al_merge_looping->changed = al_merge_looping_changed;
-    al_reverb = Cvar_Get("al_reverb", "0", CVAR_ARCHIVE);
+    al_reverb = Cvar_Get("al_reverb", "0", CVAR_ARCHIVE | CVAR_SOUND);
 
     s_loop_points = qalIsExtensionPresent("AL_SOFT_loop_points");
     s_source_spatialize = qalIsExtensionPresent("AL_SOFT_source_spatialize");
@@ -183,12 +177,13 @@ static bool AL_Init(void)
         AL_ApplyReverbPreset();
         qalAuxiliaryEffectSloti(s_reverb_slot, AL_EFFECTSLOT_EFFECT, s_reverb_effect);
     }
-    al_reverb->changed = al_reverb_changed;
 
     Com_Printf("OpenAL initialized.\n");
     return true;
 
 fail1:
+    if (al_reverb)
+        al_reverb->flags &= ~CVAR_SOUND;
     QAL_Shutdown();
 fail0:
     Com_EPrintf("Failed to initialize OpenAL: %s\n", Com_GetLastError());
@@ -232,7 +227,7 @@ static void AL_Shutdown(void)
     s_underwater_gain_hf->changed = NULL;
     s_volume->changed = NULL;
     al_merge_looping->changed = NULL;
-    al_reverb->changed = NULL;
+    al_reverb->flags &= ~CVAR_SOUND;
 
     QAL_Shutdown();
 }
