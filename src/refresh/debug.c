@@ -100,6 +100,25 @@ void R_AddDebugLine(const vec3_t start, const vec3_t end, uint32_t color, uint32
         l->bits |= GLS_DEPTHTEST_DISABLE;
 }
 
+void R_EmitDebugLines(debug_line_cb_t cb, void *userdata)
+{
+    debug_line_t *l, *next;
+
+    if (!cb || LIST_EMPTY(&debug_lines_active))
+        return;
+
+    LIST_FOR_EACH_SAFE(debug_line_t, l, next, &debug_lines_active, entry) {
+        if (l->time < com_localTime2) {
+            List_Remove(&l->entry);
+            List_Insert(&debug_lines_free, &l->entry);
+            continue;
+        }
+
+        cb(l->start, l->end, l->color,
+           !(l->bits & GLS_DEPTHTEST_DISABLE), userdata);
+    }
+}
+
 #define GL_DRAWLINE(sx, sy, sz, ex, ey, ez) \
     R_AddDebugLine((const vec3_t) { (sx), (sy), (sz) }, (const vec3_t) { (ex), (ey), (ez) }, color, time, depth_test)
 

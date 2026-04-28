@@ -30,6 +30,7 @@ the Free Software Foundation; either version 2 of the License, or
 #if USE_VULKAN
 
 #define VK_MAX_INSTANCE_EXTENSIONS 16
+#define VK_MAX_DEBUG_LINE_VERTICES TESS_MAX_VERTICES
 
 static const uint32_t vk_rect_vert_spv[] =
 #include "vk_rect_vert_spv.h"
@@ -336,6 +337,7 @@ typedef struct {
     VkPipeline texture_pipeline;
     VkPipeline color3d_pipeline;
     VkPipeline line3d_pipeline;
+    VkPipeline debug_line_pipeline;
     VkPipeline beam_pipeline;
     VkPipeline world_pipeline;
     VkPipeline world_alpha_pipeline;
@@ -381,6 +383,7 @@ typedef struct {
     vk_mesh_t sprite_quad;
     vk_mesh_t null_model;
     vk_mesh_t beam_cylinder;
+    vk_buffer_t debug_lines;
     uint32_t sky_images[6];
     vk_world_t world;
     vk_model_t models[MAX_MODELS];
@@ -2432,6 +2435,11 @@ static void vk_destroy_swapchain(void)
         vk.line3d_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.debug_line_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.debug_line_pipeline, NULL);
+        vk.debug_line_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.beam_pipeline) {
         vk.DestroyPipeline(vk.device, vk.beam_pipeline, NULL);
         vk.beam_pipeline = VK_NULL_HANDLE;
@@ -2976,8 +2984,9 @@ static bool vk_create_texture_pipeline(void)
     return true;
 }
 
-static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_write,
-                                       bool blend, VkPrimitiveTopology topology)
+static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
+                                       bool depth_write, bool blend,
+                                       VkPrimitiveTopology topology)
 {
     VkShaderModule vert = vk_create_shader_module(vk_color3d_vert_spv,
                                                   sizeof(vk_color3d_vert_spv));
@@ -3083,7 +3092,7 @@ static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_write,
     };
     VkPipelineDepthStencilStateCreateInfo depth_stencil = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable = VK_TRUE,
+        .depthTestEnable = depth_test,
         .depthWriteEnable = depth_write,
         .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
     };
@@ -3586,11 +3595,13 @@ static bool vk_create_swapchain(int width, int height)
     if (!vk_create_render_pass() ||
         !vk_create_rect_pipeline() ||
         !vk_create_texture_pipeline() ||
-        !vk_create_color3d_pipeline(&vk.color3d_pipeline, VK_TRUE, VK_FALSE,
+        !vk_create_color3d_pipeline(&vk.color3d_pipeline, VK_TRUE, VK_TRUE, VK_FALSE,
                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
-        !vk_create_color3d_pipeline(&vk.line3d_pipeline, VK_TRUE, VK_FALSE,
+        !vk_create_color3d_pipeline(&vk.line3d_pipeline, VK_TRUE, VK_TRUE, VK_FALSE,
                                     VK_PRIMITIVE_TOPOLOGY_LINE_LIST) ||
-        !vk_create_color3d_pipeline(&vk.beam_pipeline, VK_FALSE, VK_TRUE,
+        !vk_create_color3d_pipeline(&vk.debug_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE,
+                                    VK_PRIMITIVE_TOPOLOGY_LINE_LIST) ||
+        !vk_create_color3d_pipeline(&vk.beam_pipeline, VK_TRUE, VK_FALSE, VK_TRUE,
                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
         !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
@@ -4312,6 +4323,18 @@ static bool vk_create_null_model(void)
                           indices, q_countof(indices));
 }
 
+#if USE_DEBUG
+static bool vk_create_debug_line_buffer(void)
+{
+    vk_destroy_buffer(&vk.debug_lines);
+    return vk_create_buffer(sizeof(vk_vertex_t) * VK_MAX_DEBUG_LINE_VERTICES,
+                            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            &vk.debug_lines.buffer, &vk.debug_lines.memory);
+}
+#endif
+
 static bool vk_create_particle_texture(void)
 {
     uint32_t pixels[16 * 16];
@@ -4433,6 +4456,99 @@ static void vk_draw_null_model(const entity_t *ent, const refdef_t *fd)
                         0, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.null_model.index_count, 1, 0, 0, 0);
 }
+
+#if USE_DEBUG
+typedef struct {
+    vk_vertex_t *vertices;
+    uint32_t depth_vertices;
+    uint32_t nodepth_vertices;
+} vk_debug_line_build_t;
+
+static void vk_debug_line_emit(const vec3_t start, const vec3_t end,
+                               uint32_t color, qboolean depth_test,
+                               void *userdata)
+{
+    vk_debug_line_build_t *build = userdata;
+    color_t c = { .u32 = color };
+    float rgba[4] = {
+        c.u8[0] / 255.0f,
+        c.u8[1] / 255.0f,
+        c.u8[2] / 255.0f,
+        c.u8[3] / 255.0f,
+    };
+    vk_vertex_t *dst;
+
+    if (depth_test) {
+        if (build->depth_vertices + build->nodepth_vertices + 2 >
+            VK_MAX_DEBUG_LINE_VERTICES)
+            return;
+        dst = &build->vertices[build->depth_vertices];
+        build->depth_vertices += 2;
+    } else {
+        if (build->depth_vertices + build->nodepth_vertices + 2 >
+            VK_MAX_DEBUG_LINE_VERTICES)
+            return;
+        build->nodepth_vertices += 2;
+        dst = &build->vertices[VK_MAX_DEBUG_LINE_VERTICES -
+                               build->nodepth_vertices];
+    }
+
+    VectorCopy(start, dst[0].position);
+    VectorCopy(end, dst[1].position);
+    memcpy(dst[0].color, rgba, sizeof(dst[0].color));
+    memcpy(dst[1].color, rgba, sizeof(dst[1].color));
+}
+
+static void vk_draw_debug_lines(const refdef_t *fd)
+{
+    if (!vk.render_pass_active || !vk.line3d_pipeline ||
+        !vk.debug_line_pipeline || !vk.debug_lines.buffer)
+        return;
+
+    vk_vertex_t *vertices;
+    VkResult result = vk.MapMemory(vk.device, vk.debug_lines.memory, 0,
+                                   vk.debug_lines.size, 0,
+                                   (void **)&vertices);
+    if (result != VK_SUCCESS) {
+        vk_fail_result("vkMapMemory", result);
+        return;
+    }
+
+    vk_debug_line_build_t build = { .vertices = vertices };
+    R_EmitDebugLines(vk_debug_line_emit, &build);
+    vk.UnmapMemory(vk.device, vk.debug_lines.memory);
+
+    if (!build.depth_vertices && !build.nodepth_vertices)
+        return;
+
+    mat4_t mvp;
+    vk_color3d_push_t push;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    vk_world_mvp(mvp, fd);
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    Vector4Set(push.color, 1.0f, 1.0f, 1.0f, 1.0f);
+
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.debug_lines.buffer, &offset);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+
+    if (build.depth_vertices) {
+        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           vk.line3d_pipeline);
+        vk.CmdDraw(cmd, build.depth_vertices, 1, 0, 0);
+    }
+
+    if (build.nodepth_vertices) {
+        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           vk.debug_line_pipeline);
+        vk.CmdDraw(cmd, build.nodepth_vertices, 1,
+                   VK_MAX_DEBUG_LINE_VERTICES - build.nodepth_vertices, 0);
+    }
+}
+#endif
 
 static float vk_world_face_alpha(const mface_t *face)
 {
@@ -6471,6 +6587,10 @@ bool VKR_Init(bool total)
         Com_WPrintf("Couldn't create Vulkan beam cylinder: %s\n", Com_GetLastError());
     if (!vk_create_null_model())
         Com_WPrintf("Couldn't create Vulkan null model: %s\n", Com_GetLastError());
+#if USE_DEBUG
+    if (!vk_create_debug_line_buffer())
+        Com_WPrintf("Couldn't create Vulkan debug line buffer: %s\n", Com_GetLastError());
+#endif
     if (!vk_create_particle_texture())
         Com_WPrintf("Couldn't create Vulkan particle texture: %s\n", Com_GetLastError());
 
@@ -6484,6 +6604,8 @@ bool VKR_Init(bool total)
     Cmd_AddCommand("strings", vk_strings_f);
     Cmd_AddCommand("modellist", vk_model_list_f);
 #if USE_DEBUG
+    R_ClearDebugLines();
+    Cmd_AddCommand("cleardebuglines", R_ClearDebugLines);
     Cmd_AddMacro("gl_viewcluster", vk_viewcluster_m);
     Cmd_AddMacro("gl_viewleaf", vk_viewleaf_m);
 #endif
@@ -6499,6 +6621,9 @@ void VKR_Shutdown(bool total)
 
     Cmd_RemoveCommand("strings");
     Cmd_RemoveCommand("modellist");
+#if USE_DEBUG
+    Cmd_RemoveCommand("cleardebuglines");
+#endif
 
     if (r_numImages) {
         IMG_FreeAll();
@@ -6541,6 +6666,7 @@ void VKR_Shutdown(bool total)
     vk_destroy_mesh(&vk.sprite_quad);
     vk_destroy_mesh(&vk.null_model);
     vk_destroy_mesh(&vk.beam_cylinder);
+    vk_destroy_buffer(&vk.debug_lines);
 
     if (vk.sampler) {
         vk.DestroySampler(vk.device, vk.sampler, NULL);
@@ -6750,6 +6876,9 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk_draw_particles(fd);
     vk_draw_entities(fd, VK_ENTITY_ALPHA_FRONT);
     vk_draw_test_triangle(fd);
+#if USE_DEBUG
+    vk_draw_debug_lines(fd);
+#endif
     vk_draw_polyblend(fd);
 }
 
