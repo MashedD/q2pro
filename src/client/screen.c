@@ -2286,7 +2286,7 @@ static void SCR_CenterOpenTDMStatusbarTeams(char *statusbar, size_t size)
     int center_x = scr.hud_width / 2;
     int gap = 6 * CONCHAR_WIDTH;
     int name_y = 0;
-    int score_y = CONCHAR_HEIGHT;
+    int score_y = CONCHAR_HEIGHT + 3;
     int home_name_w = SCR_OpenTDMStatusbarStringWidth(statusbar, "yb -96 string");
     int visitors_name_w = SCR_OpenTDMStatusbarStringWidth(statusbar, "yb -48 string");
     int home_score_digits = SCR_OpenTDMScoreDigits(23);
