@@ -184,6 +184,8 @@ typedef struct {
     uint32_t face_count;
     float size;
     cplane_t frustum[4];
+    vec3_t vieworg;
+    int viewcluster;
     unsigned drawframe;
     unsigned visframe;
 } vk_world_t;
@@ -777,6 +779,7 @@ static void vk_free_world(void)
     vk.world.batch_count = 0;
     vk.world.face_count = 0;
     vk.world.size = 0.0f;
+    vk.world.viewcluster = -1;
     vk.world.drawframe = 0;
     vk.world.visframe = 0;
 
@@ -856,6 +859,33 @@ static void vk_model_list_f(void)
     Com_Printf("Total Vulkan models: %d (out of %u slots)\n",
                count, vk.model_count);
 }
+
+#if USE_DEBUG
+static size_t vk_viewcluster_m(char *buffer, size_t size)
+{
+    return Q_snprintf(buffer, size, "%d", vk.world.viewcluster);
+}
+
+static size_t vk_viewleaf_m(char *buffer, size_t size)
+{
+    const bsp_t *bsp = vk.world.cache;
+
+    if (bsp && bsp->nodes && bsp->leafs) {
+        const mleaf_t *leaf = BSP_PointLeaf(bsp->nodes, vk.world.vieworg);
+
+        if (leaf) {
+            return Q_snprintf(buffer, size, "%td %d %d %d %#x",
+                              leaf - bsp->leafs,
+                              leaf->cluster,
+                              leaf->numleafbrushes,
+                              leaf->numleaffaces,
+                              leaf->contents[0]);
+        }
+    }
+
+    return Q_strlcpy(buffer, "", size);
+}
+#endif
 
 static vk_model_t *vk_find_model(const char *name)
 {
@@ -4802,11 +4832,14 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
         return;
 
     vk.world.visframe++;
+    VectorCopy(fd->vieworg, vk.world.vieworg);
+    vk.world.viewcluster = -1;
 
     leaf = BSP_PointLeaf(bsp->nodes, fd->vieworg);
     if (!leaf)
         return;
     cluster1 = cluster2 = leaf->cluster;
+    vk.world.viewcluster = cluster1;
     VectorCopy(fd->vieworg, tmp);
     if (!leaf->contents[0])
         tmp[2] -= 16;
@@ -6450,6 +6483,10 @@ bool VKR_Init(bool total)
 
     Cmd_AddCommand("strings", vk_strings_f);
     Cmd_AddCommand("modellist", vk_model_list_f);
+#if USE_DEBUG
+    Cmd_AddMacro("gl_viewcluster", vk_viewcluster_m);
+    Cmd_AddMacro("gl_viewleaf", vk_viewleaf_m);
+#endif
 
     Com_Printf("------------------------\n");
     return true;
