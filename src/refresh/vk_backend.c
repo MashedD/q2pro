@@ -4947,15 +4947,10 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
     if (vk_lockpvs && vk_lockpvs->integer)
         return;
 
-    vk.world.visframe++;
-    VectorCopy(fd->vieworg, vk.world.vieworg);
-    vk.world.viewcluster = -1;
-
     leaf = BSP_PointLeaf(bsp->nodes, fd->vieworg);
     if (!leaf)
         return;
     cluster1 = cluster2 = leaf->cluster;
-    vk.world.viewcluster = cluster1;
     VectorCopy(fd->vieworg, tmp);
     if (!leaf->contents[0])
         tmp[2] -= 16;
@@ -5000,6 +4995,22 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
     }
 }
 
+static void vk_update_world_view(const refdef_t *fd)
+{
+    const bsp_t *bsp = vk.world.cache;
+    const mleaf_t *leaf;
+
+    VectorCopy(fd->vieworg, vk.world.vieworg);
+    vk.world.viewcluster = -1;
+
+    if (!bsp || !bsp->nodes)
+        return;
+
+    leaf = BSP_PointLeaf(bsp->nodes, fd->vieworg);
+    if (leaf)
+        vk.world.viewcluster = leaf->cluster;
+}
+
 static void vk_mark_world_node_faces(const mnode_t *node, const refdef_t *fd, int clipflags)
 {
     if (!node)
@@ -5036,6 +5047,8 @@ static void vk_mark_world_faces(const refdef_t *fd)
         return;
 
     vk.world.drawframe++;
+    vk.world.visframe++;
+    vk_update_world_view(fd);
     vk_mark_world_visible_nodes(fd);
     vk_setup_world_frustum(fd);
 
@@ -6839,6 +6852,7 @@ void VKR_RenderFrame(const refdef_t *fd)
 
     vk_rebuild_world_lighting();
     vk_setup_world_frustum(fd);
+    vk_update_world_view(fd);
 
     bool drawworld = !(fd->rdflags & RDF_NOWORLDMODEL) &&
         (!vk_drawworld || vk_drawworld->integer);
