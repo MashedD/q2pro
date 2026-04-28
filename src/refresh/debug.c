@@ -425,6 +425,26 @@ void R_AddDebugText(const vec3_t origin, const vec3_t angles, const char *text,
     }
 }
 
+void R_EmitDebugTexts(debug_text_cb_t cb, void *userdata)
+{
+    debug_text_t *text, *next;
+
+    if (!cb || LIST_EMPTY(&debug_texts_active))
+        return;
+
+    LIST_FOR_EACH_SAFE(debug_text_t, text, next, &debug_texts_active, entry) {
+        if (text->time < com_localTime2) {
+            List_Remove(&text->entry);
+            List_Insert(&debug_texts_free, &text->entry);
+            continue;
+        }
+
+        cb(text->origin, text->angles, text->text, text->size, text->color,
+           !(text->bits & GLS_DEPTHTEST_DISABLE),
+           !!(text->bits & GLS_CULL_DISABLE), userdata);
+    }
+}
+
 static void GL_DrawDebugLines(void)
 {
     glStateBits_t bits = -1;

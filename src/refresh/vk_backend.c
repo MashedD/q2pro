@@ -31,6 +31,9 @@ the Free Software Foundation; either version 2 of the License, or
 
 #define VK_MAX_INSTANCE_EXTENSIONS 16
 #define VK_MAX_DEBUG_LINE_VERTICES TESS_MAX_VERTICES
+#define VK_MAX_DEBUG_TEXT_CHARS    (TESS_MAX_VERTICES / 4)
+#define VK_MAX_DEBUG_TEXT_VERTICES (VK_MAX_DEBUG_TEXT_CHARS * 4)
+#define VK_MAX_DEBUG_TEXT_INDICES  (VK_MAX_DEBUG_TEXT_CHARS * 6)
 
 static const uint32_t vk_rect_vert_spv[] =
 #include "vk_rect_vert_spv.h"
@@ -338,6 +341,7 @@ typedef struct {
     VkPipeline color3d_pipeline;
     VkPipeline line3d_pipeline;
     VkPipeline debug_line_pipeline;
+    VkPipeline debug_text_pipeline;
     VkPipeline beam_pipeline;
     VkPipeline world_pipeline;
     VkPipeline world_alpha_pipeline;
@@ -384,6 +388,8 @@ typedef struct {
     vk_mesh_t null_model;
     vk_mesh_t beam_cylinder;
     vk_buffer_t debug_lines;
+    vk_buffer_t debug_text_vertices;
+    vk_buffer_t debug_text_indices;
     uint32_t sky_images[6];
     vk_world_t world;
     vk_model_t models[MAX_MODELS];
@@ -439,6 +445,9 @@ static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_cull_nodes;
 static cvar_t *vk_world_cull;
+#if USE_DEBUG
+static cvar_t *vk_debug_distfrac;
+#endif
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static void vk_destroy_texture(image_t *image);
@@ -2440,6 +2449,11 @@ static void vk_destroy_swapchain(void)
         vk.debug_line_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.debug_text_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.debug_text_pipeline, NULL);
+        vk.debug_text_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.beam_pipeline) {
         vk.DestroyPipeline(vk.device, vk.beam_pipeline, NULL);
         vk.beam_pipeline = VK_NULL_HANDLE;
@@ -3609,6 +3623,7 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.particle_add_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.debug_text_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
         !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
         !vk_create_alias_pipeline(&vk.alias_alpha_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE) ||
         !vk_create_alias_pipeline(&vk.alias_depth_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
@@ -4333,6 +4348,32 @@ static bool vk_create_debug_line_buffer(void)
                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                             &vk.debug_lines.buffer, &vk.debug_lines.memory);
 }
+
+static bool vk_create_debug_text_buffers(void)
+{
+    vk_destroy_buffer(&vk.debug_text_vertices);
+    vk_destroy_buffer(&vk.debug_text_indices);
+
+    if (!vk_create_buffer(sizeof(vk_vertex_t) * VK_MAX_DEBUG_TEXT_VERTICES,
+                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          &vk.debug_text_vertices.buffer,
+                          &vk.debug_text_vertices.memory))
+        return false;
+
+    if (!vk_create_buffer(sizeof(uint32_t) * VK_MAX_DEBUG_TEXT_INDICES,
+                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          &vk.debug_text_indices.buffer,
+                          &vk.debug_text_indices.memory)) {
+        vk_destroy_buffer(&vk.debug_text_vertices);
+        return false;
+    }
+
+    return true;
+}
 #endif
 
 static bool vk_create_particle_texture(void)
@@ -4546,6 +4587,222 @@ static void vk_draw_debug_lines(const refdef_t *fd)
                            vk.debug_line_pipeline);
         vk.CmdDraw(cmd, build.nodepth_vertices, 1,
                    VK_MAX_DEBUG_LINE_VERTICES - build.nodepth_vertices, 0);
+    }
+}
+
+typedef struct {
+    const refdef_t *fd;
+    vec3_t viewaxis[3];
+    vk_vertex_t *vertices;
+    uint32_t *indices;
+    uint32_t depth_vertices;
+    uint32_t depth_indices;
+    uint32_t nodepth_vertices;
+    uint32_t nodepth_indices;
+} vk_debug_text_build_t;
+
+static void vk_debug_text_emit_char(vk_debug_text_build_t *build,
+                                    const vec3_t pos, const vec3_t right,
+                                    const vec3_t down, uint32_t color,
+                                    int ch, qboolean depth_test)
+{
+    if ((ch & 127) == 32)
+        return;
+
+    if (build->depth_vertices + build->nodepth_vertices + 4 >
+        VK_MAX_DEBUG_TEXT_VERTICES)
+        return;
+    if (build->depth_indices + build->nodepth_indices + 6 >
+        VK_MAX_DEBUG_TEXT_INDICES)
+        return;
+
+    uint32_t base, first_index;
+    if (depth_test) {
+        base = build->depth_vertices;
+        first_index = build->depth_indices;
+        build->depth_vertices += 4;
+        build->depth_indices += 6;
+    } else {
+        build->nodepth_vertices += 4;
+        build->nodepth_indices += 6;
+        base = VK_MAX_DEBUG_TEXT_VERTICES - build->nodepth_vertices;
+        first_index = VK_MAX_DEBUG_TEXT_INDICES - build->nodepth_indices;
+    }
+
+    color_t c = { .u32 = color };
+    float rgba[4] = {
+        c.u8[0] / 255.0f,
+        c.u8[1] / 255.0f,
+        c.u8[2] / 255.0f,
+        c.u8[3] / 255.0f,
+    };
+    float s = (ch & 15) * 0.0625f;
+    float t = (ch >> 4) * 0.0625f;
+    vk_vertex_t *dst = &build->vertices[base];
+    uint32_t *indices = &build->indices[first_index];
+
+    VectorCopy(pos, dst[0].position);
+    VectorAdd(pos, right, dst[1].position);
+    VectorAdd(dst[1].position, down, dst[2].position);
+    VectorAdd(pos, down, dst[3].position);
+
+    dst[0].uv[0] = s;
+    dst[0].uv[1] = t;
+    dst[1].uv[0] = s + 0.0625f;
+    dst[1].uv[1] = t;
+    dst[2].uv[0] = s + 0.0625f;
+    dst[2].uv[1] = t + 0.0625f;
+    dst[3].uv[0] = s;
+    dst[3].uv[1] = t + 0.0625f;
+
+    for (int i = 0; i < 4; i++)
+        memcpy(dst[i].color, rgba, sizeof(dst[i].color));
+
+    indices[0] = base + 0;
+    indices[1] = base + 2;
+    indices[2] = base + 3;
+    indices[3] = base + 0;
+    indices[4] = base + 1;
+    indices[5] = base + 2;
+}
+
+static void vk_debug_text_emit_line(vk_debug_text_build_t *build,
+                                    const vec3_t origin, const vec3_t right,
+                                    const vec3_t down, const char *s,
+                                    size_t len, uint32_t color,
+                                    qboolean depth_test)
+{
+    vec3_t pos;
+
+    if (!len)
+        return;
+
+    VectorMA(origin, -0.5f * len, right, pos);
+    while (len--) {
+        byte ch = *s++;
+        vk_debug_text_emit_char(build, pos, right, down, color, ch, depth_test);
+        VectorAdd(pos, right, pos);
+    }
+}
+
+static void vk_debug_text_emit(const vec3_t origin, const vec3_t angles,
+                               const char *text, float size, uint32_t color,
+                               qboolean depth_test, qboolean oriented,
+                               void *userdata)
+{
+    vk_debug_text_build_t *build = userdata;
+    vec3_t right, down, pos;
+    const char *s, *p;
+
+    VectorSubtract(origin, build->fd->vieworg, pos);
+    if (vk_debug_distfrac &&
+        size < DotProduct(pos, build->viewaxis[0]) * vk_debug_distfrac->value)
+        return;
+
+    if (oriented) {
+        vec3_t up;
+        AngleVectors(angles, NULL, right, up);
+        VectorScale(right, size, right);
+        VectorScale(up, -size, down);
+    } else {
+        VectorScale(build->viewaxis[1], -size, right);
+        VectorScale(build->viewaxis[2], -size, down);
+    }
+
+    VectorCopy(origin, pos);
+    s = text;
+    while (*s) {
+        p = strchr(s, '\n');
+        if (!p) {
+            vk_debug_text_emit_line(build, pos, right, down, s, strlen(s),
+                                    color, depth_test);
+            break;
+        }
+        vk_debug_text_emit_line(build, pos, right, down, s, p - s,
+                                color, depth_test);
+        VectorAdd(pos, down, pos);
+        s = p + 1;
+    }
+}
+
+static void vk_draw_debug_texts(const refdef_t *fd)
+{
+    if (!vk.render_pass_active || !vk.sprite_pipeline ||
+        !vk.debug_text_pipeline || !vk.debug_text_vertices.buffer ||
+        !vk.debug_text_indices.buffer)
+        return;
+
+    image_t *font = IMG_ForHandle(r_charset);
+    if (!font)
+        return;
+
+    const vk_texture_t *texture = vk_texture_for_index(font->texnum, true);
+    if (!texture)
+        return;
+
+    vk_vertex_t *vertices;
+    VkResult result = vk.MapMemory(vk.device, vk.debug_text_vertices.memory, 0,
+                                   vk.debug_text_vertices.size, 0,
+                                   (void **)&vertices);
+    if (result != VK_SUCCESS) {
+        vk_fail_result("vkMapMemory", result);
+        return;
+    }
+
+    uint32_t *indices;
+    result = vk.MapMemory(vk.device, vk.debug_text_indices.memory, 0,
+                          vk.debug_text_indices.size, 0, (void **)&indices);
+    if (result != VK_SUCCESS) {
+        vk.UnmapMemory(vk.device, vk.debug_text_vertices.memory);
+        vk_fail_result("vkMapMemory", result);
+        return;
+    }
+
+    vk_debug_text_build_t build = {
+        .fd = fd,
+        .vertices = vertices,
+        .indices = indices,
+    };
+    AnglesToAxis(fd->viewangles, build.viewaxis);
+    R_EmitDebugTexts(vk_debug_text_emit, &build);
+
+    vk.UnmapMemory(vk.device, vk.debug_text_indices.memory);
+    vk.UnmapMemory(vk.device, vk.debug_text_vertices.memory);
+
+    if (!build.depth_indices && !build.nodepth_indices)
+        return;
+
+    mat4_t mvp;
+    vk_color3d_push_t push;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    vk_world_mvp(mvp, fd);
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    Vector4Set(push.color, 1.0f, 1.0f, 1.0f, 1.0f);
+
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.debug_text_vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.debug_text_indices.buffer, 0,
+                          VK_INDEX_TYPE_UINT32);
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.rect_pipeline_layout, 0, 1,
+                             &texture->descriptor_set, 0, NULL);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+
+    if (build.depth_indices) {
+        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           vk.sprite_pipeline);
+        vk.CmdDrawIndexed(cmd, build.depth_indices, 1, 0, 0, 0);
+    }
+
+    if (build.nodepth_indices) {
+        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           vk.debug_text_pipeline);
+        vk.CmdDrawIndexed(cmd, build.nodepth_indices, 1,
+                          VK_MAX_DEBUG_TEXT_INDICES - build.nodepth_indices,
+                          0, 0);
     }
 }
 #endif
@@ -6576,6 +6833,9 @@ bool VKR_Init(bool total)
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_cull_nodes = Cvar_Get("gl_cull_nodes", "1", 0);
     vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
+#if USE_DEBUG
+    vk_debug_distfrac = Cvar_Get("gl_debug_distfrac", "0.004", 0);
+#endif
 
     if (!vid->init())
         return false;
@@ -6603,6 +6863,8 @@ bool VKR_Init(bool total)
 #if USE_DEBUG
     if (!vk_create_debug_line_buffer())
         Com_WPrintf("Couldn't create Vulkan debug line buffer: %s\n", Com_GetLastError());
+    if (!vk_create_debug_text_buffers())
+        Com_WPrintf("Couldn't create Vulkan debug text buffers: %s\n", Com_GetLastError());
 #endif
     if (!vk_create_particle_texture())
         Com_WPrintf("Couldn't create Vulkan particle texture: %s\n", Com_GetLastError());
@@ -6680,6 +6942,8 @@ void VKR_Shutdown(bool total)
     vk_destroy_mesh(&vk.null_model);
     vk_destroy_mesh(&vk.beam_cylinder);
     vk_destroy_buffer(&vk.debug_lines);
+    vk_destroy_buffer(&vk.debug_text_vertices);
+    vk_destroy_buffer(&vk.debug_text_indices);
 
     if (vk.sampler) {
         vk.DestroySampler(vk.device, vk.sampler, NULL);
@@ -6892,6 +7156,7 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk_draw_test_triangle(fd);
 #if USE_DEBUG
     vk_draw_debug_lines(fd);
+    vk_draw_debug_texts(fd);
 #endif
     vk_draw_polyblend(fd);
 }

@@ -159,8 +159,13 @@ void SCR_Cinematic_g(genctx_t *ctx);
 typedef void (*debug_line_cb_t)(const vec3_t start, const vec3_t end,
                                 uint32_t color, qboolean depth_test,
                                 void *userdata);
+typedef void (*debug_text_cb_t)(const vec3_t origin, const vec3_t angles,
+                                const char *text, float size, uint32_t color,
+                                qboolean depth_test, qboolean oriented,
+                                void *userdata);
 void R_ClearDebugLines(void);
 void R_EmitDebugLines(debug_line_cb_t cb, void *userdata);
+void R_EmitDebugTexts(debug_text_cb_t cb, void *userdata);
 void R_AddDebugLine(const vec3_t start, const vec3_t end, uint32_t color, uint32_t time, qboolean depth_test);
 void R_AddDebugPoint(const vec3_t point, float size, uint32_t color, uint32_t time, qboolean depth_test);
 void R_AddDebugAxis(const vec3_t origin, const vec3_t angles, float size, uint32_t time, qboolean depth_test);
