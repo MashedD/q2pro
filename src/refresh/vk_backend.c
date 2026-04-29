@@ -222,6 +222,12 @@ typedef struct {
 } vk_alias_push_t;
 
 typedef struct {
+    uint32_t frame;
+    uint32_t oldframe;
+    float backlerp;
+} vk_alias_lerp_t;
+
+typedef struct {
     uint32_t graphics_family;
     uint32_t present_family;
     bool has_graphics;
@@ -4182,6 +4188,37 @@ static bool vk_cull_local_box(const vec3_t origin, const vec3_t bounds[2],
     return false;
 }
 
+static vk_alias_lerp_t vk_alias_lerp_for_entity(const vk_model_t *model,
+                                                const entity_t *ent,
+                                                const refdef_t *fd)
+{
+    vk_alias_lerp_t lerp;
+
+    lerp.backlerp = Q_clip(ent->backlerp, 0.0f, 1.0f);
+
+    if (fd && fd->extended) {
+        lerp.frame = ent->frame % model->frame_count;
+        lerp.oldframe = ent->oldframe % model->frame_count;
+    } else {
+        lerp.frame = ent->frame;
+        if (lerp.frame >= (uint32_t)model->frame_count) {
+            Com_DPrintf("%s: no such frame: %u\n", __func__, lerp.frame);
+            lerp.frame = 0;
+        }
+
+        lerp.oldframe = ent->oldframe;
+        if (lerp.oldframe >= (uint32_t)model->frame_count) {
+            Com_DPrintf("%s: no such oldframe: %u\n", __func__, lerp.oldframe);
+            lerp.oldframe = 0;
+        }
+    }
+
+    if (lerp.backlerp == 0.0f)
+        lerp.oldframe = lerp.frame;
+
+    return lerp;
+}
+
 static bool vk_alias_model_culled(const vk_model_t *model, const entity_t *ent,
                                   const vec3_t axis[3], uint32_t frame,
                                   uint32_t oldframe)
@@ -5614,7 +5651,7 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
                                  const vk_model_t *model,
                                  const VkBuffer buffers[2],
                                  const VkDeviceSize offsets[2],
-                                 float backlerp)
+                                 const vk_alias_lerp_t *lerp)
 {
     lightpoint_t point;
     vec3_t dir;
@@ -5635,10 +5672,8 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     if (w < 0.5f)
         return;
 
-    uint32_t frame = ent->frame % model->frame_count;
-    uint32_t oldframe = ent->oldframe % model->frame_count;
-    radius = model->alias_frames[frame].radius * (1.0f - backlerp) +
-        model->alias_frames[oldframe].radius * backlerp;
+    radius = model->alias_frames[lerp->frame].radius * (1.0f - lerp->backlerp) +
+        model->alias_frames[lerp->oldframe].radius * lerp->backlerp;
     radius *= ent->scale ? ent->scale : 1.0f;
 
     if (vk_shadows->integer >= 2) {
@@ -5672,7 +5707,7 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
 
     Vector4Set(push.color, 0.0f, 0.0f, 0.0f, alpha);
     Vector4Clear(push.shadedir);
-    push.backlerp = backlerp;
+    push.backlerp = lerp->backlerp;
     push.shellscale = 0.0f;
     push.depthscale = 1.0f;
 
@@ -5708,11 +5743,10 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     mat4_t mvp;
     vk_alias_push_t push;
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
-    uint32_t frame = ent->frame % model->frame_count;
-    uint32_t oldframe = ent->oldframe % model->frame_count;
+    vk_alias_lerp_t lerp = vk_alias_lerp_for_entity(model, ent, fd);
     VkDeviceSize offsets[] = {
-        (VkDeviceSize)frame * model->vertex_count * sizeof(vk_vertex_t),
-        (VkDeviceSize)oldframe * model->vertex_count * sizeof(vk_vertex_t),
+        (VkDeviceSize)lerp.frame * model->vertex_count * sizeof(vk_vertex_t),
+        (VkDeviceSize)lerp.oldframe * model->vertex_count * sizeof(vk_vertex_t),
     };
     VkBuffer buffers[] = {
         model->mesh.vertices.buffer,
@@ -5720,14 +5754,14 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     };
 
     vk_entity_axis(ent, axis);
-    if (vk_alias_model_culled(model, ent, axis, frame, oldframe))
+    if (vk_alias_model_culled(model, ent, axis, lerp.frame, lerp.oldframe))
         return;
 
     vk_entity_mvp(mvp, fd, ent, axis);
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     vk_entity_light_color(ent, fd, push.color);
     vk_alias_shadedir(ent, push.shadedir);
-    push.backlerp = Q_clip(ent->backlerp, 0.0f, 1.0f);
+    push.backlerp = lerp.backlerp;
     push.shellscale = (ent->flags & RF_SHELL_MASK) ?
         ((ent->flags & RF_WEAPONMODEL) ? WEAPONSHELL_SCALE : POWERSUIT_SCALE) : 0.0f;
     push.depthscale = (ent->flags & RF_DEPTHHACK) ? 0.25f : 1.0f;
@@ -5764,7 +5798,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
                            texture, &push);
     }
 
-    vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, push.backlerp);
+    vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp);
 }
 
 static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
