@@ -174,6 +174,8 @@ typedef struct {
     int frame_count;
     int alias_batch_count;
     vk_mesh_t mesh;
+    vk_buffer_t alias_line_indices;
+    uint32_t alias_line_index_count;
     image_t **skins;
     int skin_count;
     uint32_t vertex_count;
@@ -359,6 +361,7 @@ typedef struct {
     VkPipeline alias_alpha_pipeline;
     VkPipeline alias_depth_pipeline;
     VkPipeline alias_blend_pipeline;
+    VkPipeline alias_line_pipeline;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
     VkFormat swapchain_format;
@@ -460,6 +463,9 @@ static void vk_destroy_texture(image_t *image);
 static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
                            uint32_t vertex_count, const uint32_t *indices,
                            uint32_t index_count);
+static uint32_t *vk_build_line_indices(const uint32_t *indices,
+                                       uint32_t index_count,
+                                       uint32_t *line_index_count);
 static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, const void *pixels);
 static void vk_destroy_texture_resource(vk_texture_t *texture);
@@ -826,6 +832,8 @@ static void vk_free_model(vk_model_t *model)
         model->skins = NULL;
     }
     vk_destroy_mesh(&model->mesh);
+    vk_destroy_buffer(&model->alias_line_indices);
+    model->alias_line_index_count = 0;
 
     memset(model, 0, sizeof(*model));
 }
@@ -1016,6 +1024,8 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
     uint16_t *remap = NULL;
     vk_vertex_t *vertices = NULL;
     uint32_t *indices = NULL;
+    uint32_t *line_indices = NULL;
+    uint32_t line_index_count = 0;
     vk_alias_frame_t *alias_frames = NULL;
     uint32_t numindices = 0;
     uint32_t numverts = 0;
@@ -1185,6 +1195,16 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
         goto out;
     }
 
+    line_indices = vk_build_line_indices(indices, numindices, &line_index_count);
+    if (!line_indices ||
+        !vk_upload_buffer(&model->alias_line_indices, line_indices,
+                          sizeof(*line_indices) * line_index_count,
+                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
+        vk_free_model(model);
+        goto out;
+    }
+    model->alias_line_index_count = line_index_count;
+
     handle = (model - vk.models) + 1;
 
 out:
@@ -1200,6 +1220,8 @@ out:
         Z_Free(vertices);
     if (indices)
         Z_Free(indices);
+    if (line_indices)
+        Z_Free(line_indices);
     if (alias_frames)
         Z_Free(alias_frames);
     return handle;
@@ -1270,6 +1292,8 @@ static qhandle_t vk_load_md3_model(const char *name, const byte *rawdata, size_t
     vk_md3_mesh_info_t mesh_info[MD3_MAX_MESHES];
     vk_vertex_t *vertices = NULL;
     uint32_t *indices = NULL;
+    uint32_t *line_indices = NULL;
+    uint32_t line_index_count = 0;
     vk_alias_frame_t *alias_frames = NULL;
     vk_alias_batch_t *batches = NULL;
     image_t **skins = NULL;
@@ -1463,6 +1487,16 @@ static qhandle_t vk_load_md3_model(const char *name, const byte *rawdata, size_t
         goto out;
     }
 
+    line_indices = vk_build_line_indices(indices, index_count, &line_index_count);
+    if (!line_indices ||
+        !vk_upload_buffer(&model->alias_line_indices, line_indices,
+                          sizeof(*line_indices) * line_index_count,
+                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
+        vk_free_model(model);
+        goto out;
+    }
+    model->alias_line_index_count = line_index_count;
+
     handle = (model - vk.models) + 1;
 
 out:
@@ -1470,6 +1504,8 @@ out:
         Z_Free(vertices);
     if (indices)
         Z_Free(indices);
+    if (line_indices)
+        Z_Free(line_indices);
     if (alias_frames)
         Z_Free(alias_frames);
     if (batches)
@@ -1507,6 +1543,37 @@ static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
 fail:
     vk_destroy_mesh(&uploaded);
     return false;
+}
+
+static uint32_t *vk_build_line_indices(const uint32_t *indices,
+                                       uint32_t index_count,
+                                       uint32_t *line_index_count)
+{
+    uint32_t *line_indices;
+
+    *line_index_count = 0;
+    if (!indices || index_count < 3)
+        return NULL;
+    if (index_count > UINT32_MAX / 2)
+        return NULL;
+
+    *line_index_count = (index_count / 3) * 6;
+    line_indices = Z_Malloc(sizeof(*line_indices) * *line_index_count);
+
+    for (uint32_t i = 0, j = 0; i + 2 < index_count; i += 3) {
+        uint32_t a = indices[i + 0];
+        uint32_t b = indices[i + 1];
+        uint32_t c = indices[i + 2];
+
+        line_indices[j++] = a;
+        line_indices[j++] = b;
+        line_indices[j++] = b;
+        line_indices[j++] = c;
+        line_indices[j++] = c;
+        line_indices[j++] = a;
+    }
+
+    return line_indices;
 }
 
 static void vk_texture_barrier(VkCommandBuffer cmd, VkImage image,
@@ -2515,6 +2582,11 @@ static void vk_destroy_swapchain(void)
         vk.alias_blend_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.alias_line_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_line_pipeline, NULL);
+        vk.alias_line_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.framebuffers) {
         for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
             if (vk.framebuffers[i])
@@ -3299,7 +3371,8 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
 
 static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
                                      bool blend, bool color_write,
-                                     bool alpha_test)
+                                     bool alpha_test,
+                                     VkPrimitiveTopology topology)
 {
     VkShaderModule vert = vk_create_shader_module(vk_alias_vert_spv,
                                                   sizeof(vk_alias_vert_spv));
@@ -3389,7 +3462,7 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
     };
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .topology = topology,
     };
     VkViewport viewport = {
         .x = 0.0f,
@@ -3630,10 +3703,16 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.particle_add_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.debug_text_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
-        !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
-        !vk_create_alias_pipeline(&vk.alias_alpha_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE) ||
-        !vk_create_alias_pipeline(&vk.alias_depth_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
-        !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE) ||
+        !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE,
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
+        !vk_create_alias_pipeline(&vk.alias_alpha_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE,
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
+        !vk_create_alias_pipeline(&vk.alias_depth_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE,
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
+        !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE,
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
+        !vk_create_alias_pipeline(&vk.alias_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE,
+                                  VK_PRIMITIVE_TOPOLOGY_LINE_LIST) ||
         !vk_create_depth_resources() ||
         !vk_create_framebuffers())
         return false;
@@ -5607,6 +5686,46 @@ static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
     vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
 }
 
+static void vk_draw_alias_outlines(VkCommandBuffer cmd,
+                                   const VkBuffer buffers[2],
+                                   const VkDeviceSize offsets[2],
+                                   const vk_model_t *model,
+                                   const vk_alias_batch_t *batch,
+                                   const vk_texture_t *texture,
+                                   const vk_alias_push_t *push)
+{
+    if (!gl_showtris || !(gl_showtris->integer & SHOWTRIS_MESH) ||
+        !vk.alias_line_pipeline || !model->alias_line_indices.buffer ||
+        !model->alias_line_index_count)
+        return;
+
+    uint32_t first_index = batch ? (batch->first_index / 3) * 6 : 0;
+    uint32_t index_count = batch ?
+        (batch->index_count / 3) * 6 : model->alias_line_index_count;
+
+    if (!index_count ||
+        first_index + index_count > model->alias_line_index_count)
+        return;
+
+    vk_alias_push_t outline = *push;
+    Vector4Set(outline.color, 0.0f, 0.0f, 0.0f, 1.0f);
+    Vector4Clear(outline.shadedir);
+    outline.depthscale = 0.0f;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                       vk.alias_line_pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 2, buffers, offsets);
+    vk.CmdBindIndexBuffer(cmd, model->alias_line_indices.buffer, 0,
+                          VK_INDEX_TYPE_UINT32);
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.rect_pipeline_layout, 0, 1,
+                             &texture->descriptor_set, 0, NULL);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(outline), &outline);
+    vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
+}
+
 static bool vk_alias_shadow_point(const entity_t *ent, lightpoint_t *point)
 {
     const bsp_t *bsp = vk.world.cache;
@@ -5796,6 +5915,8 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 
         vk_draw_alias_pass(cmd, pipeline, buffers, offsets, model, batch,
                            texture, &push);
+        vk_draw_alias_outlines(cmd, buffers, offsets, model, batch,
+                               texture, &push);
     }
 
     vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp);
