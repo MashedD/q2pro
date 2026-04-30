@@ -5480,7 +5480,8 @@ static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
     }
 }
 
-static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd)
+static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd,
+                           bool translucent_faces)
 {
     bsp_t *bsp = vk.world.cache;
     int index = ~ent->model;
@@ -5500,12 +5501,14 @@ static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd)
     vk_entity_mvp(mvp, fd, ent, axis);
 
     vk.world.drawframe++;
-    bool translucent = ent->flags & RF_TRANSLUCENT;
+    bool translucent = (ent->flags & RF_TRANSLUCENT) || translucent_faces;
     vk_mark_bmodel_faces(model, ent, fd, axis, translucent);
     vk_draw_world_mesh(mvp, true,
                        translucent ? vk.sprite_pipeline : vk.world_pipeline,
-                       translucent ? VK_WORLD_ENTITY_ALPHA : VK_WORLD_OPAQUE,
-                       translucent ? ent->alpha : 1.0f, fd, ent, axis);
+                       translucent_faces ? VK_WORLD_ALPHA :
+                           (translucent ? VK_WORLD_ENTITY_ALPHA : VK_WORLD_OPAQUE),
+                       (ent->flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f,
+                       fd, ent, axis);
 }
 
 static vk_model_t *vk_model_for_handle(qhandle_t handle)
@@ -6432,6 +6435,7 @@ typedef enum {
     VK_ENTITY_BMODEL,
     VK_ENTITY_OPAQUE,
     VK_ENTITY_ALPHA_BACK,
+    VK_ENTITY_BMODEL_ALPHA,
     VK_ENTITY_BEAM,
     VK_ENTITY_ALPHA_FRONT,
 } vk_entity_pass_t;
@@ -6440,6 +6444,9 @@ static bool vk_entity_in_pass(const entity_t *ent, vk_entity_pass_t pass)
 {
     if (ent->flags & RF_BEAM)
         return pass == VK_ENTITY_BEAM;
+
+    if ((ent->model & BIT(31)) && pass == VK_ENTITY_BMODEL_ALPHA)
+        return !(ent->flags & RF_TRANSLUCENT);
 
     if (!(ent->flags & RF_TRANSLUCENT))
         return (ent->model & BIT(31)) ?
@@ -6462,7 +6469,7 @@ static void vk_draw_entity(const entity_t *ent, const refdef_t *fd,
     }
 
     if (ent->model & BIT(31)) {
-        vk_draw_bmodel(ent, fd);
+        vk_draw_bmodel(ent, fd, pass == VK_ENTITY_BMODEL_ALPHA);
         return;
     }
 
@@ -7304,11 +7311,14 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk_draw_entities(fd, VK_ENTITY_BMODEL);
     vk_draw_entities(fd, VK_ENTITY_OPAQUE);
     vk_draw_entities(fd, VK_ENTITY_ALPHA_BACK);
+    vk_draw_entities(fd, VK_ENTITY_BMODEL_ALPHA);
     if (drawworld && vk.world.mesh.index_count &&
         vk_world_textures && vk_world_textures->integer) {
         mat4_t mvp;
 
         vk_world_mvp(mvp, fd);
+        if (vk_world_vis && vk_world_vis->integer)
+            vk_mark_world_faces(fd);
         vk_draw_world_mesh(mvp, false, vk.sprite_pipeline, VK_WORLD_ALPHA,
                            1.0f, fd, NULL, NULL);
     }
