@@ -4349,39 +4349,46 @@ static bool vk_create_test_triangle(void)
 
 static bool vk_create_skybox_mesh(void)
 {
-    const float s = 2048.0f;
+    const float size = 2048.0f;
     const float white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
     vk_vertex_t vertices[24];
     uint32_t indices[36];
-    static const float positions[6][4][3] = {
-        { { s, -s, -s }, { s, -s,  s }, { s,  s,  s }, { s,  s, -s } },
-        { {-s,  s, -s }, {-s,  s,  s }, {-s, -s,  s }, {-s, -s, -s } },
-        { {-s, -s, -s }, {-s, -s,  s }, { s, -s,  s }, { s, -s, -s } },
-        { { s,  s, -s }, { s,  s,  s }, {-s,  s,  s }, {-s,  s, -s } },
-        { {-s, -s,  s }, {-s,  s,  s }, { s,  s,  s }, { s, -s,  s } },
-        { {-s,  s, -s }, {-s, -s, -s }, { s, -s, -s }, { s,  s, -s } },
+    static const int8_t st_to_vec[6][3] = {
+        { 3, -1, 2 },
+        { -3, 1, 2 },
+        { 1, 3, 2 },
+        { -1, -3, 2 },
+        { -2, -1, 3 },
+        { 2, -1, -3 },
     };
-    static const float uvs[4][2] = {
-        { 0.0f, 1.0f },
-        { 0.0f, 0.0f },
-        { 1.0f, 0.0f },
+    static const float st[4][2] = {
+        { 1.0f, -1.0f },
+        { -1.0f, -1.0f },
         { 1.0f, 1.0f },
+        { -1.0f, 1.0f },
     };
 
     for (uint32_t face = 0; face < 6; face++) {
         for (uint32_t vert = 0; vert < 4; vert++) {
             vk_vertex_t *dst = &vertices[face * 4 + vert];
+            float b[3] = { st[vert][0] * size, st[vert][1] * size, size };
 
-            memcpy(dst->position, positions[face][vert], sizeof(dst->position));
+            for (uint32_t j = 0; j < 3; j++) {
+                int k = st_to_vec[face][j];
+
+                dst->position[j] = k < 0 ? -b[-k - 1] : b[k - 1];
+            }
+
             memcpy(dst->color, white, sizeof(dst->color));
-            memcpy(dst->uv, uvs[vert], sizeof(dst->uv));
+            dst->uv[0] = (st[vert][0] + 1.0f) * 0.5f;
+            dst->uv[1] = 1.0f - (st[vert][1] + 1.0f) * 0.5f;
         }
 
         indices[face * 6 + 0] = face * 4 + 0;
         indices[face * 6 + 1] = face * 4 + 1;
         indices[face * 6 + 2] = face * 4 + 2;
-        indices[face * 6 + 3] = face * 4 + 0;
-        indices[face * 6 + 4] = face * 4 + 2;
+        indices[face * 6 + 3] = face * 4 + 2;
+        indices[face * 6 + 4] = face * 4 + 1;
         indices[face * 6 + 5] = face * 4 + 3;
     }
 
