@@ -6055,6 +6055,104 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
 }
 
+static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
+{
+    if (ent->skin <= 0 || ent->skin >= r_numImages || !vk.sprite_pipeline ||
+        !vk.sprite_quad.vertices.buffer || !vk.sprite_quad.indices.buffer)
+        return;
+
+    const image_t *image = IMG_ForHandle(ent->skin);
+    if (!image || image->texnum >= MAX_RIMAGES)
+        return;
+
+    const vk_texture_t *texture = vk_texture_for_index(image->texnum, true);
+    if (!texture)
+        return;
+
+    bool def = image->flags & IF_DEFAULT_FLARE;
+    float scale = (float)(25 << def) * ent->scale;
+    if (scale <= 0.0f)
+        return;
+
+    vec3_t viewaxis[3], left, right, down, up, xaxis, yaxis, origin;
+    mat4_t model_matrix, mvp;
+    vk_color3d_push_t push;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+    color_t color;
+
+    AnglesToAxis(fd->viewangles, viewaxis);
+    if (ent->flags & RF_FLARE_LOCK_ANGLE) {
+        VectorScale(viewaxis[1], scale, left);
+        VectorScale(viewaxis[1], -scale, right);
+        VectorScale(viewaxis[2], -scale, down);
+        VectorScale(viewaxis[2], scale, up);
+    } else {
+        vec3_t dir, r, u;
+
+        VectorSubtract(ent->origin, fd->vieworg, dir);
+        if (VectorNormalize(dir) <= 0.0f)
+            return;
+
+        MakeNormalVectors(dir, r, u);
+        VectorScale(r, -scale, left);
+        VectorScale(r, scale, right);
+        VectorScale(u, -scale, down);
+        VectorScale(u, scale, up);
+    }
+
+    VectorSubtract(right, left, xaxis);
+    VectorSubtract(up, down, yaxis);
+    VectorAdd3(ent->origin, left, down, origin);
+
+    memset(model_matrix, 0, sizeof(model_matrix));
+    model_matrix[0] = xaxis[0];
+    model_matrix[1] = xaxis[1];
+    model_matrix[2] = xaxis[2];
+    model_matrix[4] = yaxis[0];
+    model_matrix[5] = yaxis[1];
+    model_matrix[6] = yaxis[2];
+    model_matrix[10] = 1.0f;
+    model_matrix[12] = origin[0];
+    model_matrix[13] = origin[1];
+    model_matrix[14] = origin[2];
+    model_matrix[15] = 1.0f;
+
+    vk_model_mvp(mvp, fd, model_matrix);
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+
+    color.u32 = ent->rgba.u32;
+    if (ent->flags & (RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE)) {
+        VectorClear(color.u8);
+        if (ent->flags & RF_SHELL_RED)
+            color.u8[0] = 255;
+        if (ent->flags & RF_SHELL_GREEN)
+            color.u8[1] = 255;
+        if (ent->flags & RF_SHELL_BLUE)
+            color.u8[2] = 255;
+    }
+    color.u8[3] = (128 + def * 32) * ent->alpha;
+
+    push.color[0] = color.u8[0] / 255.0f;
+    push.color[1] = color.u8[1] / 255.0f;
+    push.color[2] = color.u8[2] / 255.0f;
+    push.color[3] = color.u8[3] / 255.0f;
+
+    VkPipeline pipeline = (def && vk.particle_add_pipeline) ?
+        vk.particle_add_pipeline : vk.sprite_pipeline;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.rect_pipeline_layout, 0, 1,
+                             &texture->descriptor_set, 0, NULL);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+}
+
 #define VK_PARTICLE_SIZE    (1.0f + M_SQRT1_2f)
 #define VK_PARTICLE_SCALE   (1.0f / (2.0f * VK_PARTICLE_SIZE))
 
@@ -6494,6 +6592,9 @@ static bool vk_entity_in_pass(const entity_t *ent, vk_entity_pass_t pass)
     if (ent->flags & RF_BEAM)
         return pass == VK_ENTITY_BEAM;
 
+    if (ent->flags & RF_FLARE)
+        return pass == VK_ENTITY_ALPHA_FRONT;
+
     if ((ent->model & BIT(31)) && pass == VK_ENTITY_BMODEL_ALPHA)
         return !(ent->flags & RF_TRANSLUCENT);
 
@@ -6514,6 +6615,11 @@ static void vk_draw_entity(const entity_t *ent, const refdef_t *fd,
 {
     if (pass == VK_ENTITY_BEAM) {
         vk_draw_beam(ent, fd);
+        return;
+    }
+
+    if (ent->flags & RF_FLARE) {
+        vk_draw_flare(ent, fd);
         return;
     }
 
