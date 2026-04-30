@@ -342,6 +342,7 @@ typedef struct {
     VkDescriptorSetLayout texture_set_layout;
     VkDescriptorPool descriptor_pool;
     VkSampler sampler;
+    VkSampler sky_sampler;
     VkSampler nearest_sampler;
     VkPipelineLayout rect_pipeline_layout;
     VkPipeline rect_pipeline;
@@ -1635,9 +1636,14 @@ static void vk_update_texture_descriptor(vk_texture_t *texture)
 static void vk_update_texture_descriptors(void)
 {
     for (uint32_t i = 0; i < MAX_RIMAGES; i++) {
-        VkSampler sampler = (i < (uint32_t)r_numImages &&
-                             r_images[i].type == IT_FONT &&
-                             vk.nearest_sampler) ? vk.nearest_sampler : vk.sampler;
+        VkSampler sampler = vk.sampler;
+        if (i < (uint32_t)r_numImages && r_images[i].type == IT_SKY &&
+            vk.sky_sampler) {
+            sampler = vk.sky_sampler;
+        } else if (i < (uint32_t)r_numImages && r_images[i].type == IT_FONT &&
+                   vk.nearest_sampler) {
+            sampler = vk.nearest_sampler;
+        }
         vk_update_texture_descriptor_with_sampler(&vk.textures[i], sampler);
     }
 
@@ -1800,7 +1806,9 @@ static bool vk_upload_texture(image_t *image, byte *pic)
     image->sh = 1;
     image->tl = 0;
     image->th = 1;
-    if (image->type == IT_FONT && vk.nearest_sampler)
+    if (image->type == IT_SKY && vk.sky_sampler)
+        vk_update_texture_descriptor_with_sampler(texture, vk.sky_sampler);
+    else if (image->type == IT_FONT && vk.nearest_sampler)
         vk_update_texture_descriptor_with_sampler(texture, vk.nearest_sampler);
 
     return true;
@@ -2296,6 +2304,37 @@ static bool vk_create_sampler(VkSampler *sampler)
     return true;
 }
 
+static bool vk_create_sky_sampler(VkSampler *sampler)
+{
+    VkFilter min_filter, mag_filter;
+    float anisotropy = 1.0f;
+
+    vk_texturemode_filters(&min_filter, &mag_filter);
+
+    if (vk_anisotropy && vk.physical_device_features.samplerAnisotropy) {
+        anisotropy = Cvar_ClampValue(vk_anisotropy, 1.0f,
+                                     vk.physical_device_properties.limits.maxSamplerAnisotropy);
+    }
+
+    VkSamplerCreateInfo sampler_info = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = mag_filter,
+        .minFilter = min_filter,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .anisotropyEnable = anisotropy > 1.0f,
+        .maxAnisotropy = anisotropy,
+        .maxLod = 0.0f,
+    };
+    VkResult result = vk.CreateSampler(vk.device, &sampler_info, NULL, sampler);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateSampler", result);
+
+    return true;
+}
+
 static bool vk_create_nearest_sampler(VkSampler *sampler)
 {
     VkSamplerCreateInfo sampler_info = {
@@ -2323,8 +2362,11 @@ static void vk_texturemode_changed(cvar_t *self)
         return;
 
     VkSampler sampler = VK_NULL_HANDLE;
-    if (!vk_create_sampler(&sampler)) {
+    VkSampler sky_sampler = VK_NULL_HANDLE;
+    if (!vk_create_sampler(&sampler) || !vk_create_sky_sampler(&sky_sampler)) {
         Com_WPrintf("Couldn't recreate Vulkan sampler: %s\n", Com_GetLastError());
+        if (sampler)
+            vk.DestroySampler(vk.device, sampler, NULL);
         return;
     }
 
@@ -2333,8 +2375,11 @@ static void vk_texturemode_changed(cvar_t *self)
 
     if (vk.sampler)
         vk.DestroySampler(vk.device, vk.sampler, NULL);
+    if (vk.sky_sampler)
+        vk.DestroySampler(vk.device, vk.sky_sampler, NULL);
 
     vk.sampler = sampler;
+    vk.sky_sampler = sky_sampler;
     vk_update_texture_descriptors();
 }
 
@@ -2384,6 +2429,8 @@ static bool vk_create_frame_resources(void)
         return vk_fail_result("vkCreateDescriptorPool", result);
 
     if (!vk_create_sampler(&vk.sampler))
+        return false;
+    if (!vk_create_sky_sampler(&vk.sky_sampler))
         return false;
     if (!vk_create_nearest_sampler(&vk.nearest_sampler))
         return false;
@@ -5202,7 +5249,7 @@ static void vk_draw_skybox(const refdef_t *fd)
         return;
 
     mat4_t mvp;
-    vk_color3d_push_t push;
+    vk_world_push_t push;
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
 
@@ -5212,6 +5259,8 @@ static void vk_draw_skybox(const refdef_t *fd)
     push.color[1] = 1.0f;
     push.color[2] = 1.0f;
     push.color[3] = 1.0f;
+    Vector4Clear(push.scroll);
+    Vector4Clear(push.dlight);
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sky_pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.skybox.vertices.buffer, &offset);
@@ -7117,6 +7166,10 @@ void VKR_Shutdown(bool total)
     if (vk.sampler) {
         vk.DestroySampler(vk.device, vk.sampler, NULL);
         vk.sampler = VK_NULL_HANDLE;
+    }
+    if (vk.sky_sampler) {
+        vk.DestroySampler(vk.device, vk.sky_sampler, NULL);
+        vk.sky_sampler = VK_NULL_HANDLE;
     }
     if (vk.nearest_sampler) {
         vk.DestroySampler(vk.device, vk.nearest_sampler, NULL);

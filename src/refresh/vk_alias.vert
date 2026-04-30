@@ -17,6 +17,7 @@ layout(location = 4) in vec3 in_normal;
 layout(location = 5) in vec3 in_old_normal;
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_uv;
+layout(location = 2) flat out float v_mode;
 
 void main()
 {
@@ -36,4 +37,5 @@ void main()
         v_color.rgb *= d + 1.0;
     }
     v_uv = in_uv;
+    v_mode = 0.0;
 }
