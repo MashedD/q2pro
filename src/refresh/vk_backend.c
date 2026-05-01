@@ -401,6 +401,8 @@ typedef struct {
     vk_buffer_t debug_text_vertices;
     vk_buffer_t debug_text_indices;
     uint32_t sky_images[6];
+    refdef_t fd;
+    bool fd_valid;
     vk_world_t world;
     vk_model_t models[MAX_MODELS];
     uint32_t model_count;
@@ -5068,6 +5070,12 @@ static void vk_world_face_center(const vk_world_face_t *face, const entity_t *en
     VectorMA(center, face->center[2], axis[2], center);
 }
 
+static bool vk_dynamic_lights_enabled(void)
+{
+    return (!vk_dynamic || vk_dynamic->integer == 1) &&
+           (!vk_vertexlight || !vk_vertexlight->integer);
+}
+
 static float vk_world_face_light_plane_dist(const mface_t *face, const dlight_t *light,
                                             const entity_t *ent, const vec3_t axis[3])
 {
@@ -5122,7 +5130,7 @@ static void vk_world_dynamic_light(const vk_world_face_t *face,
 
     if (!face || !face->face || !face->face->plane ||
         !fd || fd->num_dlights <= 0 || !fd->dlights ||
-        (vk_dynamic && !vk_dynamic->integer) ||
+        !vk_dynamic_lights_enabled() ||
         (face->face->drawflags & SURF_COLOR_MASK))
         return;
 
@@ -5613,7 +5621,7 @@ static const image_t *vk_skin_for_alias_batch(const vk_model_t *model,
 
 static void vk_add_dynamic_lights(const refdef_t *fd, const vec3_t origin, vec3_t color)
 {
-    if (vk_dynamic && !vk_dynamic->integer)
+    if (!vk_dynamic_lights_enabled())
         return;
     if (!fd || fd->num_dlights <= 0 || !fd->dlights)
         return;
@@ -7442,6 +7450,12 @@ void VKR_RenderFrame(const refdef_t *fd)
     if (!fd)
         return;
 
+    vk.fd = *fd;
+    vk.fd_valid = true;
+    if (!vk_dynamic_lights_enabled())
+        vk.fd.num_dlights = 0;
+    fd = &vk.fd;
+
     vk_rebuild_world_lighting();
     vk_setup_world_frustum(fd);
     vk_update_world_view(fd);
@@ -7494,8 +7508,20 @@ void VKR_RenderFrame(const refdef_t *fd)
 
 void VKR_LightPoint(const vec3_t origin, vec3_t light)
 {
-    if (!vk_static_light_point(origin, NULL, light))
+    const refdef_t *fd = vk.fd_valid ? &vk.fd : NULL;
+
+    if (vk_fullbright && vk_fullbright->integer) {
         VectorSet(light, 1.0f, 1.0f, 1.0f);
+        return;
+    }
+
+    if (!vk_static_light_point(origin, fd, light))
+        VectorSet(light, 1.0f, 1.0f, 1.0f);
+
+    vk_add_dynamic_lights(fd, origin, light);
+
+    if (vk_doublelight_entities && vk_doublelight_entities->integer)
+        VectorScale(light, vk_entity_light_modulate(), light);
 
     light[0] = Q_clipf(light[0], 0.0f, 1.0f);
     light[1] = Q_clipf(light[1], 0.0f, 1.0f);
