@@ -38,7 +38,7 @@ void main()
     }
 
     vec4 texel = texture(tex_sampler, uv);
-    if (texel.a < 0.5) {
+    if (texel.a <= 0.666) {
         discard;
     }
     out_color = texel * v_color;
