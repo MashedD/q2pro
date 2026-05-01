@@ -1653,6 +1653,7 @@ static void vk_update_texture_descriptors(void)
 
     vk_update_texture_descriptor(&vk.raw_texture);
     vk_update_texture_descriptor(&vk.particle_texture);
+    vk_update_texture_descriptor(&vk.beam_texture);
 }
 
 static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
@@ -6409,10 +6410,18 @@ static void vk_draw_lightning_beam(const vec3_t start, const vec3_t end,
     VectorCopy(start, segments[0]);
     VectorCopy(end, segments[num_segments]);
 
-    for (int i = 0; i < num_segments; i++) {
-        if (poly)
+    if (poly) {
+        for (int i = 0; i < num_segments; i++)
             vk_draw_poly_beam_segment(segments[i], segments[i + 1], fd, color, width);
-        else
+    } else {
+        float glow[4];
+
+        memcpy(glow, color, sizeof(glow));
+        glow[3] *= 0.35f;
+
+        for (int i = 0; i < num_segments; i++)
+            vk_draw_beam_segment(segments[i], segments[i + 1], fd, glow, width * 2.5f);
+        for (int i = 0; i < num_segments; i++)
             vk_draw_beam_segment(segments[i], segments[i + 1], fd, color, width);
     }
 }
