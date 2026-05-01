@@ -392,6 +392,7 @@ typedef struct {
     bool clip_set;
     vk_texture_t raw_texture;
     vk_texture_t particle_texture;
+    vk_texture_t beam_texture;
     vk_mesh_t test_triangle;
     vk_mesh_t skybox;
     vk_mesh_t sprite_quad;
@@ -473,6 +474,7 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, const void *pixels);
 static void vk_destroy_texture_resource(vk_texture_t *texture);
 static bool vk_create_particle_texture(void);
+static bool vk_create_beam_texture(void);
 static void vk_entity_axis(const entity_t *ent, vec3_t axis[3]);
 static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
                           const entity_t *ent, const vec3_t axis[3]);
@@ -4579,6 +4581,24 @@ static bool vk_create_particle_texture(void)
     return vk_upload_texture_data(&vk.particle_texture, 16, 16, pixels);
 }
 
+static bool vk_create_beam_texture(void)
+{
+    uint32_t pixels[16 * 16];
+
+    for (int y = 0; y < 16; y++) {
+        for (int x = 0; x < 16; x++) {
+            float f = abs(x - 16 / 2) - 0.5f;
+            byte alpha;
+
+            f = 1.0f - f / (16 / 2 - 2.5f);
+            alpha = 255 * Q_clipf(f, 0.0f, 1.0f);
+            pixels[y * 16 + x] = MakeColor(255, 255, 255, alpha);
+        }
+    }
+
+    return vk_upload_texture_data(&vk.beam_texture, 16, 16, pixels);
+}
+
 static void vk_partshape_changed(cvar_t *self)
 {
     if (vk.device && !vk_create_particle_texture()) {
@@ -6251,7 +6271,7 @@ static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
 {
     vec3_t dir, to_view, normal, xaxis, yaxis, origin;
     mat4_t model_matrix, mvp;
-    vk_color3d_push_t push;
+    vk_world_push_t push;
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
 
@@ -6283,6 +6303,8 @@ static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
     vk_model_mvp(mvp, fd, model_matrix);
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     memcpy(push.color, color, sizeof(push.color));
+    Vector4Clear(push.scroll);
+    Vector4Clear(push.dlight);
 
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
@@ -6397,13 +6419,15 @@ static void vk_draw_lightning_beam(const vec3_t start, const vec3_t end,
 
 static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
 {
-    if (!vk.beam_pipeline || !vk.sprite_quad.vertices.buffer ||
-        !vk.sprite_quad.indices.buffer || !ent->frame)
+    if ((!vk.beam_pipeline && !vk.sprite_pipeline) ||
+        !vk.sprite_quad.vertices.buffer || !vk.sprite_quad.indices.buffer ||
+        !ent->frame)
         return;
 
     color_t color;
     float push_color[4];
-    float scale = (vk_beamstyle && vk_beamstyle->integer) ? 0.5f : 1.2f;
+    bool poly = vk_beamstyle && vk_beamstyle->integer;
+    float scale = poly ? 0.5f : 1.2f;
     float width = abs((int16_t)ent->frame) * scale;
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
 
@@ -6418,12 +6442,23 @@ static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
     push_color[2] = color.u8[2] / 255.0f;
     push_color[3] = color.u8[3] / 255.0f;
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.beam_pipeline);
+    if (poly) {
+        if (!vk.beam_pipeline)
+            return;
+        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.beam_pipeline);
+    } else {
+        if (!vk.sprite_pipeline || !vk.beam_texture.descriptor_set)
+            return;
+        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sprite_pipeline);
+        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 vk.rect_pipeline_layout, 0, 1,
+                                 &vk.beam_texture.descriptor_set, 0, NULL);
+    }
 
     if (ent->flags & RF_GLOW) {
         vk_draw_lightning_beam(ent->origin, ent->oldorigin, fd, push_color,
-                               width, vk_beamstyle && vk_beamstyle->integer);
-    } else if (vk_beamstyle && vk_beamstyle->integer) {
+                               width, poly);
+    } else if (poly) {
         vk_draw_poly_beam_segment(ent->origin, ent->oldorigin, fd, push_color, width);
     } else {
         vk_draw_beam_segment(ent->origin, ent->oldorigin, fd, push_color, width);
@@ -7200,6 +7235,8 @@ bool VKR_Init(bool total)
 #endif
     if (!vk_create_particle_texture())
         Com_WPrintf("Couldn't create Vulkan particle texture: %s\n", Com_GetLastError());
+    if (!vk_create_beam_texture())
+        Com_WPrintf("Couldn't create Vulkan beam texture: %s\n", Com_GetLastError());
 
     r_registration_sequence = 1;
     IMG_Init();
@@ -7240,6 +7277,7 @@ void VKR_Shutdown(bool total)
 
     vk_destroy_texture_resource(&vk.raw_texture);
     vk_destroy_texture_resource(&vk.particle_texture);
+    vk_destroy_texture_resource(&vk.beam_texture);
 
     vk_destroy_swapchain();
 
