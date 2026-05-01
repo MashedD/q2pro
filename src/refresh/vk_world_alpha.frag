@@ -41,8 +41,14 @@ void main()
     if (texel.a <= 0.666) {
         discard;
     }
-    out_color = texel * v_color;
-    out_color.rgb *= pc.intensity;
+    out_color = texel;
+    if (pc.intensity < 0.0) {
+        out_color.rgb *= (out_color.r + out_color.g + out_color.b) / 3.0;
+        out_color.rgb *= v_color.a;
+    } else {
+        out_color.rgb *= pc.intensity;
+    }
+    out_color *= v_color;
     if (pc.fog.a < 0.0) {
         out_color.rgb = mix(out_color.rgb, pc.fog.rgb, -pc.fog.a);
     } else if (pc.fog.a > 0.0) {

@@ -6146,7 +6146,7 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
     vk_fog_params(fd, push.fog);
-    push.intensity = vk_texture_intensity();
+    push.intensity = def ? -1.0f : vk_texture_intensity();
 
     VkPipeline pipeline = (def && vk.particle_add_pipeline) ?
         vk.particle_add_pipeline : vk.sprite_pipeline;
