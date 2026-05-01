@@ -1,5 +1,13 @@
 #version 450
 
+layout(push_constant) uniform Push {
+    mat4 mvp;
+    vec4 color;
+    vec4 scroll;
+    vec4 dlight;
+    vec4 fog;
+} pc;
+
 layout(set = 0, binding = 0) uniform sampler2D tex_sampler;
 
 layout(location = 0) in vec4 v_color;
@@ -11,6 +19,13 @@ void main()
 {
     if (v_mode > 1.5) {
         out_color = v_color;
+        if (pc.fog.a < 0.0) {
+            out_color.rgb = mix(out_color.rgb, pc.fog.rgb, -pc.fog.a);
+        } else if (pc.fog.a > 0.0) {
+            float d = pc.fog.a * gl_FragCoord.z / gl_FragCoord.w;
+            float fog = 1.0 - exp(-(d * d));
+            out_color.rgb = mix(out_color.rgb, pc.fog.rgb, fog);
+        }
         return;
     }
 
@@ -19,4 +34,11 @@ void main()
         discard;
     }
     out_color = texel * v_color;
+    if (pc.fog.a < 0.0) {
+        out_color.rgb = mix(out_color.rgb, pc.fog.rgb, -pc.fog.a);
+    } else if (pc.fog.a > 0.0) {
+        float d = pc.fog.a * gl_FragCoord.z / gl_FragCoord.w;
+        float fog = 1.0 - exp(-(d * d));
+        out_color.rgb = mix(out_color.rgb, pc.fog.rgb, fog);
+    }
 }

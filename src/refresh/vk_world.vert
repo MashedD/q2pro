@@ -5,6 +5,7 @@ layout(push_constant) uniform Push {
     vec4 color;
     vec4 scroll;
     vec4 dlight;
+    vec4 fog;
 } pc;
 
 layout(location = 0) in vec3 in_position;

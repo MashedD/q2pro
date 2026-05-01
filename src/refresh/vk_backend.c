@@ -212,6 +212,7 @@ typedef struct {
     float color[4];
     float scroll[4];
     float dlight[4];
+    float fog[4];
 } vk_world_push_t;
 
 typedef struct {
@@ -221,6 +222,8 @@ typedef struct {
     float backlerp;
     float shellscale;
     float depthscale;
+    float _pad;
+    float fog[4];
 } vk_alias_push_t;
 
 typedef struct {
@@ -443,6 +446,7 @@ static cvar_t *vk_coloredlightmaps;
 static cvar_t *vk_dynamic;
 static cvar_t *vk_dlight_falloff;
 static cvar_t *vk_brightness;
+static cvar_t *vk_fog;
 static cvar_t *vk_znear;
 static cvar_t *vk_drawworld;
 static cvar_t *vk_novis;
@@ -4966,13 +4970,16 @@ static void vk_draw_debug_texts(const refdef_t *fd)
         return;
 
     mat4_t mvp;
-    vk_color3d_push_t push;
+    vk_world_push_t push;
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
 
     vk_world_mvp(mvp, fd);
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     Vector4Set(push.color, 1.0f, 1.0f, 1.0f, 1.0f);
+    Vector4Clear(push.scroll);
+    Vector4Clear(push.dlight);
+    Vector4Clear(push.fog);
 
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.debug_text_vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.debug_text_indices.buffer, 0,
@@ -5097,6 +5104,28 @@ static bool vk_dynamic_lights_enabled(void)
            (!vk_vertexlight || !vk_vertexlight->integer);
 }
 
+static void vk_fog_params(const refdef_t *fd, float fog[4])
+{
+    Vector4Clear(fog);
+
+    if (!fd || (vk_fog && !vk_fog->integer) || fd->fog.density <= 0.0f)
+        return;
+
+    VectorCopy(fd->fog.color, fog);
+    fog[3] = fd->fog.density / 64.0f;
+}
+
+static void vk_sky_fog_params(const refdef_t *fd, float fog[4])
+{
+    Vector4Clear(fog);
+
+    if (!fd || (vk_fog && !vk_fog->integer) || fd->fog.sky_factor <= 0.0f)
+        return;
+
+    VectorCopy(fd->fog.color, fog);
+    fog[3] = -fd->fog.sky_factor;
+}
+
 static float vk_world_face_light_plane_dist(const mface_t *face, const dlight_t *light,
                                             const entity_t *ent, const vec3_t axis[3])
 {
@@ -5198,6 +5227,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     push.color[3] = entity_alpha;
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
+    vk_fog_params(fd, push.fog);
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
@@ -5290,6 +5320,7 @@ static void vk_draw_skybox(const refdef_t *fd)
     push.color[3] = 1.0f;
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
+    vk_sky_fog_params(fd, push.fog);
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sky_pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.skybox.vertices.buffer, &offset);
@@ -5917,6 +5948,8 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     push.backlerp = lerp->backlerp;
     push.shellscale = 0.0f;
     push.depthscale = 1.0f;
+    push._pad = 0.0f;
+    vk_fog_params(fd, push.fog);
 
     for (int i = 0; i < model->alias_batch_count; i++) {
         const vk_alias_batch_t *batch = &model->alias_batches[i];
@@ -5972,6 +6005,8 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     push.shellscale = (ent->flags & RF_SHELL_MASK) ?
         ((ent->flags & RF_WEAPONMODEL) ? WEAPONSHELL_SCALE : POWERSUIT_SCALE) : 0.0f;
     push.depthscale = (ent->flags & RF_DEPTHHACK) ? 0.25f : 1.0f;
+    push._pad = 0.0f;
+    vk_fog_params(fd, push.fog);
 
     for (int i = 0; i < model->alias_batch_count; i++) {
         const vk_alias_batch_t *batch = &model->alias_batches[i];
@@ -6039,7 +6074,7 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     vec3_t viewaxis[3], left, right, down, up, xaxis, yaxis, origin;
     float scale = ent->scale ? ent->scale : 1.0f;
     mat4_t model_matrix, mvp;
-    vk_color3d_push_t push;
+    vk_world_push_t push;
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
 
@@ -6071,6 +6106,9 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     push.color[1] = 1.0f;
     push.color[2] = 1.0f;
     push.color[3] = translucent ? ent->alpha : 1.0f;
+    Vector4Clear(push.scroll);
+    Vector4Clear(push.dlight);
+    vk_fog_params(fd, push.fog);
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
@@ -6105,7 +6143,7 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
 
     vec3_t viewaxis[3], left, right, down, up, xaxis, yaxis, origin;
     mat4_t model_matrix, mvp;
-    vk_color3d_push_t push;
+    vk_world_push_t push;
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
     color_t color;
@@ -6166,6 +6204,9 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
     push.color[1] = color.u8[1] / 255.0f;
     push.color[2] = color.u8[2] / 255.0f;
     push.color[3] = color.u8[3] / 255.0f;
+    Vector4Clear(push.scroll);
+    Vector4Clear(push.dlight);
+    vk_fog_params(fd, push.fog);
 
     VkPipeline pipeline = (def && vk.particle_add_pipeline) ?
         vk.particle_add_pipeline : vk.sprite_pipeline;
@@ -6212,7 +6253,7 @@ static void vk_draw_particles(const refdef_t *fd)
         vec3_t transformed, left, right, down, up, xaxis, yaxis, origin;
         vec_t dist, scale, scale2;
         mat4_t model_matrix, mvp;
-        vk_color3d_push_t push;
+        vk_world_push_t push;
         color_t color;
 
         VectorSubtract(particle->origin, fd->vieworg, transformed);
@@ -6258,6 +6299,9 @@ static void vk_draw_particles(const refdef_t *fd)
         push.color[1] = color.u8[1] / 255.0f;
         push.color[2] = color.u8[2] / 255.0f;
         push.color[3] = color.u8[3] / 255.0f;
+        Vector4Clear(push.scroll);
+        Vector4Clear(push.dlight);
+        vk_fog_params(fd, push.fog);
 
         vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -6306,6 +6350,7 @@ static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
     memcpy(push.color, color, sizeof(push.color));
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
+    vk_fog_params(fd, push.fog);
 
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
@@ -7189,6 +7234,7 @@ bool VKR_Init(bool total)
     vk_dynamic = Cvar_Get("gl_dynamic", "1", 0);
     vk_dlight_falloff = Cvar_Get("gl_dlight_falloff", "1", 0);
     vk_brightness = Cvar_Get("gl_brightness", "0", 0);
+    vk_fog = Cvar_Get("gl_fog", "1", 0);
 
     gl_modulate_world = vk_modulate_world;
     gl_modulate_entities = vk_modulate_entities;
