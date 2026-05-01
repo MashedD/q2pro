@@ -17,8 +17,9 @@ layout(location = 2) flat out float v_mode;
 
 void main()
 {
+    float mode = mod(pc.scroll.z, 4.0);
     vec3 lit = clamp((in_color.rgb + vec3(pc.scroll.w)) * pc.color.rgb + pc.dlight.rgb, 0.0, 1.0);
-    vec3 color = pc.scroll.z > 0.5 && pc.scroll.z < 1.5 ? vec3(1.0) : lit;
+    vec3 color = mode > 0.5 && mode < 1.5 ? vec3(1.0) : lit;
 
     gl_Position = pc.mvp * vec4(in_position, 1.0);
     v_color = vec4(color, in_color.a * pc.color.a);

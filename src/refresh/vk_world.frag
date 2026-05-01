@@ -17,7 +17,14 @@ layout(location = 0) out vec4 out_color;
 
 void main()
 {
-    if (v_mode > 1.5) {
+    float mode = mod(v_mode, 4.0);
+    vec2 uv = v_uv;
+
+    if (v_mode >= 4.0) {
+        uv += vec2(0.0625) * sin(uv.ts * vec2(4.0) + vec2(pc.dlight.a));
+    }
+
+    if (mode > 1.5) {
         out_color = v_color;
         if (pc.fog.a < 0.0) {
             out_color.rgb = mix(out_color.rgb, pc.fog.rgb, -pc.fog.a);
@@ -29,7 +36,7 @@ void main()
         return;
     }
 
-    out_color = texture(tex_sampler, v_uv) * v_color;
+    out_color = texture(tex_sampler, uv) * v_color;
     if (pc.fog.a < 0.0) {
         out_color.rgb = mix(out_color.rgb, pc.fog.rgb, -pc.fog.a);
     } else if (pc.fog.a > 0.0) {

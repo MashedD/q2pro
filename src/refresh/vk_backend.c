@@ -4266,63 +4266,6 @@ static void vk_model_mvp(mat4_t out, const refdef_t *fd, const mat4_t model)
     vk_matrix_multiply(out, proj, view_model);
 }
 
-static bool vk_cull_box(const vec3_t bounds[2])
-{
-    if (!vk_cull_models || !vk_cull_models->integer)
-        return false;
-
-    for (int i = 0; i < 4; i++) {
-        if (BoxOnPlaneSide(bounds[0], bounds[1], &vk.world.frustum[i]) == BOX_BEHIND)
-            return true;
-    }
-
-    return false;
-}
-
-static bool vk_cull_sphere(const vec3_t origin, float radius)
-{
-    if (!vk_cull_models || !vk_cull_models->integer)
-        return false;
-
-    for (int i = 0; i < 4; i++) {
-        if (PlaneDiff(origin, &vk.world.frustum[i]) < -radius)
-            return true;
-    }
-
-    return false;
-}
-
-static bool vk_cull_local_box(const vec3_t origin, const vec3_t bounds[2],
-                              const vec3_t axis[3])
-{
-    vec3_t points[8];
-
-    if (!vk_cull_models || !vk_cull_models->integer)
-        return false;
-
-    for (int i = 0; i < 8; i++) {
-        VectorCopy(origin, points[i]);
-        VectorMA(points[i], bounds[(i >> 0) & 1][0], axis[0], points[i]);
-        VectorMA(points[i], bounds[(i >> 1) & 1][1], axis[1], points[i]);
-        VectorMA(points[i], bounds[(i >> 2) & 1][2], axis[2], points[i]);
-    }
-
-    for (int i = 0; i < 4; i++) {
-        bool infront = false;
-
-        for (int j = 0; j < 8; j++) {
-            if (PlaneDiff(points[j], &vk.world.frustum[i]) >= 0.0f) {
-                infront = true;
-                break;
-            }
-        }
-        if (!infront)
-            return true;
-    }
-
-    return false;
-}
-
 static vk_alias_lerp_t vk_alias_lerp_for_entity(const vk_model_t *model,
                                                 const entity_t *ent,
                                                 const refdef_t *fd)
@@ -4358,33 +4301,12 @@ static bool vk_alias_model_culled(const vk_model_t *model, const entity_t *ent,
                                   const vec3_t axis[3], uint32_t frame,
                                   uint32_t oldframe)
 {
-    vec3_t bounds[2];
-
-    if (!model->alias_frames || (ent->flags & RF_WEAPONMODEL))
-        return false;
-
-    if (frame == oldframe) {
-        VectorCopy(model->alias_frames[frame].bounds[0], bounds[0]);
-        VectorCopy(model->alias_frames[frame].bounds[1], bounds[1]);
-    } else {
-        UnionBounds(model->alias_frames[frame].bounds,
-                    model->alias_frames[oldframe].bounds, bounds);
-    }
-
-    if (!VectorEmpty(ent->angles) || (ent->scale && ent->scale != 1.0f)) {
-        float scale = ent->scale ? ent->scale : 1.0f;
-        float radius = frame == oldframe ?
-            model->alias_frames[frame].radius :
-            max(model->alias_frames[frame].radius, model->alias_frames[oldframe].radius);
-
-        if (vk_cull_sphere(ent->origin, radius * scale))
-            return true;
-        return vk_cull_local_box(ent->origin, bounds, axis);
-    }
-
-    VectorAdd(bounds[0], ent->origin, bounds[0]);
-    VectorAdd(bounds[1], ent->origin, bounds[1]);
-    return vk_cull_box(bounds);
+    (void)model;
+    (void)ent;
+    (void)axis;
+    (void)frame;
+    (void)oldframe;
+    return false;
 }
 
 static bool vk_create_test_triangle(void)
@@ -5067,11 +4989,13 @@ static void vk_world_light_params(const mface_t *face, float color[4], float scr
 {
     bool lightmap = vk_lightmap && vk_lightmap->integer;
     bool fullbright = !lightmap && vk_fullbright && vk_fullbright->integer;
+    bool warp = face->drawflags & SURF_WARP;
 
     color[0] = 1.0f;
     color[1] = 1.0f;
     color[2] = 1.0f;
-    scroll[2] = lightmap ? 2.0f : fullbright ? 1.0f : 0.0f;
+    scroll[2] = (lightmap ? 2.0f : fullbright ? 1.0f : 0.0f) +
+        (warp ? 4.0f : 0.0f);
     scroll[3] = 0.0f;
 
     if (fullbright || (face->drawflags & SURF_COLOR_MASK))
@@ -5275,6 +5199,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             vk_world_face_scroll(face->face, fd ? fd->time : 0.0f, push.scroll);
             vk_world_light_params(face->face, push.color, push.scroll);
             vk_world_dynamic_light(face, fd, ent, axis, push.dlight);
+            push.dlight[3] = fd ? fd->time : 0.0f;
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
             vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
                                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
