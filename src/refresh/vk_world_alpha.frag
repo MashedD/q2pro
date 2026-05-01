@@ -6,6 +6,7 @@ layout(push_constant) uniform Push {
     vec4 scroll;
     vec4 dlight;
     vec4 fog;
+    float intensity;
 } pc;
 
 layout(set = 0, binding = 0) uniform sampler2D tex_sampler;
@@ -41,6 +42,7 @@ void main()
         discard;
     }
     out_color = texel * v_color;
+    out_color.rgb *= pc.intensity;
     if (pc.fog.a < 0.0) {
         out_color.rgb = mix(out_color.rgb, pc.fog.rgb, -pc.fog.a);
     } else if (pc.fog.a > 0.0) {

@@ -9,6 +9,7 @@ layout(push_constant) uniform Push {
     float depthscale;
     float _pad;
     vec4 fog;
+    float intensity;
 } pc;
 
 layout(location = 0) in vec3 in_position;

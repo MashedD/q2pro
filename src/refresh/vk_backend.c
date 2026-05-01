@@ -213,6 +213,7 @@ typedef struct {
     float scroll[4];
     float dlight[4];
     float fog[4];
+    float intensity;
 } vk_world_push_t;
 
 typedef struct {
@@ -224,6 +225,7 @@ typedef struct {
     float depthscale;
     float _pad;
     float fog[4];
+    float intensity;
 } vk_alias_push_t;
 
 typedef struct {
@@ -447,6 +449,7 @@ static cvar_t *vk_dynamic;
 static cvar_t *vk_dlight_falloff;
 static cvar_t *vk_brightness;
 static cvar_t *vk_fog;
+static cvar_t *vk_intensity;
 static cvar_t *vk_znear;
 static cvar_t *vk_drawworld;
 static cvar_t *vk_novis;
@@ -4902,6 +4905,7 @@ static void vk_draw_debug_texts(const refdef_t *fd)
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
     Vector4Clear(push.fog);
+    push.intensity = 1.0f;
 
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.debug_text_vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.debug_text_indices.buffer, 0,
@@ -5050,6 +5054,11 @@ static void vk_sky_fog_params(const refdef_t *fd, float fog[4])
     fog[3] = -fd->fog.sky_factor;
 }
 
+static float vk_texture_intensity(void)
+{
+    return Cvar_ClampValue(vk_intensity, 1.0f, 5.0f);
+}
+
 static float vk_world_face_light_plane_dist(const mface_t *face, const dlight_t *light,
                                             const entity_t *ent, const vec3_t axis[3])
 {
@@ -5152,6 +5161,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
     vk_fog_params(fd, push.fog);
+    push.intensity = vk_texture_intensity();
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
@@ -5246,6 +5256,7 @@ static void vk_draw_skybox(const refdef_t *fd)
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
     vk_sky_fog_params(fd, push.fog);
+    push.intensity = 1.0f;
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sky_pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.skybox.vertices.buffer, &offset);
@@ -5875,6 +5886,7 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     push.depthscale = 1.0f;
     push._pad = 0.0f;
     vk_fog_params(fd, push.fog);
+    push.intensity = 1.0f;
 
     for (int i = 0; i < model->alias_batch_count; i++) {
         const vk_alias_batch_t *batch = &model->alias_batches[i];
@@ -5932,6 +5944,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     push.depthscale = (ent->flags & RF_DEPTHHACK) ? 0.25f : 1.0f;
     push._pad = 0.0f;
     vk_fog_params(fd, push.fog);
+    push.intensity = vk_texture_intensity();
 
     for (int i = 0; i < model->alias_batch_count; i++) {
         const vk_alias_batch_t *batch = &model->alias_batches[i];
@@ -6034,6 +6047,7 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
     vk_fog_params(fd, push.fog);
+    push.intensity = vk_texture_intensity();
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
@@ -6132,6 +6146,7 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
     vk_fog_params(fd, push.fog);
+    push.intensity = vk_texture_intensity();
 
     VkPipeline pipeline = (def && vk.particle_add_pipeline) ?
         vk.particle_add_pipeline : vk.sprite_pipeline;
@@ -6227,6 +6242,7 @@ static void vk_draw_particles(const refdef_t *fd)
         Vector4Clear(push.scroll);
         Vector4Clear(push.dlight);
         vk_fog_params(fd, push.fog);
+        push.intensity = vk_texture_intensity();
 
         vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -6276,6 +6292,7 @@ static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
     vk_fog_params(fd, push.fog);
+    push.intensity = vk_texture_intensity();
 
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
@@ -7160,6 +7177,7 @@ bool VKR_Init(bool total)
     vk_dlight_falloff = Cvar_Get("gl_dlight_falloff", "1", 0);
     vk_brightness = Cvar_Get("gl_brightness", "0", 0);
     vk_fog = Cvar_Get("gl_fog", "1", 0);
+    vk_intensity = Cvar_Get("intensity", "2", 0);
 
     gl_modulate_world = vk_modulate_world;
     gl_modulate_entities = vk_modulate_entities;
