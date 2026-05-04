@@ -8284,7 +8284,14 @@ void VKR_DrawKeepAspectPic(int x, int y, int w, int h, qhandle_t pic)
 
 void VKR_DrawStretchRaw(int x, int y, int w, int h)
 {
+    color_t saved = vk.color;
+    bool saved_set = vk.color_set;
+
+    vk.color.u32 = U32_WHITE;
+    vk.color_set = true;
     vk_draw_texture_resource(x, y, w, h, 0, 0, 1, 1, &vk.raw_texture);
+    vk.color = saved;
+    vk.color_set = saved_set;
 }
 
 void VKR_UpdateRawPic(int pic_w, int pic_h, const uint32_t *pic)
@@ -8301,21 +8308,24 @@ void VKR_UpdateRawPic(int pic_w, int pic_h, const uint32_t *pic)
 void VKR_TileClear(int x, int y, int w, int h, qhandle_t pic)
 {
     const float div64 = 1.0f / 64.0f;
+    color_t saved = vk.color;
+    bool saved_set = vk.color_set;
 
+    vk.color.u32 = U32_WHITE;
+    vk.color_set = true;
     vk_draw_texture_rect(x, y, w, h, x * div64, y * div64,
                          (x + w) * div64, (y + h) * div64, pic);
+    vk.color = saved;
+    vk.color_set = saved_set;
 }
 
 void VKR_DrawFill8(int x, int y, int w, int h, int c)
 {
-    uint32_t color = vk.color_set ? vk.color.u32 : d_8to24table[c & 0xff];
-    vk_clear_rect(x, y, w, h, color);
+    vk_clear_rect(x, y, w, h, d_8to24table[c & 0xff]);
 }
 
 void VKR_DrawFill32(int x, int y, int w, int h, uint32_t color)
 {
-    if (vk.color_set)
-        color = vk.color.u32;
     vk_clear_rect(x, y, w, h, color);
 }
 
