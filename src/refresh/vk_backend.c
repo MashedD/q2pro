@@ -353,6 +353,7 @@ typedef struct {
     VkSampler sampler;
     VkSampler sky_sampler;
     VkSampler nearest_sampler;
+    VkSampler sky_nearest_sampler;
     VkPipelineLayout rect_pipeline_layout;
     VkPipeline rect_pipeline;
     VkPipeline texture_pipeline;
@@ -436,6 +437,9 @@ static cvar_t *vk_anisotropy;
 static cvar_t *vk_round_down;
 static cvar_t *vk_picmip;
 static cvar_t *vk_downsample_skins;
+static cvar_t *vk_bilerp_chars;
+static cvar_t *vk_bilerp_pics;
+static cvar_t *vk_bilerp_skies;
 static cvar_t *vk_partscale;
 static cvar_t *vk_partstyle;
 static cvar_t *vk_partshape;
@@ -1693,17 +1697,39 @@ static void vk_update_texture_descriptor(vk_texture_t *texture)
     vk_update_texture_descriptor_with_sampler(texture, vk.sampler);
 }
 
+static VkSampler vk_sampler_for_image(const image_t *image)
+{
+    if (!image)
+        return vk.sampler;
+
+    if (image->flags & IF_NEAREST)
+        return vk.nearest_sampler ? vk.nearest_sampler : vk.sampler;
+
+    if (image->type == IT_SKY) {
+        if (vk_bilerp_skies && !vk_bilerp_skies->integer && vk.sky_nearest_sampler)
+            return vk.sky_nearest_sampler;
+        return vk.sky_sampler ? vk.sky_sampler : vk.sampler;
+    }
+
+    if (image->type == IT_FONT &&
+        (!vk_bilerp_chars || !vk_bilerp_chars->integer))
+        return vk.nearest_sampler ? vk.nearest_sampler : vk.sampler;
+
+    if (image->type == IT_PIC && vk_bilerp_pics) {
+        bool scrap = image->flags & IF_SCRAP;
+        if (!vk_bilerp_pics->integer ||
+            (scrap && vk_bilerp_pics->integer == 1))
+            return vk.nearest_sampler ? vk.nearest_sampler : vk.sampler;
+    }
+
+    return vk.sampler;
+}
+
 static void vk_update_texture_descriptors(void)
 {
     for (uint32_t i = 0; i < MAX_RIMAGES; i++) {
-        VkSampler sampler = vk.sampler;
-        if (i < (uint32_t)r_numImages && r_images[i].type == IT_SKY &&
-            vk.sky_sampler) {
-            sampler = vk.sky_sampler;
-        } else if (i < (uint32_t)r_numImages && r_images[i].type == IT_FONT &&
-                   vk.nearest_sampler) {
-            sampler = vk.nearest_sampler;
-        }
+        VkSampler sampler = i < (uint32_t)r_numImages ?
+            vk_sampler_for_image(&r_images[i]) : vk.sampler;
         vk_update_texture_descriptor_with_sampler(&vk.textures[i], sampler);
     }
 
@@ -1909,10 +1935,7 @@ static bool vk_upload_texture(image_t *image, byte *pic)
     image->sh = 1;
     image->tl = 0;
     image->th = 1;
-    if (image->type == IT_SKY && vk.sky_sampler)
-        vk_update_texture_descriptor_with_sampler(texture, vk.sky_sampler);
-    else if (image->type == IT_FONT && vk.nearest_sampler)
-        vk_update_texture_descriptor_with_sampler(texture, vk.nearest_sampler);
+    vk_update_texture_descriptor_with_sampler(texture, vk_sampler_for_image(image));
 
     return true;
 }
@@ -2440,16 +2463,17 @@ static bool vk_create_sky_sampler(VkSampler *sampler)
     return true;
 }
 
-static bool vk_create_nearest_sampler(VkSampler *sampler)
+static bool vk_create_nearest_sampler(VkSampler *sampler,
+                                      VkSamplerAddressMode address_mode)
 {
     VkSamplerCreateInfo sampler_info = {
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .magFilter = VK_FILTER_NEAREST,
         .minFilter = VK_FILTER_NEAREST,
         .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeU = address_mode,
+        .addressModeV = address_mode,
+        .addressModeW = address_mode,
         .maxLod = 0.0f,
     };
     VkResult result = vk.CreateSampler(vk.device, &sampler_info, NULL, sampler);
@@ -2485,6 +2509,16 @@ static void vk_texturemode_changed(cvar_t *self)
 
     vk.sampler = sampler;
     vk.sky_sampler = sky_sampler;
+    vk_update_texture_descriptors();
+}
+
+static void vk_sampler_selection_changed(cvar_t *self)
+{
+    (void)self;
+
+    if (!vk.device)
+        return;
+
     vk_update_texture_descriptors();
 }
 
@@ -2537,7 +2571,11 @@ static bool vk_create_frame_resources(void)
         return false;
     if (!vk_create_sky_sampler(&vk.sky_sampler))
         return false;
-    if (!vk_create_nearest_sampler(&vk.nearest_sampler))
+    if (!vk_create_nearest_sampler(&vk.nearest_sampler,
+                                   VK_SAMPLER_ADDRESS_MODE_REPEAT))
+        return false;
+    if (!vk_create_nearest_sampler(&vk.sky_nearest_sampler,
+                                   VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE))
         return false;
 
     VkPushConstantRange push_range = {
@@ -7517,6 +7555,12 @@ bool VKR_Init(bool total)
     vk_round_down = Cvar_Get("gl_round_down", "0", CVAR_FILES);
     vk_picmip = Cvar_Get("gl_picmip", "0", CVAR_FILES);
     vk_downsample_skins = Cvar_Get("gl_downsample_skins", "1", CVAR_FILES);
+    vk_bilerp_chars = Cvar_Get("gl_bilerp_chars", "0", 0);
+    vk_bilerp_chars->changed = vk_sampler_selection_changed;
+    vk_bilerp_pics = Cvar_Get("gl_bilerp_pics", "1", 0);
+    vk_bilerp_pics->changed = vk_sampler_selection_changed;
+    vk_bilerp_skies = Cvar_Get("gl_bilerp_skies", "1", 0);
+    vk_bilerp_skies->changed = vk_sampler_selection_changed;
     vk_partscale = Cvar_Get("gl_partscale", "2", 0);
     vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
     vk_partshape = Cvar_Get("gl_partshape", "0", 0);
@@ -7633,6 +7677,12 @@ void VKR_Shutdown(bool total)
         vk_texturemode->changed = NULL;
     if (vk_anisotropy)
         vk_anisotropy->changed = NULL;
+    if (vk_bilerp_chars)
+        vk_bilerp_chars->changed = NULL;
+    if (vk_bilerp_pics)
+        vk_bilerp_pics->changed = NULL;
+    if (vk_bilerp_skies)
+        vk_bilerp_skies->changed = NULL;
     if (vk_partshape)
         vk_partshape->changed = NULL;
     if (vk_clearcolor)
@@ -7702,6 +7752,10 @@ void VKR_Shutdown(bool total)
     if (vk.nearest_sampler) {
         vk.DestroySampler(vk.device, vk.nearest_sampler, NULL);
         vk.nearest_sampler = VK_NULL_HANDLE;
+    }
+    if (vk.sky_nearest_sampler) {
+        vk.DestroySampler(vk.device, vk.sky_nearest_sampler, NULL);
+        vk.sky_nearest_sampler = VK_NULL_HANDLE;
     }
 
     if (vk.descriptor_pool) {
