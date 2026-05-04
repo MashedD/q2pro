@@ -440,6 +440,8 @@ static cvar_t *vk_downsample_skins;
 static cvar_t *vk_bilerp_chars;
 static cvar_t *vk_bilerp_pics;
 static cvar_t *vk_bilerp_skies;
+static cvar_t *vk_saturation;
+static cvar_t *vk_invert;
 static cvar_t *vk_partscale;
 static cvar_t *vk_partstyle;
 static cvar_t *vk_partshape;
@@ -543,6 +545,40 @@ static void vk_resample_texture(const byte *in, int inwidth, int inheight,
             out[3] = (pix1[3] + pix2[3] + pix3[3] + pix4[3]) >> 2;
             out += 4;
         }
+    }
+}
+
+static void vk_color_transform_texture(byte *pic, int width, int height,
+                                       imagetype_t type, imageflags_t flags)
+{
+    if (type != IT_WALL || (flags & IF_TURBULENT))
+        return;
+
+    float saturation = vk_saturation ?
+        Cvar_ClampValue(vk_saturation, 0.0f, 1.0f) : 1.0f;
+    bool invert = vk_invert && vk_invert->integer;
+
+    if (saturation == 1.0f && !invert)
+        return;
+
+    byte *p = pic;
+    int count = width * height;
+    for (int i = 0; i < count; i++, p += 4) {
+        float r = p[0];
+        float g = p[1];
+        float b = p[2];
+        float y = LUMINANCE(r, g, b);
+
+        r = y + (r - y) * saturation;
+        g = y + (g - y) * saturation;
+        b = y + (b - y) * saturation;
+
+        p[0] = invert ? 255 - Q_clipf(r, 0.0f, 255.0f) :
+            Q_clipf(r, 0.0f, 255.0f);
+        p[1] = invert ? 255 - Q_clipf(g, 0.0f, 255.0f) :
+            Q_clipf(g, 0.0f, 255.0f);
+        p[2] = invert ? 255 - Q_clipf(b, 0.0f, 255.0f) :
+            Q_clipf(b, 0.0f, 255.0f);
     }
 }
 
@@ -1883,6 +1919,8 @@ static bool vk_upload_texture(image_t *image, byte *pic)
     uint32_t scaled_width = width;
     uint32_t scaled_height = height;
     byte *scaled = pic;
+
+    vk_color_transform_texture(pic, width, height, image->type, image->flags);
 
     if (image->type == IT_WALL ||
         (image->type == IT_SKIN && (!vk_downsample_skins || vk_downsample_skins->integer))) {
@@ -7561,6 +7599,8 @@ bool VKR_Init(bool total)
     vk_bilerp_pics->changed = vk_sampler_selection_changed;
     vk_bilerp_skies = Cvar_Get("gl_bilerp_skies", "1", 0);
     vk_bilerp_skies->changed = vk_sampler_selection_changed;
+    vk_saturation = Cvar_Get("gl_saturation", "1", CVAR_FILES);
+    vk_invert = Cvar_Get("gl_invert", "0", CVAR_FILES);
     vk_partscale = Cvar_Get("gl_partscale", "2", 0);
     vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
     vk_partshape = Cvar_Get("gl_partshape", "0", 0);
