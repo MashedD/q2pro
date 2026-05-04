@@ -397,6 +397,7 @@ typedef struct {
     bool render_pass_active;
     float scale;
     color_t color;
+    color_t alt_color;
     bool color_set;
     clipRect_t clip;
     bool clip_set;
@@ -8097,18 +8098,28 @@ void VKR_LightPoint(const vec3_t origin, vec3_t light)
 
 void VKR_ClearColor(void)
 {
+    vk.color.u32 = U32_WHITE;
+    vk.alt_color.u32 = U32_WHITE;
     vk.color_set = false;
 }
 
 void VKR_SetAlpha(float alpha)
 {
-    if (vk.color_set)
-        vk.color.u8[3] = Q_clip(alpha, 0.0f, 1.0f) * 255;
+    byte a = Q_clip(alpha, 0.0f, 1.0f) * 255;
+    if (!vk.color_set) {
+        vk.color.u32 = U32_WHITE;
+        vk.alt_color.u32 = U32_WHITE;
+        vk.color_set = true;
+    }
+    vk.color.u8[3] = a;
+    vk.alt_color.u8[3] = a;
 }
 
 void VKR_SetColor(uint32_t color)
 {
     vk.color.u32 = color;
+    vk.alt_color.u32 = U32_WHITE;
+    vk.alt_color.u8[3] = vk.color.u8[3];
     vk.color_set = true;
 }
 
@@ -8153,11 +8164,13 @@ void VKR_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
 
     float s = (ch & 15) * 0.0625f;
     float t = ((ch & 255) >> 4) * 0.0625f;
+    color_t saved = vk.color;
+    bool saved_set = vk.color_set;
+    color_t draw_color = (ch & 0x80) ?
+        vk.alt_color : (vk.color_set ? vk.color : (color_t){ .u32 = U32_WHITE });
 
     if ((flags & UI_DROPSHADOW) && ch != 0x83) {
-        color_t saved = vk.color;
-        bool saved_set = vk.color_set;
-        byte alpha = saved_set ? saved.u8[3] : 255;
+        byte alpha = draw_color.u8[3];
 
         vk.color.u32 = MakeColor(0, 0, 0, alpha);
         vk.color_set = true;
@@ -8172,8 +8185,12 @@ void VKR_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
         vk.color_set = saved_set;
     }
 
+    vk.color = draw_color;
+    vk.color_set = true;
     vk_draw_texture_rect(x, y, CONCHAR_WIDTH, CONCHAR_HEIGHT,
                          s, t, s + 0.0625f, t + 0.0625f, font);
+    vk.color = saved;
+    vk.color_set = saved_set;
 }
 
 int VKR_DrawString(int x, int y, int flags, size_t max_chars,
