@@ -409,6 +409,9 @@ typedef struct {
     vk_buffer_t debug_text_vertices;
     vk_buffer_t debug_text_indices;
     uint32_t sky_images[6];
+    float sky_rotate;
+    bool sky_autorotate;
+    vec3_t sky_axis;
     refdef_t fd;
     bool fd_valid;
     vk_world_t world;
@@ -5296,6 +5299,31 @@ static void vk_sky_mvp(mat4_t out, const refdef_t *fd)
     VectorClear(sky_fd.vieworg);
     vk_projection_matrix(proj, sky_fd.fov_x, sky_fd.fov_y, sky_fd.rdflags);
     vk_view_matrix(view, &sky_fd);
+
+    if (vk.sky_rotate) {
+        vec3_t axis[3];
+        mat4_t model, view_model;
+        float angle = vk.sky_autorotate ? sky_fd.time * vk.sky_rotate :
+            vk.sky_rotate;
+
+        SetupRotationMatrix(axis, vk.sky_axis, angle);
+        memset(model, 0, sizeof(model));
+        model[0] = axis[0][0];
+        model[1] = axis[0][1];
+        model[2] = axis[0][2];
+        model[4] = axis[1][0];
+        model[5] = axis[1][1];
+        model[6] = axis[1][2];
+        model[8] = axis[2][0];
+        model[9] = axis[2][1];
+        model[10] = axis[2][2];
+        model[15] = 1.0f;
+
+        vk_matrix_multiply(view_model, view, model);
+        vk_matrix_multiply(out, proj, view_model);
+        return;
+    }
+
     vk_matrix_multiply(out, proj, view);
 }
 
@@ -7510,16 +7538,20 @@ void VKR_SetSky(const char *name, float rotate, bool autorotate, const vec3_t ax
 {
     char pathname[MAX_QPATH];
 
-    (void)rotate;
-    (void)autorotate;
-    (void)axis;
-
     memset(vk.sky_images, 0, sizeof(vk.sky_images));
+    vk.sky_rotate = 0.0f;
+    vk.sky_autorotate = false;
+    VectorSet(vk.sky_axis, 0.0f, 0.0f, 1.0f);
 
     if (!name || !*name ||
         (vk_drawsky && !vk_drawsky->integer) ||
         (vk_gl_drawsky && !vk_gl_drawsky->integer))
         return;
+
+    if (rotate && VectorNormalize2(axis, vk.sky_axis) >= 0.001f) {
+        vk.sky_rotate = rotate;
+        vk.sky_autorotate = autorotate;
+    }
 
     for (uint32_t i = 0; i < 6; i++) {
         const image_t *image;
