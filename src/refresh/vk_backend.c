@@ -4659,6 +4659,17 @@ static bool vk_create_default_texture(void)
     return true;
 }
 
+static bool vk_create_shell_texture(void)
+{
+    uint32_t pixel = U32_WHITE;
+
+    if (!vk_upload_texture_data(&vk.textures[1], 1, 1, &pixel))
+        return false;
+
+    R_SHELLTEXTURE->texnum = 1;
+    return true;
+}
+
 static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float color[4])
 {
     if (!vk.render_pass_active || !vk.color3d_pipeline ||
@@ -7459,6 +7470,8 @@ bool VKR_Init(bool total)
     IMG_SetUploadBackend(&vk_image_upload);
     if (!vk_create_default_texture())
         Com_WPrintf("Couldn't create Vulkan default texture: %s\n", Com_GetLastError());
+    if (!vk_create_shell_texture())
+        Com_WPrintf("Couldn't create Vulkan shell texture: %s\n", Com_GetLastError());
     IMG_GetPalette();
 
     Cmd_AddCommand("strings", vk_strings_f);
