@@ -306,6 +306,8 @@ typedef struct {
     PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets;
     PFN_vkCmdBindVertexBuffers CmdBindVertexBuffers;
     PFN_vkCmdBindIndexBuffer CmdBindIndexBuffer;
+    PFN_vkCmdSetViewport CmdSetViewport;
+    PFN_vkCmdSetScissor CmdSetScissor;
     PFN_vkCmdPushConstants CmdPushConstants;
     PFN_vkCmdDraw CmdDraw;
     PFN_vkCmdDrawIndexed CmdDrawIndexed;
@@ -1973,6 +1975,8 @@ static bool vk_load_device(void)
     LOAD(CmdBindDescriptorSets);
     LOAD(CmdBindVertexBuffers);
     LOAD(CmdBindIndexBuffer);
+    LOAD(CmdSetViewport);
+    LOAD(CmdSetScissor);
     LOAD(CmdPushConstants);
     LOAD(CmdDraw);
     LOAD(CmdDrawIndexed);
@@ -2908,6 +2912,17 @@ static VkShaderModule vk_create_shader_module(const uint32_t *code, size_t code_
     return module;
 }
 
+static const VkDynamicState vk_3d_dynamic_states[] = {
+    VK_DYNAMIC_STATE_VIEWPORT,
+    VK_DYNAMIC_STATE_SCISSOR,
+};
+
+static const VkPipelineDynamicStateCreateInfo vk_3d_dynamic_state = {
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+    .dynamicStateCount = q_countof(vk_3d_dynamic_states),
+    .pDynamicStates = vk_3d_dynamic_states,
+};
+
 static bool vk_create_rect_pipeline(void)
 {
     VkShaderModule vert = vk_create_shader_module(vk_rect_vert_spv, sizeof(vk_rect_vert_spv));
@@ -3259,6 +3274,7 @@ static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
         .pMultisampleState = &multisample,
         .pDepthStencilState = &depth_stencil,
         .pColorBlendState = &color_blend,
+        .pDynamicState = &vk_3d_dynamic_state,
         .layout = vk.rect_pipeline_layout,
         .renderPass = vk.render_pass,
         .subpass = 0,
@@ -3411,6 +3427,7 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
         .pMultisampleState = &multisample,
         .pDepthStencilState = &depth_stencil,
         .pColorBlendState = &color_blend,
+        .pDynamicState = &vk_3d_dynamic_state,
         .layout = vk.rect_pipeline_layout,
         .renderPass = vk.render_pass,
         .subpass = 0,
@@ -3587,6 +3604,7 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
         .pMultisampleState = &multisample,
         .pDepthStencilState = &depth_stencil,
         .pColorBlendState = &color_blend,
+        .pDynamicState = &vk_3d_dynamic_state,
         .layout = vk.rect_pipeline_layout,
         .renderPass = vk.render_pass,
         .subpass = 0,
@@ -3883,6 +3901,36 @@ static int vk_2d_height(void)
         height = Q_rint(height * vk.scale);
 
     return max(height, 1);
+}
+
+static void vk_set_3d_viewport(const refdef_t *fd)
+{
+    if (!fd || !vk.CmdSetViewport || !vk.CmdSetScissor)
+        return;
+
+    int width = max(fd->width, 1);
+    int height = max(fd->height, 1);
+    int x = Q_clip(fd->x, 0, (int)vk.swapchain_extent.width);
+    int y = Q_clip(fd->y, 0, (int)vk.swapchain_extent.height);
+    int x2 = Q_clip(fd->x + width, x, (int)vk.swapchain_extent.width);
+    int y2 = Q_clip(fd->y + height, y, (int)vk.swapchain_extent.height);
+
+    VkViewport viewport = {
+        .x = x,
+        .y = y,
+        .width = max(x2 - x, 1),
+        .height = max(y2 - y, 1),
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    VkRect2D scissor = {
+        .offset = { x, y },
+        .extent = { max(x2 - x, 1), max(y2 - y, 1) },
+    };
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+
+    vk.CmdSetViewport(cmd, 0, 1, &viewport);
+    vk.CmdSetScissor(cmd, 0, 1, &scissor);
 }
 
 static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
@@ -7513,6 +7561,7 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk_rebuild_world_lighting();
     vk_setup_world_frustum(fd);
     vk_update_world_view(fd);
+    vk_set_3d_viewport(fd);
 
     bool drawworld = !(fd->rdflags & RDF_NOWORLDMODEL) &&
         (!vk_drawworld || vk_drawworld->integer);
