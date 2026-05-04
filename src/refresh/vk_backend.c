@@ -5075,8 +5075,24 @@ static float vk_world_face_light_plane_dist(const mface_t *face, const dlight_t 
     return PlaneDiffFast(local, face->plane);
 }
 
+static void vk_world_face_light_origin(const dlight_t *light, const entity_t *ent,
+                                       const vec3_t axis[3], vec3_t origin)
+{
+    if (!ent || !axis) {
+        VectorCopy(light->origin, origin);
+        return;
+    }
+
+    vec3_t delta;
+
+    VectorSubtract(light->origin, ent->origin, delta);
+    origin[0] = DotProduct(delta, axis[0]) / DotProduct(axis[0], axis[0]);
+    origin[1] = DotProduct(delta, axis[1]) / DotProduct(axis[1], axis[1]);
+    origin[2] = DotProduct(delta, axis[2]) / DotProduct(axis[2], axis[2]);
+}
+
 static float vk_world_dynamic_light_fraction(const dlight_t *light,
-                                             const vec3_t center,
+                                             const vec3_t origin, const vec3_t center,
                                              float plane_dist)
 {
     float rad = light->intensity - fabsf(plane_dist);
@@ -5093,7 +5109,7 @@ static float vk_world_dynamic_light_fraction(const dlight_t *light,
         scale = 1.0f;
     }
 
-    dist = Distance(light->origin, center);
+    dist = Distance(origin, center);
     dist2 = dist * dist - plane_dist * plane_dist;
     dist = dist2 > 0.0f ? sqrtf(dist2) : 0.0f;
 
@@ -5121,11 +5137,13 @@ static void vk_world_dynamic_light(const vk_world_face_t *face,
 
     for (int i = 0; i < fd->num_dlights; i++) {
         const dlight_t *light = &fd->dlights[i];
+        vec3_t light_origin;
         float plane_dist = fabsf(vk_world_face_light_plane_dist(face->face, light,
                                                                 ent, axis));
         float f;
 
-        f = vk_world_dynamic_light_fraction(light, center, plane_dist);
+        vk_world_face_light_origin(light, ent, axis, light_origin);
+        f = vk_world_dynamic_light_fraction(light, light_origin, center, plane_dist);
         if (f <= 0.0f)
             continue;
 
