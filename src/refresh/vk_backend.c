@@ -194,6 +194,8 @@ typedef struct {
     int viewcluster;
     unsigned drawframe;
     unsigned visframe;
+    float lightstyles[MAX_LIGHTSTYLES];
+    bool lightstyles_valid;
 } vk_world_t;
 
 typedef struct {
@@ -823,6 +825,7 @@ static void vk_free_world(void)
     vk.world.viewcluster = -1;
     vk.world.drawframe = 0;
     vk.world.visframe = 0;
+    vk.world.lightstyles_valid = false;
 
     if (vk.world.cache) {
         BSP_Free(vk.world.cache);
@@ -6842,6 +6845,7 @@ static void vk_surface_color(const mface_t *face, float color[4])
 }
 
 static bool vk_sample_surface_light(const bsp_t *bsp, const mface_t *face,
+                                    const refdef_t *fd,
                                     const vec3_t point, float color[4])
 {
     float s, t, fracs, fract;
@@ -6859,7 +6863,8 @@ static bool vk_sample_surface_light(const bsp_t *bsp, const mface_t *face,
         return false;
 
     offset = face->lightmap - bsp->lightmap;
-    if (offset < 0 || offset + size > bsp->numlightmapbytes)
+    if (offset < 0 || (uint64_t)offset + (uint64_t)face->numstyles * size >
+        (uint64_t)bsp->numlightmapbytes)
         return false;
 
     s = DotProduct(point, face->lm_axis[0]) + face->lm_offset[0];
@@ -6875,19 +6880,25 @@ static bool vk_sample_surface_light(const bsp_t *bsp, const mface_t *face,
     fract = t - t0;
 
     Vector4Clear(color);
-    const byte *lightmap = face->lightmap;
-    const byte *b1 = &lightmap[3 * (t0 * smax + s0)];
-    const byte *b2 = &lightmap[3 * (t0 * smax + s1)];
-    const byte *b3 = &lightmap[3 * (t1 * smax + s1)];
-    const byte *b4 = &lightmap[3 * (t1 * smax + s0)];
     float w1 = (1.0f - fracs) * (1.0f - fract);
     float w2 = fracs * (1.0f - fract);
     float w3 = fracs * fract;
     float w4 = (1.0f - fracs) * fract;
 
-    color[0] = w1 * b1[0] + w2 * b2[0] + w3 * b3[0] + w4 * b4[0];
-    color[1] = w1 * b1[1] + w2 * b2[1] + w3 * b3[1] + w4 * b4[1];
-    color[2] = w1 * b1[2] + w2 * b2[2] + w3 * b3[2] + w4 * b4[2];
+    const byte *lightmap = face->lightmap;
+    for (int i = 0; i < face->numstyles; i++) {
+        const byte *b1 = &lightmap[3 * (t0 * smax + s0)];
+        const byte *b2 = &lightmap[3 * (t0 * smax + s1)];
+        const byte *b3 = &lightmap[3 * (t1 * smax + s1)];
+        const byte *b4 = &lightmap[3 * (t1 * smax + s0)];
+        float style = vk_lightstyle_value(fd, face->styles[i]);
+
+        color[0] += style * (w1 * b1[0] + w2 * b2[0] + w3 * b3[0] + w4 * b4[0]);
+        color[1] += style * (w1 * b1[1] + w2 * b2[1] + w3 * b3[1] + w4 * b4[1]);
+        color[2] += style * (w1 * b1[2] + w2 * b2[2] + w3 * b3[2] + w4 * b4[2]);
+
+        lightmap += size;
+    }
 
     color[0] = Q_clipf(color[0] / 255.0f, 0.0f, 1.0f);
     color[1] = Q_clipf(color[1] / 255.0f, 0.0f, 1.0f);
@@ -6903,6 +6914,7 @@ static bool vk_sample_surface_light(const bsp_t *bsp, const mface_t *face,
 }
 
 static void vk_surface_vertex_color(const bsp_t *bsp, const mface_t *face,
+                                    const refdef_t *fd,
                                     const vec3_t point, const float fallback[4],
                                     float color[4])
 {
@@ -6916,7 +6928,7 @@ static void vk_surface_vertex_color(const bsp_t *bsp, const mface_t *face,
         return;
     }
 
-    if (!vk_sample_surface_light(bsp, face, point, color))
+    if (!vk_sample_surface_light(bsp, face, fd, point, color))
         memcpy(color, fallback, sizeof(float) * 4);
 }
 
@@ -6966,7 +6978,7 @@ static bool vk_face_edges_are_valid(const bsp_t *bsp, const mface_t *face)
     return true;
 }
 
-static bool vk_build_world_mesh(bsp_t *bsp)
+static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
 {
     if (!bsp || !bsp->faces) {
         Com_SetLastError("No BSP faces for Vulkan world mesh");
@@ -7037,7 +7049,7 @@ static bool vk_build_world_mesh(bsp_t *bsp)
 
             VectorCopy(src->point, vertices[v].position);
             VectorAdd(center, src->point, center);
-            vk_surface_vertex_color(bsp, face, src->point, fallback_color, color);
+            vk_surface_vertex_color(bsp, face, fd, src->point, fallback_color, color);
             memcpy(vertices[v].color, color, sizeof(vertices[v].color));
             vertices[v].uv[0] = (DotProduct(src->point, face->texinfo->axis[0]) +
                                  face->texinfo->offset[0]) * scale_s;
@@ -7156,6 +7168,36 @@ static bool vk_world_lighting_modified(void)
            (vk_vertexlight && vk_vertexlight->modified);
 }
 
+static bool vk_world_lightstyles_modified(const refdef_t *fd)
+{
+    if (!fd || !fd->lightstyles || !vk.world.cache ||
+        (vk_vertexlight && vk_vertexlight->integer) ||
+        (vk_fullbright && vk_fullbright->integer))
+        return false;
+
+    if (!vk.world.lightstyles_valid)
+        return true;
+
+    for (int i = 0; i < MAX_LIGHTSTYLES; i++) {
+        if (vk.world.lightstyles[i] != fd->lightstyles[i].white)
+            return true;
+    }
+
+    return false;
+}
+
+static void vk_save_world_lightstyles(const refdef_t *fd)
+{
+    if (!fd || !fd->lightstyles) {
+        vk.world.lightstyles_valid = false;
+        return;
+    }
+
+    for (int i = 0; i < MAX_LIGHTSTYLES; i++)
+        vk.world.lightstyles[i] = fd->lightstyles[i].white;
+    vk.world.lightstyles_valid = true;
+}
+
 static void vk_clear_world_lighting_modified(void)
 {
     if (vk_coloredlightmaps)
@@ -7166,11 +7208,15 @@ static void vk_clear_world_lighting_modified(void)
 
 static void vk_rebuild_world_lighting(void)
 {
-    if (!vk.world.cache || !vk_world_lighting_modified())
+    bool styles_modified = vk_world_lightstyles_modified(vk.fd_valid ? &vk.fd : NULL);
+
+    if (!vk.world.cache || (!vk_world_lighting_modified() && !styles_modified))
         return;
 
-    if (!vk_build_world_mesh(vk.world.cache))
+    if (!vk_build_world_mesh(vk.world.cache, vk.fd_valid ? &vk.fd : NULL))
         Com_WPrintf("Couldn't rebuild Vulkan world mesh: %s\n", Com_GetLastError());
+    else if (vk.fd_valid && vk.fd.lightstyles)
+        vk_save_world_lightstyles(vk.fd_valid ? &vk.fd : NULL);
 
     vk_clear_world_lighting_modified();
 }
@@ -7256,7 +7302,7 @@ static void vk_load_world(const char *name)
     vk_register_world_images(bsp);
     vk_prepare_world_surfaces(bsp);
 
-    if (!vk_build_world_mesh(bsp))
+    if (!vk_build_world_mesh(bsp, NULL))
         Com_WPrintf("Couldn't build Vulkan world mesh: %s\n", Com_GetLastError());
     else
         Com_Printf("Vulkan world mesh: %u indices, %u faces, %u batches\n",
