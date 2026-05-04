@@ -8141,7 +8141,24 @@ float VKR_ClampScale(cvar_t *var)
     if (var->value)
         return 1.0f / Cvar_ClampValue(var, 1.0f, 10.0f);
 
-    return 1.0f;
+    int scale = 1;
+
+    if (r_config.height < r_config.width) {
+        if (r_config.height >= 2160)
+            scale = 4;
+        else if (r_config.height >= 1080)
+            scale = 2;
+    } else {
+        if (r_config.width >= 3840)
+            scale = 4;
+        else if (r_config.width >= 1920)
+            scale = 2;
+    }
+
+    if (vid && vid->get_dpi_scale)
+        scale = max(scale, vid->get_dpi_scale());
+
+    return 1.0f / scale;
 }
 
 void VKR_SetScale(float scale)
