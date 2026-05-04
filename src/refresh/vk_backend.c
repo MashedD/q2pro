@@ -433,6 +433,9 @@ static cvar_t *vk_swapinterval;
 static cvar_t *vk_finish;
 static cvar_t *vk_texturemode;
 static cvar_t *vk_anisotropy;
+static cvar_t *vk_round_down;
+static cvar_t *vk_picmip;
+static cvar_t *vk_downsample_skins;
 static cvar_t *vk_partscale;
 static cvar_t *vk_partstyle;
 static cvar_t *vk_partshape;
@@ -500,6 +503,44 @@ static void vk_free_world(void);
 static void vk_load_world(const char *name);
 static bool vk_static_light_point(const vec3_t origin, const refdef_t *fd,
                                   vec3_t light);
+
+static void vk_resample_texture(const byte *in, int inwidth, int inheight,
+                                byte *out, int outwidth, int outheight)
+{
+    unsigned p1[MAX_TEXTURE_SIZE], p2[MAX_TEXTURE_SIZE];
+    unsigned fracstep = inwidth * 0x10000 / outwidth;
+    unsigned frac = fracstep >> 2;
+
+    Q_assert(outwidth <= MAX_TEXTURE_SIZE);
+
+    for (int i = 0; i < outwidth; i++) {
+        p1[i] = 4 * (frac >> 16);
+        frac += fracstep;
+    }
+    frac = 3 * (fracstep >> 2);
+    for (int i = 0; i < outwidth; i++) {
+        p2[i] = 4 * (frac >> 16);
+        frac += fracstep;
+    }
+
+    float height_scale = (float)inheight / outheight;
+    int row_stride = inwidth << 2;
+    for (int i = 0; i < outheight; i++) {
+        const byte *inrow1 = in + row_stride * (int)((i + 0.25f) * height_scale);
+        const byte *inrow2 = in + row_stride * (int)((i + 0.75f) * height_scale);
+        for (int j = 0; j < outwidth; j++) {
+            const byte *pix1 = inrow1 + p1[j];
+            const byte *pix2 = inrow1 + p2[j];
+            const byte *pix3 = inrow2 + p1[j];
+            const byte *pix4 = inrow2 + p2[j];
+            out[0] = (pix1[0] + pix2[0] + pix3[0] + pix4[0]) >> 2;
+            out[1] = (pix1[1] + pix2[1] + pix3[1] + pix4[1]) >> 2;
+            out[2] = (pix1[2] + pix2[2] + pix3[2] + pix4[2]) >> 2;
+            out[3] = (pix1[3] + pix2[3] + pix3[3] + pix4[3]) >> 2;
+            out += 4;
+        }
+    }
+}
 
 static void vk_upload_image(image_t *image, byte *pic)
 {
@@ -1811,8 +1852,50 @@ static bool vk_upload_texture(image_t *image, byte *pic)
     uint32_t index = image - r_images;
     vk_texture_t *texture = &vk.textures[index];
 
-    if (!vk_upload_texture_data(texture, image->upload_width,
-                                image->upload_height, pic)) {
+    uint32_t width = image->upload_width;
+    uint32_t height = image->upload_height;
+    uint32_t scaled_width = width;
+    uint32_t scaled_height = height;
+    byte *scaled = pic;
+
+    if (image->type == IT_WALL ||
+        (image->type == IT_SKIN && (!vk_downsample_skins || vk_downsample_skins->integer))) {
+        if (vk_round_down && vk_round_down->integer) {
+            uint32_t pot_width = Q_npot32(scaled_width);
+            uint32_t pot_height = Q_npot32(scaled_height);
+            if (pot_width > scaled_width)
+                scaled_width = max(pot_width >> 1, 1);
+            if (pot_height > scaled_height)
+                scaled_height = max(pot_height >> 1, 1);
+        }
+
+        int shift = vk_picmip ? Cvar_ClampInteger(vk_picmip, 0, 31) : 0;
+        while (shift-- > 0 && (scaled_width > 1 || scaled_height > 1)) {
+            scaled_width = max(scaled_width >> 1, 1);
+            scaled_height = max(scaled_height >> 1, 1);
+        }
+    }
+
+    uint32_t max_size = min(vk.physical_device_properties.limits.maxImageDimension2D,
+                            MAX_TEXTURE_SIZE);
+    while (max_size > 0 && (scaled_width > max_size || scaled_height > max_size)) {
+        scaled_width = max(scaled_width >> 1, 1);
+        scaled_height = max(scaled_height >> 1, 1);
+    }
+
+    if (scaled_width != width || scaled_height != height) {
+        scaled = FS_AllocTempMem(scaled_width * scaled_height * 4);
+        vk_resample_texture(pic, width, height, scaled, scaled_width, scaled_height);
+    }
+
+    image->upload_width = scaled_width;
+    image->upload_height = scaled_height;
+
+    bool ok = vk_upload_texture_data(texture, scaled_width, scaled_height, scaled);
+    if (scaled != pic)
+        FS_FreeTempMem(scaled);
+
+    if (!ok) {
         image->texnum = texture->descriptor_set ? index : 0;
         image->sl = 0;
         image->sh = 1;
@@ -7431,6 +7514,9 @@ bool VKR_Init(bool total)
     vk_texturemode->changed = vk_texturemode_changed;
     vk_anisotropy = Cvar_Get("gl_anisotropy", "1", 0);
     vk_anisotropy->changed = vk_texturemode_changed;
+    vk_round_down = Cvar_Get("gl_round_down", "0", CVAR_FILES);
+    vk_picmip = Cvar_Get("gl_picmip", "0", CVAR_FILES);
+    vk_downsample_skins = Cvar_Get("gl_downsample_skins", "1", CVAR_FILES);
     vk_partscale = Cvar_Get("gl_partscale", "2", 0);
     vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
     vk_partshape = Cvar_Get("gl_partshape", "0", 0);
