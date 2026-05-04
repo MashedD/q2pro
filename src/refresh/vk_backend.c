@@ -5927,7 +5927,53 @@ static void vk_draw_alias_outlines(VkCommandBuffer cmd,
     vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
 }
 
-static bool vk_alias_shadow_point(const entity_t *ent, lightpoint_t *point)
+static void vk_trace_bmodel_light_points(const refdef_t *fd, const bsp_t *bsp,
+                                         const vec3_t origin, const vec3_t end,
+                                         lightpoint_t *point)
+{
+    if (!fd)
+        return;
+
+    for (int i = 0; i < fd->num_entities; i++) {
+        const entity_t *ent = &fd->entities[i];
+        if (!(ent->model & BIT(31)))
+            continue;
+
+        int index = ~ent->model;
+        if (index < 1 || index >= bsp->nummodels)
+            continue;
+
+        const mmodel_t *model = &bsp->models[index];
+        if (!model->numfaces)
+            continue;
+
+        const vec_t *angles = NULL;
+        if (!VectorEmpty(ent->angles)) {
+            if (fabsf(origin[0] - ent->origin[0]) > model->radius ||
+                fabsf(origin[1] - ent->origin[1]) > model->radius)
+                continue;
+            angles = ent->angles;
+        } else {
+            vec3_t mins, maxs;
+            VectorAdd(model->mins, ent->origin, mins);
+            VectorAdd(model->maxs, ent->origin, maxs);
+            if (origin[0] < mins[0] || origin[0] > maxs[0] ||
+                origin[1] < mins[1] || origin[1] > maxs[1])
+                continue;
+        }
+
+        lightpoint_t model_point;
+        BSP_TransformedLightPoint(&model_point, origin, end,
+                                  model->headnode,
+                                  SURF_SKY | SURF_NODRAW | SURF_TRANS_MASK,
+                                  ent->origin, angles);
+        if (model_point.fraction < point->fraction)
+            *point = model_point;
+    }
+}
+
+static bool vk_alias_shadow_point(const entity_t *ent, const refdef_t *fd,
+                                  lightpoint_t *point)
 {
     const bsp_t *bsp = vk.world.cache;
     vec3_t end;
@@ -5939,6 +5985,7 @@ static bool vk_alias_shadow_point(const entity_t *ent, lightpoint_t *point)
     end[2] -= 8192.0f;
     BSP_LightPoint(point, ent->origin, end, bsp->nodes,
                    SURF_SKY | SURF_NODRAW | SURF_TRANS_MASK);
+    vk_trace_bmodel_light_points(fd, bsp, ent->origin, end, point);
     return point->surf != NULL;
 }
 
@@ -5983,7 +6030,7 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
         return;
     if (ent->flags & (RF_WEAPONMODEL | RF_NOSHADOW))
         return;
-    if (!model->alias_frames || !vk_alias_shadow_point(ent, &point))
+    if (!model->alias_frames || !vk_alias_shadow_point(ent, fd, &point))
         return;
 
     w = point.plane.normal[2];
@@ -6756,6 +6803,8 @@ static bool vk_static_light_point(const vec3_t origin, const refdef_t *fd,
 
     BSP_LightPoint(&point, origin, end, bsp->nodes,
                    SURF_SKY | SURF_NODRAW | SURF_TRANS_MASK);
+    vk_trace_bmodel_light_points(fd, bsp, origin, end, &point);
+
     if (!point.surf)
         return false;
 
@@ -7492,6 +7541,17 @@ void VKR_Shutdown(bool total)
     if (!total)
         return;
 
+    if (vk_swapinterval)
+        vk_swapinterval->changed = NULL;
+    if (vk_texturemode)
+        vk_texturemode->changed = NULL;
+    if (vk_anisotropy)
+        vk_anisotropy->changed = NULL;
+    if (vk_partshape)
+        vk_partshape->changed = NULL;
+    if (vk_clearcolor)
+        vk_clearcolor->generator = NULL;
+
     Cmd_RemoveCommand("strings");
     Cmd_RemoveCommand("modellist");
 #if USE_DEBUG
@@ -7501,6 +7561,7 @@ void VKR_Shutdown(bool total)
     if (r_numImages) {
         IMG_FreeAll();
         vk_destroy_texture_resource(&vk.textures[0]);
+        vk_destroy_texture_resource(&vk.textures[1]);
         IMG_Shutdown();
     }
 
