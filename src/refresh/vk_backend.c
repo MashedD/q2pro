@@ -442,6 +442,8 @@ static cvar_t *vk_bilerp_pics;
 static cvar_t *vk_bilerp_skies;
 static cvar_t *vk_saturation;
 static cvar_t *vk_invert;
+static cvar_t *vk_gamma;
+static cvar_t *vk_gamma_scale_pics;
 static cvar_t *vk_partscale;
 static cvar_t *vk_partstyle;
 static cvar_t *vk_partshape;
@@ -484,6 +486,7 @@ static cvar_t *vk_world_cull;
 #if USE_DEBUG
 static cvar_t *vk_debug_distfrac;
 #endif
+static byte vk_gammatable[256];
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static void vk_destroy_texture(image_t *image);
@@ -551,14 +554,17 @@ static void vk_resample_texture(const byte *in, int inwidth, int inheight,
 static void vk_color_transform_texture(byte *pic, int width, int height,
                                        imagetype_t type, imageflags_t flags)
 {
-    if (type != IT_WALL || (flags & IF_TURBULENT))
-        return;
-
     float saturation = vk_saturation ?
         Cvar_ClampValue(vk_saturation, 0.0f, 1.0f) : 1.0f;
-    bool invert = vk_invert && vk_invert->integer;
+    bool world = type == IT_WALL && !(flags & IF_TURBULENT);
+    bool invert = world && vk_invert && vk_invert->integer;
+    bool scale_pics = !(r_config.flags & QVF_GAMMARAMP) &&
+        vk_gamma_scale_pics && vk_gamma_scale_pics->integer &&
+        type != IT_WALL && type != IT_SKIN;
 
-    if (saturation == 1.0f && !invert)
+    if (!world && !scale_pics)
+        return;
+    if (world && saturation == 1.0f && !invert && !scale_pics)
         return;
 
     byte *p = pic;
@@ -567,11 +573,13 @@ static void vk_color_transform_texture(byte *pic, int width, int height,
         float r = p[0];
         float g = p[1];
         float b = p[2];
-        float y = LUMINANCE(r, g, b);
 
-        r = y + (r - y) * saturation;
-        g = y + (g - y) * saturation;
-        b = y + (b - y) * saturation;
+        if (world) {
+            float y = LUMINANCE(r, g, b);
+            r = y + (r - y) * saturation;
+            g = y + (g - y) * saturation;
+            b = y + (b - y) * saturation;
+        }
 
         p[0] = invert ? 255 - Q_clipf(r, 0.0f, 255.0f) :
             Q_clipf(r, 0.0f, 255.0f);
@@ -579,7 +587,40 @@ static void vk_color_transform_texture(byte *pic, int width, int height,
             Q_clipf(g, 0.0f, 255.0f);
         p[2] = invert ? 255 - Q_clipf(b, 0.0f, 255.0f) :
             Q_clipf(b, 0.0f, 255.0f);
+
+        if (scale_pics) {
+            p[0] = vk_gammatable[p[0]];
+            p[1] = vk_gammatable[p[1]];
+            p[2] = vk_gammatable[p[2]];
+        }
     }
+}
+
+static void vk_build_gamma_table(void)
+{
+    float gamma = vk_gamma ? vk_gamma->value : 1.0f;
+
+    if (gamma == 1.0f) {
+        for (int i = 0; i < 256; i++)
+            vk_gammatable[i] = i;
+        return;
+    }
+
+    gamma = 1.0f / gamma;
+    for (int i = 0; i < 256; i++) {
+        float value = 255.0f * powf((i + 0.5f) / 255.5f, gamma) + 0.5f;
+        vk_gammatable[i] = min(value, 255);
+    }
+}
+
+static void vk_gamma_changed(cvar_t *self)
+{
+    (void)self;
+
+    vk_build_gamma_table();
+
+    if ((r_config.flags & QVF_GAMMARAMP) && vid && vid->update_gamma)
+        vid->update_gamma(vk_gammatable);
 }
 
 static void vk_upload_image(image_t *image, byte *pic)
@@ -7601,6 +7642,17 @@ bool VKR_Init(bool total)
     vk_bilerp_skies->changed = vk_sampler_selection_changed;
     vk_saturation = Cvar_Get("gl_saturation", "1", CVAR_FILES);
     vk_invert = Cvar_Get("gl_invert", "0", CVAR_FILES);
+    vk_gamma_scale_pics = Cvar_Get("gl_gamma_scale_pics", "0", CVAR_FILES);
+    vk_gamma = Cvar_Get("vid_gamma", "1", CVAR_ARCHIVE);
+    if (r_config.flags & QVF_GAMMARAMP) {
+        vk_gamma->changed = vk_gamma_changed;
+        vk_gamma->flags &= ~CVAR_FILES;
+    } else {
+        vk_gamma->flags |= CVAR_FILES;
+    }
+    vk_build_gamma_table();
+    if (r_config.flags & QVF_GAMMARAMP)
+        vk_gamma_changed(vk_gamma);
     vk_partscale = Cvar_Get("gl_partscale", "2", 0);
     vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
     vk_partshape = Cvar_Get("gl_partshape", "0", 0);
@@ -7723,6 +7775,8 @@ void VKR_Shutdown(bool total)
         vk_bilerp_pics->changed = NULL;
     if (vk_bilerp_skies)
         vk_bilerp_skies->changed = NULL;
+    if (vk_gamma)
+        vk_gamma->changed = NULL;
     if (vk_partshape)
         vk_partshape->changed = NULL;
     if (vk_clearcolor)
