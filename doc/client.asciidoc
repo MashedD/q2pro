@@ -273,10 +273,14 @@ cl_itemhighlight::
     use weapon-specific colors shared with their ammo where applicable.
     Default value is 0 (disabled).
 
+cl_playerhighlight::
+    Adds colored tint to player models. Male models are green and female
+    models are cyan/teal. Default value is 0 (disabled).
+
 cl_itemhighlight_glow::
-    Controls bloom intensity for item highlight tint shells. This does not add
-    dynamic lights. Value 0 disables highlight bloom and keeps only the color
-    tint. Higher values increase bloom strength, clamped to 5. Requires
+    Controls bloom intensity for item and player highlight tint shells. This
+    does not add dynamic lights. Value 0 disables highlight bloom and keeps
+    only the color tint. Higher values increase bloom strength, clamped to 5. Requires
     ‘gl_bloom’ to be enabled. Default value is 0.
 
 cl_nobob::

@@ -55,11 +55,10 @@ features include:
   checkerboard similar to one seen in original Quake 2
 - sound: added `al_hrtf` option to menu
 - sound: added `al_reverb` option to menu. 1 - softer, 2 - stronger
-- effects: added `cl_itemhighlight` and `cl_itemhighlight_glow`
+- effects: added `cl_itemhighlight`, `cl_playerhighlight` and `cl_itemhighlight_glow`
 
 # TODO
 
 - fix transparency problems in game menu background
 - check q2repro for useful changes (like in manuals)
 - consider adding Vulkan renderer
-

@@ -506,6 +506,32 @@ static float CL_ItemHighlightBloom(void)
     return Cvar_ClampValue(cl_itemhighlight_glow, 0, 5);
 }
 
+static bool CL_GetPlayerHighlight(const centity_state_t *state, item_highlight_t *highlight)
+{
+    int clientnum;
+    const clientinfo_t *ci;
+
+    if (!cl_playerhighlight->integer || state->modelindex != MODELINDEX_PLAYER)
+        return false;
+
+    clientnum = state->skinnum & 0xff;
+    if (clientnum < 0 || clientnum >= MAX_CLIENTS)
+        return false;
+
+    ci = &cl.clientinfo[clientnum];
+    if (!Q_stricmp(ci->model_name, "male")) {
+        highlight->shell = RF_SHELL_GREEN;
+        VectorSet(highlight->color, 0.0f, 1.0f, 0.0f);
+    } else if (!Q_stricmp(ci->model_name, "female")) {
+        highlight->shell = RF_SHELL_BLUE | RF_SHELL_GREEN;
+        VectorSet(highlight->color, 0.0f, 0.75f, 1.0f);
+    } else {
+        return false;
+    }
+
+    return true;
+}
+
 static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *highlight)
 {
     const char *model;
@@ -670,7 +696,9 @@ static void CL_AddPacketEntities(void)
     float                   custom_alpha;
     uint64_t                custom_flags;
     item_highlight_t        item_highlight;
+    item_highlight_t        player_highlight;
     bool                    has_item_highlight;
+    bool                    has_player_highlight;
 
     // bonus items rotate at a fixed rate
     autorotate = anglemod(cl.time * 0.1f);
@@ -693,6 +721,7 @@ static void CL_AddPacketEntities(void)
         effects = s1->effects;
         renderfx = s1->renderfx;
         has_item_highlight = CL_GetItemHighlight(s1, &item_highlight);
+        has_player_highlight = CL_GetPlayerHighlight(s1, &player_highlight);
 
         // set frame
         if (effects & EF_ANIM01)
@@ -739,6 +768,11 @@ static void CL_AddPacketEntities(void)
         if (has_item_highlight) {
             effects |= EF_COLOR_SHELL;
             renderfx |= item_highlight.shell;
+        }
+
+        if (has_player_highlight) {
+            effects |= EF_COLOR_SHELL;
+            renderfx |= player_highlight.shell;
         }
 
         // optionally remove the glowing effect
@@ -898,7 +932,7 @@ static void CL_AddPacketEntities(void)
         else
             ent.flags = renderfx;
 
-        if (has_item_highlight)
+        if (has_item_highlight || has_player_highlight)
             ent.flags |= renderfx & RF_GLOW;
 
         // calculate angles
@@ -1053,7 +1087,7 @@ static void CL_AddPacketEntities(void)
                 }
             }
             ent.flags = renderfx | RF_TRANSLUCENT;
-            if (has_item_highlight) {
+            if (has_item_highlight || has_player_highlight) {
                 float bloom = CL_ItemHighlightBloom();
                 if (!bloom)
                     ent.flags |= RF_NOBLOOM | RF_NOSHELLSCALE;

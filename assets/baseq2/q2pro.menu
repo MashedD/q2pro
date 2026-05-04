@@ -144,6 +144,7 @@ begin effects
     values "entity cel-shading" gl_celshading no 1x 2x 3x
     toggle "entity glowing" cl_noglow ~
     toggle "item highlighting" cl_itemhighlight
+    toggle "player highlighting" cl_playerhighlight
     range "highlight bloom" cl_itemhighlight_glow 0 5 1
     values "ground shadows" gl_shadows no yes fade
     toggle "screen blending" gl_polyblend
