@@ -38,6 +38,7 @@ features include:
 - fixed compilation warnings
 - fixed problem with displaying excessive items in address book after
   quickly switching from Server Browser
+- fixed OpenTDM crash on Windows when loading q2dm1 twice
 
 # Changes
 
@@ -54,6 +55,7 @@ features include:
   checkerboard similar to one seen in original Quake 2
 - sound: added `al_hrtf` option to menu
 - sound: added `al_reverb` option to menu. 1 - softer, 2 - stronger
+- effects: added `cl_itemhighlight` and `cl_itemhighlight_glow`
 
 # TODO
 

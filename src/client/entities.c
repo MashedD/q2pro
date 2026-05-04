@@ -24,6 +24,11 @@ extern qhandle_t cl_mod_laser;
 extern qhandle_t cl_mod_dmspot;
 extern qhandle_t cl_img_flare;
 
+typedef struct {
+    uint64_t    shell;
+    vec3_t      color;
+} item_highlight_t;
+
 /*
 =========================================================================
 
@@ -491,6 +496,159 @@ static float lerp_entity_alpha(const centity_t *ent)
     return curr ? curr : 1.0f;
 }
 
+static bool model_starts_with(const char *model, const char *prefix)
+{
+    return !Q_strncasecmp(model, prefix, strlen(prefix));
+}
+
+static float CL_ItemHighlightBloom(void)
+{
+    return Cvar_ClampValue(cl_itemhighlight_glow, 0, 5);
+}
+
+static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *highlight)
+{
+    const char *model;
+
+    if (!cl_itemhighlight->integer || !state->modelindex)
+        return false;
+
+    model = cl.configstrings[cl.csr.models + state->modelindex];
+
+    if (model_starts_with(model, "models/items/healing/") ||
+        model_starts_with(model, "models/items/mega_h/")) {
+        highlight->shell = RF_SHELL_GREEN;
+        VectorSet(highlight->color, 0.0f, 1.0f, 0.0f);
+        return true;
+    }
+
+    if (model_starts_with(model, "models/items/armor/")) {
+        highlight->shell = RF_SHELL_BLUE | RF_SHELL_GREEN;
+        VectorSet(highlight->color, 0.0f, 0.75f, 1.0f);
+        return true;
+    }
+
+    if (!Q_strcasecmp(model, "models/objects/rocket/tris.md2") ||
+        !Q_strcasecmp(model, "models/objects/grenade/tris.md2") ||
+        !Q_strcasecmp(model, "models/objects/grenade2/tris.md2")) {
+        highlight->shell = RF_SHELL_RED;
+        VectorSet(highlight->color, 1.0f, 0.0f, 0.0f);
+        return true;
+    }
+
+    if (!Q_strcasecmp(model, "models/items/ammo/shells/medium/tris.md2") ||
+        !Q_strcasecmp(model, "models/weapons/g_shotg2/tris.md2")) {
+        highlight->shell = RF_SHELL_DOUBLE;
+        VectorSet(highlight->color, 1.0f, 0.75f, 0.0f);
+        return true;
+    }
+
+    if (!Q_strcasecmp(model, "models/items/ammo/rockets/medium/tris.md2") ||
+        !Q_strcasecmp(model, "models/weapons/g_rocket/tris.md2")) {
+        highlight->shell = RF_SHELL_RED;
+        VectorSet(highlight->color, 1.0f, 0.0f, 0.0f);
+        return true;
+    }
+
+    if (!Q_strcasecmp(model, "models/items/ammo/bullets/medium/tris.md2") ||
+        !Q_strcasecmp(model, "models/weapons/g_chain/tris.md2")) {
+        highlight->shell = RF_SHELL_BLUE;
+        VectorSet(highlight->color, 0.0f, 0.25f, 1.0f);
+        return true;
+    }
+
+    if (!Q_strcasecmp(model, "models/items/ammo/slugs/medium/tris.md2") ||
+        !Q_strcasecmp(model, "models/weapons/g_rail/tris.md2")) {
+        highlight->shell = RF_SHELL_RED | RF_SHELL_BLUE;
+        VectorSet(highlight->color, 0.75f, 0.0f, 1.0f);
+        return true;
+    }
+
+    if (!Q_strcasecmp(model, "models/items/ammo/grenades/medium/tris.md2") ||
+        !Q_strcasecmp(model, "models/weapons/g_launch/tris.md2")) {
+        highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
+        VectorSet(highlight->color, 1.0f, 0.45f, 0.0f);
+        return true;
+    }
+
+    if (!Q_strcasecmp(model, "models/items/ammo/cells/medium/tris.md2") ||
+        !Q_strcasecmp(model, "models/weapons/g_hyperb/tris.md2") ||
+        !Q_strcasecmp(model, "models/weapons/g_bfg/tris.md2")) {
+        highlight->shell = RF_SHELL_LITE_GREEN;
+        VectorSet(highlight->color, 0.56f, 0.93f, 0.56f);
+        return true;
+    }
+
+    if (model_starts_with(model, "models/items/ammo/")) {
+        highlight->shell = RF_SHELL_DOUBLE;
+        VectorSet(highlight->color, 1.0f, 0.75f, 0.0f);
+        return true;
+    }
+
+    if (model_starts_with(model, "models/weapons/g_")) {
+        highlight->shell = RF_SHELL_RED;
+        VectorSet(highlight->color, 1.0f, 0.0f, 0.0f);
+        return true;
+    }
+
+    if (model_starts_with(model, "models/items/quaddama/") ||
+        model_starts_with(model, "models/items/invulner/") ||
+        model_starts_with(model, "models/items/silencer/") ||
+        model_starts_with(model, "models/items/breather/") ||
+        model_starts_with(model, "models/items/enviro/")) {
+        highlight->shell = RF_SHELL_RED | RF_SHELL_BLUE;
+        VectorSet(highlight->color, 1.0f, 0.0f, 1.0f);
+        return true;
+    }
+
+    if (model_starts_with(model, "models/items/keys/")) {
+        highlight->shell = RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE;
+        VectorSet(highlight->color, 1.0f, 1.0f, 1.0f);
+        return true;
+    }
+
+    if (model_starts_with(model, "models/items/")) {
+        highlight->shell = RF_SHELL_BLUE;
+        VectorSet(highlight->color, 0.25f, 0.45f, 1.0f);
+        return true;
+    }
+
+    return false;
+}
+
+static bool CL_GetWeaponHighlight(int weapon, item_highlight_t *highlight)
+{
+    switch (weapon) {
+    case 3: // super shotgun
+        highlight->shell = RF_SHELL_DOUBLE;
+        VectorSet(highlight->color, 1.0f, 0.75f, 0.0f);
+        return true;
+    case 5: // chaingun
+        highlight->shell = RF_SHELL_BLUE;
+        VectorSet(highlight->color, 0.0f, 0.25f, 1.0f);
+        return true;
+    case 8: // rocket launcher
+        highlight->shell = RF_SHELL_RED;
+        VectorSet(highlight->color, 1.0f, 0.0f, 0.0f);
+        return true;
+    case 10: // railgun
+        highlight->shell = RF_SHELL_RED | RF_SHELL_BLUE;
+        VectorSet(highlight->color, 0.75f, 0.0f, 1.0f);
+        return true;
+    case 7: // grenade launcher
+        highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
+        VectorSet(highlight->color, 1.0f, 0.45f, 0.0f);
+        return true;
+    case 9: // hyperblaster
+    case 11: // BFG
+        highlight->shell = RF_SHELL_LITE_GREEN;
+        VectorSet(highlight->color, 0.56f, 0.93f, 0.56f);
+        return true;
+    default:
+        return false;
+    }
+}
+
 /*
 ===============
 CL_AddPacketEntities
@@ -511,6 +669,8 @@ static void CL_AddPacketEntities(void)
     bool                    has_alpha, has_trail;
     float                   custom_alpha;
     uint64_t                custom_flags;
+    item_highlight_t        item_highlight;
+    bool                    has_item_highlight;
 
     // bonus items rotate at a fixed rate
     autorotate = anglemod(cl.time * 0.1f);
@@ -532,6 +692,7 @@ static void CL_AddPacketEntities(void)
 
         effects = s1->effects;
         renderfx = s1->renderfx;
+        has_item_highlight = CL_GetItemHighlight(s1, &item_highlight);
 
         // set frame
         if (effects & EF_ANIM01)
@@ -573,6 +734,11 @@ static void CL_AddPacketEntities(void)
         if (s1->morefx & EFX_DUALFIRE) {
             effects |= EF_COLOR_SHELL;
             renderfx |= RF_SHELL_LITE_GREEN;
+        }
+
+        if (has_item_highlight) {
+            effects |= EF_COLOR_SHELL;
+            renderfx |= item_highlight.shell;
         }
 
         // optionally remove the glowing effect
@@ -732,6 +898,9 @@ static void CL_AddPacketEntities(void)
         else
             ent.flags = renderfx;
 
+        if (has_item_highlight)
+            ent.flags |= renderfx & RF_GLOW;
+
         // calculate angles
         if (effects & EF_ROTATE) {  // some bonus items auto-rotate
             ent.angles[0] = 0;
@@ -884,7 +1053,14 @@ static void CL_AddPacketEntities(void)
                 }
             }
             ent.flags = renderfx | RF_TRANSLUCENT;
-            ent.alpha = custom_alpha * 0.30f;
+            if (has_item_highlight) {
+                float bloom = CL_ItemHighlightBloom();
+                if (!bloom)
+                    ent.flags |= RF_NOBLOOM | RF_NOSHELLSCALE;
+                ent.alpha = custom_alpha * 0.30f * max(bloom, 1.0f);
+            } else {
+                ent.alpha = custom_alpha * 0.30f;
+            }
             V_AddEntity(&ent);
         }
 
@@ -895,12 +1071,16 @@ static void CL_AddPacketEntities(void)
 
         // duplicate for linked models
         if (s1->modelindex2) {
+            item_highlight_t weapon_highlight;
+            bool has_weapon_highlight = false;
+
             if (s1->modelindex2 == MODELINDEX_PLAYER) {
                 // custom weapon
                 ci = &cl.clientinfo[s1->skinnum & 0xff];
                 i = (s1->skinnum >> 8); // 0 is default weapon model
                 if (cl.csr.extended)
                     i &= 0xff;
+                has_weapon_highlight = CL_GetWeaponHighlight(i, &weapon_highlight);
                 if (i < 0 || i > cl.numWeaponModels - 1)
                     i = 0;
                 ent.model = ci->weaponmodel[i];
@@ -920,6 +1100,15 @@ static void CL_AddPacketEntities(void)
             }
 
             V_AddEntity(&ent);
+
+            if (has_weapon_highlight) {
+                float bloom = CL_ItemHighlightBloom();
+                ent.flags = weapon_highlight.shell | RF_TRANSLUCENT;
+                if (!bloom)
+                    ent.flags |= RF_NOBLOOM | RF_NOSHELLSCALE;
+                ent.alpha = custom_alpha * 0.30f * max(bloom, 1.0f);
+                V_AddEntity(&ent);
+            }
 
             //PGM - make sure these get reset.
             ent.flags = custom_flags;
@@ -976,7 +1165,7 @@ static void CL_AddPacketEntities(void)
                 CL_DiminishingTrail(cent, ent.origin, DT_ROCKET);
                 has_trail = true;
             }
-            if (cl_dlight_hacks->integer & DLHACK_ROCKET_COLOR)
+            if (has_item_highlight || (cl_dlight_hacks->integer & DLHACK_ROCKET_COLOR))
                 V_AddLight(ent.origin, 200, 1, 0.23f, 0);
             else
                 V_AddLight(ent.origin, 200, 1, 1, 0);

@@ -699,7 +699,7 @@ static void draw_alias_mesh(const uint16_t *indices, int num_indices,
 
     if (glr.framebuffer_bound && gl_bloom->integer) {
         state |= GLS_BLOOM_GENERATE;
-        if (glr.ent->flags & RF_SHELL_MASK)
+        if ((glr.ent->flags & RF_SHELL_MASK) && !(glr.ent->flags & RF_NOBLOOM))
             state |= GLS_BLOOM_SHELL;
     }
 
@@ -994,7 +994,8 @@ void GL_DrawAliasModel(const model_t *model)
     setup_frame_scale(model);
 
     if (ent->flags & RF_SHELL_MASK)
-        shellscale = (ent->flags & RF_WEAPONMODEL) ? WEAPONSHELL_SCALE : POWERSUIT_SCALE;
+        shellscale = (ent->flags & RF_NOSHELLSCALE) ? 0 :
+            (ent->flags & RF_WEAPONMODEL) ? WEAPONSHELL_SCALE : POWERSUIT_SCALE;
 
     buffer = model->buffers[0];
     GL_BindBuffer(GL_ARRAY_BUFFER, model->buffers[0]);

@@ -543,6 +543,8 @@ extern cvar_t   *cl_noskins;
 extern cvar_t   *cl_kickangles;
 extern cvar_t   *cl_rollhack;
 extern cvar_t   *cl_noglow;
+extern cvar_t   *cl_itemhighlight;
+extern cvar_t   *cl_itemhighlight_glow;
 extern cvar_t   *cl_nobob;
 extern cvar_t   *cl_nolerp;
 
