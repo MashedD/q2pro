@@ -4355,11 +4355,49 @@ static bool vk_alias_model_culled(const vk_model_t *model, const entity_t *ent,
                                   const vec3_t axis[3], uint32_t frame,
                                   uint32_t oldframe)
 {
-    (void)model;
-    (void)ent;
-    (void)axis;
-    (void)frame;
-    (void)oldframe;
+    vec3_t bounds[2];
+    vec3_t points[8];
+
+    if (!vk_cull_models || !vk_cull_models->integer)
+        return false;
+    if (!model || !model->alias_frames || !ent || !axis)
+        return false;
+    if (ent->flags & RF_WEAPONMODEL)
+        return false;
+
+    if (frame >= (uint32_t)model->frame_count ||
+        oldframe >= (uint32_t)model->frame_count)
+        return false;
+
+    if (frame == oldframe) {
+        VectorCopy(model->alias_frames[frame].bounds[0], bounds[0]);
+        VectorCopy(model->alias_frames[frame].bounds[1], bounds[1]);
+    } else {
+        UnionBounds(model->alias_frames[frame].bounds,
+                    model->alias_frames[oldframe].bounds, bounds);
+    }
+
+    for (int i = 0; i < 8; i++) {
+        VectorCopy(ent->origin, points[i]);
+        VectorMA(points[i], bounds[(i >> 0) & 1][0], axis[0], points[i]);
+        VectorMA(points[i], bounds[(i >> 1) & 1][1], axis[1], points[i]);
+        VectorMA(points[i], bounds[(i >> 2) & 1][2], axis[2], points[i]);
+    }
+
+    for (int i = 0; i < 4; i++) {
+        bool infront = false;
+
+        for (int j = 0; j < 8; j++) {
+            if (PlaneDiffFast(points[j], &vk.world.frustum[i]) >= 0.0f) {
+                infront = true;
+                break;
+            }
+        }
+
+        if (!infront)
+            return true;
+    }
+
     return false;
 }
 
