@@ -6925,8 +6925,6 @@ static bool vk_face_is_drawable(mface_t *face)
     if (!face || !face->texinfo || !face->plane)
         return false;
 
-    face->drawflags |= face->texinfo->c.flags & ~DSURF_PLANEBACK;
-
     if (face->numsurfedges < 3)
         return false;
     if (face->drawflags & SURF_SKY)
@@ -7187,7 +7185,8 @@ static void vk_register_world_images(bsp_t *bsp)
     for (int i = 0; i < bsp->numtexinfo; i++) {
         mtexinfo_t *info = &bsp->texinfo[i];
 
-        if (info->c.flags & (SURF_SKY | SURF_NODRAW)) {
+        if ((info->c.flags & SURF_SKY) ||
+            ((info->c.flags & SURF_NODRAW) && bsp->has_bspx)) {
             info->image = R_NOTEXTURE;
             continue;
         }
@@ -7195,6 +7194,36 @@ static void vk_register_world_images(bsp_t *bsp)
         imageflags_t flags = (info->c.flags & SURF_WARP) ? IF_TURBULENT : IF_NONE;
         Q_concat(buffer, sizeof(buffer), "textures/", info->name, ".wal");
         info->image = IMG_Find(buffer, IT_WALL, flags);
+    }
+}
+
+static void vk_prepare_world_surfaces(bsp_t *bsp)
+{
+    if (!bsp || !bsp->faces)
+        return;
+
+    for (int i = 0; i < bsp->numfaces; i++) {
+        mface_t *face = &bsp->faces[i];
+
+        if (!face->texinfo)
+            continue;
+
+        face->drawflags |= face->texinfo->c.flags & ~DSURF_PLANEBACK;
+
+        if ((face->drawflags & SURF_NODRAW) && !bsp->has_bspx)
+            face->drawflags &= ~SURF_NODRAW;
+    }
+}
+
+static void vk_mark_world_images_registered(bsp_t *bsp)
+{
+    if (!bsp || !bsp->texinfo)
+        return;
+
+    for (int i = 0; i < bsp->numtexinfo; i++) {
+        image_t *image = bsp->texinfo[i].image;
+        if (image)
+            image->registration_sequence = r_registration_sequence;
     }
 }
 
@@ -7215,6 +7244,7 @@ static void vk_load_world(const char *name)
                   __func__, buffer, BSP_ErrorString(ret));
 
     if (vk.world.cache == bsp) {
+        vk_mark_world_images_registered(bsp);
         bsp->refcount--;
         return;
     }
@@ -7224,6 +7254,7 @@ static void vk_load_world(const char *name)
     vk.world.size = vk_world_size_for_bsp(bsp);
 
     vk_register_world_images(bsp);
+    vk_prepare_world_surfaces(bsp);
 
     if (!vk_build_world_mesh(bsp))
         Com_WPrintf("Couldn't build Vulkan world mesh: %s\n", Com_GetLastError());
