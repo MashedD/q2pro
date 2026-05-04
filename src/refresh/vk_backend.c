@@ -6911,6 +6911,11 @@ static void vk_surface_vertex_color(const bsp_t *bsp, const mface_t *face,
         return;
     }
 
+    if (vk_vertexlight && vk_vertexlight->integer) {
+        memcpy(color, fallback, sizeof(float) * 4);
+        return;
+    }
+
     if (!vk_sample_surface_light(bsp, face, point, color))
         memcpy(color, fallback, sizeof(float) * 4);
 }
