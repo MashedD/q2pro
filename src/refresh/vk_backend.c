@@ -12,6 +12,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include "common/cmd.h"
 #include "common/common.h"
 #include "common/math.h"
+#include "common/prompt.h"
 #include "common/utils.h"
 #include "common/zone.h"
 #include "client/client.h"
@@ -2590,6 +2591,23 @@ static void vk_texturemode_changed(cvar_t *self)
     vk.sampler = sampler;
     vk.sky_sampler = sky_sampler;
     vk_update_texture_descriptors();
+}
+
+static void vk_texturemode_g(genctx_t *ctx)
+{
+    static const char *modes[] = {
+        "GL_NEAREST",
+        "GL_LINEAR",
+        "GL_NEAREST_MIPMAP_NEAREST",
+        "GL_LINEAR_MIPMAP_NEAREST",
+        "GL_NEAREST_MIPMAP_LINEAR",
+        "GL_LINEAR_MIPMAP_LINEAR",
+        "MAG_NEAREST",
+    };
+
+    ctx->ignorecase = true;
+    for (int i = 0; i < q_countof(modes); i++)
+        Prompt_AddMatch(ctx, modes[i]);
 }
 
 static void vk_sampler_selection_changed(cvar_t *self)
@@ -7630,6 +7648,7 @@ bool VKR_Init(bool total)
     vk_texturemode = Cvar_Get("gl_texturemode", "GL_LINEAR_MIPMAP_LINEAR",
                               CVAR_ARCHIVE);
     vk_texturemode->changed = vk_texturemode_changed;
+    vk_texturemode->generator = vk_texturemode_g;
     vk_anisotropy = Cvar_Get("gl_anisotropy", "1", 0);
     vk_anisotropy->changed = vk_texturemode_changed;
     vk_round_down = Cvar_Get("gl_round_down", "0", CVAR_FILES);
@@ -7768,6 +7787,8 @@ void VKR_Shutdown(bool total)
         vk_swapinterval->changed = NULL;
     if (vk_texturemode)
         vk_texturemode->changed = NULL;
+    if (vk_texturemode)
+        vk_texturemode->generator = NULL;
     if (vk_anisotropy)
         vk_anisotropy->changed = NULL;
     if (vk_bilerp_chars)
