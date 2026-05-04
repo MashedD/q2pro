@@ -6071,7 +6071,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     vk_entity_light_color(ent, fd, push.color);
     vk_alias_shadedir(ent, push.shadedir);
     push.backlerp = lerp.backlerp;
-    push.shellscale = (ent->flags & RF_SHELL_MASK) ?
+    push.shellscale = (ent->flags & RF_SHELL_MASK) && !(ent->flags & RF_NOSHELLSCALE) ?
         ((ent->flags & RF_WEAPONMODEL) ? WEAPONSHELL_SCALE : POWERSUIT_SCALE) : 0.0f;
     push.depthscale = (ent->flags & RF_DEPTHHACK) ? 0.25f : 1.0f;
     push._pad = 0.0f;
