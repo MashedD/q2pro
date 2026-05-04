@@ -7037,6 +7037,10 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
         vk_surface_color(face, fallback_color);
         float scale_s = image->width ? 1.0f / image->width : 1.0f;
         float scale_t = image->height ? 1.0f / image->height : 1.0f;
+        if (face->drawflags & SURF_N64_UV) {
+            scale_s *= 0.5f;
+            scale_t *= 0.5f;
+        }
         vec3_t center;
 
         VectorClear(center);
