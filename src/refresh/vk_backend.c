@@ -7477,7 +7477,12 @@ static float vk_world_size_for_bsp(const bsp_t *bsp)
 
 static bool vk_world_lighting_modified(void)
 {
-    return (vk_coloredlightmaps && vk_coloredlightmaps->modified) ||
+    return (vk_modulate && vk_modulate->modified) ||
+           (vk_modulate_world && vk_modulate_world->modified) ||
+           (vk_brightness && vk_brightness->modified) ||
+           (vk_dynamic && vk_dynamic->modified) ||
+           (vk_fullbright && vk_fullbright->modified) ||
+           (vk_coloredlightmaps && vk_coloredlightmaps->modified) ||
            (vk_vertexlight && vk_vertexlight->modified);
 }
 
@@ -7513,6 +7518,16 @@ static void vk_save_world_lightstyles(const refdef_t *fd)
 
 static void vk_clear_world_lighting_modified(void)
 {
+    if (vk_modulate)
+        vk_modulate->modified = false;
+    if (vk_modulate_world)
+        vk_modulate_world->modified = false;
+    if (vk_brightness)
+        vk_brightness->modified = false;
+    if (vk_dynamic)
+        vk_dynamic->modified = false;
+    if (vk_fullbright)
+        vk_fullbright->modified = false;
     if (vk_coloredlightmaps)
         vk_coloredlightmaps->modified = false;
     if (vk_vertexlight)
