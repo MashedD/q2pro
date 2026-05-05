@@ -7122,7 +7122,7 @@ static void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass)
     if (fd->num_entities <= 0 || !fd->entities)
         return;
 
-    for (int i = 0; i < fd->num_entities; i++) {
+    for (int i = fd->num_entities - 1; i >= 0; i--) {
         const entity_t *ent = &fd->entities[i];
 
         if (vk_entity_in_pass(ent, pass))
