@@ -470,6 +470,7 @@ static cvar_t *vk_dlight_falloff;
 static cvar_t *vk_brightness;
 static cvar_t *vk_fog;
 static cvar_t *vk_intensity;
+static cvar_t *vk_shaders;
 static cvar_t *vk_znear;
 static cvar_t *vk_drawworld;
 static cvar_t *vk_novis;
@@ -7719,7 +7720,10 @@ bool VKR_Init(bool total)
     vk_brightness = Cvar_Get("gl_brightness", "0", 0);
     vk_fog = Cvar_Get("gl_fog", "1", 0);
     vk_intensity = Cvar_Get("intensity", "2", 0);
+    vk_shaders = Cvar_Get("gl_shaders", "0", CVAR_FILES);
 
+    gl_intensity = vk_intensity;
+    gl_shaders = vk_shaders;
     gl_modulate_world = vk_modulate_world;
     gl_modulate_entities = vk_modulate_entities;
     gl_brightness = vk_brightness;
