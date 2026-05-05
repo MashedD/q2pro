@@ -7705,6 +7705,7 @@ bool VKR_Init(bool total)
     vk_draworder = Cvar_Get("gl_draworder", "1", 0);
     vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
     vk_showtearing = Cvar_Get("gl_showtearing", "0", CVAR_CHEAT);
+    gl_showtris = Cvar_Get("gl_showtris", "0", CVAR_CHEAT);
     vk_modulate = Cvar_Get("gl_modulate", "1", CVAR_ARCHIVE);
     vk_modulate_entities = Cvar_Get("gl_modulate_entities", "1", 0);
     vk_doublelight_entities = Cvar_Get("gl_doublelight_entities", "1", 0);
