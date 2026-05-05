@@ -193,6 +193,7 @@ typedef struct {
     cplane_t frustum[4];
     vec3_t vieworg;
     int viewcluster;
+    int nolm_mask;
     unsigned drawframe;
     unsigned visframe;
     float lightstyles[MAX_LIGHTSTYLES];
@@ -6214,7 +6215,7 @@ static void vk_trace_bmodel_light_points(const refdef_t *fd, const bsp_t *bsp,
         lightpoint_t model_point;
         BSP_TransformedLightPoint(&model_point, origin, end,
                                   model->headnode,
-                                  SURF_SKY | SURF_NODRAW | SURF_TRANS_MASK,
+                                  vk.world.nolm_mask | SURF_TRANS_MASK,
                                   ent->origin, angles);
         if (model_point.fraction < point->fraction)
             *point = model_point;
@@ -6233,7 +6234,7 @@ static bool vk_alias_shadow_point(const entity_t *ent, const refdef_t *fd,
     VectorCopy(ent->origin, end);
     end[2] -= 8192.0f;
     BSP_LightPoint(point, ent->origin, end, bsp->nodes,
-                   SURF_SKY | SURF_NODRAW | SURF_TRANS_MASK);
+                   vk.world.nolm_mask | SURF_TRANS_MASK);
     vk_trace_bmodel_light_points(fd, bsp, ent->origin, end, point);
     return point->surf != NULL;
 }
@@ -7051,7 +7052,7 @@ static bool vk_static_light_point(const vec3_t origin, const refdef_t *fd,
     end[2] = origin[2] - 8192.0f;
 
     BSP_LightPoint(&point, origin, end, bsp->nodes,
-                   SURF_SKY | SURF_NODRAW | SURF_TRANS_MASK);
+                   vk.world.nolm_mask | SURF_TRANS_MASK);
     vk_trace_bmodel_light_points(fd, bsp, origin, end, &point);
 
     if (!point.surf)
@@ -7576,6 +7577,8 @@ static void vk_prepare_world_surfaces(bsp_t *bsp)
     if (!bsp || !bsp->faces)
         return;
 
+    int n64surfs = 0;
+
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *face = &bsp->faces[i];
 
@@ -7586,7 +7589,14 @@ static void vk_prepare_world_surfaces(bsp_t *bsp)
 
         if ((face->drawflags & SURF_NODRAW) && !bsp->has_bspx)
             face->drawflags &= ~SURF_NODRAW;
+
+        if (face->drawflags & (SURF_N64_UV | SURF_N64_SCROLL_X | SURF_N64_SCROLL_Y))
+            n64surfs++;
     }
+
+    vk.world.nolm_mask = SURF_NOLM_MASK_DEFAULT;
+    if (bsp->has_bspx || n64surfs > 100)
+        vk.world.nolm_mask = SURF_NOLM_MASK_REMASTER;
 }
 
 static void vk_mark_world_images_registered(bsp_t *bsp)
