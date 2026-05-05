@@ -5855,9 +5855,11 @@ static void vk_mark_world_faces(const refdef_t *fd)
         return;
 
     vk.world.drawframe++;
-    vk.world.visframe++;
     vk_update_world_view(fd);
-    vk_mark_world_visible_nodes(fd);
+    if (!vk_lockpvs || !vk_lockpvs->integer) {
+        vk.world.visframe++;
+        vk_mark_world_visible_nodes(fd);
+    }
     vk_setup_world_frustum(fd);
 
     clipflags = (!vk_cull_nodes || vk_cull_nodes->integer) &&
