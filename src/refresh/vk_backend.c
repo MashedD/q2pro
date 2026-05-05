@@ -2644,6 +2644,15 @@ static void vk_swapinterval_changed(cvar_t *self)
     vk_recreate_swapchain();
 }
 
+static void vk_drawsky_changed(cvar_t *self)
+{
+    extern void CL_SetSky(void);
+
+    (void)self;
+
+    CL_SetSky();
+}
+
 static bool vk_create_frame_resources(void)
 {
     VkDescriptorSetLayoutBinding sampler_binding = {
@@ -7662,7 +7671,9 @@ bool VKR_Init(bool total)
     vk_drawentities = Cvar_Get("vk_drawentities", "1", CVAR_CHEAT);
     vk_gl_drawentities = Cvar_Get("gl_drawentities", "1", CVAR_CHEAT);
     vk_drawsky = Cvar_Get("vk_drawsky", "1", 0);
+    vk_drawsky->changed = vk_drawsky_changed;
     vk_gl_drawsky = Cvar_Get("gl_drawsky", "1", 0);
+    vk_gl_drawsky->changed = vk_drawsky_changed;
     vk_swapinterval = Cvar_Get("gl_swapinterval", "1", CVAR_ARCHIVE);
     vk_swapinterval->changed = vk_swapinterval_changed;
     vk_finish = Cvar_Get("gl_finish", "0", 0);
@@ -7814,6 +7825,10 @@ void VKR_Shutdown(bool total)
         vk_texturemode->changed = NULL;
     if (vk_texturemode)
         vk_texturemode->generator = NULL;
+    if (vk_drawsky)
+        vk_drawsky->changed = NULL;
+    if (vk_gl_drawsky)
+        vk_gl_drawsky->changed = NULL;
     if (vk_anisotropy)
         vk_anisotropy->changed = NULL;
     if (vk_bilerp_chars)
