@@ -8158,7 +8158,15 @@ void VKR_SetColor(uint32_t color)
 void VKR_SetClipRect(const clipRect_t *clip)
 {
     if (clip) {
-        vk.clip = *clip;
+        vk.clip.left = max(clip->left, 0);
+        vk.clip.top = max(clip->top, 0);
+        vk.clip.right = min(clip->right, vk_2d_width());
+        vk.clip.bottom = min(clip->bottom, vk_2d_height());
+        if (vk.clip.right < vk.clip.left ||
+            vk.clip.bottom < vk.clip.top) {
+            vk.clip_set = false;
+            return;
+        }
         vk.clip_set = true;
     } else {
         vk.clip_set = false;
