@@ -1824,7 +1824,9 @@ static void vk_update_texture_descriptors(void)
 
     vk_update_texture_descriptor_with_sampler(&vk.raw_texture,
                                               vk_sampler_for_pic_flags(IF_NONE));
-    vk_update_texture_descriptor(&vk.particle_texture);
+    vk_update_texture_descriptor_with_sampler(&vk.particle_texture,
+        vk_sampler_for_pic_flags((vk_partshape && vk_partshape->integer == 1) ?
+                                 IF_NEAREST : IF_NONE));
     vk_update_texture_descriptor(&vk.beam_texture);
 }
 
@@ -4830,7 +4832,12 @@ static bool vk_create_particle_texture(void)
         }
     }
 
-    return vk_upload_texture_data(&vk.particle_texture, 16, 16, pixels);
+    if (!vk_upload_texture_data(&vk.particle_texture, 16, 16, pixels))
+        return false;
+
+    vk_update_texture_descriptor_with_sampler(&vk.particle_texture,
+        vk_sampler_for_pic_flags(shape == 1 ? IF_NEAREST : IF_NONE));
+    return true;
 }
 
 static bool vk_create_beam_texture(void)
