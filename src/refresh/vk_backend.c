@@ -1804,6 +1804,16 @@ static VkSampler vk_sampler_for_image(const image_t *image)
     return vk.sampler;
 }
 
+static VkSampler vk_sampler_for_pic_flags(imageflags_t flags)
+{
+    image_t image = {
+        .type = IT_PIC,
+        .flags = flags,
+    };
+
+    return vk_sampler_for_image(&image);
+}
+
 static void vk_update_texture_descriptors(void)
 {
     for (uint32_t i = 0; i < MAX_RIMAGES; i++) {
@@ -1812,7 +1822,8 @@ static void vk_update_texture_descriptors(void)
         vk_update_texture_descriptor_with_sampler(&vk.textures[i], sampler);
     }
 
-    vk_update_texture_descriptor(&vk.raw_texture);
+    vk_update_texture_descriptor_with_sampler(&vk.raw_texture,
+                                              vk_sampler_for_pic_flags(IF_NONE));
     vk_update_texture_descriptor(&vk.particle_texture);
     vk_update_texture_descriptor(&vk.beam_texture);
 }
@@ -8302,6 +8313,9 @@ void VKR_UpdateRawPic(int pic_w, int pic_h, const uint32_t *pic)
     if (!vk_upload_texture_data(&vk.raw_texture, pic_w, pic_h, pic)) {
         Com_WPrintf("Couldn't upload Vulkan raw texture: %s\n",
                     Com_GetLastError());
+    } else {
+        vk_update_texture_descriptor_with_sampler(&vk.raw_texture,
+                                                  vk_sampler_for_pic_flags(IF_NONE));
     }
 }
 
