@@ -506,6 +506,11 @@ static float CL_ItemHighlightBloom(void)
     return Cvar_ClampValue(cl_itemhighlight_glow, 0, 5);
 }
 
+static float CL_ItemHighlightBloomAlpha(float bloom)
+{
+    return min(bloom * 0.15f, 1.0f);
+}
+
 static bool CL_GetPlayerHighlight(const centity_state_t *state, item_highlight_t *highlight)
 {
     int clientnum;
@@ -1089,9 +1094,14 @@ static void CL_AddPacketEntities(void)
             ent.flags = renderfx | RF_TRANSLUCENT;
             if (has_item_highlight || has_player_highlight) {
                 float bloom = CL_ItemHighlightBloom();
-                if (!bloom)
+                if (bloom)
+                    ent.flags |= RF_BLOOM_ONLY;
+                else
                     ent.flags |= RF_NOBLOOM | RF_NOSHELLSCALE;
-                ent.alpha = custom_alpha * 0.30f * max(bloom, 1.0f);
+                if (bloom <= 1)
+                    ent.flags |= RF_NOSHELLSCALE;
+                ent.alpha = custom_alpha * (bloom ?
+                    CL_ItemHighlightBloomAlpha(bloom) : 0.30f);
             } else {
                 ent.alpha = custom_alpha * 0.30f;
             }
@@ -1138,9 +1148,14 @@ static void CL_AddPacketEntities(void)
             if (has_weapon_highlight) {
                 float bloom = CL_ItemHighlightBloom();
                 ent.flags = weapon_highlight.shell | RF_TRANSLUCENT;
-                if (!bloom)
+                if (bloom)
+                    ent.flags |= RF_BLOOM_ONLY;
+                else
                     ent.flags |= RF_NOBLOOM | RF_NOSHELLSCALE;
-                ent.alpha = custom_alpha * 0.30f * max(bloom, 1.0f);
+                if (bloom <= 1)
+                    ent.flags |= RF_NOSHELLSCALE;
+                ent.alpha = custom_alpha * (bloom ?
+                    CL_ItemHighlightBloomAlpha(bloom) : 0.30f);
                 V_AddEntity(&ent);
             }
 

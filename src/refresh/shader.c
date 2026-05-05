@@ -641,7 +641,10 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
     if (bits & GLS_BLOOM_GENERATE)
         GLSL(o_bloom = bloom;)
 
-    GLSL(o_color = diffuse;)
+    if (bits & GLS_BLOOM_ONLY)
+        GLSL(o_color = vec4(0.0);)
+    else
+        GLSL(o_color = diffuse;)
     GLSF("}\n");
 }
 

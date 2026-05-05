@@ -32,6 +32,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define RF_TRACKER          BIT_ULL(32)
 #define RF_NOBLOOM          BIT_ULL(33)
 #define RF_NOSHELLSCALE     BIT_ULL(34)
+#define RF_BLOOM_ONLY       BIT_ULL(35)
 
 #define RF_SHELL_MASK       (RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE | \
                              RF_SHELL_DOUBLE | RF_SHELL_HALF_DAM | RF_SHELL_LITE_GREEN)

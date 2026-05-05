@@ -554,6 +554,7 @@ void GL_LoadWorld(const char *name);
 #define GLS_BLOOM_GENERATE      BIT_ULL(29)
 #define GLS_BLOOM_OUTPUT        BIT_ULL(30)
 #define GLS_BLOOM_SHELL         BIT_ULL(31)
+#define GLS_BLOOM_ONLY          BIT_ULL(34)
 
 #define GLS_BLUR_GAUSS          BIT_ULL(32)
 #define GLS_BLUR_BOX            BIT_ULL(33)
@@ -564,7 +565,7 @@ void GL_LoadWorld(const char *name);
 #define GLS_FOG_MASK            (GLS_FOG_GLOBAL | GLS_FOG_HEIGHT | GLS_FOG_SKY)
 #define GLS_MESH_ANY            (GLS_MESH_MD2 | GLS_MESH_MD5)
 #define GLS_MESH_MASK           (GLS_MESH_ANY | GLS_MESH_LERP | GLS_MESH_SHELL | GLS_MESH_SHADE)
-#define GLS_BLOOM_MASK          (GLS_BLOOM_GENERATE | GLS_BLOOM_OUTPUT | GLS_BLOOM_SHELL)
+#define GLS_BLOOM_MASK          (GLS_BLOOM_GENERATE | GLS_BLOOM_OUTPUT | GLS_BLOOM_SHELL | GLS_BLOOM_ONLY)
 #define GLS_BLUR_MASK           (GLS_BLUR_GAUSS | GLS_BLUR_BOX)
 #define GLS_SHADER_MASK         (GLS_ALPHATEST_ENABLE | GLS_TEXTURE_REPLACE | GLS_SCROLL_ENABLE | \
                                  GLS_LIGHTMAP_ENABLE | GLS_WARP_ENABLE | GLS_INTENSITY_ENABLE | \

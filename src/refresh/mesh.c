@@ -667,7 +667,7 @@ static void draw_alias_mesh(const uint16_t *indices, int num_indices,
 
     // avoid drawing hidden faces by pre-filling depth buffer, but not for
     // explosions and muzzleflashes
-    if ((glr.ent->flags & (RF_FULLBRIGHT | RF_TRANSLUCENT)) == RF_TRANSLUCENT) {
+    if ((glr.ent->flags & (RF_FULLBRIGHT | RF_TRANSLUCENT | RF_BLOOM_ONLY)) == RF_TRANSLUCENT) {
         if (gls.currentva) {
             GL_StateBits(GLS_DEFAULT);
             GL_ArrayBits(GLA_VERTEX);
@@ -692,6 +692,8 @@ static void draw_alias_mesh(const uint16_t *indices, int num_indices,
 
     if (glr.ent->flags & RF_TRANSLUCENT)
         state |= GLS_BLEND_BLEND | GLS_DEPTHMASK_FALSE;
+    if (glr.ent->flags & RF_BLOOM_ONLY)
+        state |= GLS_BLOOM_ONLY;
 
     skin = skin_for_mesh(skins, num_skins);
     if (skin->texnum2)
