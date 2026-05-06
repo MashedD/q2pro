@@ -219,6 +219,8 @@ void    R_EndRegistration(void);
 #define R_RegisterSkin(name)    R_RegisterImage(name, IT_SKIN, IF_NONE)
 #define R_RegisterSprite(name)  R_RegisterImage(name, IT_SPRITE, IF_NONE)
 
+bool    R_ModelFramesBounds(qhandle_t model, int firstframe, int numframes,
+                            vec3_t mins, vec3_t maxs);
 void    R_RenderFrame(const refdef_t *fd);
 void    R_LightPoint(const vec3_t origin, vec3_t light);
 
@@ -231,6 +233,9 @@ void    R_SetScale(float scale);
 void    R_DrawChar(int x, int y, int flags, int ch, qhandle_t font);
 int     R_DrawString(int x, int y, int flags, size_t maxChars,
                      const char *string, qhandle_t font);  // returns advanced x coord
+int     R_DrawStringSize(int x, int y, int char_w, int char_h, int flags,
+                         size_t maxChars, const char *string,
+                         qhandle_t font);  // returns advanced x coord
 bool    R_GetPicSize(int *w, int *h, qhandle_t pic);   // returns transparency bit
 void    R_DrawPic(int x, int y, qhandle_t pic);
 void    R_DrawStretchPic(int x, int y, int w, int h, qhandle_t pic);

@@ -2806,6 +2806,112 @@ draw:
     SCR_ExecuteLayoutString(cl.layout);
 }
 
+static bool SCR_ProjectWorldPoint(const vec3_t point, int *x, int *y)
+{
+    vec3_t dist;
+    float z, xc, yc;
+
+    VectorSubtract(point, cl.refdef.vieworg, dist);
+    z = DotProduct(dist, cl.v_forward);
+    if (z <= 1.0f)
+        return false;
+
+    xc = DotProduct(dist, cl.v_right);
+    yc = DotProduct(dist, cl.v_up);
+
+    *x = Q_rint(cl.refdef.x + cl.refdef.width * 0.5f +
+                xc * (cl.refdef.width * 0.5f) / (z * tanf(DEG2RAD(cl.refdef.fov_x) * 0.5f)));
+    *y = Q_rint(cl.refdef.y + cl.refdef.height * 0.5f -
+                yc * (cl.refdef.height * 0.5f) / (z * tanf(DEG2RAD(cl.refdef.fov_y) * 0.5f)));
+
+    return *x >= cl.refdef.x && *x < cl.refdef.x + cl.refdef.width &&
+           *y >= cl.refdef.y && *y < cl.refdef.y + cl.refdef.height;
+}
+
+static void SCR_DrawPlayerNames(void)
+{
+#define FRAME_CRDEATH1 173
+#define PLAYERNAME_Z_PADDING 4.0f
+    static qhandle_t prochars_font;
+    const centity_state_t *s1;
+    const centity_t *cent;
+    const clientinfo_t *ci;
+    const char *name;
+    vec3_t org;
+    trace_t tr;
+    int i, pnum, clientnum, x, y, len;
+
+    if (!cl_playernames->integer || !cl.frame.valid)
+        return;
+
+    if (!prochars_font)
+        prochars_font = R_RegisterFont("prochars.png");
+    if (!prochars_font)
+        prochars_font = scr.font_pic;
+
+    R_SetScale(1.0f);
+    R_SetAlpha(1.0f);
+    R_SetColor(U32_WHITE);
+
+    for (pnum = 0; pnum < cl.frame.numEntities; pnum++) {
+        i = (cl.frame.firstEntity + pnum) & PARSE_ENTITIES_MASK;
+        s1 = &cl.entityStates[i];
+
+        if (s1->modelindex != MODELINDEX_PLAYER)
+            continue;
+        if (s1->frame >= FRAME_CRDEATH1)
+            continue;
+        if (s1->number == cl.frame.clientNum + 1 && !cl.thirdPersonView)
+            continue;
+
+        clientnum = s1->skinnum & 0xff;
+        if (clientnum < 0 || clientnum >= MAX_CLIENTS)
+            continue;
+
+        ci = &cl.clientinfo[clientnum];
+        name = ci->name;
+        if (!name[0])
+            continue;
+
+        len = strlen(name);
+        if (len > MAX_CLIENT_NAME)
+            len = MAX_CLIENT_NAME;
+
+        cent = &cl_entities[s1->number];
+        if (cent->serverframe != cl.frame.number)
+            continue;
+
+        if (s1->number == cl.frame.clientNum + 1)
+            VectorCopy(cl.playerEntityOrigin, org);
+        else
+            LerpVector(cent->prev.origin, cent->current.origin, cl.lerpfrac, org);
+
+        {
+            vec3_t bounds[2];
+            if (R_ModelFramesBounds(ci->model, 0, FRAME_CRDEATH1,
+                                    bounds[0], bounds[1])) {
+                org[2] += bounds[1][2] + PLAYERNAME_Z_PADDING;
+            } else if (cent->maxs[2] > 0.0f) {
+                org[2] += cent->maxs[2] + PLAYERNAME_Z_PADDING;
+            } else {
+                org[2] += Cvar_ClampValue(cl_playernames_offset, 24.0f, 64.0f);
+            }
+        }
+
+        CL_Trace(&tr, cl.refdef.vieworg, org, vec3_origin, vec3_origin, MASK_SOLID);
+        if (tr.fraction < 1.0f)
+            continue;
+
+        if (!SCR_ProjectWorldPoint(org, &x, &y))
+            continue;
+
+        R_DrawStringSize(x - len * 16 / 2, y - 16 / 2,
+                         16, 16, 0, len, name, prochars_font);
+    }
+#undef PLAYERNAME_Z_PADDING
+#undef FRAME_CRDEATH1
+}
+
 static void SCR_Draw2D(void)
 {
     if (scr_draw2d->integer <= 0)
@@ -2894,6 +3000,9 @@ static void SCR_DrawActive(void)
 
     // draw 3D game view
     V_RenderView();
+
+    // draw world-anchored player names before normal HUD elements
+    SCR_DrawPlayerNames();
 
     // draw all 2D elements
     SCR_Draw2D();
