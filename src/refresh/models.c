@@ -1682,6 +1682,30 @@ model_t *MOD_ForHandle(qhandle_t h)
     return model;
 }
 
+bool R_ModelFramesBounds(qhandle_t h, int firstframe, int numframes, vec3_t mins, vec3_t maxs)
+{
+    model_t *model = MOD_ForHandle(h);
+    int i, lastframe;
+
+    if (!model || !model->frames || firstframe < 0 || numframes <= 0)
+        return false;
+    if (model->type != MOD_ALIAS)
+        return false;
+
+    if (firstframe >= model->numframes)
+        return false;
+
+    lastframe = min(firstframe + numframes, model->numframes);
+    VectorCopy(model->frames[firstframe].bounds[0], mins);
+    VectorCopy(model->frames[firstframe].bounds[1], maxs);
+    for (i = firstframe + 1; i < lastframe; i++) {
+        AddPointToBounds(model->frames[i].bounds[0], mins, maxs);
+        AddPointToBounds(model->frames[i].bounds[1], mins, maxs);
+    }
+
+    return true;
+}
+
 void MOD_Init(void)
 {
     Q_assert(!r_numModels);

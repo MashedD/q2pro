@@ -345,7 +345,8 @@ void R_DrawFill32(int x, int y, int w, int h, uint32_t color)
     GL_StretchPic_(x, y, w, h, 0, 0, 1, 1, color, TEXNUM_WHITE, 0);
 }
 
-static inline void draw_char(int x, int y, int flags, int c, const image_t *image)
+static inline void draw_char_ex(int x, int y, int char_w, int char_h,
+                                int flags, int c, const image_t *image)
 {
     float s, t;
 
@@ -364,16 +365,21 @@ static inline void draw_char(int x, int y, int flags, int c, const image_t *imag
     if (flags & UI_DROPSHADOW && c != 0x83) {
         uint32_t black = draw.colors[0].u32 & U32_ALPHA;
 
-        GL_StretchPic(x + 1, y + 1, CONCHAR_WIDTH, CONCHAR_HEIGHT, s, t,
+        GL_StretchPic(x + 1, y + 1, char_w, char_h, s, t,
                       s + 0.0625f, t + 0.0625f, black, image);
 
         if (gl_fontshadow->integer > 1)
-            GL_StretchPic(x + 2, y + 2, CONCHAR_WIDTH, CONCHAR_HEIGHT, s, t,
+            GL_StretchPic(x + 2, y + 2, char_w, char_h, s, t,
                           s + 0.0625f, t + 0.0625f, black, image);
     }
 
-    GL_StretchPic(x, y, CONCHAR_WIDTH, CONCHAR_HEIGHT, s, t,
+    GL_StretchPic(x, y, char_w, char_h, s, t,
                   s + 0.0625f, t + 0.0625f, draw.colors[c >> 7].u32, image);
+}
+
+static inline void draw_char(int x, int y, int flags, int c, const image_t *image)
+{
+    draw_char_ex(x, y, CONCHAR_WIDTH, CONCHAR_HEIGHT, flags, c, image);
 }
 
 void R_DrawChar(int x, int y, int flags, int c, qhandle_t font)
@@ -393,8 +399,25 @@ int R_DrawString(int x, int y, int flags, size_t maxlen, const char *s, qhandle_
 
     while (maxlen-- && *s) {
         byte c = *s++;
-        draw_char(x, y, flags, c, image);
+        draw_char_ex(x, y, CONCHAR_WIDTH, CONCHAR_HEIGHT, flags, c, image);
         x += CONCHAR_WIDTH;
+    }
+
+    return x;
+}
+
+int R_DrawStringSize(int x, int y, int char_w, int char_h, int flags,
+                     size_t maxlen, const char *s, qhandle_t font)
+{
+    const image_t *image = IMG_ForHandle(font);
+
+    if (gl_fontshadow->integer > 0)
+        flags |= UI_DROPSHADOW;
+
+    while (maxlen-- && *s) {
+        byte c = *s++;
+        draw_char_ex(x, y, char_w, char_h, flags, c, image);
+        x += char_w;
     }
 
     return x;

@@ -43,6 +43,8 @@ cvar_t  *cl_noglow;
 cvar_t  *cl_itemhighlight;
 cvar_t  *cl_itemhighlight_glow;
 cvar_t  *cl_playerhighlight;
+cvar_t  *cl_playernames;
+cvar_t  *cl_playernames_offset;
 cvar_t  *cl_nobob;
 cvar_t  *cl_nolerp;
 
@@ -2753,6 +2755,8 @@ static void CL_InitLocal(void)
     cl_itemhighlight = Cvar_Get("cl_itemhighlight", "0", 0);
     cl_itemhighlight_glow = Cvar_Get("cl_itemhighlight_glow", "0", 0);
     cl_playerhighlight = Cvar_Get("cl_playerhighlight", "0", 0);
+    cl_playernames = Cvar_Get("cl_playernames", "1", 0);
+    cl_playernames_offset = Cvar_Get("cl_playernames_offset", "40", 0);
     cl_nobob = Cvar_Get("cl_nobob", "0", 0);
     cl_nolerp = Cvar_Get("cl_nolerp", "0", 0);
 
