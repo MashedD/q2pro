@@ -727,6 +727,17 @@ static const image_t *GL_TextureAnimation(const mtexinfo_t *tex)
     return tex->image;
 }
 
+static bool GL_SurfaceGlowmapEnabled(const mface_t *surf, const image_t *image)
+{
+    if (!image->texnum2)
+        return false;
+
+    if (!r_lava_glowmaps->integer && strstr(surf->texinfo->name, "lava"))
+        return false;
+
+    return true;
+}
+
 static void GL_DrawFace(const mface_t *surf)
 {
     const image_t *image = GL_TextureAnimation(surf->texinfo);
@@ -740,7 +751,8 @@ static void GL_DrawFace(const mface_t *surf)
     texnum[TMU_TEXTURE] = image->texnum;
     if (q_likely(surf->light_m)) {
         texnum[TMU_LIGHTMAP] = lm.texnums[surf->light_m - lm.lightmaps];
-        texnum[TMU_GLOWMAP ] = image->texnum2;
+        if (GL_SurfaceGlowmapEnabled(surf, image))
+            texnum[TMU_GLOWMAP] = image->texnum2;
 
         if (q_unlikely(gl_lightmap->integer)) {
             texnum[TMU_TEXTURE] = TEXNUM_WHITE;
@@ -753,6 +765,11 @@ static void GL_DrawFace(const mface_t *surf)
             texnum[TMU_TEXTURE ] = TEXNUM_BLACK;
             state &= ~GLS_CLASSIC_SKY;
         }
+    } else if (GL_SurfaceGlowmapEnabled(surf, image)) {
+        // Warp surfaces such as lava often have no lightmap. Use a neutral
+        // lightmap so wall glowmaps can still feed bloom and fullbright areas.
+        texnum[TMU_LIGHTMAP] = TEXNUM_WHITE;
+        texnum[TMU_GLOWMAP ] = image->texnum2;
     }
 
     if (memcmp(tess.texnum, texnum, sizeof(texnum)) ||

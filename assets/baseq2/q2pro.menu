@@ -93,6 +93,7 @@ begin video
     range "modulate entities"  gl_modulate_entities 1 5
     toggle "bloom" gl_bloom
     range "glowmap intensity" gl_glowmap_intensity 0 1
+    toggle "lava glowmaps" r_lava_glowmaps
 end
 
 begin options

@@ -1003,6 +1003,10 @@ r_glowmaps::
     Enables loading of glowmap images as found in re-release. Only effective if
     ‘gl_shaders’ is enabled. Default value is 1.
 
+r_lava_glowmaps::
+    Enables glowmaps on lava textures. This includes lava warp surfaces without
+    lightmaps. Other glowmaps are not affected. Default value is 1.
+
 r_override_textures::
     Enables automatic overriding of palettized textures (in WAL or PCX format)
     with truecolor replacements (in PNG, JPG or TGA format) by stripping off
