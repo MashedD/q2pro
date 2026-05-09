@@ -2222,7 +2222,8 @@ static void SCR_DrawCrosshair(void)
 static bool SCR_IsOpenTDMScoreboard(void)
 {
     return cl_stream_scoreboard->value
-        && (cl.frame.ps.stats[STAT_LAYOUTS] & LAYOUTS_LAYOUT)
+        && ((cl.frame.ps.stats[STAT_LAYOUTS] & LAYOUTS_LAYOUT) ||
+            (cls.demo.playback && Key_IsDown(K_F1)))
         && *cl.layout
         && cl.layout[0] == 'x'
         && cl.layout[1] == 'v'
@@ -2346,6 +2347,7 @@ typedef struct {
     int net;
     int ping;
     bool captain;
+    char location[32];
 } stream_player_t;
 
 typedef struct {
@@ -2360,12 +2362,25 @@ typedef struct {
 #define STREAM_SCOREBOARD_MAX_STRINGS  64
 #define STREAM_SCOREBOARD_LINE_SIZE    128
 #define STREAM_SCOREBOARD_NAME_CHARS   15
-#define STREAM_SCOREBOARD_COLUMNS      "Name            Frags Dths Net Ping"
-#define STREAM_SCOREBOARD_COLUMN_CHARS (sizeof(STREAM_SCOREBOARD_COLUMNS) - 1)
+#define STREAM_SCOREBOARD_STATS_COL    16
+#define STREAM_SCOREBOARD_LOC_COL      (STREAM_SCOREBOARD_STATS_COL + 22)
+#define STREAM_SCOREBOARD_LOC_CHARS    12
+#define STREAM_SCOREBOARD_COLUMNS      "Name            Frags Dths Net Ping C Loc"
+#define STREAM_SCOREBOARD_COLUMN_CHARS (sizeof(STREAM_SCOREBOARD_COLUMNS) - 1 + STREAM_SCOREBOARD_LOC_CHARS)
 
 static bool SCR_IsOpenTDMColumnHeader(const char *line)
 {
-    return !strcmp(line, " " STREAM_SCOREBOARD_COLUMNS) || !strcmp(line, " Name");
+    while (*line && isspace((unsigned char)*line))
+        line++;
+
+    if (!strcmp(line, "Name"))
+        return true;
+
+    return !strncmp(line, "Name", 4)
+        && strstr(line, "Frags")
+        && (strstr(line, "Dths") || strstr(line, "Deaths"))
+        && strstr(line, "Net")
+        && strstr(line, "Ping");
 }
 
 static bool SCR_IsIntegerToken(const char *s)
@@ -2455,12 +2470,33 @@ static bool SCR_ParseOpenTDMTeamHeader(const char *line, stream_team_t *team)
     return team->name[0] != 0;
 }
 
+static void SCR_AddOpenTDMTeamHeader(stream_team_t teams[2],
+                                     const stream_team_t *header)
+{
+    for (int i = 0; i < 2; i++) {
+        if (!Q_stricmp(teams[i].name, header->name)) {
+            teams[i].avg_ping = header->avg_ping;
+            Q_strlcpy(teams[i].skin, header->skin, sizeof(teams[i].skin));
+            return;
+        }
+    }
+
+    for (int i = 0; i < 2; i++) {
+        if (!teams[i].skin[0]) {
+            Q_strlcpy(teams[i].name, header->name, sizeof(teams[i].name));
+            teams[i].avg_ping = header->avg_ping;
+            Q_strlcpy(teams[i].skin, header->skin, sizeof(teams[i].skin));
+            return;
+        }
+    }
+}
+
 static bool SCR_ParseOpenTDMPlayer(const char *line, stream_player_t *out)
 {
     char buf[STREAM_SCOREBOARD_LINE_SIZE];
     char *tokens[16];
     char *p, *last;
-    int tok_count = 0;
+    int tok_count = 0, nums[4], num_count = 0;
 
     Q_strlcpy(buf, line, sizeof(buf));
     p = buf;
@@ -2483,26 +2519,48 @@ static bool SCR_ParseOpenTDMPlayer(const char *line, stream_player_t *out)
         return false;
 
     last = tokens[tok_count - 1];
-    if (!SCR_IsIntegerToken(last))
-        return false;
-
-    out->ping = atoi(last);
-    tok_count--;
-
-    if (tok_count >= 1 && !strcmp(tokens[tok_count - 1], "[READY]"))
+    if (SCR_IsIntegerToken(last)) {
+        out->ping = atoi(last);
         tok_count--;
 
-    if (tok_count >= 3 &&
-        SCR_IsIntegerToken(tokens[tok_count - 1]) &&
-        SCR_IsIntegerToken(tokens[tok_count - 2]) &&
-        SCR_IsIntegerToken(tokens[tok_count - 3])) {
-        out->frags = atoi(tokens[tok_count - 3]);
-        out->deaths = atoi(tokens[tok_count - 2]);
-        out->net = atoi(tokens[tok_count - 1]);
+        if (tok_count >= 1 && !strcmp(tokens[tok_count - 1], "[READY]"))
+            tok_count--;
+
+        if (tok_count >= 3 &&
+            SCR_IsIntegerToken(tokens[tok_count - 1]) &&
+            SCR_IsIntegerToken(tokens[tok_count - 2]) &&
+            SCR_IsIntegerToken(tokens[tok_count - 3])) {
+            out->frags = atoi(tokens[tok_count - 3]);
+            out->deaths = atoi(tokens[tok_count - 2]);
+            out->net = atoi(tokens[tok_count - 1]);
+            SCR_CopyTrimmed(out->name, sizeof(out->name), line, STREAM_SCOREBOARD_NAME_CHARS);
+            return out->name[0] != 0;
+        }
+
+        SCR_CopyTrimmed(out->name, sizeof(out->name), line, STREAM_SCOREBOARD_NAME_CHARS);
+        return out->name[0] != 0;
     }
 
+    for (int i = 0; i < tok_count && num_count < q_countof(nums); i++) {
+        if (SCR_IsIntegerToken(tokens[i]))
+            nums[num_count++] = atoi(tokens[i]);
+    }
+
+    if (num_count == 1) {
+        out->ping = nums[0];
+        SCR_CopyTrimmed(out->name, sizeof(out->name), line, STREAM_SCOREBOARD_NAME_CHARS);
+        return out->name[0] != 0;
+    }
+
+    if (num_count < q_countof(nums))
+        return false;
+
+    out->frags = nums[0];
+    out->deaths = nums[1];
+    out->net = nums[2];
+    out->ping = nums[3];
     SCR_CopyTrimmed(out->name, sizeof(out->name), line, STREAM_SCOREBOARD_NAME_CHARS);
-    return true;
+    return out->name[0] != 0;
 }
 
 static bool SCR_AddOpenTDMPlayer(stream_team_t *team, const stream_player_t *player)
@@ -2511,6 +2569,24 @@ static bool SCR_AddOpenTDMPlayer(stream_team_t *team, const stream_player_t *pla
         return false;
     team->players[team->num_players++] = *player;
     return true;
+}
+
+static void SCR_FindPlayerLocation(stream_player_t *player)
+{
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        vec3_t origin;
+
+        if (!cl.clientinfo[i].name[0])
+            continue;
+        if (Q_stricmpn(cl.clientinfo[i].name, player->name, STREAM_SCOREBOARD_NAME_CHARS))
+            continue;
+        VectorCopy(cl_entities[i + 1].current.origin, origin);
+        if (origin[0] == 0 && origin[1] == 0 && origin[2] == 0)
+            continue;
+        SCR_CopyTrimmed(player->location, sizeof(player->location),
+                        LOC_FindLocation(origin), STREAM_SCOREBOARD_LOC_CHARS);
+        return;
+    }
 }
 
 static void SCR_DrawOpenTDMTeamScore(int x, int y, const stream_team_t *team)
@@ -2535,7 +2611,10 @@ static void SCR_DrawOpenTDMTeamScore(int x, int y, const stream_team_t *team)
         Q_snprintf(buf, sizeof(buf), "%5d %4d %3d %4d %s",
                    player->frags, player->deaths, player->net, player->ping,
                    player->captain ? "*" : "");
-        HUD_DrawString(x + CONCHAR_WIDTH * 16, row_y, buf);
+        HUD_DrawString(x + CONCHAR_WIDTH * STREAM_SCOREBOARD_STATS_COL, row_y, buf);
+
+        if (player->location[0])
+            HUD_DrawString(x + CONCHAR_WIDTH * STREAM_SCOREBOARD_LOC_COL, row_y, player->location);
     }
 }
 
@@ -2547,7 +2626,7 @@ static int SCR_CollectOpenTDMStrings(const char *s,
     while (s) {
         char *token = COM_Parse(&s);
 
-        if (!strcmp(token, "string") || !strcmp(token, "string2")) {
+        if (!strcmp(token, "string") || !strcmp(token, "string2") || !strcmp(token, "cstring")) {
             token = COM_Parse(&s);
             if (count == STREAM_SCOREBOARD_MAX_STRINGS)
                 break;
@@ -2558,22 +2637,30 @@ static int SCR_CollectOpenTDMStrings(const char *s,
     return count;
 }
 
-static void SCR_DrawOpenTDMScores(const char *s)
+static bool SCR_DrawOpenTDMScores(const char *s)
 {
     char strings[STREAM_SCOREBOARD_MAX_STRINGS][STREAM_SCOREBOARD_LINE_SIZE];
     stream_team_t teams[2] = {{{0}}};
     stream_player_t *last_player = NULL;
-    int num_strings, team_headers = 0, player_idx = 0, start_players = -1;
+    int num_strings, player_idx = 0, start_players = -1;
     int col_width = STREAM_SCOREBOARD_COLUMN_CHARS * CONCHAR_WIDTH;
     int x = cl_stream_scoreboard_x->integer;
     int y = scr.hud_height - cl_stream_scoreboard_offset->integer - 8 * CONCHAR_HEIGHT;
 
     if (!s[0])
-        return;
+        return false;
 
     num_strings = SCR_CollectOpenTDMStrings(s, strings);
     if (num_strings < 4)
-        return;
+        return false;
+
+    bool is_old_scoreboard = false;
+    for (int i = 0; i < num_strings; i++) {
+        if (!strncmp(strings[i], "oldscoreboard:", 14)) {
+            is_old_scoreboard = true;
+            break;
+        }
+    }
 
     if (!SCR_ParseOpenTDMTeamScore(strings[1], &teams[0]))
         Q_strlcpy(teams[0].name, "Hometeam", sizeof(teams[0].name));
@@ -2581,13 +2668,13 @@ static void SCR_DrawOpenTDMScores(const char *s)
         Q_strlcpy(teams[1].name, "Visitors", sizeof(teams[1].name));
 
     for (int i = 4; i < num_strings; i++) {
-        if (SCR_ParseOpenTDMTeamHeader(strings[i], &teams[team_headers])) {
-            if (++team_headers == q_countof(teams))
-                break;
-        }
+        stream_team_t header = {0};
+
+        if (SCR_ParseOpenTDMTeamHeader(strings[i], &header))
+            SCR_AddOpenTDMTeamHeader(teams, &header);
     }
 
-    for (int i = 6; i < num_strings; i++) {
+    for (int i = 0; i < num_strings; i++) {
         if (SCR_IsOpenTDMColumnHeader(strings[i])) {
             start_players = i + 1;
             break;
@@ -2595,7 +2682,17 @@ static void SCR_DrawOpenTDMScores(const char *s)
     }
 
     if (start_players < 0)
-        return;
+        for (int i = 0; i < num_strings; i++) {
+            stream_player_t player;
+
+            if (SCR_ParseOpenTDMPlayer(strings[i], &player)) {
+                start_players = i;
+                break;
+            }
+        }
+
+    if (start_players < 0)
+        return false;
 
     for (int i = start_players; i < num_strings; i++) {
         stream_team_t *team;
@@ -2626,13 +2723,17 @@ static void SCR_DrawOpenTDMScores(const char *s)
         else
             team = &teams[0];
 
-        if (SCR_AddOpenTDMPlayer(team, &player))
+        if (SCR_AddOpenTDMPlayer(team, &player)) {
             last_player = &team->players[team->num_players - 1];
+            if (!is_old_scoreboard)
+                SCR_FindPlayerLocation(last_player);
+        }
         player_idx++;
     }
 
     SCR_DrawOpenTDMTeamScore(x, y, &teams[0]);
     SCR_DrawOpenTDMTeamScore(scr.hud_width - x - col_width, y, &teams[1]);
+    return true;
 }
 
 static void SCR_DrawLayout(void)
@@ -2648,8 +2749,8 @@ static void SCR_DrawLayout(void)
 
 draw:
     if (SCR_IsOpenTDMScoreboard()) {
-        SCR_DrawOpenTDMScores(cl.layout);
-        return;
+        if (SCR_DrawOpenTDMScores(cl.layout))
+            return;
     }
     SCR_ExecuteLayoutString(cl.layout);
 }
