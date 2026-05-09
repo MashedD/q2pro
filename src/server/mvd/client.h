@@ -68,9 +68,6 @@ typedef struct {
     bool inuse;
     char name[16];
     mvd_cs_t *configstrings;
-    int prev_frags;
-    pmtype_t prev_pm_type;
-    unsigned prev_effects;
 } mvd_player_t;
 
 typedef struct {

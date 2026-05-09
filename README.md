@@ -57,7 +57,6 @@ features include:
 - rendering: added `r_lava_glowmaps` to toggle lava glowmaps independently
 - rendering: added `gl_glare` surface glare effect for bright glowmapped
   surfaces, with size, intensity and brightness threshold controls
-- added `chase quadkiller` command (when playing MVD demos)
 
 # TODO
 
