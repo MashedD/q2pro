@@ -63,7 +63,6 @@ features include:
   added `ch_marker_scale` to change marker scale
 - added Remastered-style HUD damage direction indicators, controlled by
   `scr_damage_indicator`
-- added `chase quadkiller` command (when playing MVD demos)
 
 # TODO
 
