@@ -167,9 +167,20 @@ static location_t *LOC_FindClosest(const vec3_t pos)
 }
 
 /*
-==============
+================
+LOC_FindLocation
+================
+*/
+const char *LOC_FindLocation(const vec3_t pos)
+{
+    location_t *loc = LOC_FindClosest(pos);
+    return loc ? loc->name : "unknown";
+}
+
+/*
+================
 LOC_AddLocationsToScene
-==============
+================
 */
 void LOC_AddLocationsToScene(void)
 {

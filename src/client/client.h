@@ -971,6 +971,7 @@ bool CL_GetDemoInfo(const char *path, demoInfo_t *info);
 void LOC_Init(void);
 void LOC_LoadLocations(void);
 void LOC_FreeLocations(void);
+const char *LOC_FindLocation(const vec3_t pos);
 void LOC_AddLocationsToScene(void);
 
 
