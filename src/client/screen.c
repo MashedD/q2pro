@@ -2347,6 +2347,8 @@ typedef struct {
     int net;
     int ping;
     bool captain;
+    bool quad;
+    bool pent;
     char location[32];
 } stream_player_t;
 
@@ -2571,18 +2573,24 @@ static bool SCR_AddOpenTDMPlayer(stream_team_t *team, const stream_player_t *pla
     return true;
 }
 
-static void SCR_FindPlayerLocation(stream_player_t *player)
+static void SCR_UpdateOpenTDMPlayerState(stream_player_t *player)
 {
     for (int i = 0; i < MAX_CLIENTS; i++) {
         vec3_t origin;
+        unsigned effects;
 
         if (!cl.clientinfo[i].name[0])
             continue;
         if (Q_stricmpn(cl.clientinfo[i].name, player->name, STREAM_SCOREBOARD_NAME_CHARS))
             continue;
+
+        effects = cl_entities[i + 1].current.effects;
+        player->quad = (effects & EF_QUAD) != 0;
+        player->pent = (effects & EF_PENT) != 0;
+
         VectorCopy(cl_entities[i + 1].current.origin, origin);
         if (origin[0] == 0 && origin[1] == 0 && origin[2] == 0)
-            continue;
+            return;
         SCR_CopyTrimmed(player->location, sizeof(player->location),
                         LOC_FindLocation(origin), STREAM_SCOREBOARD_LOC_CHARS);
         return;
@@ -2606,6 +2614,21 @@ static void SCR_DrawOpenTDMTeamScore(int x, int y, const stream_team_t *team)
 
     for (int i = 0; i < team->num_players; i++, row_y += CONCHAR_HEIGHT) {
         const stream_player_t *player = &team->players[i];
+
+        if (player->quad || player->pent) {
+            uint32_t color;
+
+            if (player->quad && player->pent)
+                color = MakeColor(200, 80, 255, 70);
+            else if (player->quad)
+                color = MakeColor(60, 110, 255, 70);
+            else
+                color = MakeColor(255, 90, 90, 70);
+
+            R_DrawFill32(x - 2, row_y,
+                         STREAM_SCOREBOARD_COLUMN_CHARS * CONCHAR_WIDTH + 4,
+                         CONCHAR_HEIGHT, color);
+        }
 
         HUD_DrawString(x, row_y, player->name);
         Q_snprintf(buf, sizeof(buf), "%5d %4d %3d %4d %s",
@@ -2726,7 +2749,7 @@ static bool SCR_DrawOpenTDMScores(const char *s)
         if (SCR_AddOpenTDMPlayer(team, &player)) {
             last_player = &team->players[team->num_players - 1];
             if (!is_old_scoreboard)
-                SCR_FindPlayerLocation(last_player);
+                SCR_UpdateOpenTDMPlayerState(last_player);
         }
         player_idx++;
     }
