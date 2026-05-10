@@ -7145,6 +7145,24 @@ static void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass)
 
 static void vk_surface_color(const mface_t *face, float color[4])
 {
+    float intensity = vk_texture_intensity();
+
+    if (face->drawflags & SURF_TRANS33) {
+        Vector4Set(color, 1.0f / intensity, 1.0f / intensity,
+                   1.0f / intensity, 0.33f);
+        return;
+    }
+    if (face->drawflags & SURF_TRANS66) {
+        Vector4Set(color, 1.0f / intensity, 1.0f / intensity,
+                   1.0f / intensity, 0.66f);
+        return;
+    }
+    if (face->drawflags & SURF_WARP) {
+        Vector4Set(color, 1.0f / intensity, 1.0f / intensity,
+                   1.0f / intensity, 1.0f);
+        return;
+    }
+
     uint32_t hash = FS_HashPath(face->texinfo->name, UINT32_MAX);
     float shade = 0.35f + fabsf(face->plane->normal[2]) * 0.35f;
 
