@@ -6592,7 +6592,7 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
     vk_fog_params(fd, push.fog);
-    push.intensity = vk_texture_intensity();
+    push.intensity = 1.0f;
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
@@ -6691,7 +6691,7 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
     vk_fog_params(fd, push.fog);
-    push.intensity = def ? -1.0f : vk_texture_intensity();
+    push.intensity = def ? -1.0f : 1.0f;
 
     VkPipeline pipeline = (def && vk.particle_add_pipeline) ?
         vk.particle_add_pipeline : vk.sprite_pipeline;
@@ -6787,7 +6787,7 @@ static void vk_draw_particles(const refdef_t *fd)
         Vector4Clear(push.scroll);
         Vector4Clear(push.dlight);
         vk_fog_params(fd, push.fog);
-        push.intensity = vk_texture_intensity();
+        push.intensity = 1.0f;
 
         vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -6837,7 +6837,7 @@ static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
     vk_fog_params(fd, push.fog);
-    push.intensity = vk_texture_intensity();
+    push.intensity = 1.0f;
 
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
