@@ -5507,6 +5507,23 @@ static void vk_world_dynamic_light(const vk_world_face_t *face,
     dlight[2] = Q_clipf(dlight[2], 0.0f, 1.0f);
 }
 
+static const image_t *vk_world_face_image(const mface_t *face,
+                                          const refdef_t *fd,
+                                          const entity_t *ent)
+{
+    const mtexinfo_t *tex = face->texinfo;
+
+    if (tex && tex->next) {
+        int frame = ent ? ent->frame : (int)((fd ? fd->time : 0.0f) * 2.0f);
+        int c = frame % tex->numframes;
+
+        while (c-- > 0 && tex->next)
+            tex = tex->next;
+    }
+
+    return tex ? tex->image : NULL;
+}
+
 static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                VkPipeline pipeline, vk_world_pass_t pass,
                                float entity_alpha, const refdef_t *fd,
@@ -5554,6 +5571,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                  vk.rect_pipeline_layout, 0, 1,
                                  &texture->descriptor_set, 0, NULL);
+        uint32_t bound_texture_index = batch->texture_index;
 
         if (batch->first_face > vk.world.face_count ||
             batch->face_count > vk.world.face_count - batch->first_face)
@@ -5569,6 +5587,19 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 continue;
             if (!vk_world_face_in_pass(face->face, pass))
                 continue;
+
+            const image_t *image = vk_world_face_image(face->face, fd, ent);
+            if (!image || image->texnum >= MAX_RIMAGES)
+                continue;
+            if (image->texnum != bound_texture_index) {
+                texture = vk_texture_for_index(image->texnum, true);
+                if (!texture)
+                    continue;
+                vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                         vk.rect_pipeline_layout, 0, 1,
+                                         &texture->descriptor_set, 0, NULL);
+                bound_texture_index = image->texnum;
+            }
 
             face_pipeline = vk_world_face_pipeline(face->face, pipeline, pass);
             if (face_pipeline != pipeline)
