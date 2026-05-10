@@ -5353,7 +5353,7 @@ static void vk_world_light_params(const mface_t *face, float color[4], float scr
         (warp ? 4.0f : 0.0f);
     scroll[3] = 0.0f;
 
-    if (fullbright || (face->drawflags & SURF_COLOR_MASK))
+    if (fullbright || (face->drawflags & vk.world.nolm_mask))
         return;
 
     color[0] = Cvar_ClampValue(vk_modulate, 0.0f, 1e6f) *
@@ -5481,7 +5481,7 @@ static void vk_world_dynamic_light(const vk_world_face_t *face,
     if (!face || !face->face || !face->face->plane ||
         !fd || fd->num_dlights <= 0 || !fd->dlights ||
         !vk_dynamic_lights_enabled() ||
-        (face->face->drawflags & SURF_COLOR_MASK))
+        (face->face->drawflags & vk.world.nolm_mask))
         return;
 
     vk_world_face_center(face, ent, axis, center);
@@ -7167,7 +7167,7 @@ static bool vk_sample_surface_light(const bsp_t *bsp, const mface_t *face,
 
     if (!face->lightmap || !face->numstyles || smax < 1 || tmax < 1)
         return false;
-    if (face->drawflags & SURF_COLOR_MASK)
+    if (face->drawflags & vk.world.nolm_mask)
         return false;
     if (!bsp->lightmap || face->lightmap < bsp->lightmap)
         return false;
@@ -7228,7 +7228,7 @@ static void vk_surface_vertex_color(const bsp_t *bsp, const mface_t *face,
                                     const vec3_t point, const float fallback[4],
                                     float color[4])
 {
-    if (face->drawflags & SURF_COLOR_MASK) {
+    if (face->drawflags & vk.world.nolm_mask) {
         Vector4Set(color, 1.0f, 1.0f, 1.0f, 1.0f);
         return;
     }
