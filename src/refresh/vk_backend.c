@@ -5410,6 +5410,22 @@ static float vk_texture_intensity(void)
     return Cvar_ClampValue(vk_intensity, 1.0f, 5.0f);
 }
 
+static void vk_transform_to_entity_local(const vec3_t point, const entity_t *ent,
+                                         const vec3_t axis[3], vec3_t local)
+{
+    vec3_t delta;
+    float len0, len1, len2;
+
+    VectorSubtract(point, ent->origin, delta);
+    len0 = DotProduct(axis[0], axis[0]);
+    len1 = DotProduct(axis[1], axis[1]);
+    len2 = DotProduct(axis[2], axis[2]);
+
+    local[0] = len0 ? DotProduct(delta, axis[0]) / len0 : 0.0f;
+    local[1] = len1 ? DotProduct(delta, axis[1]) / len1 : 0.0f;
+    local[2] = len2 ? DotProduct(delta, axis[2]) / len2 : 0.0f;
+}
+
 static float vk_world_face_light_plane_dist(const mface_t *face, const dlight_t *light,
                                             const entity_t *ent, const vec3_t axis[3])
 {
@@ -5417,12 +5433,8 @@ static float vk_world_face_light_plane_dist(const mface_t *face, const dlight_t 
         return PlaneDiffFast(light->origin, face->plane);
 
     vec3_t local;
-    vec3_t delta;
 
-    VectorSubtract(light->origin, ent->origin, delta);
-    local[0] = DotProduct(delta, axis[0]) / DotProduct(axis[0], axis[0]);
-    local[1] = DotProduct(delta, axis[1]) / DotProduct(axis[1], axis[1]);
-    local[2] = DotProduct(delta, axis[2]) / DotProduct(axis[2], axis[2]);
+    vk_transform_to_entity_local(light->origin, ent, axis, local);
     return PlaneDiffFast(local, face->plane);
 }
 
@@ -5434,12 +5446,7 @@ static void vk_world_face_light_origin(const dlight_t *light, const entity_t *en
         return;
     }
 
-    vec3_t delta;
-
-    VectorSubtract(light->origin, ent->origin, delta);
-    origin[0] = DotProduct(delta, axis[0]) / DotProduct(axis[0], axis[0]);
-    origin[1] = DotProduct(delta, axis[1]) / DotProduct(axis[1], axis[1]);
-    origin[2] = DotProduct(delta, axis[2]) / DotProduct(axis[2], axis[2]);
+    vk_transform_to_entity_local(light->origin, ent, axis, origin);
 }
 
 static float vk_world_dynamic_light_fraction(const dlight_t *light,
@@ -5921,12 +5928,10 @@ static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
     if (!model || (model->numfaces > 0 && !model->firstface))
         return;
 
-    VectorSubtract(fd->vieworg, ent->origin, transformed);
-    if (!VectorEmpty(ent->angles) || (ent->scale && ent->scale != 1.0f)) {
-        vec3_t temp;
-        VectorCopy(transformed, temp);
-        VectorRotate(temp, axis, transformed);
-    }
+    if (!VectorEmpty(ent->angles) || (ent->scale && ent->scale != 1.0f))
+        vk_transform_to_entity_local(fd->vieworg, ent, axis, transformed);
+    else
+        VectorSubtract(fd->vieworg, ent->origin, transformed);
 
     for (int i = 0; i < model->numfaces; i++) {
         mface_t *face = model->firstface + i;
