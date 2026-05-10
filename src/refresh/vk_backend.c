@@ -5957,6 +5957,43 @@ static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
     }
 }
 
+static bool vk_bmodel_culled(const mmodel_t *model, const entity_t *ent,
+                             const vec3_t axis[3])
+{
+    vec3_t points[8];
+
+    if (!vk_cull_models || !vk_cull_models->integer)
+        return false;
+    if (!model || !ent || !axis)
+        return false;
+
+    for (int i = 0; i < 8; i++) {
+        VectorCopy(ent->origin, points[i]);
+        VectorMA(points[i], (i & 1) ? model->maxs[0] : model->mins[0],
+                 axis[0], points[i]);
+        VectorMA(points[i], (i & 2) ? model->maxs[1] : model->mins[1],
+                 axis[1], points[i]);
+        VectorMA(points[i], (i & 4) ? model->maxs[2] : model->mins[2],
+                 axis[2], points[i]);
+    }
+
+    for (int i = 0; i < 4; i++) {
+        bool infront = false;
+
+        for (int j = 0; j < 8; j++) {
+            if (PlaneDiffFast(points[j], &vk.world.frustum[i]) >= 0.0f) {
+                infront = true;
+                break;
+            }
+        }
+
+        if (!infront)
+            return true;
+    }
+
+    return false;
+}
+
 static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd,
                            bool translucent_faces)
 {
@@ -5975,6 +6012,9 @@ static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd,
         return;
 
     vk_entity_axis(ent, axis);
+    if (vk_bmodel_culled(model, ent, axis))
+        return;
+
     vk_entity_mvp(mvp, fd, ent, axis);
 
     vk.world.drawframe++;
