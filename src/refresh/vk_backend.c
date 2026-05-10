@@ -6442,7 +6442,8 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         if (!pipeline)
             continue;
 
-        if (translucent && !(ent->flags & RF_FULLBRIGHT) &&
+        if (translucent &&
+            (ent->flags & (RF_FULLBRIGHT | RF_BLOOM_ONLY)) == 0 &&
             vk.alias_depth_pipeline) {
             vk_draw_alias_pass(cmd, vk.alias_depth_pipeline, buffers, offsets,
                                model, batch, texture, &push);
