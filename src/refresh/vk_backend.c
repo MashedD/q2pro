@@ -6058,6 +6058,31 @@ static float vk_entity_light_modulate(void)
            Cvar_ClampValue(vk_modulate_entities, 0.0f, 1e6f);
 }
 
+static void vk_adjust_entity_light(vec3_t color)
+{
+    float add = 255.0f * Cvar_ClampValue(vk_brightness, -1.0f, 1.0f);
+    float modulate = vk_entity_light_modulate();
+    float scale = Cvar_ClampValue(vk_coloredlightmaps, 0.0f, 1.0f);
+    float maxc;
+
+    color[0] = max((color[0] + add) * modulate, 0.0f);
+    color[1] = max((color[1] + add) * modulate, 0.0f);
+    color[2] = max((color[2] + add) * modulate, 0.0f);
+
+    maxc = max(max(color[0], color[1]), color[2]);
+    if (maxc > 255.0f)
+        VectorScale(color, 255.0f / maxc, color);
+
+    if (scale != 1.0f) {
+        float y = LUMINANCE(color[0], color[1], color[2]);
+        color[0] = y + (color[0] - y) * scale;
+        color[1] = y + (color[1] - y) * scale;
+        color[2] = y + (color[2] - y) * scale;
+    }
+
+    VectorScale(color, 1.0f / 255.0f, color);
+}
+
 static void vk_entity_light_color(const entity_t *ent, const refdef_t *fd, vec4_t color)
 {
     uint64_t flags = ent->flags;
@@ -6980,7 +7005,7 @@ static void vk_sample_lightpoint(const lightpoint_t *point, const refdef_t *fd,
         lightmap += size;
     }
 
-    VectorScale(color, vk_entity_light_modulate() * (1.0f / 255.0f), color);
+    vk_adjust_entity_light(color);
 }
 
 static bool vk_lightgrid_point(const lightgrid_t *grid, const vec3_t start,
@@ -7059,7 +7084,7 @@ static bool vk_lightgrid_point(const lightgrid_t *grid, const vec3_t start,
     LerpVector2(lerp_x[0], lerp_x[1], 1.0f - fy, fy, lerp_y[0]);
     LerpVector2(lerp_x[2], lerp_x[3], 1.0f - fy, fy, lerp_y[1]);
     LerpVector2(lerp_y[0], lerp_y[1], 1.0f - fz, fz, color);
-    VectorScale(color, vk_entity_light_modulate() * (1.0f / 255.0f), color);
+    vk_adjust_entity_light(color);
     return true;
 }
 
