@@ -5844,6 +5844,8 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
     if (!bsp || !bsp->nodes || !bsp->leafs)
         return;
 
+    glr.nodes_visible = 0;
+
     if (vk_lockpvs && vk_lockpvs->integer)
         return;
 
@@ -5867,6 +5869,7 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
             bsp->leafs[i].visframe = vk.world.visframe;
         for (int i = 0; i < bsp->numnodes; i++)
             bsp->nodes[i].visframe = vk.world.visframe;
+        glr.nodes_visible = bsp->numnodes;
         return;
     }
 
@@ -5891,6 +5894,7 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
              node && node->visframe != vk.world.visframe;
              node = node->parent) {
             node->visframe = vk.world.visframe;
+            glr.nodes_visible++;
         }
     }
 }
@@ -7857,6 +7861,77 @@ static void vk_draw_polyblend(const refdef_t *fd)
     }
 }
 
+#if USE_DEBUG
+static int vk_auto_scale(void)
+{
+    int scale = 1;
+
+    if (r_config.height < r_config.width) {
+        if (r_config.height >= 2160)
+            scale = 4;
+        else if (r_config.height >= 1080)
+            scale = 2;
+    } else {
+        if (r_config.width >= 3840)
+            scale = 4;
+        else if (r_config.width >= 1920)
+            scale = 2;
+    }
+
+    if (vid && vid->get_dpi_scale)
+        scale = max(scale, vid->get_dpi_scale());
+
+    return scale;
+}
+
+static void vk_draw_stat_string(int x, int y, const char *fmt, ...)
+{
+    va_list argptr;
+    char buffer[MAX_STRING_CHARS];
+
+    va_start(argptr, fmt);
+    Q_vsnprintf(buffer, sizeof(buffer), fmt, argptr);
+    va_end(argptr);
+
+    VKR_DrawString(x, y, 0, -1, buffer, r_charset);
+}
+
+static void vk_draw_stats(void)
+{
+    int x = 10, y = 10;
+
+    VKR_SetScale(1.0f / vk_auto_scale());
+    VKR_DrawFill8(8, 8, 25 * 8, 24 * 10 + 2, 4);
+
+    vk_draw_stat_string(x, y, "Nodes visible  : %i", glr.nodes_visible); y += 10;
+    vk_draw_stat_string(x, y, "Nodes culled   : %i", c.nodesCulled); y += 10;
+    vk_draw_stat_string(x, y, "Nodes drawn    : %i", c.nodesDrawn); y += 10;
+    vk_draw_stat_string(x, y, "Leaves drawn   : %i", c.leavesDrawn); y += 10;
+    vk_draw_stat_string(x, y, "Faces drawn    : %i", c.facesDrawn); y += 10;
+    vk_draw_stat_string(x, y, "Faces culled   : %i", c.facesCulled); y += 10;
+    vk_draw_stat_string(x, y, "Boxes culled   : %i", c.boxesCulled); y += 10;
+    vk_draw_stat_string(x, y, "Spheres culled : %i", c.spheresCulled); y += 10;
+    vk_draw_stat_string(x, y, "RtBoxes culled : %i", c.rotatedBoxesCulled); y += 10;
+    vk_draw_stat_string(x, y, "Shadows culled : %i", c.shadowsCulled); y += 10;
+    vk_draw_stat_string(x, y, "Tris drawn     : %i", c.trisDrawn); y += 10;
+    vk_draw_stat_string(x, y, "Tex switches   : %i", c.texSwitches); y += 10;
+    vk_draw_stat_string(x, y, "Tex uploads    : %i", c.texUploads); y += 10;
+    vk_draw_stat_string(x, y, "LM texels      : %i", c.lightTexels); y += 10;
+    vk_draw_stat_string(x, y, "Batches drawn  : %i", c.batchesDrawn); y += 10;
+    vk_draw_stat_string(x, y, "Faces / batch  : %.1f", c.batchesDrawn ? (float)c.facesDrawn / c.batchesDrawn : 0.0f); y += 10;
+    vk_draw_stat_string(x, y, "Tris / batch   : %.1f", c.batchesDrawn ? (float)c.facesTris / c.batchesDrawn : 0.0f); y += 10;
+    vk_draw_stat_string(x, y, "2D batches     : %i", c.batchesDrawn2D); y += 10;
+    vk_draw_stat_string(x, y, "Total entities : %i", glr.fd.num_entities); y += 10;
+    vk_draw_stat_string(x, y, "Total dlights  : %i", glr.fd.num_dlights); y += 10;
+    vk_draw_stat_string(x, y, "Total particles: %i", glr.fd.num_particles); y += 10;
+    vk_draw_stat_string(x, y, "Uniform uploads: %i", c.uniformUploads); y += 10;
+    vk_draw_stat_string(x, y, "Array binds    : %i", c.vertexArrayBinds); y += 10;
+    vk_draw_stat_string(x, y, "Occl. queries  : %i", c.occlusionQueries); y += 10;
+
+    VKR_SetScale(1.0f);
+}
+#endif
+
 bool VKR_Init(bool total)
 {
     if (!total)
@@ -8003,6 +8078,9 @@ bool VKR_Init(bool total)
     if (!vk_create_shell_texture())
         Com_WPrintf("Couldn't create Vulkan shell texture: %s\n", Com_GetLastError());
     IMG_GetPalette();
+#if USE_DEBUG
+    r_charset = VKR_RegisterImage("conchars", IT_FONT, IF_PERMANENT);
+#endif
 
     Cmd_AddCommand("strings", vk_strings_f);
     Cmd_AddCommand("modellist", vk_model_list_f);
@@ -8051,6 +8129,7 @@ void VKR_Shutdown(bool total)
     Cmd_RemoveCommand("modellist");
 #if USE_DEBUG
     Cmd_RemoveCommand("cleardebuglines");
+    r_charset = 0;
 #endif
 
     if (r_numImages) {
@@ -8838,7 +8917,7 @@ void VKR_EndFrame(void)
 
 #if USE_DEBUG
     if (vk_showstats && vk_showstats->integer)
-        Draw_Stats();
+        vk_draw_stats();
 #endif
 
     vk_draw_tearing();
