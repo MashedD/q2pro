@@ -5748,6 +5748,8 @@ static void vk_draw_skybox(const refdef_t *fd)
 
         vk_bind_texture_descriptor(cmd, texture->descriptor_set);
         vk.CmdDrawIndexed(cmd, 6, 1, face * 6, 0, 0);
+        c.trisDrawn += 2;
+        c.batchesDrawn++;
     }
 }
 
