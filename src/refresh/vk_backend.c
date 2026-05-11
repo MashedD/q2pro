@@ -4291,6 +4291,18 @@ static void vk_blend_vignette(int x, int y, int w, int h, const vec4_t color,
     vk_blend_rect(x + w - distance, y + distance, distance, h, color);
 }
 
+static void vk_draw_pic_showtris(int x, int y, int w, int h)
+{
+    if (!gl_showtris || !(gl_showtris->integer & SHOWTRIS_PIC) ||
+        w <= 0 || h <= 0)
+        return;
+
+    vk_clear_rect(x, y, w, 1, U32_RED);
+    vk_clear_rect(x, y + h - 1, w, 1, U32_RED);
+    vk_clear_rect(x, y, 1, h, U32_RED);
+    vk_clear_rect(x + w - 1, y, 1, h, U32_RED);
+}
+
 static void vk_draw_tearing(void)
 {
     static int frame;
@@ -4392,6 +4404,8 @@ static void vk_draw_texture_resource(int x, int y, int w, int h,
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
+
+    vk_draw_pic_showtris(x, y, w, h);
 }
 
 static void vk_draw_texture_rect(int x, int y, int w, int h,
