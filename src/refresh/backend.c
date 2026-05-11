@@ -130,7 +130,7 @@ static const refresh_backend_t vk_backend = {
     .end_frame = VKR_EndFrame,
     .mode_changed = VKR_ModeChanged,
     .video_sync = VKR_VideoSync,
-    .get_gl_config = GLR_GetGLConfig,
+    .get_gl_config = VKR_GetGLConfig,
 };
 #endif
 

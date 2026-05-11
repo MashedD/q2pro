@@ -456,6 +456,7 @@ static cvar_t *vk_gl_lightgrid;
 static cvar_t *vk_fullbright;
 static cvar_t *vk_cull_models;
 static cvar_t *vk_shadows;
+static cvar_t *vk_celshading;
 static cvar_t *vk_dotshading;
 static cvar_t *vk_draworder;
 static cvar_t *vk_showorigins;
@@ -6239,16 +6240,27 @@ static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
 }
 
 static void vk_draw_alias_outlines(VkCommandBuffer cmd,
-                                   const VkBuffer buffers[2],
-                                   const VkDeviceSize offsets[2],
-                                   const vk_model_t *model,
-                                   const vk_alias_batch_t *batch,
-                                   const vk_texture_t *texture,
-                                   const vk_alias_push_t *push)
+                                    const VkBuffer buffers[2],
+                                    const VkDeviceSize offsets[2],
+                                    const vk_model_t *model,
+                                    const vk_alias_batch_t *batch,
+                                    const vk_texture_t *texture,
+                                    const vk_alias_push_t *push,
+                                    const entity_t *ent,
+                                    const refdef_t *fd)
 {
-    if (!gl_showtris || !(gl_showtris->integer & SHOWTRIS_MESH) ||
-        !vk.alias_line_pipeline || !model->alias_line_indices.buffer ||
-        !model->alias_line_index_count)
+    bool showtris = gl_showtris && (gl_showtris->integer & SHOWTRIS_MESH);
+    bool celshading = false;
+    float celalpha = 1.0f;
+
+    if (vk_celshading && vk_celshading->value > 0.0f &&
+        !(ent->flags & (RF_TRANSLUCENT | RF_SHELL_MASK | RF_TRACKER))) {
+        celalpha = 1.0f - Distance(ent->origin, fd->vieworg) / 700.0f;
+        celshading = celalpha >= 0.01f;
+    }
+
+    if ((!showtris && !celshading) || !vk.alias_line_pipeline ||
+        !model->alias_line_indices.buffer || !model->alias_line_index_count)
         return;
 
     uint32_t first_index = batch ? (batch->first_index / 3) * 6 : 0;
@@ -6260,7 +6272,8 @@ static void vk_draw_alias_outlines(VkCommandBuffer cmd,
         return;
 
     vk_alias_push_t outline = *push;
-    Vector4Set(outline.color, 0.0f, 0.0f, 0.0f, 1.0f);
+    Vector4Set(outline.color, 0.0f, 0.0f, 0.0f,
+               celshading ? celalpha : 1.0f);
     Vector4Clear(outline.shadedir);
     outline.depthscale = 0.0f;
 
@@ -6522,7 +6535,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         vk_draw_alias_pass(cmd, pipeline, buffers, offsets, model, batch,
                            texture, &push);
         vk_draw_alias_outlines(cmd, buffers, offsets, model, batch,
-                               texture, &push);
+                               texture, &push, ent, fd);
     }
 
     vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp);
@@ -7863,6 +7876,7 @@ bool VKR_Init(bool total)
     vk_fullbright = Cvar_Get("r_fullbright", "0", CVAR_CHEAT);
     vk_cull_models = Cvar_Get("gl_cull_models", "1", 0);
     vk_shadows = Cvar_Get("gl_shadows", "0", CVAR_ARCHIVE);
+    vk_celshading = Cvar_Get("gl_celshading", "0", 0);
     vk_dotshading = Cvar_Get("gl_dotshading", "1", 0);
     vk_draworder = Cvar_Get("gl_draworder", "1", 0);
     vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
@@ -8865,6 +8879,11 @@ bool VKR_VideoSync(void)
         return true;
 
     return vk.WaitForFences(vk.device, 1, &vk.frame_fence, VK_TRUE, 0) == VK_SUCCESS;
+}
+
+r_opengl_config_t VKR_GetGLConfig(void)
+{
+    return (r_opengl_config_t){ 0 };
 }
 
 #endif
