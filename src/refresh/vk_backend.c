@@ -6673,6 +6673,11 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
         !vk.sprite_quad.vertices.buffer || !vk.sprite_quad.indices.buffer)
         return;
 
+    for (int i = 0; i < 4; i++) {
+        if (PlaneDiff(ent->origin, &vk.world.frustum[i]) < -2.5f)
+            return;
+    }
+
     const image_t *image = IMG_ForHandle(ent->skin);
     if (!image || image->texnum >= MAX_RIMAGES)
         return;
