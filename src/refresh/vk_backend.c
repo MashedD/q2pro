@@ -4136,6 +4136,30 @@ static VkClearColorValue vk_frame_clear_color(void)
     return vk_color_to_clear(color.u32);
 }
 
+static void vk_bind_texture_descriptor(VkCommandBuffer cmd, VkDescriptorSet set)
+{
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.rect_pipeline_layout, 0, 1, &set, 0, NULL);
+    c.texSwitches++;
+}
+
+static void vk_push_constants(VkCommandBuffer cmd, uint32_t size,
+                              const void *data)
+{
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, size, data);
+    c.uniformUploads++;
+}
+
+static void vk_bind_vertex_buffers(VkCommandBuffer cmd, uint32_t first,
+                                   uint32_t count, const VkBuffer *buffers,
+                                   const VkDeviceSize *offsets)
+{
+    vk.CmdBindVertexBuffers(cmd, first, count, buffers, offsets);
+    c.vertexArrayBinds++;
+}
+
 static int vk_2d_width(void)
 {
     int width = r_config.width > 0 ? r_config.width : (int)vk.swapchain_extent.width;
@@ -4230,9 +4254,7 @@ static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.rect_pipeline);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
+    vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
@@ -4262,9 +4284,7 @@ static void vk_blend_rect(int x, int y, int w, int h, const vec4_t color)
     };
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.rect_pipeline);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
+    vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
@@ -4395,12 +4415,8 @@ static void vk_draw_texture_resource(int x, int y, int w, int h,
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.texture_pipeline);
-    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                             vk.rect_pipeline_layout, 0, 1,
-                             &texture->descriptor_set, 0, NULL);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
+    vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+    vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
@@ -4961,11 +4977,9 @@ static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float co
     VkDeviceSize offset = 0;
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.color3d_pipeline);
-    vk.CmdBindVertexBuffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
+    vk_bind_vertex_buffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
+    vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, mesh->index_count, 1, 0, 0, 0);
     c.trisDrawn += mesh->index_count / 3;
     c.batchesDrawn++;
@@ -4993,12 +5007,10 @@ static void vk_draw_null_model(const entity_t *ent, const refdef_t *fd)
     push.color[3] = 1.0f;
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.line3d_pipeline);
-    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.null_model.vertices.buffer, &offset);
+    vk_bind_vertex_buffers(cmd, 0, 1, &vk.null_model.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.null_model.indices.buffer, 0,
                           VK_INDEX_TYPE_UINT32);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
+    vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.null_model.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.null_model.index_count / 3;
     c.batchesDrawn++;
@@ -5593,11 +5605,9 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     VkDeviceSize offset = 0;
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vk.CmdBindVertexBuffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
+    vk_bind_vertex_buffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
+    vk_push_constants(cmd, sizeof(push), &push);
 
     for (uint32_t i = 0; i < vk.world.batch_count; i++) {
         const vk_world_batch_t *batch = &vk.world.batches[i];
@@ -5608,9 +5618,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         if (!texture)
             continue;
 
-        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                 vk.rect_pipeline_layout, 0, 1,
-                                 &texture->descriptor_set, 0, NULL);
+        vk_bind_texture_descriptor(cmd, texture->descriptor_set);
         uint32_t bound_texture_index = batch->texture_index;
 
         if (batch->first_face > vk.world.face_count ||
@@ -5635,9 +5643,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 texture = vk_texture_for_index(image->texnum, true);
                 if (!texture)
                     continue;
-                vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                         vk.rect_pipeline_layout, 0, 1,
-                                         &texture->descriptor_set, 0, NULL);
+                vk_bind_texture_descriptor(cmd, texture->descriptor_set);
                 bound_texture_index = image->texnum;
             }
 
@@ -5651,9 +5657,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             vk_world_dynamic_light(face, fd, ent, axis, push.dlight);
             push.dlight[3] = fd ? fd->time : 0.0f;
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
-            vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                0, sizeof(push), &push);
+            vk_push_constants(cmd, sizeof(push), &push);
             vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
             c.facesDrawn++;
             c.facesTris += face->index_count / 3;
@@ -5728,11 +5732,9 @@ static void vk_draw_skybox(const refdef_t *fd)
     push.intensity = 1.0f;
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sky_pipeline);
-    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.skybox.vertices.buffer, &offset);
+    vk_bind_vertex_buffers(cmd, 0, 1, &vk.skybox.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.skybox.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
+    vk_push_constants(cmd, sizeof(push), &push);
 
     for (uint32_t face = 0; face < 6; face++) {
         uint32_t texture_index = vk.sky_images[face];
@@ -5744,9 +5746,7 @@ static void vk_draw_skybox(const refdef_t *fd)
         if (!texture)
             continue;
 
-        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                 vk.rect_pipeline_layout, 0, 1,
-                                 &texture->descriptor_set, 0, NULL);
+        vk_bind_texture_descriptor(cmd, texture->descriptor_set);
         vk.CmdDrawIndexed(cmd, 6, 1, face * 6, 0, 0);
     }
 }
@@ -6276,14 +6276,10 @@ static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
     uint32_t index_count = batch ? batch->index_count : model->mesh.index_count;
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vk.CmdBindVertexBuffers(cmd, 0, 2, buffers, offsets);
+    vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
     vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                             vk.rect_pipeline_layout, 0, 1,
-                             &texture->descriptor_set, 0, NULL);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(*push), push);
+    vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+    vk_push_constants(cmd, sizeof(*push), push);
     vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
     c.trisDrawn += index_count / 3;
     c.batchesDrawn++;
@@ -6329,15 +6325,11 @@ static void vk_draw_alias_outlines(VkCommandBuffer cmd,
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                        vk.alias_line_pipeline);
-    vk.CmdBindVertexBuffers(cmd, 0, 2, buffers, offsets);
+    vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
     vk.CmdBindIndexBuffer(cmd, model->alias_line_indices.buffer, 0,
                           VK_INDEX_TYPE_UINT32);
-    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                             vk.rect_pipeline_layout, 0, 1,
-                             &texture->descriptor_set, 0, NULL);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(outline), &outline);
+    vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+    vk_push_constants(cmd, sizeof(outline), &outline);
     vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
 }
 
@@ -6660,14 +6652,10 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     push.intensity = 1.0f;
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
+    vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                             vk.rect_pipeline_layout, 0, 1,
-                             &texture->descriptor_set, 0, NULL);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
+    vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+    vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.sprite_quad.index_count / 3;
     c.batchesDrawn++;
@@ -6764,14 +6752,10 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
         vk.particle_add_pipeline : vk.sprite_pipeline;
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
+    vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                             vk.rect_pipeline_layout, 0, 1,
-                             &texture->descriptor_set, 0, NULL);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
+    vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+    vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.sprite_quad.index_count / 3;
     c.batchesDrawn++;
@@ -6796,11 +6780,9 @@ static void vk_draw_particles(const refdef_t *fd)
     AnglesToAxis(fd->viewangles, viewaxis);
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
+    vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                             vk.rect_pipeline_layout, 0, 1,
-                             &vk.particle_texture.descriptor_set, 0, NULL);
+    vk_bind_texture_descriptor(cmd, vk.particle_texture.descriptor_set);
 
     for (int i = 0; i < fd->num_particles; i++) {
         const particle_t *particle = &fd->particles[i];
@@ -6858,9 +6840,7 @@ static void vk_draw_particles(const refdef_t *fd)
         vk_fog_params(fd, push.fog);
         push.intensity = 1.0f;
 
-        vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                            0, sizeof(push), &push);
+        vk_push_constants(cmd, sizeof(push), &push);
         vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
         c.trisDrawn += vk.sprite_quad.index_count / 3;
         c.batchesDrawn++;
@@ -6910,11 +6890,9 @@ static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
     vk_fog_params(fd, push.fog);
     push.intensity = 1.0f;
 
-    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
+    vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
+    vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.sprite_quad.index_count / 3;
     c.batchesDrawn++;
@@ -6961,12 +6939,10 @@ static void vk_draw_poly_beam_segment(const vec3_t start, const vec3_t end,
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     memcpy(push.color, color, sizeof(push.color));
 
-    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.beam_cylinder.vertices.buffer, &offset);
+    vk_bind_vertex_buffers(cmd, 0, 1, &vk.beam_cylinder.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.beam_cylinder.indices.buffer, 0,
                           VK_INDEX_TYPE_UINT32);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
+    vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.beam_cylinder.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.beam_cylinder.index_count / 3;
     c.batchesDrawn++;
@@ -7066,9 +7042,7 @@ static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
         if (!vk.sprite_pipeline || !vk.beam_texture.descriptor_set)
             return;
         vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sprite_pipeline);
-        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                 vk.rect_pipeline_layout, 0, 1,
-                                 &vk.beam_texture.descriptor_set, 0, NULL);
+        vk_bind_texture_descriptor(cmd, vk.beam_texture.descriptor_set);
     }
 
     if (ent->flags & RF_GLOW) {
