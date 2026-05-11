@@ -6667,6 +6667,32 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     c.batchesDrawn++;
 }
 
+static bool vk_flare_occluded(const entity_t *ent, const refdef_t *fd)
+{
+    bsp_t *bsp = vk.world.cache;
+    lightpoint_t point;
+    vec3_t end;
+
+    if (!bsp || !bsp->nodes)
+        return false;
+
+    VectorCopy(ent->origin, end);
+    const mleaf_t *leaf = BSP_PointLeaf(bsp->nodes, end);
+    if (leaf && (leaf->contents[0] & CONTENTS_SOLID)) {
+        vec3_t dir;
+
+        VectorSubtract(end, fd->vieworg, dir);
+        if (VectorNormalize(dir) > 0.0f)
+            VectorMA(end, -5.0f, dir, end);
+    }
+
+    BSP_LightPoint(&point, fd->vieworg, end, bsp->nodes,
+                   vk.world.nolm_mask | SURF_TRANS_MASK);
+    vk_trace_bmodel_light_points(fd, bsp, fd->vieworg, end, &point);
+
+    return point.surf && point.fraction < 0.995f;
+}
+
 static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
 {
     if (ent->skin <= 0 || ent->skin >= r_numImages || !vk.sprite_pipeline ||
@@ -6677,6 +6703,8 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
         if (PlaneDiff(ent->origin, &vk.world.frustum[i]) < -2.5f)
             return;
     }
+    if (vk_flare_occluded(ent, fd))
+        return;
 
     const image_t *image = IMG_ForHandle(ent->skin);
     if (!image || image->texnum >= MAX_RIMAGES)
