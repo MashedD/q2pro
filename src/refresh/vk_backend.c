@@ -4664,8 +4664,13 @@ static bool vk_alias_model_culled(const vk_model_t *model, const entity_t *ent,
             }
         }
 
-        if (!infront)
+        if (!infront) {
+            if (!VectorEmpty(ent->angles) || (ent->scale && ent->scale != 1.0f))
+                c.rotatedBoxesCulled++;
+            else
+                c.boxesCulled++;
             return true;
+        }
     }
 
     return false;
@@ -6026,8 +6031,13 @@ static bool vk_bmodel_culled(const mmodel_t *model, const entity_t *ent,
             }
         }
 
-        if (!infront)
+        if (!infront) {
+            if (!VectorEmpty(ent->angles) || (ent->scale && ent->scale != 1.0f))
+                c.rotatedBoxesCulled++;
+            else
+                c.boxesCulled++;
             return true;
+        }
     }
 
     return false;
@@ -6458,8 +6468,10 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     if (vk_cull_models && vk_cull_models->integer) {
         float min_d = -radius / w;
         for (int i = 0; i < 4; i++) {
-            if (PlaneDiff(point.pos, &vk.world.frustum[i]) < min_d)
+            if (PlaneDiff(point.pos, &vk.world.frustum[i]) < min_d) {
+                c.shadowsCulled++;
                 return;
+            }
         }
     }
 
