@@ -5796,8 +5796,10 @@ static bool vk_clip_world_node(const mnode_t *node, int *clipflags)
             continue;
 
         bits = BoxOnPlaneSide(node->mins, node->maxs, &vk.world.frustum[i]);
-        if (bits == BOX_BEHIND)
+        if (bits == BOX_BEHIND) {
+            c.nodesCulled++;
             return false;
+        }
         if (bits == BOX_INFRONT)
             flags |= mask;
     }
@@ -5820,6 +5822,8 @@ static void vk_mark_world_leaf(const mleaf_t *leaf, const refdef_t *fd)
         if (leaf->firstleafface[i])
             leaf->firstleafface[i]->drawframe = vk.world.drawframe;
     }
+
+    c.leavesDrawn++;
 }
 
 static void vk_mark_world_visible_nodes(const refdef_t *fd)
@@ -5917,6 +5921,8 @@ static void vk_mark_world_node_faces(const mnode_t *node, const refdef_t *fd, in
             break;
         }
 
+        c.nodesDrawn++;
+
         dot = PlaneDiffFast(fd->vieworg, node->plane);
         side = dot < 0;
 
@@ -5982,6 +5988,7 @@ static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
         dot = PlaneDiffFast(transformed, face->plane);
         if ((face->drawflags & DSURF_PLANEBACK) ?
             (dot > VK_BACKFACE_EPSILON) : (dot < -VK_BACKFACE_EPSILON)) {
+            c.facesCulled++;
             continue;
         }
 
