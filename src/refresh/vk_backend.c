@@ -425,6 +425,7 @@ typedef struct {
     uint32_t model_count;
     vk_texture_t textures[MAX_RIMAGES];
     float flare_fracs[MAX_EDICTS];
+    uint32_t flare_times[MAX_EDICTS];
 } vk_state_t;
 
 static vk_state_t vk;
@@ -6716,6 +6717,10 @@ static float vk_flare_frac(const entity_t *ent, const refdef_t *fd)
     float *frac = &vk.flare_fracs[key];
     float speed = vk_flarespeed ? vk_flarespeed->value : 8.0f;
 
+    if (com_eventTime - vk.flare_times[key] >= 2500)
+        *frac = 0.0f;
+    vk.flare_times[key] = com_eventTime;
+
     if (speed <= 0.0f) {
         *frac = target;
     } else if (*frac < target) {
@@ -8311,6 +8316,7 @@ void VKR_BeginRegistration(const char *map)
     Com_Printf("Vulkan registration: %s\n", map && *map ? map : "<none>");
     r_registration_sequence++;
     memset(vk.flare_fracs, 0, sizeof(vk.flare_fracs));
+    memset(vk.flare_times, 0, sizeof(vk.flare_times));
     vk_load_world(map);
 }
 
