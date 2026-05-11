@@ -461,6 +461,9 @@ static cvar_t *vk_dotshading;
 static cvar_t *vk_draworder;
 static cvar_t *vk_showorigins;
 static cvar_t *vk_showtearing;
+#if USE_DEBUG
+static cvar_t *vk_showstats;
+#endif
 static cvar_t *vk_modulate;
 static cvar_t *vk_modulate_entities;
 static cvar_t *vk_doublelight_entities;
@@ -4231,6 +4234,8 @@ static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(push), &push);
     vk.CmdDraw(cmd, 6, 1, 0, 0);
+    c.trisDrawn += 2;
+    c.batchesDrawn2D++;
 }
 
 static void vk_blend_rect(int x, int y, int w, int h, const vec4_t color)
@@ -4261,6 +4266,8 @@ static void vk_blend_rect(int x, int y, int w, int h, const vec4_t color)
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(push), &push);
     vk.CmdDraw(cmd, 6, 1, 0, 0);
+    c.trisDrawn += 2;
+    c.batchesDrawn2D++;
 }
 
 static void vk_blend_vignette(int x, int y, int w, int h, const vec4_t color,
@@ -4358,14 +4365,14 @@ static void vk_draw_texture_resource(int x, int y, int w, int h,
     w = x2i - nx;
     h = y2i - ny;
 
-    color_t c = { .u32 = vk.color_set ? vk.color.u32 : MakeColor(255, 255, 255, 255) };
+    color_t color = { .u32 = vk.color_set ? vk.color.u32 : MakeColor(255, 255, 255, 255) };
     vk_draw_push_t push = {
         .rect = { x, y, w, h },
         .color = {
-            c.u8[0] / 255.0f,
-            c.u8[1] / 255.0f,
-            c.u8[2] / 255.0f,
-            c.u8[3] / 255.0f,
+            color.u8[0] / 255.0f,
+            color.u8[1] / 255.0f,
+            color.u8[2] / 255.0f,
+            color.u8[3] / 255.0f,
         },
         .screen = {
             screen_w,
@@ -4383,6 +4390,8 @@ static void vk_draw_texture_resource(int x, int y, int w, int h,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(push), &push);
     vk.CmdDraw(cmd, 6, 1, 0, 0);
+    c.trisDrawn += 2;
+    c.batchesDrawn2D++;
 }
 
 static void vk_draw_texture_rect(int x, int y, int w, int h,
@@ -4939,6 +4948,8 @@ static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float co
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, mesh->index_count, 1, 0, 0, 0);
+    c.trisDrawn += mesh->index_count / 3;
+    c.batchesDrawn++;
 }
 
 static void vk_draw_null_model(const entity_t *ent, const refdef_t *fd)
@@ -4970,6 +4981,8 @@ static void vk_draw_null_model(const entity_t *ent, const refdef_t *fd)
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.null_model.index_count, 1, 0, 0, 0);
+    c.trisDrawn += vk.null_model.index_count / 3;
+    c.batchesDrawn++;
 }
 
 #if USE_DEBUG
@@ -5623,6 +5636,10 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                 0, sizeof(push), &push);
             vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
+            c.facesDrawn++;
+            c.facesTris += face->index_count / 3;
+            c.trisDrawn += face->index_count / 3;
+            c.batchesDrawn++;
 
             if (face_pipeline != pipeline)
                 vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -6237,6 +6254,8 @@ static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(*push), push);
     vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
+    c.trisDrawn += index_count / 3;
+    c.batchesDrawn++;
 }
 
 static void vk_draw_alias_outlines(VkCommandBuffer cmd,
@@ -6617,6 +6636,8 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+    c.trisDrawn += vk.sprite_quad.index_count / 3;
+    c.batchesDrawn++;
 }
 
 static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
@@ -6719,6 +6740,8 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+    c.trisDrawn += vk.sprite_quad.index_count / 3;
+    c.batchesDrawn++;
 }
 
 #define VK_PARTICLE_SIZE    (1.0f + M_SQRT1_2f)
@@ -6806,6 +6829,8 @@ static void vk_draw_particles(const refdef_t *fd)
                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                             0, sizeof(push), &push);
         vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+        c.trisDrawn += vk.sprite_quad.index_count / 3;
+        c.batchesDrawn++;
     }
 }
 
@@ -6858,6 +6883,8 @@ static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+    c.trisDrawn += vk.sprite_quad.index_count / 3;
+    c.batchesDrawn++;
 }
 
 static void vk_draw_poly_beam_segment(const vec3_t start, const vec3_t end,
@@ -6908,6 +6935,8 @@ static void vk_draw_poly_beam_segment(const vec3_t start, const vec3_t end,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.beam_cylinder.index_count, 1, 0, 0, 0);
+    c.trisDrawn += vk.beam_cylinder.index_count / 3;
+    c.batchesDrawn++;
 }
 
 #define VK_MIN_LIGHTNING_SEGMENTS   3
@@ -7881,6 +7910,9 @@ bool VKR_Init(bool total)
     vk_draworder = Cvar_Get("gl_draworder", "1", 0);
     vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
     vk_showtearing = Cvar_Get("gl_showtearing", "0", CVAR_CHEAT);
+#if USE_DEBUG
+    vk_showstats = Cvar_Get("gl_showstats", "0", 0);
+#endif
     gl_showtris = Cvar_Get("gl_showtris", "0", CVAR_CHEAT);
     vk_modulate = Cvar_Get("gl_modulate", "1", CVAR_ARCHIVE);
     vk_modulate_entities = Cvar_Get("gl_modulate_entities", "1", 0);
@@ -8244,6 +8276,7 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk.fd_valid = true;
     if (!vk_dynamic_lights_enabled())
         vk.fd.num_dlights = 0;
+    glr.fd = vk.fd;
     fd = &vk.fd;
 
     vk_rebuild_world_lighting();
@@ -8716,6 +8749,8 @@ out:
 
 void VKR_BeginFrame(void)
 {
+    memset(&c, 0, sizeof(c));
+
     if (!vk.swapchain || !vk.frame_fence || vk.frame_active)
         return;
 
@@ -8791,6 +8826,11 @@ void VKR_EndFrame(void)
 {
     if (!vk.frame_active)
         return;
+
+#if USE_DEBUG
+    if (vk_showstats && vk_showstats->integer)
+        Draw_Stats();
+#endif
 
     vk_draw_tearing();
 
