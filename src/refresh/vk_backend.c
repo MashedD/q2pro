@@ -424,6 +424,7 @@ typedef struct {
     vk_model_t models[MAX_MODELS];
     uint32_t model_count;
     vk_texture_t textures[MAX_RIMAGES];
+    float flare_fracs[MAX_EDICTS];
 } vk_state_t;
 
 static vk_state_t vk;
@@ -451,6 +452,7 @@ static cvar_t *vk_partscale;
 static cvar_t *vk_partstyle;
 static cvar_t *vk_partshape;
 static cvar_t *vk_beamstyle;
+static cvar_t *vk_flarespeed;
 static cvar_t *vk_lightgrid;
 static cvar_t *vk_gl_lightgrid;
 static cvar_t *vk_fullbright;
@@ -6693,17 +6695,50 @@ static bool vk_flare_occluded(const entity_t *ent, const refdef_t *fd)
     return point.surf && point.fraction < 0.995f;
 }
 
+static bool vk_flare_visible(const entity_t *ent, const refdef_t *fd)
+{
+    for (int i = 0; i < 4; i++) {
+        if (PlaneDiff(ent->origin, &vk.world.frustum[i]) < -2.5f)
+            return false;
+    }
+
+    return !vk_flare_occluded(ent, fd);
+}
+
+static float vk_flare_frac(const entity_t *ent, const refdef_t *fd)
+{
+    float target = vk_flare_visible(ent, fd) ? 1.0f : 0.0f;
+    int key = ent->skinnum;
+
+    if (key < 0 || key >= MAX_EDICTS)
+        return target;
+
+    float *frac = &vk.flare_fracs[key];
+    float speed = vk_flarespeed ? vk_flarespeed->value : 8.0f;
+
+    if (speed <= 0.0f) {
+        *frac = target;
+    } else if (*frac < target) {
+        *frac += speed * fd->frametime;
+        if (*frac > target)
+            *frac = target;
+    } else if (*frac > target) {
+        *frac -= speed * fd->frametime;
+        if (*frac < target)
+            *frac = target;
+    }
+
+    return *frac;
+}
+
 static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
 {
     if (ent->skin <= 0 || ent->skin >= r_numImages || !vk.sprite_pipeline ||
         !vk.sprite_quad.vertices.buffer || !vk.sprite_quad.indices.buffer)
         return;
 
-    for (int i = 0; i < 4; i++) {
-        if (PlaneDiff(ent->origin, &vk.world.frustum[i]) < -2.5f)
-            return;
-    }
-    if (vk_flare_occluded(ent, fd))
+    float frac = vk_flare_frac(ent, fd);
+    if (frac <= 0.0f)
         return;
 
     const image_t *image = IMG_ForHandle(ent->skin);
@@ -6715,7 +6750,7 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
         return;
 
     bool def = image->flags & IF_DEFAULT_FLARE;
-    float scale = (float)(25 << def) * ent->scale;
+    float scale = (float)(25 << def) * (ent->scale * frac);
     if (scale <= 0.0f)
         return;
 
@@ -6776,7 +6811,7 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
         if (ent->flags & RF_SHELL_BLUE)
             color.u8[2] = 255;
     }
-    color.u8[3] = (128 + def * 32) * ent->alpha;
+    color.u8[3] = (128 + def * 32) * (ent->alpha * frac);
 
     push.color[0] = color.u8[0] / 255.0f;
     push.color[1] = color.u8[1] / 255.0f;
@@ -8017,6 +8052,7 @@ bool VKR_Init(bool total)
     vk_partshape = Cvar_Get("gl_partshape", "0", 0);
     vk_partshape->changed = vk_partshape_changed;
     vk_beamstyle = Cvar_Get("gl_beamstyle", "0", 0);
+    vk_flarespeed = Cvar_Get("gl_flarespeed", "8", 0);
     vk_lightgrid = Cvar_Get("vk_lightgrid", "1", 0);
     vk_gl_lightgrid = Cvar_Get("gl_lightgrid", "1", 0);
     vk_fullbright = Cvar_Get("r_fullbright", "0", CVAR_CHEAT);
@@ -8274,6 +8310,7 @@ void VKR_BeginRegistration(const char *map)
 {
     Com_Printf("Vulkan registration: %s\n", map && *map ? map : "<none>");
     r_registration_sequence++;
+    memset(vk.flare_fracs, 0, sizeof(vk.flare_fracs));
     vk_load_world(map);
 }
 
