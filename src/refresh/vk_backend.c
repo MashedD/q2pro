@@ -5089,15 +5089,14 @@ static void vk_draw_debug_lines(const refdef_t *fd)
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     Vector4Set(push.color, 1.0f, 1.0f, 1.0f, 1.0f);
 
-    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.debug_lines.buffer, &offset);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
+    vk_bind_vertex_buffers(cmd, 0, 1, &vk.debug_lines.buffer, &offset);
+    vk_push_constants(cmd, sizeof(push), &push);
 
     if (build.depth_vertices) {
         vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            vk.line3d_pipeline);
         vk.CmdDraw(cmd, build.depth_vertices, 1, 0, 0);
+        c.batchesDrawn++;
     }
 
     if (build.nodepth_vertices) {
@@ -5105,6 +5104,7 @@ static void vk_draw_debug_lines(const refdef_t *fd)
                            vk.debug_line_pipeline);
         vk.CmdDraw(cmd, build.nodepth_vertices, 1,
                    VK_MAX_DEBUG_LINE_VERTICES - build.nodepth_vertices, 0);
+        c.batchesDrawn++;
     }
 }
 
@@ -5303,20 +5303,18 @@ static void vk_draw_debug_texts(const refdef_t *fd)
     Vector4Clear(push.fog);
     push.intensity = 1.0f;
 
-    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.debug_text_vertices.buffer, &offset);
+    vk_bind_vertex_buffers(cmd, 0, 1, &vk.debug_text_vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.debug_text_indices.buffer, 0,
                           VK_INDEX_TYPE_UINT32);
-    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                             vk.rect_pipeline_layout, 0, 1,
-                             &texture->descriptor_set, 0, NULL);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
+    vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+    vk_push_constants(cmd, sizeof(push), &push);
 
     if (build.depth_indices) {
         vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            vk.sprite_pipeline);
         vk.CmdDrawIndexed(cmd, build.depth_indices, 1, 0, 0, 0);
+        c.trisDrawn += build.depth_indices / 3;
+        c.batchesDrawn++;
     }
 
     if (build.nodepth_indices) {
@@ -5325,6 +5323,8 @@ static void vk_draw_debug_texts(const refdef_t *fd)
         vk.CmdDrawIndexed(cmd, build.nodepth_indices, 1,
                           VK_MAX_DEBUG_TEXT_INDICES - build.nodepth_indices,
                           0, 0);
+        c.trisDrawn += build.nodepth_indices / 3;
+        c.batchesDrawn++;
     }
 }
 #endif
