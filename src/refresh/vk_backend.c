@@ -8680,6 +8680,11 @@ void VKR_DrawKeepAspectPic(int x, int y, int w, int h, qhandle_t pic)
         return;
 
     const image_t *image = IMG_ForHandle(pic);
+    if (image->flags & IF_SCRAP) {
+        VKR_DrawStretchPic(x, y, w, h, pic);
+        return;
+    }
+
     float scale_w = w;
     float scale_h = h * image->aspect;
     float scale = max(scale_w, scale_h);
