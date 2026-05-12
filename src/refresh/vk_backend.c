@@ -6610,6 +6610,18 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 
         vk_draw_alias_pass(cmd, pipeline, buffers, offsets, model, batch,
                            texture, &push);
+        if (skin->texnum2 && skin->texnum2 < MAX_RIMAGES &&
+            vk.alias_blend_pipeline) {
+            const vk_texture_t *glow = vk_texture_for_index(skin->texnum2, true);
+
+            if (glow) {
+                vk_alias_push_t glow_push = push;
+
+                glow_push.intensity = 1.0f;
+                vk_draw_alias_pass(cmd, vk.alias_blend_pipeline, buffers, offsets,
+                                   model, batch, glow, &glow_push);
+            }
+        }
         vk_draw_alias_outlines(cmd, buffers, offsets, model, batch,
                                texture, &push, ent, fd);
     }
