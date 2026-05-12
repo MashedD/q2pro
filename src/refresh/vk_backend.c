@@ -8745,6 +8745,7 @@ void VKR_RenderFrame(const refdef_t *fd)
         } else {
             const float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
             vk_draw_mesh(&vk.world.mesh, mvp, color);
+            vk_draw_world_outlines(mvp, false, VK_WORLD_ENTITY_ALPHA, fd, NULL);
         }
     }
 
