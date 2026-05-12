@@ -8010,6 +8010,7 @@ static bool vk_world_lighting_modified(void)
            (vk_intensity && vk_intensity->modified) ||
            (vk_dynamic && vk_dynamic->modified) ||
            (vk_fullbright && vk_fullbright->modified) ||
+           (vk_lightmap && vk_lightmap->modified) ||
            (vk_coloredlightmaps && vk_coloredlightmaps->modified) ||
            (vk_vertexlight && vk_vertexlight->modified);
 }
@@ -8058,6 +8059,8 @@ static void vk_clear_world_lighting_modified(void)
         vk_dynamic->modified = false;
     if (vk_fullbright)
         vk_fullbright->modified = false;
+    if (vk_lightmap)
+        vk_lightmap->modified = false;
     if (vk_coloredlightmaps)
         vk_coloredlightmaps->modified = false;
     if (vk_vertexlight)
