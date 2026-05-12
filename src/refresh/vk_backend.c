@@ -8361,7 +8361,7 @@ bool VKR_Init(bool total)
     vk_brightness = Cvar_Get("gl_brightness", "0", 0);
     vk_fog = Cvar_Get("gl_fog", "1", 0);
     vk_intensity = Cvar_Get("intensity", "2", 0);
-    vk_shaders = Cvar_Get("gl_shaders", "0", CVAR_FILES);
+    vk_shaders = Cvar_Get("gl_shaders", "1", CVAR_FILES);
 
     gl_intensity = vk_intensity;
     gl_shaders = vk_shaders;
