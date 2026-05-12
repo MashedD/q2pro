@@ -4831,8 +4831,9 @@ static bool vk_create_sprite_quad(void)
     if (!vk_upload_buffer(&vk.sprite_quad_line_indices, line_indices,
                           sizeof(*line_indices) * line_index_count,
                           VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
+        Com_WPrintf("Couldn't upload Vulkan sprite outline indices\n");
         Z_Free(line_indices);
-        return false;
+        return true;
     }
 
     Z_Free(line_indices);
@@ -4887,8 +4888,9 @@ static bool vk_create_beam_cylinder(void)
     if (!vk_upload_buffer(&vk.beam_cylinder_line_indices, line_indices,
                           sizeof(*line_indices) * line_index_count,
                           VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
+        Com_WPrintf("Couldn't upload Vulkan beam outline indices\n");
         Z_Free(line_indices);
-        return false;
+        return true;
     }
 
     Z_Free(line_indices);
