@@ -6560,6 +6560,7 @@ static void vk_draw_alias_outlines(VkCommandBuffer cmd,
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(outline), &outline);
     vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
+    c.batchesDrawn++;
 }
 
 static void vk_trace_bmodel_light_points(const refdef_t *fd, const bsp_t *bsp,
