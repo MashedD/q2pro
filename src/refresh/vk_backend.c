@@ -5837,7 +5837,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             c.trisDrawn += face->index_count / 3;
             c.batchesDrawn++;
 
-            if (pass == VK_WORLD_OPAQUE &&
+            if ((pass == VK_WORLD_OPAQUE || pass == VK_WORLD_ENTITY_ALPHA) &&
                 vk_world_face_glowmap_enabled(face->face, image)) {
                 const vk_texture_t *glow = vk_texture_for_index(image->texnum2, true);
                 if (glow) {
