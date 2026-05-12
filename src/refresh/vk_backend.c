@@ -72,6 +72,10 @@ static const uint32_t vk_world_alpha_frag_spv[] =
 #include "vk_world_alpha_frag_spv.h"
 ;
 
+static const uint32_t vk_world_glow_frag_spv[] =
+#include "vk_world_glow_frag_spv.h"
+;
+
 static const uint32_t vk_alias_vert_spv[] =
 #include "vk_alias_vert_spv.h"
 ;
@@ -366,6 +370,7 @@ typedef struct {
     VkPipeline beam_pipeline;
     VkPipeline world_pipeline;
     VkPipeline world_alpha_pipeline;
+    VkPipeline world_glow_pipeline;
     VkPipeline sky_pipeline;
     VkPipeline sprite_pipeline;
     VkPipeline sprite_alpha_pipeline;
@@ -2884,6 +2889,11 @@ static void vk_destroy_swapchain(void)
         vk.world_alpha_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.world_glow_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.world_glow_pipeline, NULL);
+        vk.world_glow_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.sky_pipeline) {
         vk.DestroyPipeline(vk.device, vk.sky_pipeline, NULL);
         vk.sky_pipeline = VK_NULL_HANDLE;
@@ -3573,14 +3583,17 @@ static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
 
 static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
                                      bool depth_write, bool blend,
-                                     bool alpha_test, bool additive)
+                                     bool alpha_test, bool additive,
+                                     bool glowmap)
 {
     VkShaderModule vert = vk_create_shader_module(vk_world_vert_spv,
                                                   sizeof(vk_world_vert_spv));
     if (!vert)
         return false;
 
-    VkShaderModule frag = alpha_test ?
+    VkShaderModule frag = glowmap ?
+        vk_create_shader_module(vk_world_glow_frag_spv,
+                                sizeof(vk_world_glow_frag_spv)) : alpha_test ?
         vk_create_shader_module(vk_world_alpha_frag_spv,
                                 sizeof(vk_world_alpha_frag_spv)) :
         vk_create_shader_module(vk_world_frag_spv,
@@ -4052,13 +4065,14 @@ static bool vk_create_swapchain(int width, int height)
                                     VK_PRIMITIVE_TOPOLOGY_LINE_LIST) ||
         !vk_create_color3d_pipeline(&vk.beam_pipeline, VK_TRUE, VK_FALSE, VK_TRUE,
                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
-        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.particle_add_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE) ||
-        !vk_create_world_pipeline(&vk.debug_text_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.world_glow_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.particle_add_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.debug_text_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
         !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
         !vk_create_alias_pipeline(&vk.alias_alpha_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE,
@@ -5481,6 +5495,12 @@ static float vk_texture_intensity(void)
     return Cvar_ClampValue(vk_intensity, 1.0f, 5.0f);
 }
 
+static float vk_glowmap_intensity(void)
+{
+    return vk_texture_intensity() *
+        (gl_glowmap_intensity ? Cvar_ClampValue(gl_glowmap_intensity, 0.0f, 5.0f) : 0.75f);
+}
+
 static void vk_transform_to_entity_local(const vec3_t point, const entity_t *ent,
                                          const vec3_t axis[3], vec3_t local)
 {
@@ -5586,8 +5606,8 @@ static void vk_world_dynamic_light(const vk_world_face_t *face,
 }
 
 static const image_t *vk_world_face_image(const mface_t *face,
-                                          const refdef_t *fd,
-                                          const entity_t *ent)
+                                           const refdef_t *fd,
+                                           const entity_t *ent)
 {
     const mtexinfo_t *tex = face->texinfo;
 
@@ -5600,6 +5620,23 @@ static const image_t *vk_world_face_image(const mface_t *face,
     }
 
     return tex ? tex->image : NULL;
+}
+
+static bool vk_world_face_glowmap_enabled(const mface_t *face,
+                                          const image_t *image)
+{
+    if (!vk.world_glow_pipeline || !image || !image->texnum2 ||
+        image->texnum2 >= MAX_RIMAGES)
+        return false;
+
+    if (vk_lightmap && vk_lightmap->integer)
+        return false;
+
+    if (r_lava_glowmaps && !r_lava_glowmaps->integer && face->texinfo &&
+        strstr(face->texinfo->name, "lava"))
+        return false;
+
+    return true;
 }
 
 static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
@@ -5682,6 +5719,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             vk_world_light_params(face->face, push.color, push.scroll);
             vk_world_dynamic_light(face, fd, ent, axis, push.dlight);
             push.dlight[3] = fd ? fd->time : 0.0f;
+            push.intensity = vk_texture_intensity();
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
             vk_push_constants(cmd, sizeof(push), &push);
             vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
@@ -5689,6 +5727,27 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             c.facesTris += face->index_count / 3;
             c.trisDrawn += face->index_count / 3;
             c.batchesDrawn++;
+
+            if (vk_world_face_glowmap_enabled(face->face, image)) {
+                const vk_texture_t *glow = vk_texture_for_index(image->texnum2, true);
+                if (glow) {
+                    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                       vk.world_glow_pipeline);
+                    vk_bind_texture_descriptor(cmd, glow->descriptor_set);
+                    bound_texture_index = image->texnum2;
+                    push.intensity = vk_glowmap_intensity();
+                    push.color[0] = 1.0f;
+                    push.color[1] = 1.0f;
+                    push.color[2] = 1.0f;
+                    push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
+                    vk_push_constants(cmd, sizeof(push), &push);
+                    vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
+                    c.trisDrawn += face->index_count / 3;
+                    c.batchesDrawn++;
+                    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                       face_pipeline);
+                }
+            }
 
             if (face_pipeline != pipeline)
                 vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
