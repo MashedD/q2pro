@@ -189,10 +189,12 @@ typedef struct {
 typedef struct {
     bsp_t *cache;
     vk_mesh_t mesh;
+    vk_buffer_t line_indices;
     vk_world_batch_t *batches;
     vk_world_face_t *faces;
     uint32_t batch_count;
     uint32_t face_count;
+    uint32_t line_index_count;
     float size;
     cplane_t frustum[4];
     vec3_t vieworg;
@@ -950,6 +952,7 @@ static const vk_texture_t *vk_texture_for_index(unsigned index, bool allow_nobin
 static void vk_free_world(void)
 {
     vk_destroy_mesh(&vk.world.mesh);
+    vk_destroy_buffer(&vk.world.line_indices);
     if (vk.world.batches) {
         Z_Free(vk.world.batches);
         vk.world.batches = NULL;
@@ -960,6 +963,7 @@ static void vk_free_world(void)
     }
     vk.world.batch_count = 0;
     vk.world.face_count = 0;
+    vk.world.line_index_count = 0;
     vk.world.size = 0.0f;
     vk.world.viewcluster = -1;
     vk.world.drawframe = 0;
@@ -5622,6 +5626,63 @@ static const image_t *vk_world_face_image(const mface_t *face,
     return tex ? tex->image : NULL;
 }
 
+static void vk_draw_world_outlines(const mat4_t mvp, bool marked_only,
+                                   vk_world_pass_t pass, const refdef_t *fd,
+                                   const entity_t *ent)
+{
+    if (!gl_showtris || !(gl_showtris->integer & SHOWTRIS_WORLD) ||
+        !vk.render_pass_active || !vk.line3d_pipeline ||
+        !vk.world.mesh.vertices.buffer || !vk.world.line_indices.buffer ||
+        !vk.world.line_index_count || !vk.world.batch_count ||
+        !vk.world.batches || !vk.world.faces)
+        return;
+
+    bool use_marked = marked_only ||
+        (vk_world_vis && vk_world_vis->integer && vk.world.face_count);
+    vk_color3d_push_t push;
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    Vector4Set(push.color, 1.0f, 0.0f, 0.0f, 1.0f);
+
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.line3d_pipeline);
+    vk_bind_vertex_buffers(cmd, 0, 1, &vk.world.mesh.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.world.line_indices.buffer, 0,
+                          VK_INDEX_TYPE_UINT32);
+    vk_push_constants(cmd, sizeof(push), &push);
+
+    for (uint32_t i = 0; i < vk.world.batch_count; i++) {
+        const vk_world_batch_t *batch = &vk.world.batches[i];
+
+        if (batch->first_face > vk.world.face_count ||
+            batch->face_count > vk.world.face_count - batch->first_face)
+            continue;
+
+        for (uint32_t j = 0; j < batch->face_count; j++) {
+            const vk_world_face_t *face = &vk.world.faces[batch->first_face + j];
+            uint32_t first_index, index_count;
+
+            if (!face->face)
+                continue;
+            if (use_marked && face->face->drawframe != vk.world.drawframe)
+                continue;
+            if (!vk_world_face_in_pass(face->face, pass))
+                continue;
+            if (!vk_world_face_image(face->face, fd, ent))
+                continue;
+
+            first_index = (face->first_index / 3) * 6;
+            index_count = (face->index_count / 3) * 6;
+            if (!index_count || first_index + index_count > vk.world.line_index_count)
+                continue;
+
+            vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
+            c.batchesDrawn++;
+        }
+    }
+}
+
 static bool vk_world_face_glowmap_enabled(const mface_t *face,
                                           const image_t *image)
 {
@@ -6160,13 +6221,15 @@ static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd,
 
     vk.world.drawframe++;
     bool translucent = (ent->flags & RF_TRANSLUCENT) || translucent_faces;
+    vk_world_pass_t world_pass = translucent_faces ? VK_WORLD_ALPHA :
+        (translucent ? VK_WORLD_ENTITY_ALPHA : VK_WORLD_OPAQUE);
     vk_mark_bmodel_faces(model, ent, fd, axis, translucent);
     vk_draw_world_mesh(mvp, true,
-                       translucent ? vk.sprite_pipeline : vk.world_pipeline,
-                       translucent_faces ? VK_WORLD_ALPHA :
-                           (translucent ? VK_WORLD_ENTITY_ALPHA : VK_WORLD_OPAQUE),
+                        translucent ? vk.sprite_pipeline : vk.world_pipeline,
+                       world_pass,
                        (ent->flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f,
                        fd, ent, axis);
+    vk_draw_world_outlines(mvp, true, world_pass, fd, ent);
 }
 
 static vk_model_t *vk_model_for_handle(qhandle_t handle)
@@ -7672,6 +7735,8 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
     vk_world_build_face_t *build_faces = Z_Malloc(sizeof(*build_faces) * face_count);
     vk_world_face_t *draw_faces = Z_Malloc(sizeof(*draw_faces) * face_count);
     uint32_t *texture_index_counts = Z_Mallocz(sizeof(*texture_index_counts) * MAX_RIMAGES);
+    uint32_t *line_indices = NULL;
+    uint32_t line_index_count = 0;
     uint32_t v = 0;
     uint32_t face_index = 0;
 
@@ -7775,7 +7840,22 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
         }
     }
 
+    line_indices = vk_build_line_indices(indices, idx, &line_index_count);
+
     bool ok = vk_upload_mesh(&vk.world.mesh, vertices, v, indices, idx);
+    if (ok) {
+        vk_destroy_buffer(&vk.world.line_indices);
+        vk.world.line_index_count = 0;
+        if (line_indices && line_index_count) {
+            if (vk_upload_buffer(&vk.world.line_indices, line_indices,
+                                 sizeof(*line_indices) * line_index_count,
+                                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
+                vk.world.line_index_count = line_index_count;
+            } else {
+                Com_WPrintf("Couldn't upload Vulkan world outline indices\n");
+            }
+        }
+    }
     if (ok) {
         if (vk.world.batches)
             Z_Free(vk.world.batches);
@@ -7791,6 +7871,8 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
 
     Z_Free(vertices);
     Z_Free(indices);
+    if (line_indices)
+        Z_Free(line_indices);
     Z_Free(build_faces);
     Z_Free(texture_index_counts);
     if (batches)
@@ -8560,6 +8642,7 @@ void VKR_RenderFrame(const refdef_t *fd)
                 vk_mark_world_faces(fd);
             vk_draw_world_mesh(mvp, false, vk.world_pipeline, VK_WORLD_OPAQUE,
                                1.0f, fd, NULL, NULL);
+            vk_draw_world_outlines(mvp, false, VK_WORLD_OPAQUE, fd, NULL);
         } else {
             const float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
             vk_draw_mesh(&vk.world.mesh, mvp, color);
@@ -8579,6 +8662,7 @@ void VKR_RenderFrame(const refdef_t *fd)
             vk_mark_world_faces(fd);
         vk_draw_world_mesh(mvp, false, vk.sprite_pipeline, VK_WORLD_ALPHA,
                            1.0f, fd, NULL, NULL);
+        vk_draw_world_outlines(mvp, false, VK_WORLD_ALPHA, fd, NULL);
     }
     vk_draw_entities(fd, VK_ENTITY_BEAM);
     vk_draw_particles(fd);
