@@ -1969,15 +1969,35 @@ fail:
     return false;
 }
 
+static uint32_t vk_alloc_temp_texture_index(void)
+{
+    for (uint32_t i = MAX_RIMAGES; i-- > (uint32_t)r_numImages;) {
+        if (!vk.textures[i].descriptor_set)
+            return i;
+    }
+
+    return 0;
+}
+
 static bool vk_upload_texture(image_t *image, byte *pic)
 {
     uintptr_t first = (uintptr_t)r_images;
     uintptr_t last = (uintptr_t)(r_images + MAX_RIMAGES);
     uintptr_t ptr = (uintptr_t)image;
-    if (ptr < first || ptr >= last || !pic)
+    if (!pic)
         return true;
 
-    uint32_t index = image - r_images;
+    uint32_t index;
+    if (ptr >= first && ptr < last) {
+        index = image - r_images;
+    } else {
+        index = vk_alloc_temp_texture_index();
+        if (!index) {
+            Com_SetLastError("No free Vulkan texture slots");
+            return false;
+        }
+    }
+
     vk_texture_t *texture = &vk.textures[index];
 
     uint32_t width = image->upload_width;
@@ -2072,10 +2092,12 @@ static void vk_destroy_texture_resource(vk_texture_t *texture)
 static void vk_destroy_texture(image_t *image)
 {
     unsigned index = image->texnum;
-    if (!index || index >= MAX_RIMAGES)
-        return;
+    unsigned index2 = image->texnum2;
 
-    vk_destroy_texture_resource(&vk.textures[index]);
+    if (index && index < MAX_RIMAGES)
+        vk_destroy_texture_resource(&vk.textures[index]);
+    if (index2 && index2 < MAX_RIMAGES && index2 != index)
+        vk_destroy_texture_resource(&vk.textures[index2]);
     image->texnum = image->texnum2 = 0;
 }
 
