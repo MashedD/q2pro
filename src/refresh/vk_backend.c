@@ -1971,6 +1971,7 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
 
     vk_destroy_texture_resource(texture);
     *texture = uploaded;
+    c.texUploads++;
     return true;
 
 fail:
