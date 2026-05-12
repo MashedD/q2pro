@@ -8171,6 +8171,8 @@ bool VKR_Init(bool total)
     vk_modulate_entities = Cvar_Get("gl_modulate_entities", "1", 0);
     vk_doublelight_entities = Cvar_Get("gl_doublelight_entities", "1", 0);
     vk_fontshadow = Cvar_Get("gl_fontshadow", "0", 0);
+    gl_glowmap_intensity = Cvar_Get("gl_glowmap_intensity", "0.75", 0);
+    r_lava_glowmaps = Cvar_Get("r_lava_glowmaps", "1", 0);
     vk_modulate_world = Cvar_Get("gl_modulate_world", "1", 0);
     vk_coloredlightmaps = Cvar_Get("gl_coloredlightmaps", "1", 0);
     vk_dynamic = Cvar_Get("gl_dynamic", "1", 0);
