@@ -5728,7 +5728,8 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             c.trisDrawn += face->index_count / 3;
             c.batchesDrawn++;
 
-            if (vk_world_face_glowmap_enabled(face->face, image)) {
+            if (pass == VK_WORLD_OPAQUE &&
+                vk_world_face_glowmap_enabled(face->face, image)) {
                 const vk_texture_t *glow = vk_texture_for_index(image->texnum2, true);
                 if (glow) {
                     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -6676,7 +6677,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
             if (glow) {
                 vk_alias_push_t glow_push = push;
 
-                glow_push.intensity = 1.0f;
+                glow_push.intensity = vk_glowmap_intensity();
                 vk_draw_alias_pass(cmd, vk.alias_blend_pipeline, buffers, offsets,
                                    model, batch, glow, &glow_push);
             }
