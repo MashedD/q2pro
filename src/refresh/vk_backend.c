@@ -650,6 +650,7 @@ static void vk_unload_image(image_t *image)
 static const image_upload_t vk_image_upload = {
     .load = vk_upload_image,
     .unload = vk_unload_image,
+    .glowmaps = true,
 };
 
 static bool vk_fail_result(const char *what, VkResult result)
