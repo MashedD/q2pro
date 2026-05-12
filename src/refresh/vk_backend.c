@@ -416,8 +416,12 @@ typedef struct {
     vk_mesh_t test_triangle;
     vk_mesh_t skybox;
     vk_mesh_t sprite_quad;
+    vk_buffer_t sprite_quad_line_indices;
+    uint32_t sprite_quad_line_index_count;
     vk_mesh_t null_model;
     vk_mesh_t beam_cylinder;
+    vk_buffer_t beam_cylinder_line_indices;
+    uint32_t beam_cylinder_line_index_count;
     vk_buffer_t debug_lines;
     vk_buffer_t debug_text_vertices;
     vk_buffer_t debug_text_indices;
@@ -4810,9 +4814,30 @@ static bool vk_create_sprite_quad(void)
         { { 1.0f, 1.0f, 0.0f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
     };
     static const uint32_t indices[] = { 0, 1, 2, 2, 1, 3 };
+    uint32_t line_index_count;
+    uint32_t *line_indices;
 
-    return vk_upload_mesh(&vk.sprite_quad, vertices, q_countof(vertices),
-                          indices, q_countof(indices));
+    if (!vk_upload_mesh(&vk.sprite_quad, vertices, q_countof(vertices),
+                        indices, q_countof(indices)))
+        return false;
+
+    line_indices = vk_build_line_indices(indices, q_countof(indices),
+                                         &line_index_count);
+    if (!line_indices)
+        return true;
+
+    vk_destroy_buffer(&vk.sprite_quad_line_indices);
+    vk.sprite_quad_line_index_count = 0;
+    if (!vk_upload_buffer(&vk.sprite_quad_line_indices, line_indices,
+                          sizeof(*line_indices) * line_index_count,
+                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
+        Z_Free(line_indices);
+        return false;
+    }
+
+    Z_Free(line_indices);
+    vk.sprite_quad_line_index_count = line_index_count;
+    return true;
 }
 
 #define VK_BEAM_POINTS 12
@@ -4821,6 +4846,8 @@ static bool vk_create_beam_cylinder(void)
 {
     vk_vertex_t vertices[VK_BEAM_POINTS * 2];
     uint32_t indices[VK_BEAM_POINTS * 6];
+    uint32_t line_index_count;
+    uint32_t *line_indices;
     const float white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 
     for (uint32_t i = 0; i < VK_BEAM_POINTS; i++) {
@@ -4846,8 +4873,27 @@ static bool vk_create_beam_cylinder(void)
         indices[i * 6 + 5] = j;
     }
 
-    return vk_upload_mesh(&vk.beam_cylinder, vertices, q_countof(vertices),
-                          indices, q_countof(indices));
+    if (!vk_upload_mesh(&vk.beam_cylinder, vertices, q_countof(vertices),
+                        indices, q_countof(indices)))
+        return false;
+
+    line_indices = vk_build_line_indices(indices, q_countof(indices),
+                                         &line_index_count);
+    if (!line_indices)
+        return true;
+
+    vk_destroy_buffer(&vk.beam_cylinder_line_indices);
+    vk.beam_cylinder_line_index_count = 0;
+    if (!vk_upload_buffer(&vk.beam_cylinder_line_indices, line_indices,
+                          sizeof(*line_indices) * line_index_count,
+                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
+        Z_Free(line_indices);
+        return false;
+    }
+
+    Z_Free(line_indices);
+    vk.beam_cylinder_line_index_count = line_index_count;
+    return true;
 }
 
 static bool vk_create_null_model(void)
@@ -5815,6 +5861,29 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         }
     }
+}
+
+static void vk_draw_fx_outlines(const vk_mesh_t *mesh, const vk_buffer_t *indices,
+                                uint32_t index_count, const mat4_t mvp)
+{
+    if (!gl_showtris || !(gl_showtris->integer & SHOWTRIS_FX) ||
+        !vk.render_pass_active || !vk.line3d_pipeline || !mesh || !indices ||
+        !mesh->vertices.buffer || !indices->buffer || !index_count)
+        return;
+
+    vk_color3d_push_t push;
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    Vector4Set(push.color, 1.0f, 0.0f, 0.0f, 1.0f);
+
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.line3d_pipeline);
+    vk_bind_vertex_buffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, indices->buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk_push_constants(cmd, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, index_count, 1, 0, 0, 0);
+    c.batchesDrawn++;
 }
 
 static void vk_sky_mvp(mat4_t out, const refdef_t *fd)
@@ -6826,6 +6895,8 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.sprite_quad.index_count / 3;
     c.batchesDrawn++;
+    vk_draw_fx_outlines(&vk.sprite_quad, &vk.sprite_quad_line_indices,
+                        vk.sprite_quad_line_index_count, mvp);
 }
 
 static bool vk_flare_occluded(const entity_t *ent, const refdef_t *fd)
@@ -6996,6 +7067,8 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.sprite_quad.index_count / 3;
     c.batchesDrawn++;
+    vk_draw_fx_outlines(&vk.sprite_quad, &vk.sprite_quad_line_indices,
+                        vk.sprite_quad_line_index_count, mvp);
 }
 
 #define VK_PARTICLE_SIZE    (1.0f + M_SQRT1_2f)
@@ -7081,6 +7154,15 @@ static void vk_draw_particles(const refdef_t *fd)
         vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
         c.trisDrawn += vk.sprite_quad.index_count / 3;
         c.batchesDrawn++;
+        vk_draw_fx_outlines(&vk.sprite_quad, &vk.sprite_quad_line_indices,
+                            vk.sprite_quad_line_index_count, mvp);
+        if (gl_showtris && (gl_showtris->integer & SHOWTRIS_FX)) {
+            vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
+            vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0,
+                                  VK_INDEX_TYPE_UINT32);
+            vk_bind_texture_descriptor(cmd, vk.particle_texture.descriptor_set);
+        }
     }
 }
 
@@ -7133,6 +7215,15 @@ static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.sprite_quad.index_count / 3;
     c.batchesDrawn++;
+    vk_draw_fx_outlines(&vk.sprite_quad, &vk.sprite_quad_line_indices,
+                        vk.sprite_quad_line_index_count, mvp);
+    if (gl_showtris && (gl_showtris->integer & SHOWTRIS_FX)) {
+        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sprite_pipeline);
+        vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
+        vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0,
+                              VK_INDEX_TYPE_UINT32);
+        vk_bind_texture_descriptor(cmd, vk.beam_texture.descriptor_set);
+    }
 }
 
 static void vk_draw_poly_beam_segment(const vec3_t start, const vec3_t end,
@@ -7183,6 +7274,10 @@ static void vk_draw_poly_beam_segment(const vec3_t start, const vec3_t end,
     vk.CmdDrawIndexed(cmd, vk.beam_cylinder.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.beam_cylinder.index_count / 3;
     c.batchesDrawn++;
+    vk_draw_fx_outlines(&vk.beam_cylinder, &vk.beam_cylinder_line_indices,
+                        vk.beam_cylinder_line_index_count, mvp);
+    if (gl_showtris && (gl_showtris->integer & SHOWTRIS_FX))
+        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.beam_pipeline);
 }
 
 #define VK_MIN_LIGHTNING_SEGMENTS   3
@@ -8426,8 +8521,12 @@ void VKR_Shutdown(bool total)
     vk_destroy_mesh(&vk.test_triangle);
     vk_destroy_mesh(&vk.skybox);
     vk_destroy_mesh(&vk.sprite_quad);
+    vk_destroy_buffer(&vk.sprite_quad_line_indices);
+    vk.sprite_quad_line_index_count = 0;
     vk_destroy_mesh(&vk.null_model);
     vk_destroy_mesh(&vk.beam_cylinder);
+    vk_destroy_buffer(&vk.beam_cylinder_line_indices);
+    vk.beam_cylinder_line_index_count = 0;
     vk_destroy_buffer(&vk.debug_lines);
     vk_destroy_buffer(&vk.debug_text_vertices);
     vk_destroy_buffer(&vk.debug_text_indices);
