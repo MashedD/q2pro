@@ -2294,6 +2294,9 @@ static void SCR_Draw2D(void)
 
     // crosshair has its own color and alpha
     SCR_DrawCrosshair();
+
+    // restore default color for subsequent drawing (console, UI)
+    R_ClearColor();
 }
 
 static void SCR_DrawActive(void)
