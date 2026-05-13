@@ -537,6 +537,29 @@ static bool CL_GetPlayerHighlight(const centity_state_t *state, item_highlight_t
     return true;
 }
 
+static uint64_t CL_GetPlayerPowerupHighlightShell(unsigned effects)
+{
+    bool quad = effects & EF_QUAD;
+    bool pent = effects & EF_PENT;
+
+    if (quad && pent)
+        return RF_SHELL_RED | RF_SHELL_BLUE;
+    if (quad)
+        return RF_SHELL_BLUE;
+    if (pent)
+        return RF_SHELL_RED;
+
+    return 0;
+}
+
+static uint64_t CL_GetPlayerHighlightShell(uint64_t player_shell, uint64_t powerup_shell)
+{
+    if (!powerup_shell)
+        return player_shell;
+
+    return (cl.time / 500) & 1 ? powerup_shell : player_shell;
+}
+
 static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *highlight)
 {
     const char *model;
@@ -704,6 +727,7 @@ static void CL_AddPacketEntities(void)
     item_highlight_t        player_highlight;
     bool                    has_item_highlight;
     bool                    has_player_highlight;
+    uint64_t                player_powerup_highlight_shell;
 
     // bonus items rotate at a fixed rate
     autorotate = anglemod(cl.time * 0.1f);
@@ -727,6 +751,7 @@ static void CL_AddPacketEntities(void)
         renderfx = s1->renderfx;
         has_item_highlight = CL_GetItemHighlight(s1, &item_highlight);
         has_player_highlight = CL_GetPlayerHighlight(s1, &player_highlight);
+        player_powerup_highlight_shell = CL_GetPlayerPowerupHighlightShell(s1->effects);
 
         // set frame
         if (effects & EF_ANIM01)
@@ -777,7 +802,10 @@ static void CL_AddPacketEntities(void)
 
         if (has_player_highlight) {
             effects |= EF_COLOR_SHELL;
-            renderfx |= player_highlight.shell;
+            if (player_powerup_highlight_shell)
+                renderfx &= ~RF_SHELL_MASK;
+            renderfx |= CL_GetPlayerHighlightShell(player_highlight.shell,
+                                                   player_powerup_highlight_shell);
         }
 
         // optionally remove the glowing effect
