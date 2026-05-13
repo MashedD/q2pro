@@ -1124,7 +1124,8 @@ static void CL_AddPacketEntities(void)
                 i = (s1->skinnum >> 8); // 0 is default weapon model
                 if (cl.csr.extended)
                     i &= 0xff;
-                has_weapon_highlight = CL_GetWeaponHighlight(i, &weapon_highlight);
+                has_weapon_highlight = cl_itemhighlight->integer ?
+                    CL_GetWeaponHighlight(i, &weapon_highlight) : false;
                 if (i < 0 || i > cl.numWeaponModels - 1)
                     i = 0;
                 ent.model = ci->weaponmodel[i];
