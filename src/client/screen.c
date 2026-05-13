@@ -80,6 +80,7 @@ static cvar_t   *scr_font;
 static cvar_t   *scr_scale;
 
 static cvar_t   *scr_crosshair;
+static cvar_t   *scr_crosshair_paused;
 
 static cvar_t   *scr_chathud;
 static cvar_t   *scr_chathud_lines;
@@ -1412,6 +1413,7 @@ void SCR_Init(void)
     scr_scale->changed = scr_scale_changed;
     scr_crosshair = Cvar_Get("crosshair", "0", CVAR_ARCHIVE);
     scr_crosshair->changed = scr_crosshair_changed;
+    scr_crosshair_paused = Cvar_Get("crosshair_paused", "1", 0);
 
     scr_netgraph = Cvar_Get("netgraph", "0", 0);
     scr_timegraph = Cvar_Get("timegraph", "0", 0);
@@ -2197,7 +2199,7 @@ static void SCR_DrawCrosshair(void)
         return;
     if (cl.frame.ps.stats[STAT_LAYOUTS] & (LAYOUTS_HIDE_HUD | LAYOUTS_HIDE_CROSSHAIR))
         return;
-    if (sv_paused->integer && cl_paused->integer)
+    if (!scr_crosshair_paused->integer && sv_paused->integer && cl_paused->integer)
         return;
 
     x = (r_config.width  - scr.crosshair_width)  / 2;

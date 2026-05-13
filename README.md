@@ -34,7 +34,6 @@ features include:
 
 - fixed playback of some demos
 - fixed `ch_scale` so that `scr_scale` doesn't affect crosshair size
-- don't draw crosshair on top of "Paused" image
 - fixed compilation warnings
 - fixed problem with displaying excessive items in address book after
   quickly switching from Server Browser
@@ -46,6 +45,7 @@ features include:
 - building: win64 build uses now `OpenAL64.dll` instead of `OpenAL32.dll`,
   so now win32 and win64 binaries can live next to each other (optional)
 - building: win build has OpenAL library hard linked now
+- with `crosshair_paused 1` don't draw crosshair on top of "Paused" image
 - lin64 build now looks for game files in current folder
   instead of `$HOME/.q2pro` as it was not XDG Base Directory Specification
   compliant
