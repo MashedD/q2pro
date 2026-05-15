@@ -4712,6 +4712,19 @@ static bool vk_alias_model_culled(const vk_model_t *model, const entity_t *ent,
                     model->alias_frames[oldframe].bounds, bounds);
     }
 
+    if (!VectorEmpty(ent->angles) || (ent->scale && ent->scale != 1.0f)) {
+        float radius = max(model->alias_frames[frame].radius,
+                           model->alias_frames[oldframe].radius);
+        radius *= ent->scale ? ent->scale : 1.0f;
+
+        for (int i = 0; i < 4; i++) {
+            if (PlaneDiffFast(ent->origin, &vk.world.frustum[i]) < -radius) {
+                c.spheresCulled++;
+                return true;
+            }
+        }
+    }
+
     for (int i = 0; i < 8; i++) {
         VectorCopy(ent->origin, points[i]);
         VectorMA(points[i], bounds[(i >> 0) & 1][0], axis[0], points[i]);
