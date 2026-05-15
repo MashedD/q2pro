@@ -5514,20 +5514,6 @@ static void vk_world_light_params(const mface_t *face, float color[4], float scr
     scroll[3] = Cvar_ClampValue(vk_brightness, -1.0f, 1.0f);
 }
 
-static void vk_world_face_center(const vk_world_face_t *face, const entity_t *ent,
-                                 const vec3_t axis[3], vec3_t center)
-{
-    if (!ent || !axis) {
-        VectorCopy(face->center, center);
-        return;
-    }
-
-    VectorCopy(ent->origin, center);
-    VectorMA(center, face->center[0], axis[0], center);
-    VectorMA(center, face->center[1], axis[1], center);
-    VectorMA(center, face->center[2], axis[2], center);
-}
-
 static bool vk_dynamic_lights_enabled(void)
 {
     return (!vk_dynamic || vk_dynamic->integer == 1) &&
@@ -5607,11 +5593,12 @@ static void vk_world_face_light_origin(const dlight_t *light, const entity_t *en
 }
 
 static float vk_world_dynamic_light_fraction(const dlight_t *light,
-                                             const vec3_t origin, const vec3_t center,
+                                             const mface_t *face,
+                                             const vec3_t origin,
                                              float plane_dist)
 {
     float rad = light->intensity - fabsf(plane_dist);
-    float minlight, scale, dist, dist2;
+    float minlight, scale, dist;
 
     if (rad < DLIGHT_CUTOFF)
         return 0.0f;
@@ -5624,9 +5611,19 @@ static float vk_world_dynamic_light_fraction(const dlight_t *light,
         scale = 1.0f;
     }
 
-    dist = Distance(origin, center);
-    dist2 = dist * dist - plane_dist * plane_dist;
-    dist = dist2 > 0.0f ? sqrtf(dist2) : 0.0f;
+    vec3_t point;
+    vec2_t local;
+    float s, t, sd, td;
+
+    VectorMA(origin, -plane_dist, face->plane->normal, point);
+    local[0] = DotProduct(point, face->lm_axis[0]) + face->lm_offset[0];
+    local[1] = DotProduct(point, face->lm_axis[1]) + face->lm_offset[1];
+
+    s = Q_clipf(local[0], 0.0f, max(face->lm_width - 1, 0));
+    t = Q_clipf(local[1], 0.0f, max(face->lm_height - 1, 0));
+    sd = fabsf(local[0] - s) * face->lm_scale[0];
+    td = fabsf(local[1] - t) * face->lm_scale[1];
+    dist = sd > td ? sd + td * 0.5f : td + sd * 0.5f;
 
     if (dist >= minlight)
         return 0.0f;
@@ -5638,8 +5635,6 @@ static void vk_world_dynamic_light(const vk_world_face_t *face,
                                    const refdef_t *fd, const entity_t *ent,
                                    const vec3_t axis[3], float dlight[4])
 {
-    vec3_t center;
-
     Vector4Clear(dlight);
 
     if (!face || !face->face || !face->face->plane ||
@@ -5648,17 +5643,15 @@ static void vk_world_dynamic_light(const vk_world_face_t *face,
         (face->face->drawflags & vk.world.nolm_mask))
         return;
 
-    vk_world_face_center(face, ent, axis, center);
-
     for (int i = 0; i < fd->num_dlights; i++) {
         const dlight_t *light = &fd->dlights[i];
         vec3_t light_origin;
-        float plane_dist = fabsf(vk_world_face_light_plane_dist(face->face, light,
-                                                                ent, axis));
+        float plane_dist = vk_world_face_light_plane_dist(face->face, light,
+                                                         ent, axis);
         float f;
 
         vk_world_face_light_origin(light, ent, axis, light_origin);
-        f = vk_world_dynamic_light_fraction(light, light_origin, center, plane_dist);
+        f = vk_world_dynamic_light_fraction(light, face->face, light_origin, plane_dist);
         if (f <= 0.0f)
             continue;
 
@@ -6769,6 +6762,9 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     if (!model || model->type != VK_MODEL_ALIAS ||
         !model->mesh.vertices.buffer || !model->mesh.indices.buffer ||
         !model->vertex_count || !model->alias_batch_count)
+        return;
+
+    if (ent->flags & RF_BLOOM_ONLY)
         return;
 
     vec3_t axis[3];
@@ -8409,6 +8405,8 @@ bool VKR_Init(bool total)
     vk_clearcolor->generator = Com_Color_g;
     vk_polyblend = Cvar_Get("gl_polyblend", "1", 0);
     vk_damageblend_frac = Cvar_Get("gl_damageblend_frac", "0.2", 0);
+    gl_bloom = Cvar_Get("gl_bloom", "0", 0);
+    Cvar_Get("gl_showbloom", "0", CVAR_CHEAT);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_cull_nodes = Cvar_Get("gl_cull_nodes", "1", 0);
