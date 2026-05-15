@@ -38,6 +38,7 @@ features include:
 - fixed problem with displaying excessive items in address book after
   quickly switching from Server Browser
 - fixed OpenTDM crash on Windows when loading q2dm1 twice
+- fixed audio switching on Windows (for example when plugging in headphones)
 
 # Changes
 

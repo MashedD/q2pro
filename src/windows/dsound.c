@@ -20,6 +20,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "client/sound/dma.h"
 #include <mmsystem.h>
 #include <dsound.h>
+#include <initguid.h>
+#include <mmdeviceapi.h>
+#include <objbase.h>
 
 typedef HRESULT (WINAPI *LPDIRECTSOUNDCREATE)(LPCGUID, LPDIRECTSOUND *, LPUNKNOWN);
 
@@ -39,6 +42,20 @@ static HINSTANCE hInstDS;
 
 static DWORD        gSndBufSize;
 
+/*
+ * Audio endpoint notification via IMMNotificationClient.
+ * Detects default device changes (headphones, HDMI, etc.)
+ * and triggers snd_restart.
+ */
+typedef struct {
+    const IMMNotificationClientVtbl *lpVtbl;
+    LONG refcount;
+} AudioNotificationClient;
+
+static IMMDeviceEnumerator     *g_enumerator;
+static volatile long            g_deviceChanged;
+static bool                     g_comOurs;   /* we called CoInitializeEx */
+
 static const char *DSoundError(int error)
 {
     switch (error) {
@@ -53,6 +70,118 @@ static const char *DSoundError(int error)
     }
 
     return "<unknown error>";
+}
+
+/* ---- IMMNotificationClient implementation ---- */
+
+static HRESULT STDMETHODCALLTYPE notif_QueryInterface(
+    IMMNotificationClient *This, REFIID riid, void **ppv)
+{
+    if (IsEqualGUID(riid, &IID_IUnknown) ||
+        IsEqualGUID(riid, &IID_IMMNotificationClient)) {
+        *ppv = This;
+        This->lpVtbl->AddRef(This);
+        return S_OK;
+    }
+    *ppv = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE notif_AddRef(IMMNotificationClient *This)
+{
+    AudioNotificationClient *c = (AudioNotificationClient *)This;
+    return InterlockedIncrement(&c->refcount);
+}
+
+static ULONG STDMETHODCALLTYPE notif_Release(IMMNotificationClient *This)
+{
+    AudioNotificationClient *c = (AudioNotificationClient *)This;
+    return InterlockedDecrement(&c->refcount);
+}
+
+static HRESULT STDMETHODCALLTYPE notif_OnDeviceStateChanged(
+    IMMNotificationClient *This, LPCWSTR id, DWORD state)
+{
+    (void)This; (void)id; (void)state;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE notif_OnDeviceAdded(
+    IMMNotificationClient *This, LPCWSTR id)
+{
+    (void)This; (void)id;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE notif_OnDeviceRemoved(
+    IMMNotificationClient *This, LPCWSTR id)
+{
+    (void)This; (void)id;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE notif_OnDefaultDeviceChanged(
+    IMMNotificationClient *This, EDataFlow flow, ERole role, LPCWSTR id)
+{
+    (void)This; (void)role; (void)id;
+    if (flow == eRender)
+        InterlockedExchange(&g_deviceChanged, 1);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE notif_OnPropertyValueChanged(
+    IMMNotificationClient *This, LPCWSTR id, const PROPERTYKEY key)
+{
+    (void)This; (void)id; (void)key;
+    return S_OK;
+}
+
+static const IMMNotificationClientVtbl g_notifVtbl = {
+    notif_QueryInterface,
+    notif_AddRef,
+    notif_Release,
+    notif_OnDeviceStateChanged,
+    notif_OnDeviceAdded,
+    notif_OnDeviceRemoved,
+    notif_OnDefaultDeviceChanged,
+    notif_OnPropertyValueChanged
+};
+
+static AudioNotificationClient g_notifClient = {
+    &g_notifVtbl,
+    1
+};
+
+static void DS_RegisterNotification(void)
+{
+    HRESULT hr;
+
+    hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL,
+                          CLSCTX_ALL, &IID_IMMDeviceEnumerator,
+                          (void **)&g_enumerator);
+    if (FAILED(hr)) {
+        Com_DPrintf("DS: CoCreateInstance(MMDeviceEnumerator) failed 0x%lx\n", hr);
+        return;
+    }
+
+    hr = g_enumerator->lpVtbl->RegisterEndpointNotificationCallback(
+            g_enumerator, (IMMNotificationClient *)&g_notifClient);
+    if (FAILED(hr)) {
+        Com_DPrintf("DS: RegisterEndpointNotificationCallback failed 0x%lx\n", hr);
+        g_enumerator->lpVtbl->Release(g_enumerator);
+        g_enumerator = NULL;
+    }
+}
+
+static void DS_UnregisterNotification(void)
+{
+    if (!g_enumerator)
+        return;
+
+    g_enumerator->lpVtbl->UnregisterEndpointNotificationCallback(
+        g_enumerator, (IMMNotificationClient *)&g_notifClient);
+    g_enumerator->lpVtbl->Release(g_enumerator);
+    g_enumerator = NULL;
 }
 
 /*
@@ -105,6 +234,13 @@ static void DS_Shutdown(void)
         Com_DPrintf("...freeing DSOUND.DLL\n");
         FreeLibrary(hInstDS);
         hInstDS = NULL;
+    }
+
+    DS_UnregisterNotification();
+
+    if (g_comOurs) {
+        CoUninitialize();
+        g_comOurs = false;
     }
 
     pDS = NULL;
@@ -286,6 +422,14 @@ static sndinitstat_t DS_Init(void)
         return SIS_FAILURE;
     }
 
+    /* Init COM for audio endpoint notification */
+    if (!g_comOurs) {
+        HRESULT cohr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+        g_comOurs = SUCCEEDED(cohr);
+    }
+    if (g_comOurs)
+        DS_RegisterNotification();
+
     Com_Printf("DirectSound initialized\n");
 
     return SIS_SUCCESS;
@@ -310,6 +454,9 @@ static void DS_BeginPainting(void)
     HRESULT hresult;
     DWORD   dwStatus, dwWrite;
     MMTIME  mmtime;
+
+    if (InterlockedExchange(&g_deviceChanged, 0))
+        cvar_modified |= CVAR_SOUND;
 
     if (!pDSBuf)
         return;
