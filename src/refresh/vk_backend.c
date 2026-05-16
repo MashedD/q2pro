@@ -497,6 +497,7 @@ static cvar_t *vk_dotshading;
 static cvar_t *vk_draworder;
 static cvar_t *vk_showorigins;
 static cvar_t *vk_showtearing;
+static cvar_t *vk_showbloom;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
 #endif
@@ -4770,6 +4771,21 @@ static bool vk_bloom_enabled(void)
         vk.blur_texture.descriptor_set;
 }
 
+static bool vk_alias_model_has_glowmap(const vk_model_t *model)
+{
+    if (!model || model->type != VK_MODEL_ALIAS || !model->skins)
+        return false;
+
+    for (int i = 0; i < model->skin_count; i++) {
+        const image_t *skin = model->skins[i];
+
+        if (skin && skin->texnum2 && skin->texnum2 < MAX_RIMAGES)
+            return true;
+    }
+
+    return false;
+}
+
 static void vk_composite_scene_texture(void)
 {
     const vec4_t color = { 1.0f, 1.0f, 1.0f, 1.0f };
@@ -6129,6 +6145,32 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             const image_t *image = vk_world_face_image(face->face, fd, ent);
             if (!image || image->texnum >= MAX_RIMAGES)
                 continue;
+
+            if (vk.drawing_bloom) {
+                if (!vk_world_face_glowmap_enabled(face->face, image))
+                    continue;
+
+                const vk_texture_t *glow = vk_texture_for_index(image->texnum2, true);
+                if (!glow)
+                    continue;
+
+                vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                   vk.world_glow_pipeline);
+                vk_bind_texture_descriptor(cmd, glow->descriptor_set);
+                push.intensity = vk_glowmap_intensity();
+                push.color[0] = 1.0f;
+                push.color[1] = 1.0f;
+                push.color[2] = 1.0f;
+                push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
+                Vector4Clear(push.dlight);
+                vk_world_face_scroll(face->face, fd ? fd->time : 0.0f, push.scroll);
+                vk_push_constants(cmd, sizeof(push), &push);
+                vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
+                c.trisDrawn += face->index_count / 3;
+                c.batchesDrawn++;
+                continue;
+            }
+
             if (image->texnum != bound_texture_index) {
                 texture = vk_texture_for_index(image->texnum, true);
                 if (!texture)
@@ -7069,13 +7111,18 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     vk_model_t *model = vk_model_for_handle(ent->model);
 
     bool translucent = ent->flags & RF_TRANSLUCENT;
+    bool bloom_only = ent->flags & RF_BLOOM_ONLY;
+    bool bloom_shell = (ent->flags & RF_SHELL_MASK) && !(ent->flags & RF_NOBLOOM);
 
     if (!model || model->type != VK_MODEL_ALIAS ||
         !model->mesh.vertices.buffer || !model->mesh.indices.buffer ||
         !model->vertex_count || !model->alias_batch_count)
         return;
 
-    if ((ent->flags & RF_BLOOM_ONLY) && !vk.drawing_bloom)
+    if (bloom_only && !vk.drawing_bloom)
+        return;
+    if (vk.drawing_bloom && !bloom_only && !bloom_shell &&
+        !vk_alias_model_has_glowmap(model))
         return;
 
     vec3_t axis[3];
@@ -7120,25 +7167,25 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         if (!texture)
             continue;
 
-        if (translucent)
+        if (vk.drawing_bloom)
+            pipeline = (bloom_only || bloom_shell) ? vk.alias_blend_pipeline : VK_NULL_HANDLE;
+        else if (translucent)
             pipeline = vk.alias_blend_pipeline;
         else if ((skin->flags & IF_TRANSPARENT) && vk.alias_alpha_pipeline)
             pipeline = vk.alias_alpha_pipeline;
         else
             pipeline = vk.alias_pipeline;
 
-        if (!pipeline)
-            continue;
-
-        if (translucent &&
+        if (!vk.drawing_bloom && translucent &&
             (ent->flags & (RF_FULLBRIGHT | RF_BLOOM_ONLY)) == 0 &&
             vk.alias_depth_pipeline) {
             vk_draw_alias_pass(cmd, vk.alias_depth_pipeline, buffers, offsets,
                                model, batch, texture, &push);
         }
 
-        vk_draw_alias_pass(cmd, pipeline, buffers, offsets, model, batch,
-                           texture, &push);
+        if (pipeline)
+            vk_draw_alias_pass(cmd, pipeline, buffers, offsets, model, batch,
+                               texture, &push);
         if (skin->texnum2 && skin->texnum2 < MAX_RIMAGES &&
             vk.alias_blend_pipeline) {
             const vk_texture_t *glow = vk_texture_for_index(skin->texnum2, true);
@@ -7151,11 +7198,13 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
                                    model, batch, glow, &glow_push);
             }
         }
-        vk_draw_alias_outlines(cmd, buffers, offsets, model, batch,
-                               texture, &push, ent, fd);
+        if (!vk.drawing_bloom)
+            vk_draw_alias_outlines(cmd, buffers, offsets, model, batch,
+                                   texture, &push, ent, fd);
     }
 
-    vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp);
+    if (!vk.drawing_bloom)
+        vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp);
 }
 
 static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
@@ -7890,6 +7939,7 @@ typedef enum {
     VK_ENTITY_BEAM,
     VK_ENTITY_ALPHA_FRONT,
     VK_ENTITY_BLOOM_ONLY,
+    VK_ENTITY_BLOOM_SOURCE,
 } vk_entity_pass_t;
 
 static bool vk_entity_in_pass(const entity_t *ent, vk_entity_pass_t pass)
@@ -7902,6 +7952,20 @@ static bool vk_entity_in_pass(const entity_t *ent, vk_entity_pass_t pass)
 
     if (pass == VK_ENTITY_BLOOM_ONLY)
         return false;
+
+    if (pass == VK_ENTITY_BLOOM_SOURCE) {
+        if (ent->flags & RF_FLARE)
+            return false;
+        if (ent->model & BIT(31))
+            return false;
+
+        vk_model_t *model = vk_model_for_handle(ent->model);
+        if (!model || model->type != VK_MODEL_ALIAS)
+            return false;
+
+        return ((ent->flags & RF_SHELL_MASK) && !(ent->flags & RF_NOBLOOM)) ||
+            vk_alias_model_has_glowmap(model);
+    }
 
     if (ent->flags & RF_FLARE)
         return pass == VK_ENTITY_ALPHA_FRONT;
@@ -7977,6 +8041,34 @@ static void vk_draw_bloom_only_entities(const refdef_t *fd)
     vk.drawing_bloom = true;
     vk_set_3d_viewport(fd);
     vk_draw_entities(fd, VK_ENTITY_BLOOM_ONLY);
+    vk.drawing_bloom = old;
+}
+
+static void vk_draw_bloom_source_entities(const refdef_t *fd)
+{
+    bool old = vk.drawing_bloom;
+
+    vk.drawing_bloom = true;
+    vk_set_3d_viewport(fd);
+    vk_draw_entities(fd, VK_ENTITY_BLOOM_SOURCE);
+    vk.drawing_bloom = old;
+}
+
+static void vk_draw_bloom_world_glowmaps(const refdef_t *fd)
+{
+    if (!fd || (fd->rdflags & RDF_NOWORLDMODEL) ||
+        (vk_drawworld && !vk_drawworld->integer) ||
+        !vk.world.mesh.index_count || !vk.world_glow_pipeline)
+        return;
+
+    bool old = vk.drawing_bloom;
+    mat4_t mvp;
+
+    vk.drawing_bloom = true;
+    vk_set_3d_viewport(fd);
+    vk_world_mvp(mvp, fd);
+    vk_draw_world_mesh(mvp, false, vk.world_pipeline, VK_WORLD_OPAQUE,
+                       1.0f, fd, NULL, NULL);
     vk.drawing_bloom = old;
 }
 
@@ -8697,6 +8789,7 @@ bool VKR_Init(bool total)
     vk_draworder = Cvar_Get("gl_draworder", "1", 0);
     vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
     vk_showtearing = Cvar_Get("gl_showtearing", "0", CVAR_CHEAT);
+    vk_showbloom = Cvar_Get("gl_showbloom", "0", CVAR_CHEAT);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
 #endif
@@ -8734,7 +8827,6 @@ bool VKR_Init(bool total)
     vk_polyblend = Cvar_Get("gl_polyblend", "1", 0);
     vk_damageblend_frac = Cvar_Get("gl_damageblend_frac", "0.2", 0);
     gl_bloom = Cvar_Get("gl_bloom", "0", 0);
-    Cvar_Get("gl_showbloom", "0", CVAR_CHEAT);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_cull_nodes = Cvar_Get("gl_cull_nodes", "1", 0);
@@ -9710,8 +9802,11 @@ void VKR_EndFrame(void)
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
         vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer);
         vk_draw_fullscreen_texture(vk.bloom_extract_pipeline, &vk.scene_texture, white);
-        if (vk.fd_valid)
+        if (vk.fd_valid) {
+            vk_draw_bloom_world_glowmaps(&vk.fd);
+            vk_draw_bloom_source_entities(&vk.fd);
             vk_draw_bloom_only_entities(&vk.fd);
+        }
         vk.CmdEndRenderPass(cmd);
         vk.render_pass_active = false;
 
@@ -9747,8 +9842,12 @@ void VKR_EndFrame(void)
                                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
         vk_begin_render_pass(vk.render_pass, vk.framebuffers[vk.current_image]);
-        vk_composite_scene_texture();
-        vk_draw_fullscreen_texture(vk.bloom_add_pipeline, &vk.bloom_texture, white);
+        if (vk_showbloom && vk_showbloom->integer) {
+            vk_draw_fullscreen_texture(vk.texture_pipeline, &vk.bloom_texture, white);
+        } else {
+            vk_composite_scene_texture();
+            vk_draw_fullscreen_texture(vk.bloom_add_pipeline, &vk.bloom_texture, white);
+        }
     }
 
     if (vk.render_pass_active) {
