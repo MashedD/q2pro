@@ -493,6 +493,7 @@ static cvar_t *vk_draworder;
 static cvar_t *vk_showorigins;
 static cvar_t *vk_showtearing;
 static cvar_t *vk_showbloom;
+static cvar_t *vk_bloom_sigma;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
 #endif
@@ -8030,6 +8031,16 @@ static void vk_draw_bloom_only_entities(const refdef_t *fd)
     vk.drawing_bloom = old;
 }
 
+static void vk_draw_bloom_beams(const refdef_t *fd)
+{
+    bool old = vk.drawing_bloom;
+
+    vk.drawing_bloom = true;
+    vk_set_3d_viewport(fd);
+    vk_draw_entities(fd, VK_ENTITY_BEAM);
+    vk.drawing_bloom = old;
+}
+
 static void vk_draw_bloom_source_entities(const refdef_t *fd)
 {
     bool old = vk.drawing_bloom;
@@ -8776,6 +8787,7 @@ bool VKR_Init(bool total)
     vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
     vk_showtearing = Cvar_Get("gl_showtearing", "0", CVAR_CHEAT);
     vk_showbloom = Cvar_Get("gl_showbloom", "0", CVAR_CHEAT);
+    vk_bloom_sigma = Cvar_Get("gl_bloom_sigma", "4", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
 #endif
@@ -9759,15 +9771,18 @@ void VKR_EndFrame(void)
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     if (vk_bloom_enabled()) {
         const vec4_t white = { 1.0f, 1.0f, 1.0f, 1.0f };
+        float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
+        sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
+        sigma = max(sigma, 1.0f) / 4.0f;
         vec4_t blur_x = {
-            1.0f / max((float)vk.swapchain_extent.width, 1.0f),
+            sigma / max((float)vk.swapchain_extent.width, 1.0f),
             0.0f,
             0.0f,
             1.0f,
         };
         vec4_t blur_y = {
             0.0f,
-            1.0f / max((float)vk.swapchain_extent.height, 1.0f),
+            sigma / max((float)vk.swapchain_extent.height, 1.0f),
             0.0f,
             1.0f,
         };
@@ -9790,6 +9805,7 @@ void VKR_EndFrame(void)
         if (vk.fd_valid) {
             vk_draw_bloom_world_glowmaps(&vk.fd);
             vk_draw_bloom_source_entities(&vk.fd);
+            vk_draw_bloom_beams(&vk.fd);
             vk_draw_bloom_only_entities(&vk.fd);
         }
         vk.CmdEndRenderPass(cmd);
