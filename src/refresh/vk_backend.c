@@ -395,6 +395,7 @@ typedef struct {
     VkPipeline alias_line_pipeline;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
+    VkRenderPass bloom_render_pass;
     VkFormat swapchain_format;
     VkFormat depth_format;
     VkExtent2D swapchain_extent;
@@ -421,6 +422,7 @@ typedef struct {
     uint32_t current_image;
     bool frame_active;
     bool render_pass_active;
+    bool drawing_bloom;
     float scale;
     color_t color;
     color_t alt_color;
@@ -3132,6 +3134,11 @@ static void vk_destroy_swapchain(void)
         vk.render_pass = VK_NULL_HANDLE;
     }
 
+    if (vk.bloom_render_pass) {
+        vk.DestroyRenderPass(vk.device, vk.bloom_render_pass, NULL);
+        vk.bloom_render_pass = VK_NULL_HANDLE;
+    }
+
     if (vk.swapchain_views) {
         for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
             if (vk.swapchain_views[i])
@@ -3212,7 +3219,7 @@ static bool vk_create_render_pass(void)
             .format = vk.depth_format,
             .samples = VK_SAMPLE_COUNT_1_BIT,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
@@ -3245,6 +3252,13 @@ static bool vk_create_render_pass(void)
     };
 
     VkResult result = vk.CreateRenderPass(vk.device, &create_info, NULL, &vk.render_pass);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateRenderPass", result);
+
+    attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    result = vk.CreateRenderPass(vk.device, &create_info, NULL, &vk.bloom_render_pass);
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreateRenderPass", result);
 
@@ -3353,10 +3367,11 @@ static bool vk_create_scene_target(void)
         vk_texture_t *texture;
         VkFramebuffer *framebuffer;
         VkImageLayout *layout;
+        VkRenderPass render_pass;
     } targets[] = {
-        { &vk.scene_texture, &vk.scene_framebuffer, &vk.scene_layout },
-        { &vk.bloom_texture, &vk.bloom_framebuffer, &vk.bloom_layout },
-        { &vk.blur_texture, &vk.blur_framebuffer, &vk.blur_layout },
+        { &vk.scene_texture, &vk.scene_framebuffer, &vk.scene_layout, vk.render_pass },
+        { &vk.bloom_texture, &vk.bloom_framebuffer, &vk.bloom_layout, vk.bloom_render_pass },
+        { &vk.blur_texture, &vk.blur_framebuffer, &vk.blur_layout, vk.bloom_render_pass },
     };
 
     for (size_t i = 0; i < q_countof(targets); i++) {
@@ -3369,7 +3384,7 @@ static bool vk_create_scene_target(void)
         VkImageView attachments[] = { targets[i].texture->view, vk.depth_view };
         VkFramebufferCreateInfo create_info = {
             .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            .renderPass = vk.render_pass,
+            .renderPass = targets[i].render_pass,
             .attachmentCount = q_countof(attachments),
             .pAttachments = attachments,
             .width = vk.swapchain_extent.width,
@@ -7060,7 +7075,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         !model->vertex_count || !model->alias_batch_count)
         return;
 
-    if (ent->flags & RF_BLOOM_ONLY)
+    if ((ent->flags & RF_BLOOM_ONLY) && !vk.drawing_bloom)
         return;
 
     vec3_t axis[3];
@@ -7874,12 +7889,19 @@ typedef enum {
     VK_ENTITY_BMODEL_ALPHA,
     VK_ENTITY_BEAM,
     VK_ENTITY_ALPHA_FRONT,
+    VK_ENTITY_BLOOM_ONLY,
 } vk_entity_pass_t;
 
 static bool vk_entity_in_pass(const entity_t *ent, vk_entity_pass_t pass)
 {
     if (ent->flags & RF_BEAM)
         return pass == VK_ENTITY_BEAM;
+
+    if (ent->flags & RF_BLOOM_ONLY)
+        return pass == VK_ENTITY_BLOOM_ONLY;
+
+    if (pass == VK_ENTITY_BLOOM_ONLY)
+        return false;
 
     if (ent->flags & RF_FLARE)
         return pass == VK_ENTITY_ALPHA_FRONT;
@@ -7928,7 +7950,7 @@ static void vk_draw_entity(const entity_t *ent, const refdef_t *fd,
     else if (model->type == VK_MODEL_ALIAS)
         vk_draw_alias_model(ent, fd);
 
-    if (vk_showorigins && vk_showorigins->integer)
+    if (!vk.drawing_bloom && vk_showorigins && vk_showorigins->integer)
         vk_draw_null_model(ent, fd);
 }
 
@@ -7946,6 +7968,16 @@ static void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass)
         if (vk_entity_in_pass(ent, pass))
             vk_draw_entity(ent, fd, pass);
     }
+}
+
+static void vk_draw_bloom_only_entities(const refdef_t *fd)
+{
+    bool old = vk.drawing_bloom;
+
+    vk.drawing_bloom = true;
+    vk_set_3d_viewport(fd);
+    vk_draw_entities(fd, VK_ENTITY_BLOOM_ONLY);
+    vk.drawing_bloom = old;
 }
 
 static void vk_surface_color(const mface_t *face, float color[4])
@@ -9524,7 +9556,7 @@ out:
     return ret;
 }
 
-static void vk_begin_render_pass(VkFramebuffer framebuffer)
+static void vk_begin_render_pass(VkRenderPass render_pass, VkFramebuffer framebuffer)
 {
     VkClearValue clear[] = {
         {
@@ -9536,7 +9568,7 @@ static void vk_begin_render_pass(VkFramebuffer framebuffer)
     };
     VkRenderPassBeginInfo render_pass_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderPass = vk.render_pass,
+        .renderPass = render_pass,
         .framebuffer = framebuffer,
         .renderArea = {
             .offset = { 0, 0 },
@@ -9676,8 +9708,10 @@ void VKR_EndFrame(void)
                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        vk_begin_render_pass(vk.bloom_framebuffer);
+        vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer);
         vk_draw_fullscreen_texture(vk.bloom_extract_pipeline, &vk.scene_texture, white);
+        if (vk.fd_valid)
+            vk_draw_bloom_only_entities(&vk.fd);
         vk.CmdEndRenderPass(cmd);
         vk.render_pass_active = false;
 
@@ -9689,7 +9723,7 @@ void VKR_EndFrame(void)
                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        vk_begin_render_pass(vk.blur_framebuffer);
+        vk_begin_render_pass(vk.bloom_render_pass, vk.blur_framebuffer);
         vk_draw_fullscreen_texture(vk.bloom_blur_pipeline, &vk.bloom_texture, blur_x);
         vk.CmdEndRenderPass(cmd);
         vk.render_pass_active = false;
@@ -9702,7 +9736,7 @@ void VKR_EndFrame(void)
                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        vk_begin_render_pass(vk.bloom_framebuffer);
+        vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer);
         vk_draw_fullscreen_texture(vk.bloom_blur_pipeline, &vk.blur_texture, blur_y);
         vk.CmdEndRenderPass(cmd);
         vk.render_pass_active = false;
@@ -9712,7 +9746,7 @@ void VKR_EndFrame(void)
                                    VK_ACCESS_SHADER_READ_BIT,
                                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
-        vk_begin_render_pass(vk.framebuffers[vk.current_image]);
+        vk_begin_render_pass(vk.render_pass, vk.framebuffers[vk.current_image]);
         vk_composite_scene_texture();
         vk_draw_fullscreen_texture(vk.bloom_add_pipeline, &vk.bloom_texture, white);
     }
