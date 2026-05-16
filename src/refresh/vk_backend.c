@@ -52,10 +52,6 @@ static const uint32_t vk_tex_frag_spv[] =
 #include "vk_tex_frag_spv.h"
 ;
 
-static const uint32_t vk_bloom_extract_frag_spv[] =
-#include "vk_bloom_extract_frag_spv.h"
-;
-
 static const uint32_t vk_bloom_blur_frag_spv[] =
 #include "vk_bloom_blur_frag_spv.h"
 ;
@@ -373,7 +369,6 @@ typedef struct {
     VkPipelineLayout rect_pipeline_layout;
     VkPipeline rect_pipeline;
     VkPipeline texture_pipeline;
-    VkPipeline bloom_extract_pipeline;
     VkPipeline bloom_blur_pipeline;
     VkPipeline bloom_add_pipeline;
     VkPipeline color3d_pipeline;
@@ -2984,11 +2979,6 @@ static void vk_destroy_swapchain(void)
         vk.texture_pipeline = VK_NULL_HANDLE;
     }
 
-    if (vk.bloom_extract_pipeline) {
-        vk.DestroyPipeline(vk.device, vk.bloom_extract_pipeline, NULL);
-        vk.bloom_extract_pipeline = VK_NULL_HANDLE;
-    }
-
     if (vk.bloom_blur_pipeline) {
         vk.DestroyPipeline(vk.device, vk.bloom_blur_pipeline, NULL);
         vk.bloom_blur_pipeline = VK_NULL_HANDLE;
@@ -4289,10 +4279,6 @@ static bool vk_create_swapchain(int width, int height)
     if (!vk_create_render_pass() ||
         !vk_create_rect_pipeline() ||
         !vk_create_texture_pipeline() ||
-        !vk_create_texture_pipeline_ex(&vk.bloom_extract_pipeline,
-                                       vk_bloom_extract_frag_spv,
-                                       sizeof(vk_bloom_extract_frag_spv),
-                                       false) ||
         !vk_create_texture_pipeline_ex(&vk.bloom_blur_pipeline,
                                        vk_bloom_blur_frag_spv,
                                        sizeof(vk_bloom_blur_frag_spv),
@@ -9801,7 +9787,6 @@ void VKR_EndFrame(void)
                                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
         vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer);
-        vk_draw_fullscreen_texture(vk.bloom_extract_pipeline, &vk.scene_texture, white);
         if (vk.fd_valid) {
             vk_draw_bloom_world_glowmaps(&vk.fd);
             vk_draw_bloom_source_entities(&vk.fd);
@@ -9810,31 +9795,34 @@ void VKR_EndFrame(void)
         vk.CmdEndRenderPass(cmd);
         vk.render_pass_active = false;
 
-        vk_transition_color_target(cmd, &vk.bloom_texture, &vk.bloom_layout,
-                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                   VK_ACCESS_SHADER_READ_BIT,
-                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-        vk_transition_color_target(cmd, &vk.blur_texture, &vk.blur_layout,
-                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        vk_begin_render_pass(vk.bloom_render_pass, vk.blur_framebuffer);
-        vk_draw_fullscreen_texture(vk.bloom_blur_pipeline, &vk.bloom_texture, blur_x);
-        vk.CmdEndRenderPass(cmd);
-        vk.render_pass_active = false;
+        int iterations = gl_bloom ? Cvar_ClampInteger(gl_bloom, 1, 8) : 1;
+        for (int i = 0; i < iterations; i++) {
+            vk_transition_color_target(cmd, &vk.bloom_texture, &vk.bloom_layout,
+                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                       VK_ACCESS_SHADER_READ_BIT,
+                                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            vk_transition_color_target(cmd, &vk.blur_texture, &vk.blur_layout,
+                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            vk_begin_render_pass(vk.bloom_render_pass, vk.blur_framebuffer);
+            vk_draw_fullscreen_texture(vk.bloom_blur_pipeline, &vk.bloom_texture, blur_x);
+            vk.CmdEndRenderPass(cmd);
+            vk.render_pass_active = false;
 
-        vk_transition_color_target(cmd, &vk.blur_texture, &vk.blur_layout,
-                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                   VK_ACCESS_SHADER_READ_BIT,
-                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-        vk_transition_color_target(cmd, &vk.bloom_texture, &vk.bloom_layout,
-                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer);
-        vk_draw_fullscreen_texture(vk.bloom_blur_pipeline, &vk.blur_texture, blur_y);
-        vk.CmdEndRenderPass(cmd);
-        vk.render_pass_active = false;
+            vk_transition_color_target(cmd, &vk.blur_texture, &vk.blur_layout,
+                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                       VK_ACCESS_SHADER_READ_BIT,
+                                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            vk_transition_color_target(cmd, &vk.bloom_texture, &vk.bloom_layout,
+                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer);
+            vk_draw_fullscreen_texture(vk.bloom_blur_pipeline, &vk.blur_texture, blur_y);
+            vk.CmdEndRenderPass(cmd);
+            vk.render_pass_active = false;
+        }
 
         vk_transition_color_target(cmd, &vk.bloom_texture, &vk.bloom_layout,
                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
