@@ -97,6 +97,7 @@ static cvar_t   *ch_alpha;
 static cvar_t   *ch_scale;
 static cvar_t   *ch_x;
 static cvar_t   *ch_y;
+static cvar_t   *ch_marker_scale;
 
 static cvar_t   *scr_hit_marker_time;
 
@@ -1265,6 +1266,12 @@ static void ch_scale_changed(cvar_t *self)
     R_GetPicSize(&w, &h, scr.crosshair_pic);
     scr.crosshair_width = Q_rint(w * scale);
     scr.crosshair_height = Q_rint(h * scale);
+}
+
+static void ch_marker_scale_changed(cvar_t *self)
+{
+    int w, h;
+    float scale = Cvar_ClampValue(self, 0.1f, 9.0f);
 
     R_GetPicSize(&w, &h, scr.hit_marker_pic);
     scr.hit_marker_width = Q_rint(w * scale);
@@ -1374,6 +1381,7 @@ void SCR_RegisterMedia(void)
     scr.hit_marker_pic = R_RegisterImage("marker", IT_PIC, IF_PERMANENT | IF_OPTIONAL);
 
     scr_crosshair_changed(scr_crosshair);
+    ch_marker_scale_changed(ch_marker_scale);
     scr_font_changed(scr_font);
 }
 
@@ -1445,6 +1453,8 @@ void SCR_Init(void)
     ch_scale->changed = ch_scale_changed;
     ch_x = Cvar_Get("ch_x", "0", 0);
     ch_y = Cvar_Get("ch_y", "0", 0);
+    ch_marker_scale = Cvar_Get("ch_marker_scale", "1", 0);
+    ch_marker_scale->changed = ch_marker_scale_changed;
 
     scr_draw2d = Cvar_Get("scr_draw2d", "2", 0);
     scr_showturtle = Cvar_Get("scr_showturtle", "1", 0);
@@ -2168,6 +2178,8 @@ static void SCR_DrawLoading(void)
 
 static void SCR_DrawHitMarker(void)
 {
+    if (cl.frame.ps.stats[STAT_LAYOUTS] & LAYOUTS_HIDE_HUD)
+        return;
     if (!cl.hit_marker_count)
         return;
     if (!scr.hit_marker_pic || scr_hit_marker_time->integer <= 0 ||
@@ -2212,8 +2224,6 @@ static void SCR_DrawCrosshair(void)
                      scr.crosshair_width,
                      scr.crosshair_height,
                      scr.crosshair_pic);
-
-    SCR_DrawHitMarker();
 }
 
 // The status bar is a small layout program that is based on the stats array
@@ -2294,6 +2304,7 @@ static void SCR_Draw2D(void)
 
     // crosshair has its own color and alpha
     SCR_DrawCrosshair();
+    SCR_DrawHitMarker();
 
     // restore default color for subsequent drawing (console, UI)
     R_ClearColor();

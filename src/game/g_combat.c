@@ -460,6 +460,14 @@ void T_Damage(edict_t *targ, edict_t *inflictor, edict_t *attacker, const vec3_t
 
         targ->health = targ->health - take;
 
+        // send hit marker to attacker
+        if (attacker && attacker->client && attacker != targ) {
+            gi.WriteByte(svc_temp_entity);
+            gi.WriteByte(TE_DAMAGE_DEALT);
+            gi.WriteShort(take);
+            gi.unicast(attacker, false);
+        }
+
         if (targ->health <= 0) {
             if ((targ->svflags & SVF_MONSTER) || (client))
                 targ->flags |= FL_NO_KNOCKBACK;

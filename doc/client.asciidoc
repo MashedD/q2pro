@@ -596,6 +596,10 @@ ch_alpha::
 ch_scale::
     Scaling factor of the crosshair image. Default value is 1 (original size).
 
+ch_marker_scale::
+    Scaling factor of the hit marker image. Independent from crosshair scale.
+    Default value is 1 (original size).
+
 ch_x::
 ch_y::
     These variables specify the crosshair image offset, counted in pixels from
@@ -603,8 +607,7 @@ ch_y::
     (draw in center).
 
 scr_hit_marker_time::
-    Hit marker visibility time in milliseconds. Hit marker is only visible if
-    crosshair is visible. Default value is 500.
+    Hit marker visibility time in milliseconds. Default value is 500.
 
 Video Modes
 ~~~~~~~~~~~

@@ -57,6 +57,8 @@ features include:
 - sound: added `al_reverb` option to menu. 1 - softer, 2 - stronger
 - effects: added `cl_itemhighlight`, `cl_playerhighlight` and `cl_itemhighlight_glow`
 - rendering: added `r_lava_glowmaps` to toggle lava glowmaps independently
+- added ability to display hit markers in non-Remastered Quake 2,
+  added `ch_marker_scale` to change marker scale
 
 # TODO
 
