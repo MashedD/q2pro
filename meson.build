@@ -359,6 +359,7 @@ if vulkan.found()
   glslc = find_program('glslc', required: get_option('vulkan'))
   vk_shader_headers = []
   foreach shader : ['vk_rect.vert', 'vk_rect.frag', 'vk_tex.vert', 'vk_tex.frag',
+                    'vk_waterwarp.frag',
                     'vk_bloom_downscale.frag', 'vk_bloom_blur.frag',
                     'vk_color3d.vert', 'vk_color3d.frag',
                     'vk_world.vert', 'vk_world.frag', 'vk_world_alpha.frag',

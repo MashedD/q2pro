@@ -52,6 +52,10 @@ static const uint32_t vk_tex_frag_spv[] =
 #include "vk_tex_frag_spv.h"
 ;
 
+static const uint32_t vk_waterwarp_frag_spv[] =
+#include "vk_waterwarp_frag_spv.h"
+;
+
 static const uint32_t vk_bloom_blur_frag_spv[] =
 #include "vk_bloom_blur_frag_spv.h"
 ;
@@ -373,6 +377,7 @@ typedef struct {
     VkPipelineLayout rect_pipeline_layout;
     VkPipeline rect_pipeline;
     VkPipeline texture_pipeline;
+    VkPipeline waterwarp_pipeline;
     VkPipeline bloom_downscale_pipeline;
     VkPipeline bloom_blur_pipeline;
     VkPipeline bloom_add_pipeline;
@@ -425,6 +430,8 @@ typedef struct {
     bool frame_active;
     bool render_pass_active;
     bool drawing_bloom;
+    bool frame_bloom;
+    bool frame_waterwarp;
     float scale;
     color_t color;
     color_t alt_color;
@@ -501,6 +508,7 @@ static cvar_t *vk_draworder;
 static cvar_t *vk_showorigins;
 static cvar_t *vk_showtearing;
 static cvar_t *vk_showbloom;
+static cvar_t *vk_waterwarp;
 static cvar_t *vk_bloom_sigma;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -2988,6 +2996,11 @@ static void vk_destroy_swapchain(void)
         vk.texture_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.waterwarp_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.waterwarp_pipeline, NULL);
+        vk.waterwarp_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.bloom_downscale_pipeline) {
         vk.DestroyPipeline(vk.device, vk.bloom_downscale_pipeline, NULL);
         vk.bloom_downscale_pipeline = VK_NULL_HANDLE;
@@ -4317,6 +4330,11 @@ static bool vk_create_swapchain(int width, int height)
     if (!vk_create_render_pass() ||
         !vk_create_rect_pipeline() ||
         !vk_create_texture_pipeline() ||
+        !vk_create_texture_pipeline_ex(&vk.waterwarp_pipeline,
+                                       vk_waterwarp_frag_spv,
+                                       sizeof(vk_waterwarp_frag_spv),
+                                       false,
+                                       vk.swapchain_extent) ||
         !vk_create_texture_pipeline_ex(&vk.bloom_downscale_pipeline,
                                        vk_bloom_downscale_frag_spv,
                                        sizeof(vk_bloom_downscale_frag_spv),
@@ -4810,6 +4828,13 @@ static bool vk_bloom_enabled_for_frame(void)
         !(vk.fd.rdflags & RDF_NOWORLDMODEL);
 }
 
+static bool vk_waterwarp_enabled_for_frame(void)
+{
+    return vk_waterwarp && vk_waterwarp->integer > 0 && vk.fd_valid &&
+        (vk.fd.rdflags & RDF_UNDERWATER) && vk.scene_framebuffer &&
+        vk.scene_texture.descriptor_set;
+}
+
 static bool vk_alias_model_has_glowmap(const vk_model_t *model)
 {
     if (!model || model->type != VK_MODEL_ALIAS || !model->skins)
@@ -4827,9 +4852,15 @@ static bool vk_alias_model_has_glowmap(const vk_model_t *model)
 
 static void vk_composite_scene_texture(void)
 {
-    const vec4_t color = { 1.0f, 1.0f, 1.0f, 1.0f };
+    vec4_t color = { 1.0f, 1.0f, 1.0f, 1.0f };
+    VkPipeline pipeline = vk.texture_pipeline;
 
-    vk_draw_fullscreen_texture(vk.texture_pipeline, &vk.scene_texture, color);
+    if (vk.frame_waterwarp) {
+        color[0] = vk.fd.time;
+        pipeline = vk.waterwarp_pipeline;
+    }
+
+    vk_draw_fullscreen_texture(pipeline, &vk.scene_texture, color);
 }
 
 static void vk_draw_fullscreen_texture_sized(VkPipeline pipeline,
@@ -8849,6 +8880,7 @@ bool VKR_Init(bool total)
     vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
     vk_showtearing = Cvar_Get("gl_showtearing", "0", CVAR_CHEAT);
     vk_showbloom = Cvar_Get("gl_showbloom", "0", CVAR_CHEAT);
+    vk_waterwarp = Cvar_Get("gl_waterwarp", "0", 0);
     vk_bloom_sigma = Cvar_Get("gl_bloom_sigma", "4", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
@@ -9784,8 +9816,10 @@ void VKR_BeginFrame(void)
                         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 
-    bool bloom = vk_bloom_enabled_for_frame();
-    if (bloom) {
+    vk.frame_bloom = vk_bloom_enabled_for_frame();
+    vk.frame_waterwarp = vk_waterwarp_enabled_for_frame();
+    bool postprocess = vk.frame_bloom || vk.frame_waterwarp;
+    if (postprocess) {
         vk_transition_scene(cmd,
                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -9803,7 +9837,7 @@ void VKR_BeginFrame(void)
     VkRenderPassBeginInfo render_pass_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
         .renderPass = vk.render_pass,
-        .framebuffer = bloom ? vk.scene_framebuffer : vk.framebuffers[vk.current_image],
+        .framebuffer = postprocess ? vk.scene_framebuffer : vk.framebuffers[vk.current_image],
         .renderArea = {
             .offset = { 0, 0 },
             .extent = vk.swapchain_extent,
@@ -9832,7 +9866,9 @@ void VKR_EndFrame(void)
     vk_draw_tearing();
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
-    if (vk_bloom_enabled_for_frame()) {
+    bool bloom = vk.frame_bloom;
+    bool waterwarp = vk.frame_waterwarp;
+    if (bloom) {
         const vec4_t white = { 1.0f, 1.0f, 1.0f, 1.0f };
         const VkClearColorValue black = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
         uint32_t bloom_w = max(vk.bloom_texture.width, 1);
@@ -9944,6 +9980,21 @@ void VKR_EndFrame(void)
             vk_composite_scene_texture();
             vk_draw_fullscreen_texture(vk.bloom_add_pipeline, &vk.bloom_texture, white);
         }
+    }
+
+    if (!bloom && waterwarp) {
+        if (vk.render_pass_active) {
+            vk.CmdEndRenderPass(cmd);
+            vk.render_pass_active = false;
+        }
+
+        vk_transition_scene(cmd,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_ACCESS_SHADER_READ_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        vk_begin_render_pass(vk.render_pass, vk.framebuffers[vk.current_image],
+                             vk_frame_clear_color());
+        vk_composite_scene_texture();
     }
 
     if (vk.render_pass_active) {
