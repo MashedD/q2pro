@@ -4804,6 +4804,12 @@ static bool vk_bloom_enabled(void)
         vk.bloom_texture.descriptor_set && vk.blur_texture.descriptor_set;
 }
 
+static bool vk_bloom_enabled_for_frame(void)
+{
+    return vk_bloom_enabled() && vk.fd_valid &&
+        !(vk.fd.rdflags & RDF_NOWORLDMODEL);
+}
+
 static bool vk_alias_model_has_glowmap(const vk_model_t *model)
 {
     if (!model || model->type != VK_MODEL_ALIAS || !model->skins)
@@ -9778,7 +9784,7 @@ void VKR_BeginFrame(void)
                         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 
-    bool bloom = vk_bloom_enabled();
+    bool bloom = vk_bloom_enabled_for_frame();
     if (bloom) {
         vk_transition_scene(cmd,
                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -9826,7 +9832,7 @@ void VKR_EndFrame(void)
     vk_draw_tearing();
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
-    if (vk_bloom_enabled()) {
+    if (vk_bloom_enabled_for_frame()) {
         const vec4_t white = { 1.0f, 1.0f, 1.0f, 1.0f };
         const VkClearColorValue black = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
         uint32_t bloom_w = max(vk.bloom_texture.width, 1);
