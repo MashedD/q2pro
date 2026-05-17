@@ -56,6 +56,10 @@ static const uint32_t vk_bloom_blur_frag_spv[] =
 #include "vk_bloom_blur_frag_spv.h"
 ;
 
+static const uint32_t vk_bloom_downscale_frag_spv[] =
+#include "vk_bloom_downscale_frag_spv.h"
+;
+
 static const uint32_t vk_color3d_vert_spv[] =
 #include "vk_color3d_vert_spv.h"
 ;
@@ -4314,8 +4318,8 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_rect_pipeline() ||
         !vk_create_texture_pipeline() ||
         !vk_create_texture_pipeline_ex(&vk.bloom_downscale_pipeline,
-                                       vk_tex_frag_spv,
-                                       sizeof(vk_tex_frag_spv),
+                                       vk_bloom_downscale_frag_spv,
+                                       sizeof(vk_bloom_downscale_frag_spv),
                                        false,
                                        bloom_extent) ||
         !vk_create_texture_pipeline_ex(&vk.bloom_blur_pipeline,
@@ -9827,6 +9831,12 @@ void VKR_EndFrame(void)
         const VkClearColorValue black = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
         uint32_t bloom_w = max(vk.bloom_texture.width, 1);
         uint32_t bloom_h = max(vk.bloom_texture.height, 1);
+        vec4_t downscale_step = {
+            1.0f / max((float)vk.bloom_source_texture.width, 1.0f),
+            1.0f / max((float)vk.bloom_source_texture.height, 1.0f),
+            0.0f,
+            1.0f,
+        };
         float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
         sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
         sigma = max(sigma, 1.0f) / 4.0f;
@@ -9877,7 +9887,7 @@ void VKR_EndFrame(void)
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
         vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer, black);
         vk_draw_fullscreen_texture_sized(vk.bloom_downscale_pipeline,
-                                         &vk.bloom_source_texture, white,
+                                         &vk.bloom_source_texture, downscale_step,
                                          bloom_w, bloom_h);
         vk.CmdEndRenderPass(cmd);
         vk.render_pass_active = false;
