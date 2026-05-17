@@ -369,6 +369,7 @@ typedef struct {
     VkPipelineLayout rect_pipeline_layout;
     VkPipeline rect_pipeline;
     VkPipeline texture_pipeline;
+    VkPipeline bloom_downscale_pipeline;
     VkPipeline bloom_blur_pipeline;
     VkPipeline bloom_add_pipeline;
     VkPipeline color3d_pipeline;
@@ -401,10 +402,12 @@ typedef struct {
     VkImageView *swapchain_views;
     VkFramebuffer *framebuffers;
     VkFramebuffer scene_framebuffer;
+    VkFramebuffer bloom_source_framebuffer;
     VkFramebuffer bloom_framebuffer;
     VkFramebuffer blur_framebuffer;
     VkImageLayout *swapchain_layouts;
     VkImageLayout scene_layout;
+    VkImageLayout bloom_source_layout;
     VkImageLayout bloom_layout;
     VkImageLayout blur_layout;
     VkCommandBuffer *command_buffers;
@@ -426,6 +429,7 @@ typedef struct {
     bool clip_set;
     vk_texture_t raw_texture;
     vk_texture_t scene_texture;
+    vk_texture_t bloom_source_texture;
     vk_texture_t bloom_texture;
     vk_texture_t blur_texture;
     vk_texture_t particle_texture;
@@ -2980,6 +2984,11 @@ static void vk_destroy_swapchain(void)
         vk.texture_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.bloom_downscale_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.bloom_downscale_pipeline, NULL);
+        vk.bloom_downscale_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.bloom_blur_pipeline) {
         vk.DestroyPipeline(vk.device, vk.bloom_blur_pipeline, NULL);
         vk.bloom_blur_pipeline = VK_NULL_HANDLE;
@@ -3089,6 +3098,11 @@ static void vk_destroy_swapchain(void)
         vk.scene_framebuffer = VK_NULL_HANDLE;
     }
 
+    if (vk.bloom_source_framebuffer) {
+        vk.DestroyFramebuffer(vk.device, vk.bloom_source_framebuffer, NULL);
+        vk.bloom_source_framebuffer = VK_NULL_HANDLE;
+    }
+
     if (vk.bloom_framebuffer) {
         vk.DestroyFramebuffer(vk.device, vk.bloom_framebuffer, NULL);
         vk.bloom_framebuffer = VK_NULL_HANDLE;
@@ -3100,9 +3114,11 @@ static void vk_destroy_swapchain(void)
     }
 
     vk_destroy_texture_resource(&vk.scene_texture);
+    vk_destroy_texture_resource(&vk.bloom_source_texture);
     vk_destroy_texture_resource(&vk.bloom_texture);
     vk_destroy_texture_resource(&vk.blur_texture);
     vk.scene_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.bloom_source_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.bloom_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.blur_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -3360,16 +3376,26 @@ static bool vk_create_scene_target(void)
         VkFramebuffer *framebuffer;
         VkImageLayout *layout;
         VkRenderPass render_pass;
+        uint32_t width;
+        uint32_t height;
     } targets[] = {
-        { &vk.scene_texture, &vk.scene_framebuffer, &vk.scene_layout, vk.render_pass },
-        { &vk.bloom_texture, &vk.bloom_framebuffer, &vk.bloom_layout, vk.bloom_render_pass },
-        { &vk.blur_texture, &vk.blur_framebuffer, &vk.blur_layout, vk.bloom_render_pass },
+        { &vk.scene_texture, &vk.scene_framebuffer, &vk.scene_layout, vk.render_pass,
+          vk.swapchain_extent.width, vk.swapchain_extent.height },
+        { &vk.bloom_source_texture, &vk.bloom_source_framebuffer,
+          &vk.bloom_source_layout, vk.bloom_render_pass,
+          vk.swapchain_extent.width, vk.swapchain_extent.height },
+        { &vk.bloom_texture, &vk.bloom_framebuffer, &vk.bloom_layout,
+          vk.bloom_render_pass, max(vk.swapchain_extent.width / 4, 1),
+          max(vk.swapchain_extent.height / 4, 1) },
+        { &vk.blur_texture, &vk.blur_framebuffer, &vk.blur_layout,
+          vk.bloom_render_pass, max(vk.swapchain_extent.width / 4, 1),
+          max(vk.swapchain_extent.height / 4, 1) },
     };
 
     for (size_t i = 0; i < q_countof(targets); i++) {
         if (!vk_create_color_target(targets[i].texture,
-                                    vk.swapchain_extent.width,
-                                    vk.swapchain_extent.height,
+                                    targets[i].width,
+                                    targets[i].height,
                                     vk.swapchain_format))
             return false;
 
@@ -3379,8 +3405,8 @@ static bool vk_create_scene_target(void)
             .renderPass = targets[i].render_pass,
             .attachmentCount = q_countof(attachments),
             .pAttachments = attachments,
-            .width = vk.swapchain_extent.width,
-            .height = vk.swapchain_extent.height,
+            .width = targets[i].width,
+            .height = targets[i].height,
             .layers = 1,
         };
 
@@ -3541,7 +3567,8 @@ static bool vk_create_rect_pipeline(void)
 static bool vk_create_texture_pipeline_ex(VkPipeline *pipeline,
                                           const uint32_t *frag_spv,
                                           size_t frag_size,
-                                          bool additive)
+                                          bool additive,
+                                          VkExtent2D extent)
 {
     VkShaderModule vert = vk_create_shader_module(vk_tex_vert_spv, sizeof(vk_tex_vert_spv));
     if (!vert)
@@ -3577,14 +3604,14 @@ static bool vk_create_texture_pipeline_ex(VkPipeline *pipeline,
     VkViewport viewport = {
         .x = 0.0f,
         .y = 0.0f,
-        .width = vk.swapchain_extent.width,
-        .height = vk.swapchain_extent.height,
+        .width = extent.width,
+        .height = extent.height,
         .minDepth = 0.0f,
         .maxDepth = 1.0f,
     };
     VkRect2D scissor = {
         .offset = { 0, 0 },
-        .extent = vk.swapchain_extent,
+        .extent = extent,
     };
     VkPipelineViewportStateCreateInfo viewport_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
@@ -3659,7 +3686,8 @@ static bool vk_create_texture_pipeline(void)
     return vk_create_texture_pipeline_ex(&vk.texture_pipeline,
                                          vk_tex_frag_spv,
                                          sizeof(vk_tex_frag_spv),
-                                         false);
+                                         false,
+                                         vk.swapchain_extent);
 }
 
 static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
@@ -4277,17 +4305,29 @@ static bool vk_create_swapchain(int width, int height)
             return vk_fail_result("vkCreateImageView", result);
     }
 
+    VkExtent2D bloom_extent = {
+        max(vk.swapchain_extent.width / 4, 1),
+        max(vk.swapchain_extent.height / 4, 1),
+    };
+
     if (!vk_create_render_pass() ||
         !vk_create_rect_pipeline() ||
         !vk_create_texture_pipeline() ||
+        !vk_create_texture_pipeline_ex(&vk.bloom_downscale_pipeline,
+                                       vk_tex_frag_spv,
+                                       sizeof(vk_tex_frag_spv),
+                                       false,
+                                       bloom_extent) ||
         !vk_create_texture_pipeline_ex(&vk.bloom_blur_pipeline,
                                        vk_bloom_blur_frag_spv,
                                        sizeof(vk_bloom_blur_frag_spv),
-                                       false) ||
+                                       false,
+                                       bloom_extent) ||
         !vk_create_texture_pipeline_ex(&vk.bloom_add_pipeline,
                                        vk_tex_frag_spv,
                                        sizeof(vk_tex_frag_spv),
-                                       true) ||
+                                       true,
+                                       vk.swapchain_extent) ||
         !vk_create_color3d_pipeline(&vk.color3d_pipeline, VK_TRUE, VK_TRUE, VK_FALSE,
                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
         !vk_create_color3d_pipeline(&vk.line3d_pipeline, VK_TRUE, VK_TRUE, VK_FALSE,
@@ -4753,9 +4793,11 @@ static void vk_draw_texture_rect(int x, int y, int w, int h,
 static bool vk_bloom_enabled(void)
 {
     return gl_bloom && gl_bloom->integer > 0 &&
-        vk.scene_framebuffer && vk.bloom_framebuffer && vk.blur_framebuffer &&
-        vk.scene_texture.descriptor_set && vk.bloom_texture.descriptor_set &&
-        vk.blur_texture.descriptor_set;
+        vk.scene_framebuffer && vk.bloom_source_framebuffer &&
+        vk.bloom_framebuffer && vk.blur_framebuffer &&
+        vk.scene_texture.descriptor_set &&
+        vk.bloom_source_texture.descriptor_set &&
+        vk.bloom_texture.descriptor_set && vk.blur_texture.descriptor_set;
 }
 
 static bool vk_alias_model_has_glowmap(const vk_model_t *model)
@@ -4780,17 +4822,18 @@ static void vk_composite_scene_texture(void)
     vk_draw_fullscreen_texture(vk.texture_pipeline, &vk.scene_texture, color);
 }
 
-static void vk_draw_fullscreen_texture(VkPipeline pipeline,
-                                       const vk_texture_t *texture,
-                                       const vec4_t color)
+static void vk_draw_fullscreen_texture_sized(VkPipeline pipeline,
+                                             const vk_texture_t *texture,
+                                             const vec4_t color,
+                                             uint32_t width, uint32_t height)
 {
     if (!vk.render_pass_active || !pipeline || !texture->descriptor_set)
         return;
 
     vk_draw_push_t push = {
-        .rect = { 0, 0, vk.swapchain_extent.width, vk.swapchain_extent.height },
+        .rect = { 0, 0, width, height },
         .color = { color[0], color[1], color[2], color[3] },
-        .screen = { vk.swapchain_extent.width, vk.swapchain_extent.height },
+        .screen = { width, height },
         .uv = { 0.0f, 0.0f, 1.0f, 1.0f },
     };
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
@@ -4801,6 +4844,15 @@ static void vk_draw_fullscreen_texture(VkPipeline pipeline,
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
+}
+
+static void vk_draw_fullscreen_texture(VkPipeline pipeline,
+                                       const vk_texture_t *texture,
+                                       const vec4_t color)
+{
+    vk_draw_fullscreen_texture_sized(pipeline, texture, color,
+                                     vk.swapchain_extent.width,
+                                     vk.swapchain_extent.height);
 }
 
 static float vk_projection_zfar(int rdflags)
@@ -9773,18 +9825,20 @@ void VKR_EndFrame(void)
     if (vk_bloom_enabled()) {
         const vec4_t white = { 1.0f, 1.0f, 1.0f, 1.0f };
         const VkClearColorValue black = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
+        uint32_t bloom_w = max(vk.bloom_texture.width, 1);
+        uint32_t bloom_h = max(vk.bloom_texture.height, 1);
         float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
         sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
         sigma = max(sigma, 1.0f) / 4.0f;
         vec4_t blur_x = {
-            sigma / max((float)vk.swapchain_extent.width, 1.0f),
+            sigma / (float)bloom_w,
             0.0f,
             0.0f,
             1.0f,
         };
         vec4_t blur_y = {
             0.0f,
-            sigma / max((float)vk.swapchain_extent.height, 1.0f),
+            sigma / (float)bloom_h,
             0.0f,
             1.0f,
         };
@@ -9799,17 +9853,32 @@ void VKR_EndFrame(void)
                             VK_ACCESS_SHADER_READ_BIT,
                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
-        vk_transition_color_target(cmd, &vk.bloom_texture, &vk.bloom_layout,
+        vk_transition_color_target(cmd, &vk.bloom_source_texture, &vk.bloom_source_layout,
                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer, black);
+        vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_source_framebuffer, black);
         if (vk.fd_valid) {
             vk_draw_bloom_world_glowmaps(&vk.fd);
             vk_draw_bloom_source_entities(&vk.fd);
             vk_draw_bloom_beams(&vk.fd);
             vk_draw_bloom_only_entities(&vk.fd);
         }
+        vk.CmdEndRenderPass(cmd);
+        vk.render_pass_active = false;
+
+        vk_transition_color_target(cmd, &vk.bloom_source_texture, &vk.bloom_source_layout,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_ACCESS_SHADER_READ_BIT,
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        vk_transition_color_target(cmd, &vk.bloom_texture, &vk.bloom_layout,
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer, black);
+        vk_draw_fullscreen_texture_sized(vk.bloom_downscale_pipeline,
+                                         &vk.bloom_source_texture, white,
+                                         bloom_w, bloom_h);
         vk.CmdEndRenderPass(cmd);
         vk.render_pass_active = false;
 
@@ -9824,7 +9893,9 @@ void VKR_EndFrame(void)
                                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
             vk_begin_render_pass(vk.bloom_render_pass, vk.blur_framebuffer, black);
-            vk_draw_fullscreen_texture(vk.bloom_blur_pipeline, &vk.bloom_texture, blur_x);
+            vk_draw_fullscreen_texture_sized(vk.bloom_blur_pipeline,
+                                             &vk.bloom_texture, blur_x,
+                                             bloom_w, bloom_h);
             vk.CmdEndRenderPass(cmd);
             vk.render_pass_active = false;
 
@@ -9837,7 +9908,9 @@ void VKR_EndFrame(void)
                                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
             vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer, black);
-            vk_draw_fullscreen_texture(vk.bloom_blur_pipeline, &vk.blur_texture, blur_y);
+            vk_draw_fullscreen_texture_sized(vk.bloom_blur_pipeline,
+                                             &vk.blur_texture, blur_y,
+                                             bloom_w, bloom_h);
             vk.CmdEndRenderPass(cmd);
             vk.render_pass_active = false;
         }
