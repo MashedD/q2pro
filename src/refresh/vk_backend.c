@@ -9646,11 +9646,12 @@ out:
     return ret;
 }
 
-static void vk_begin_render_pass(VkRenderPass render_pass, VkFramebuffer framebuffer)
+static void vk_begin_render_pass(VkRenderPass render_pass, VkFramebuffer framebuffer,
+                                 VkClearColorValue color)
 {
     VkClearValue clear[] = {
         {
-            .color = vk_frame_clear_color(),
+            .color = color,
         },
         {
             .depthStencil = { .depth = 1.0f, .stencil = 0 },
@@ -9771,6 +9772,7 @@ void VKR_EndFrame(void)
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     if (vk_bloom_enabled()) {
         const vec4_t white = { 1.0f, 1.0f, 1.0f, 1.0f };
+        const VkClearColorValue black = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
         float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
         sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
         sigma = max(sigma, 1.0f) / 4.0f;
@@ -9801,7 +9803,7 @@ void VKR_EndFrame(void)
                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer);
+        vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer, black);
         if (vk.fd_valid) {
             vk_draw_bloom_world_glowmaps(&vk.fd);
             vk_draw_bloom_source_entities(&vk.fd);
@@ -9821,7 +9823,7 @@ void VKR_EndFrame(void)
                                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-            vk_begin_render_pass(vk.bloom_render_pass, vk.blur_framebuffer);
+            vk_begin_render_pass(vk.bloom_render_pass, vk.blur_framebuffer, black);
             vk_draw_fullscreen_texture(vk.bloom_blur_pipeline, &vk.bloom_texture, blur_x);
             vk.CmdEndRenderPass(cmd);
             vk.render_pass_active = false;
@@ -9834,7 +9836,7 @@ void VKR_EndFrame(void)
                                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-            vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer);
+            vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer, black);
             vk_draw_fullscreen_texture(vk.bloom_blur_pipeline, &vk.blur_texture, blur_y);
             vk.CmdEndRenderPass(cmd);
             vk.render_pass_active = false;
@@ -9845,7 +9847,8 @@ void VKR_EndFrame(void)
                                    VK_ACCESS_SHADER_READ_BIT,
                                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
-        vk_begin_render_pass(vk.render_pass, vk.framebuffers[vk.current_image]);
+        vk_begin_render_pass(vk.render_pass, vk.framebuffers[vk.current_image],
+                             vk_frame_clear_color());
         if (vk_showbloom && vk_showbloom->integer) {
             vk_draw_fullscreen_texture(vk.texture_pipeline, &vk.bloom_texture, white);
         } else {
