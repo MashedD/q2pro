@@ -777,6 +777,22 @@ gl_bloom_sigma::
 NOTE: Bloom only works with glowmaps. Enabling it with non-remastered content
 (or glowmaps disabled) is a waste of resources.
 
+gl_glare::
+    Enables lens glare sprites on bright glowmapped world surfaces. Visibility
+    is checked against the BSP world and fades smoothly using ‘gl_flarespeed’.
+    Default value is 1.
+
+gl_glare_threshold::
+    Minimum lightmap brightness required for a glowmapped surface to emit glare.
+    Higher values reduce the number of glare sources. Default value is 0.3.
+
+gl_glare_size::
+    Base size of surface glare sprites. Glare size also scales with source
+    brightness and distance from the viewer. Default value is 24.
+
+gl_glare_intensity::
+    Intensity factor for surface glare sprites. Default value is 0.5.
+
 gl_flarespeed::
     Specifies flare fading effect speed. Default value is 8. Set this to 0
     for instant fading.

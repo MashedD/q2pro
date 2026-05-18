@@ -94,6 +94,10 @@ begin video
     toggle "bloom" gl_bloom
     range "glowmap intensity" gl_glowmap_intensity 0 1
     toggle "lava glowmaps" r_lava_glowmaps
+    toggle "surface glare" gl_glare
+    range "glare intensity" gl_glare_intensity 0 2
+    range "glare size" gl_glare_size 8 96
+    range "glare threshold" gl_glare_threshold 0 1
 end
 
 begin options

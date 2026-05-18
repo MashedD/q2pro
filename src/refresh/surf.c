@@ -1062,6 +1062,77 @@ static void remove_fake_sky_faces(const bsp_t *bsp)
         Com_DPrintf("Removed %d fake sky faces\n", count);
 }
 
+void GL_BuildGlareList(void)
+{
+    const bsp_t *bsp = gl_static.world.cache;
+    mface_t *surf;
+    int i;
+
+    glr.num_glare_sources = 0;
+
+    if (!gl_glare->integer)
+        return;
+
+    if (gl_fullbright->integer || gl_vertexlight->integer)
+        return;
+
+    if (!bsp)
+        return;
+
+    // no need to check r_glowmaps: if glowmaps not loaded,
+    // texnum2 will be 0 and no sources will match
+
+    for (i = 0, surf = bsp->faces; i < bsp->numfaces; i++, surf++) {
+        if (surf->drawflags & SURF_NODRAW)
+            continue;
+
+        if (!surf->texinfo->image->texnum2)
+            continue;
+
+        if (!surf->light_m)
+            continue;
+
+        // compute face center
+        vec3_t center = { 0, 0, 0 };
+        const msurfedge_t *src_surfedge = surf->firstsurfedge;
+        for (int j = 0; j < surf->numsurfedges; j++) {
+            const medge_t *src_edge = bsp->edges + src_surfedge->edge;
+            const mvertex_t *src_vert = bsp->vertices + src_edge->v[src_surfedge->vert];
+            VectorAdd(center, src_vert->point, center);
+            src_surfedge++;
+        }
+        VectorScale(center, 1.0f / surf->numsurfedges, center);
+
+        // sample lightmap brightness at center
+        int sc = surf->lm_width / 2;
+        int tc = surf->lm_height / 2;
+        int offset = (surf->light_t + tc) * lm.block_size * 4 + (surf->light_s + sc) * 4;
+        byte *pixel = surf->light_m->buffer + offset;
+
+        float r = pixel[0] / 255.0f;
+        float g = pixel[1] / 255.0f;
+        float b = pixel[2] / 255.0f;
+        float brightness = (r + g + b) * (1.0f / 3.0f);
+
+        if (brightness < gl_glare_threshold->value)
+            continue;
+
+        if (glr.num_glare_sources >= MAX_GLARE_SOURCES)
+            break;
+
+        vec3_t normal;
+        VectorCopy(surf->plane->normal, normal);
+        if (surf->drawflags & DSURF_PLANEBACK)
+            VectorNegate(normal, normal);
+
+        glare_source_t *gs = &glr.glare_sources[glr.num_glare_sources++];
+        VectorMA(center, 2.0f, normal, gs->origin);
+        VectorCopy(normal, gs->normal);
+        VectorSet(gs->lightcolor, r, g, b);
+        gs->brightness = brightness;
+    }
+}
+
 void GL_LoadWorld(const char *name)
 {
     char buffer[MAX_QPATH];
@@ -1090,6 +1161,8 @@ void GL_LoadWorld(const char *name)
 
         for (i = 0; i < bsp->numleafs; i++)
             bsp->leafs[i].visframe = 0;
+
+        GL_BuildGlareList();
 
         Com_DPrintf("%s: reused old world model\n", __func__);
         bsp->refcount--;
@@ -1192,6 +1265,9 @@ void GL_LoadWorld(const char *name)
     upload_world_surfaces();
 
     glr.fd.lightstyles = NULL;
+
+    // build glare source list from bright glowmapped surfaces
+    GL_BuildGlareList();
 
     GL_ShowErrors(__func__);
 }

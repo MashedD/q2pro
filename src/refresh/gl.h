@@ -130,6 +130,17 @@ typedef struct {
     hash_map_t      *programs;
 } glStatic_t;
 
+#define MAX_GLARE_SOURCES 512
+
+typedef struct {
+    vec3_t origin;
+    vec3_t normal;
+    vec3_t lightcolor;
+    float brightness;
+    float visibility;
+    bool visible;
+} glare_source_t;
+
 typedef struct {
     refdef_t        fd;
     vec3_t          viewaxis[3];
@@ -156,6 +167,8 @@ typedef struct {
         entity_t    *alpha_back;
         entity_t    *alpha_front;
     } ents;
+    int             num_glare_sources;
+    glare_source_t  glare_sources[MAX_GLARE_SOURCES];
     glStateBits_t   fog_bits, fog_bits_sky;
     int             framebuffer_width;
     int             framebuffer_height;
@@ -260,6 +273,10 @@ extern cvar_t *gl_md5_distance;
 extern cvar_t *gl_damageblend_frac;
 extern cvar_t *gl_waterwarp;
 extern cvar_t *gl_bloom;
+extern cvar_t *gl_glare;
+extern cvar_t *gl_glare_threshold;
+extern cvar_t *gl_glare_size;
+extern cvar_t *gl_glare_intensity;
 extern cvar_t *r_lava_glowmaps;
 
 // development variables
@@ -921,6 +938,8 @@ void GL_Flush2D(void);
 void GL_DrawParticles(void);
 void GL_DrawBeams(void);
 void GL_DrawFlares(void);
+void GL_BuildGlareList(void);
+void GL_DrawGlare(void);
 
 void GL_BindArrays(glVertexArray_t va);
 void GL_LockArrays(GLsizei count);
