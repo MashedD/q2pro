@@ -381,6 +381,7 @@ static const save_field_t clientfields[] = {
     I(damage_blood),
     I(damage_knockback),
     V(damage_from),
+    I(damage_indicator_count),
 
     F(killer_yaw),
 

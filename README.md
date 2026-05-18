@@ -61,6 +61,8 @@ features include:
   surfaces, with size, intensity and brightness threshold controls
 - added ability to display hit markers in non-Remastered Quake 2,
   added `ch_marker_scale` to change marker scale
+- added Remastered-style HUD damage direction indicators, controlled by
+  `scr_damage_indicator`
 
 # TODO
 

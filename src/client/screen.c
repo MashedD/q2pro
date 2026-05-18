@@ -100,6 +100,9 @@ static cvar_t   *ch_y;
 static cvar_t   *ch_marker_scale;
 
 static cvar_t   *scr_hit_marker_time;
+static cvar_t   *scr_damage_indicator;
+static cvar_t   *scr_damage_indicator_time;
+static cvar_t   *scr_damage_indicator_scale;
 
 vrect_t     scr_vrect;      // position of render window on screen
 
@@ -1470,6 +1473,9 @@ void SCR_Init(void)
 #endif
 
     scr_hit_marker_time = Cvar_Get("scr_hit_marker_time", "500", 0);
+    scr_damage_indicator = Cvar_Get("scr_damage_indicator", "1", CVAR_ARCHIVE);
+    scr_damage_indicator_time = Cvar_Get("scr_damage_indicator_time", "800", 0);
+    scr_damage_indicator_scale = Cvar_Get("scr_damage_indicator_scale", "1", 0);
 
     Cmd_Register(scr_cmds);
 
@@ -2203,6 +2209,81 @@ static void SCR_DrawHitMarker(void)
                      scr.hit_marker_pic);
 }
 
+static void SCR_DrawDamageIndicator(void)
+{
+    static int last_marker;
+    static int last_frame;
+    static unsigned last_time;
+    static int last_yaw;
+
+    if (cl.frame.ps.stats[STAT_LAYOUTS] & LAYOUTS_HIDE_HUD)
+        return;
+    if (!scr_damage_indicator->integer)
+        return;
+    if (scr_damage_indicator_time->integer <= 0)
+        return;
+
+    int marker = cl.frame.ps.stats[STAT_FLASHES] & 0x7ffc;
+    if (marker && marker != last_marker) {
+        last_marker = marker;
+        last_frame = cl.frame.number;
+        last_time = cls.realtime;
+        last_yaw = (marker >> 2) & 511;
+    } else if (marker && cl.frame.number != last_frame) {
+        last_frame = cl.frame.number;
+        last_time = cls.realtime;
+    } else if ((cl.frame.ps.stats[STAT_FLASHES] & 3) && cl.frame.number != last_frame) {
+        last_frame = cl.frame.number;
+        last_time = cls.realtime;
+        last_yaw = 0;
+    }
+
+    unsigned elapsed = cls.realtime - last_time;
+    if (!last_frame || elapsed > (unsigned)scr_damage_indicator_time->integer)
+        return;
+
+    float frac = (float)elapsed / scr_damage_indicator_time->integer;
+    float alpha = (1.0f - frac) * (1.0f - frac);
+    float scale = Cvar_ClampValue(scr_damage_indicator_scale, 0.25f, 4.0f);
+    float angle = DEG2RAD(last_yaw);
+    float sx = sinf(angle);
+    float sy = -cosf(angle);
+    int radius = Q_rint(74 * scale);
+    int length = Q_rint(50 * scale);
+    int thick = Q_rint(10 * scale);
+    int x = r_config.width / 2 + Q_rint(sx * radius);
+    int y = r_config.height / 2 + Q_rint(sy * radius);
+
+    float lx = sx;
+    float ly = sy;
+
+    float nx = -ly;
+    float ny = lx;
+    int step = Q_rint(scale);
+    if (step < 1)
+        step = 1;
+
+    for (int i = 0; i < length; i += step) {
+        float u = ((float)i / length) - 0.5f;
+        float taper = sinf(((float)i / length) * M_PIf);
+        float cx = x + lx * u * length;
+        float cy = y + ly * u * length;
+
+        for (int j = -thick / 2; j <= thick / 2; j += step) {
+            float edge = 1.0f - Q_clipf(fabsf((float)j) / (thick * 0.5f), 0, 1);
+            int a = Q_clip_uint8(alpha * taper * edge * 150);
+            int c = 160 + Q_clip_uint8(edge * 95);
+
+            if (!a)
+                continue;
+
+            int px = Q_rint(cx + nx * j);
+            int py = Q_rint(cy + ny * j);
+            R_DrawFill32(px - step / 2, py - step / 2, step + 1, step + 1, MakeColor(c, c, c, a));
+        }
+    }
+}
+
 static void SCR_DrawCrosshair(void)
 {
     int x, y;
@@ -2304,6 +2385,7 @@ static void SCR_Draw2D(void)
 
     // crosshair has its own color and alpha
     SCR_DrawCrosshair();
+    SCR_DrawDamageIndicator();
     SCR_DrawHitMarker();
 
     // restore default color for subsequent drawing (console, UI)
