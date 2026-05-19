@@ -4914,7 +4914,8 @@ static void vk_draw_texture_rect_sized(VkPipeline pipeline,
                                        const vec4_t color,
                                        int x, int y, int w, int h,
                                        uint32_t screen_w,
-                                       uint32_t screen_h)
+                                       uint32_t screen_h,
+                                       const vec4_t uv)
 {
     if (!vk.render_pass_active || !pipeline || !texture->descriptor_set ||
         w <= 0 || h <= 0)
@@ -4924,7 +4925,7 @@ static void vk_draw_texture_rect_sized(VkPipeline pipeline,
         .rect = { x, y, w, h },
         .color = { color[0], color[1], color[2], color[3] },
         .screen = { screen_w, screen_h },
-        .uv = { 0.0f, 0.0f, 1.0f, 1.0f },
+        .uv = { uv[0], uv[1], uv[2], uv[3] },
     };
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
 
@@ -4940,19 +4941,25 @@ static void vk_draw_refdef_texture(VkPipeline pipeline,
                                    const vk_texture_t *texture,
                                    const vec4_t color)
 {
+    vec4_t uv = { 0.0f, 0.0f, 1.0f, 1.0f };
+
     if (vk.fd_valid) {
+        uv[0] = vk.fd.x / max((float)vk.swapchain_extent.width, 1.0f);
+        uv[1] = vk.fd.y / max((float)vk.swapchain_extent.height, 1.0f);
+        uv[2] = (vk.fd.x + vk.fd.width) / max((float)vk.swapchain_extent.width, 1.0f);
+        uv[3] = (vk.fd.y + vk.fd.height) / max((float)vk.swapchain_extent.height, 1.0f);
         vk_draw_texture_rect_sized(pipeline, texture, color,
                                    vk.fd.x, vk.fd.y,
                                    vk.fd.width, vk.fd.height,
                                    vk.swapchain_extent.width,
-                                   vk.swapchain_extent.height);
+                                   vk.swapchain_extent.height, uv);
     } else {
         vk_draw_texture_rect_sized(pipeline, texture, color,
                                    0, 0,
                                    vk.swapchain_extent.width,
                                    vk.swapchain_extent.height,
                                    vk.swapchain_extent.width,
-                                   vk.swapchain_extent.height);
+                                   vk.swapchain_extent.height, uv);
     }
 }
 
