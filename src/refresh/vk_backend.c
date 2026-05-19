@@ -9381,7 +9381,6 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk_draw_debug_lines(fd);
     vk_draw_debug_texts(fd);
 #endif
-    vk_draw_polyblend(fd);
 }
 
 void VKR_LightPoint(const vec3_t origin, vec3_t light)
@@ -9924,13 +9923,6 @@ void VKR_EndFrame(void)
     if (!vk.frame_active)
         return;
 
-#if USE_DEBUG
-    if (vk_showstats && vk_showstats->integer)
-        vk_draw_stats();
-#endif
-
-    vk_draw_tearing();
-
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     bool bloom = vk.frame_bloom;
     bool waterwarp = vk.frame_waterwarp;
@@ -10062,6 +10054,16 @@ void VKR_EndFrame(void)
                              vk_frame_clear_color());
         vk_composite_scene_texture();
     }
+
+    if (vk.fd_valid)
+        vk_draw_polyblend(&vk.fd);
+
+#if USE_DEBUG
+    if (vk_showstats && vk_showstats->integer)
+        vk_draw_stats();
+#endif
+
+    vk_draw_tearing();
 
     if (vk.render_pass_active) {
         vk.CmdEndRenderPass(cmd);
