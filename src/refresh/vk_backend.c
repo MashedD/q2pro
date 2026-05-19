@@ -9847,8 +9847,10 @@ out:
     return ret;
 }
 
-static void vk_begin_render_pass(VkRenderPass render_pass, VkFramebuffer framebuffer,
-                                 VkClearColorValue color)
+static void vk_begin_render_pass_sized(VkRenderPass render_pass,
+                                       VkFramebuffer framebuffer,
+                                       VkClearColorValue color,
+                                       uint32_t width, uint32_t height)
 {
     VkClearValue clear[] = {
         {
@@ -9864,7 +9866,7 @@ static void vk_begin_render_pass(VkRenderPass render_pass, VkFramebuffer framebu
         .framebuffer = framebuffer,
         .renderArea = {
             .offset = { 0, 0 },
-            .extent = vk.swapchain_extent,
+            .extent = { width, height },
         },
         .clearValueCount = q_countof(clear),
         .pClearValues = clear,
@@ -9873,6 +9875,14 @@ static void vk_begin_render_pass(VkRenderPass render_pass, VkFramebuffer framebu
     vk.CmdBeginRenderPass(vk.command_buffers[vk.current_image], &render_pass_info,
                           VK_SUBPASS_CONTENTS_INLINE);
     vk.render_pass_active = true;
+}
+
+static void vk_begin_render_pass(VkRenderPass render_pass, VkFramebuffer framebuffer,
+                                 VkClearColorValue color)
+{
+    vk_begin_render_pass_sized(render_pass, framebuffer, color,
+                               vk.swapchain_extent.width,
+                               vk.swapchain_extent.height);
 }
 
 void VKR_BeginFrame(void)
@@ -10027,7 +10037,8 @@ void VKR_EndFrame(void)
                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer, black);
+        vk_begin_render_pass_sized(vk.bloom_render_pass, vk.bloom_framebuffer,
+                                   black, bloom_w, bloom_h);
         vk_draw_fullscreen_texture_sized(vk.bloom_downscale_pipeline,
                                          &vk.bloom_source_texture, downscale_step,
                                          bloom_w, bloom_h);
@@ -10044,7 +10055,8 @@ void VKR_EndFrame(void)
                                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-            vk_begin_render_pass(vk.bloom_render_pass, vk.blur_framebuffer, black);
+            vk_begin_render_pass_sized(vk.bloom_render_pass, vk.blur_framebuffer,
+                                       black, bloom_w, bloom_h);
             vk_draw_fullscreen_texture_sized(vk.bloom_blur_pipeline,
                                              &vk.bloom_texture, blur_x,
                                              bloom_w, bloom_h);
@@ -10059,7 +10071,8 @@ void VKR_EndFrame(void)
                                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-            vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_framebuffer, black);
+            vk_begin_render_pass_sized(vk.bloom_render_pass, vk.bloom_framebuffer,
+                                       black, bloom_w, bloom_h);
             vk_draw_fullscreen_texture_sized(vk.bloom_blur_pipeline,
                                              &vk.blur_texture, blur_y,
                                              bloom_w, bloom_h);
