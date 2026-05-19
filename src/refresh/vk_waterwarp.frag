@@ -14,6 +14,8 @@ layout(location = 0) out vec4 out_color;
 
 void main()
 {
-    vec2 tc = v_uv + vec2(0.0625) * sin(v_uv.ts * 4.0 + pc.color.x);
+    vec2 span = pc.uv.zw - pc.uv.xy;
+    vec2 local = (v_uv - pc.uv.xy) / span;
+    vec2 tc = v_uv + span * vec2(0.0625) * sin(local.ts * 4.0 + pc.color.x);
     out_color = texture(tex_sampler, tc);
 }
