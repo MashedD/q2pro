@@ -9989,8 +9989,8 @@ void VKR_EndFrame(void)
         uint32_t bloom_w = max(vk.bloom_texture.width, 1);
         uint32_t bloom_h = max(vk.bloom_texture.height, 1);
         vec4_t downscale_step = {
-            1.0f / max((float)vk.bloom_source_texture.width, 1.0f),
-            1.0f / max((float)vk.bloom_source_texture.height, 1.0f),
+            1.0f / (float)bloom_w,
+            1.0f / (float)bloom_h,
             0.0f,
             1.0f,
         };
