@@ -2438,6 +2438,10 @@ static void SCR_DrawStats(void)
     }
 }
 
+#define STREAM_SCOREBOARD_MAX_STRINGS  64
+#define STREAM_SCOREBOARD_LINE_SIZE    128
+#define STREAM_SCOREBOARD_Y_UNKNOWN    (-999999)
+
 typedef struct {
     char name[32];
     int frags;
@@ -2459,8 +2463,11 @@ typedef struct {
     int num_players;
 } stream_team_t;
 
-#define STREAM_SCOREBOARD_MAX_STRINGS  64
-#define STREAM_SCOREBOARD_LINE_SIZE    128
+typedef struct {
+    char text[STREAM_SCOREBOARD_LINE_SIZE];
+    int y;
+} open_tdm_string_t;
+
 #define STREAM_SCOREBOARD_NAME_CHARS   15
 #define STREAM_SCOREBOARD_STATS_COL    16
 #define STREAM_SCOREBOARD_LOC_COL      (STREAM_SCOREBOARD_STATS_COL + 22)
@@ -2739,19 +2746,28 @@ static void SCR_DrawOpenTDMTeamScore(int x, int y, const stream_team_t *team)
     }
 }
 
-static int SCR_CollectOpenTDMStrings(const char *s,
-                                     char strings[STREAM_SCOREBOARD_MAX_STRINGS][STREAM_SCOREBOARD_LINE_SIZE])
+static int SCR_CollectOpenTDMStrings(const char *s, open_tdm_string_t strings[STREAM_SCOREBOARD_MAX_STRINGS])
 {
     int count = 0;
+    int y = STREAM_SCOREBOARD_Y_UNKNOWN;
 
     while (s) {
         char *token = COM_Parse(&s);
+
+        if (!strcmp(token, "yv")) {
+            token = COM_Parse(&s);
+            if (SCR_IsIntegerToken(token))
+                y = atoi(token);
+            continue;
+        }
 
         if (!strcmp(token, "string") || !strcmp(token, "string2") || !strcmp(token, "cstring")) {
             token = COM_Parse(&s);
             if (count == STREAM_SCOREBOARD_MAX_STRINGS)
                 break;
-            Q_strlcpy(strings[count++], token, STREAM_SCOREBOARD_LINE_SIZE);
+            Q_strlcpy(strings[count].text, token, sizeof(strings[count].text));
+            strings[count].y = y;
+            count++;
         }
     }
 
@@ -2760,10 +2776,10 @@ static int SCR_CollectOpenTDMStrings(const char *s,
 
 static bool SCR_DrawOpenTDMScores(const char *s)
 {
-    char strings[STREAM_SCOREBOARD_MAX_STRINGS][STREAM_SCOREBOARD_LINE_SIZE];
+    open_tdm_string_t strings[STREAM_SCOREBOARD_MAX_STRINGS];
     stream_team_t teams[2] = {{{0}}};
     stream_player_t *last_player = NULL;
-    int num_strings, player_idx = 0, start_players = -1;
+    int num_strings, player_idx = 0, start_players = -1, bottom_header_y = STREAM_SCOREBOARD_Y_UNKNOWN;
     int col_width = STREAM_SCOREBOARD_COLUMN_CHARS * CONCHAR_WIDTH;
     int x = cl_stream_scoreboard_x->integer;
     int y = scr.hud_height - cl_stream_scoreboard_offset->integer - 8 * CONCHAR_HEIGHT;
@@ -2777,28 +2793,31 @@ static bool SCR_DrawOpenTDMScores(const char *s)
 
     bool is_old_scoreboard = false;
     for (int i = 0; i < num_strings; i++) {
-        if (!strncmp(strings[i], "oldscoreboard:", 14)) {
+        if (!strncmp(strings[i].text, "oldscoreboard:", 14)) {
             is_old_scoreboard = true;
             break;
         }
     }
 
-    if (!SCR_ParseOpenTDMTeamScore(strings[1], &teams[0]))
+    if (!SCR_ParseOpenTDMTeamScore(strings[1].text, &teams[0]))
         Q_strlcpy(teams[0].name, "Hometeam", sizeof(teams[0].name));
-    if (!SCR_ParseOpenTDMTeamScore(strings[2], &teams[1]))
+    if (!SCR_ParseOpenTDMTeamScore(strings[2].text, &teams[1]))
         Q_strlcpy(teams[1].name, "Visitors", sizeof(teams[1].name));
 
     for (int i = 4; i < num_strings; i++) {
         stream_team_t header = {0};
 
-        if (SCR_ParseOpenTDMTeamHeader(strings[i], &header))
+        if (SCR_ParseOpenTDMTeamHeader(strings[i].text, &header))
             SCR_AddOpenTDMTeamHeader(teams, &header);
     }
 
+    int column_headers = 0;
     for (int i = 0; i < num_strings; i++) {
-        if (SCR_IsOpenTDMColumnHeader(strings[i])) {
-            start_players = i + 1;
-            break;
+        if (SCR_IsOpenTDMColumnHeader(strings[i].text)) {
+            if (start_players < 0)
+                start_players = i + 1;
+            if (++column_headers == 2)
+                bottom_header_y = strings[i].y;
         }
     }
 
@@ -2806,7 +2825,7 @@ static bool SCR_DrawOpenTDMScores(const char *s)
         for (int i = 0; i < num_strings; i++) {
             stream_player_t player;
 
-            if (SCR_ParseOpenTDMPlayer(strings[i], &player)) {
+            if (SCR_ParseOpenTDMPlayer(strings[i].text, &player)) {
                 start_players = i;
                 break;
             }
@@ -2818,7 +2837,7 @@ static bool SCR_DrawOpenTDMScores(const char *s)
     for (int i = start_players; i < num_strings; i++) {
         stream_team_t *team;
         stream_player_t player = {0};
-        char *line = strings[i];
+        char *line = strings[i].text;
 
         if (!strcmp(line, " Spectators"))
             break;
@@ -2835,7 +2854,9 @@ static bool SCR_DrawOpenTDMScores(const char *s)
         if (!SCR_ParseOpenTDMPlayer(line, &player))
             continue;
 
-        if (teams[0].skin[0] && !teams[1].skin[0])
+        if (bottom_header_y != STREAM_SCOREBOARD_Y_UNKNOWN && strings[i].y != STREAM_SCOREBOARD_Y_UNKNOWN)
+            team = strings[i].y >= bottom_header_y ? &teams[1] : &teams[0];
+        else if (teams[0].skin[0] && !teams[1].skin[0])
             team = &teams[0];
         else if (!teams[0].skin[0] && teams[1].skin[0])
             team = &teams[1];
