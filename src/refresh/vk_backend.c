@@ -4944,10 +4944,15 @@ static void vk_draw_refdef_texture(VkPipeline pipeline,
     vec4_t uv = { 0.0f, 0.0f, 1.0f, 1.0f };
 
     if (vk.fd_valid) {
-        uv[0] = vk.fd.x / max((float)vk.swapchain_extent.width, 1.0f);
-        uv[1] = vk.fd.y / max((float)vk.swapchain_extent.height, 1.0f);
-        uv[2] = (vk.fd.x + vk.fd.width) / max((float)vk.swapchain_extent.width, 1.0f);
-        uv[3] = (vk.fd.y + vk.fd.height) / max((float)vk.swapchain_extent.height, 1.0f);
+        float scale_x = texture->width / max((float)vk.swapchain_extent.width, 1.0f);
+        float scale_y = texture->height / max((float)vk.swapchain_extent.height, 1.0f);
+        float tex_w = max((float)texture->width, 1.0f);
+        float tex_h = max((float)texture->height, 1.0f);
+
+        uv[0] = (vk.fd.x * scale_x) / tex_w;
+        uv[1] = (vk.fd.y * scale_y) / tex_h;
+        uv[2] = ((vk.fd.x + vk.fd.width) * scale_x) / tex_w;
+        uv[3] = ((vk.fd.y + vk.fd.height) * scale_y) / tex_h;
         vk_draw_texture_rect_sized(pipeline, texture, color,
                                    vk.fd.x, vk.fd.y,
                                    vk.fd.width, vk.fd.height,
