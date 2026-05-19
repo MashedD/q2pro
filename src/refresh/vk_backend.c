@@ -372,6 +372,7 @@ typedef struct {
     VkDescriptorPool descriptor_pool;
     VkSampler sampler;
     VkSampler sky_sampler;
+    VkSampler postprocess_sampler;
     VkSampler nearest_sampler;
     VkSampler sky_nearest_sampler;
     VkPipelineLayout rect_pipeline_layout;
@@ -2736,6 +2737,25 @@ static bool vk_create_sky_sampler(VkSampler *sampler)
     return true;
 }
 
+static bool vk_create_postprocess_sampler(VkSampler *sampler)
+{
+    VkSamplerCreateInfo sampler_info = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_LINEAR,
+        .minFilter = VK_FILTER_LINEAR,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .maxLod = 0.0f,
+    };
+    VkResult result = vk.CreateSampler(vk.device, &sampler_info, NULL, sampler);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateSampler", result);
+
+    return true;
+}
+
 static bool vk_create_nearest_sampler(VkSampler *sampler,
                                       VkSamplerAddressMode address_mode)
 {
@@ -2869,6 +2889,8 @@ static bool vk_create_frame_resources(void)
     if (!vk_create_sampler(&vk.sampler))
         return false;
     if (!vk_create_sky_sampler(&vk.sky_sampler))
+        return false;
+    if (!vk_create_postprocess_sampler(&vk.postprocess_sampler))
         return false;
     if (!vk_create_nearest_sampler(&vk.nearest_sampler,
                                    VK_SAMPLER_ADDRESS_MODE_REPEAT))
@@ -3415,6 +3437,9 @@ static bool vk_create_scene_target(void)
                                     targets[i].height,
                                     vk.swapchain_format))
             return false;
+
+        vk_update_texture_descriptor_with_sampler(targets[i].texture,
+                                                  vk.postprocess_sampler);
 
         VkImageView attachments[] = { targets[i].texture->view, vk.depth_view };
         VkFramebufferCreateInfo create_info = {
@@ -9081,6 +9106,10 @@ void VKR_Shutdown(bool total)
     if (vk.sky_sampler) {
         vk.DestroySampler(vk.device, vk.sky_sampler, NULL);
         vk.sky_sampler = VK_NULL_HANDLE;
+    }
+    if (vk.postprocess_sampler) {
+        vk.DestroySampler(vk.device, vk.postprocess_sampler, NULL);
+        vk.postprocess_sampler = VK_NULL_HANDLE;
     }
     if (vk.nearest_sampler) {
         vk.DestroySampler(vk.device, vk.nearest_sampler, NULL);
