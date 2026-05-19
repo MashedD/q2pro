@@ -44,6 +44,10 @@ static const uint32_t vk_rect_frag_spv[] =
 #include "vk_rect_frag_spv.h"
 ;
 
+static const uint32_t vk_vignette_vert_spv[] =
+#include "vk_vignette_vert_spv.h"
+;
+
 static const uint32_t vk_tex_vert_spv[] =
 #include "vk_tex_vert_spv.h"
 ;
@@ -377,6 +381,7 @@ typedef struct {
     VkSampler sky_nearest_sampler;
     VkPipelineLayout rect_pipeline_layout;
     VkPipeline rect_pipeline;
+    VkPipeline vignette_pipeline;
     VkPipeline texture_pipeline;
     VkPipeline waterwarp_pipeline;
     VkPipeline bloom_downscale_pipeline;
@@ -3013,6 +3018,11 @@ static void vk_destroy_swapchain(void)
         vk.rect_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.vignette_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.vignette_pipeline, NULL);
+        vk.vignette_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.texture_pipeline) {
         vk.DestroyPipeline(vk.device, vk.texture_pipeline, NULL);
         vk.texture_pipeline = VK_NULL_HANDLE;
@@ -3492,9 +3502,11 @@ static const VkPipelineDynamicStateCreateInfo vk_3d_dynamic_state = {
     .pDynamicStates = vk_3d_dynamic_states,
 };
 
-static bool vk_create_rect_pipeline(void)
+static bool vk_create_rect_pipeline_ex(VkPipeline *pipeline,
+                                       const uint32_t *vert_spv,
+                                       size_t vert_size)
 {
-    VkShaderModule vert = vk_create_shader_module(vk_rect_vert_spv, sizeof(vk_rect_vert_spv));
+    VkShaderModule vert = vk_create_shader_module(vert_spv, vert_size);
     if (!vert)
         return false;
 
@@ -3595,8 +3607,8 @@ static bool vk_create_rect_pipeline(void)
     };
 
     VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
-                                                 &create_info, NULL,
-                                                 &vk.rect_pipeline);
+                                                  &create_info, NULL,
+                                                  pipeline);
     vk.DestroyShaderModule(vk.device, frag, NULL);
     vk.DestroyShaderModule(vk.device, vert, NULL);
 
@@ -3604,6 +3616,12 @@ static bool vk_create_rect_pipeline(void)
         return vk_fail_result("vkCreateGraphicsPipelines", result);
 
     return true;
+}
+
+static bool vk_create_rect_pipeline(void)
+{
+    return vk_create_rect_pipeline_ex(&vk.rect_pipeline, vk_rect_vert_spv,
+                                      sizeof(vk_rect_vert_spv));
 }
 
 static bool vk_create_texture_pipeline_ex(VkPipeline *pipeline,
@@ -4354,6 +4372,9 @@ static bool vk_create_swapchain(int width, int height)
 
     if (!vk_create_render_pass() ||
         !vk_create_rect_pipeline() ||
+        !vk_create_rect_pipeline_ex(&vk.vignette_pipeline,
+                                    vk_vignette_vert_spv,
+                                    sizeof(vk_vignette_vert_spv)) ||
         !vk_create_texture_pipeline() ||
         !vk_create_texture_pipeline_ex(&vk.waterwarp_pipeline,
                                        vk_waterwarp_frag_spv,
@@ -4697,15 +4718,31 @@ static void vk_blend_vignette(int x, int y, int w, int h, const vec4_t color,
         return;
     }
 
-    vk_blend_rect(x, y, w, distance, color);
-    vk_blend_rect(x, y + h - distance, w, distance, color);
-
-    h -= distance * 2;
-    if (h <= 0)
+    int inner_w = w - distance * 2;
+    int inner_h = h - distance * 2;
+    if (!vk.render_pass_active || !vk.vignette_pipeline || inner_w <= 0 ||
+        inner_h <= 0 || color[3] <= 0.0f)
         return;
 
-    vk_blend_rect(x, y + distance, distance, h, color);
-    vk_blend_rect(x + w - distance, y + distance, distance, h, color);
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    vk_draw_push_t push = {
+        .rect = { x, y, w, h },
+        .color = {
+            Q_clipf(color[0], 0.0f, 1.0f),
+            Q_clipf(color[1], 0.0f, 1.0f),
+            Q_clipf(color[2], 0.0f, 1.0f),
+            Q_clipf(color[3], 0.0f, 1.0f),
+        },
+        .screen = { vk_2d_width(), vk_2d_height() },
+        .uv = { x + distance, y + distance, inner_w, inner_h },
+    };
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                       vk.vignette_pipeline);
+    vk_push_constants(cmd, sizeof(push), &push);
+    vk.CmdDraw(cmd, 24, 1, 0, 0);
+    c.trisDrawn += 8;
+    c.batchesDrawn2D++;
 }
 
 static void vk_draw_pic_showtris(int x, int y, int w, int h)
