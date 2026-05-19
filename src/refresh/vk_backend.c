@@ -569,9 +569,6 @@ static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
                           const entity_t *ent, const vec3_t axis[3]);
 static bool vk_create_swapchain(int width, int height);
 static bool vk_recreate_swapchain(void);
-static void vk_draw_fullscreen_texture(VkPipeline pipeline,
-                                       const vk_texture_t *texture,
-                                       const vec4_t color);
 static bool vk_create_test_triangle(void);
 static void vk_destroy_mesh(vk_mesh_t *mesh);
 static void vk_free_world(void);
@@ -4912,6 +4909,53 @@ static bool vk_alias_model_has_glowmap(const vk_model_t *model)
     return false;
 }
 
+static void vk_draw_texture_rect_sized(VkPipeline pipeline,
+                                       const vk_texture_t *texture,
+                                       const vec4_t color,
+                                       int x, int y, int w, int h,
+                                       uint32_t screen_w,
+                                       uint32_t screen_h)
+{
+    if (!vk.render_pass_active || !pipeline || !texture->descriptor_set ||
+        w <= 0 || h <= 0)
+        return;
+
+    vk_draw_push_t push = {
+        .rect = { x, y, w, h },
+        .color = { color[0], color[1], color[2], color[3] },
+        .screen = { screen_w, screen_h },
+        .uv = { 0.0f, 0.0f, 1.0f, 1.0f },
+    };
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+    vk_push_constants(cmd, sizeof(push), &push);
+    vk.CmdDraw(cmd, 6, 1, 0, 0);
+    c.trisDrawn += 2;
+    c.batchesDrawn2D++;
+}
+
+static void vk_draw_refdef_texture(VkPipeline pipeline,
+                                   const vk_texture_t *texture,
+                                   const vec4_t color)
+{
+    if (vk.fd_valid) {
+        vk_draw_texture_rect_sized(pipeline, texture, color,
+                                   vk.fd.x, vk.fd.y,
+                                   vk.fd.width, vk.fd.height,
+                                   vk.swapchain_extent.width,
+                                   vk.swapchain_extent.height);
+    } else {
+        vk_draw_texture_rect_sized(pipeline, texture, color,
+                                   0, 0,
+                                   vk.swapchain_extent.width,
+                                   vk.swapchain_extent.height,
+                                   vk.swapchain_extent.width,
+                                   vk.swapchain_extent.height);
+    }
+}
+
 static void vk_composite_scene_texture(void)
 {
     vec4_t color = { 1.0f, 1.0f, 1.0f, 1.0f };
@@ -4922,7 +4966,7 @@ static void vk_composite_scene_texture(void)
         pipeline = vk.waterwarp_pipeline;
     }
 
-    vk_draw_fullscreen_texture(pipeline, &vk.scene_texture, color);
+    vk_draw_refdef_texture(pipeline, &vk.scene_texture, color);
 }
 
 static void vk_draw_fullscreen_texture_sized(VkPipeline pipeline,
@@ -4947,15 +4991,6 @@ static void vk_draw_fullscreen_texture_sized(VkPipeline pipeline,
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
-}
-
-static void vk_draw_fullscreen_texture(VkPipeline pipeline,
-                                       const vk_texture_t *texture,
-                                       const vec4_t color)
-{
-    vk_draw_fullscreen_texture_sized(pipeline, texture, color,
-                                     vk.swapchain_extent.width,
-                                     vk.swapchain_extent.height);
 }
 
 static float vk_projection_zfar(int rdflags)
@@ -10033,10 +10068,10 @@ void VKR_EndFrame(void)
         vk_begin_render_pass(vk.render_pass, vk.framebuffers[vk.current_image],
                              vk_frame_clear_color());
         if (vk_showbloom && vk_showbloom->integer) {
-            vk_draw_fullscreen_texture(vk.texture_pipeline, &vk.bloom_texture, white);
+            vk_draw_refdef_texture(vk.texture_pipeline, &vk.bloom_texture, white);
         } else {
             vk_composite_scene_texture();
-            vk_draw_fullscreen_texture(vk.bloom_add_pipeline, &vk.bloom_texture, white);
+            vk_draw_refdef_texture(vk.bloom_add_pipeline, &vk.bloom_texture, white);
         }
     }
 
