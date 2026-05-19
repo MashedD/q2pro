@@ -1789,6 +1789,8 @@ void Menu_Init(menuFrameWork_t *menu)
 
     menu->y1 = 0;
     menu->y2 = uis.height;
+    menu->scrollOffset = 0;
+    menu->maxVisible = 0;
 
     if (!menu->size) {
         menu->size = Menu_Size;
@@ -1874,7 +1876,7 @@ void Menu_Init(menuFrameWork_t *menu)
 void Menu_Size(menuFrameWork_t *menu)
 {
     menuCommon_t *item;
-    int x, y, w, h;
+    int x, y, w, h, totalHeight;
     int i, widest = -1;
 
     // count visible items
@@ -1933,6 +1935,9 @@ void Menu_Size(menuFrameWork_t *menu)
         y += GENERIC_SPACING(menu->banner_rc.height);
     }
 
+    // save for scroll overflow check
+    totalHeight = h;
+
     // plaque and logo are vertically centered and
     // positioned to the left of bitmaps and cursor
     h = 0;
@@ -1968,6 +1973,79 @@ void Menu_Size(menuFrameWork_t *menu)
         }
     }
 
+    // scroll handling - reposition items when they don't fit
+    {
+        int availHeight = uis.height - MENU_SPACING * 2;
+        if (menu->banner && menu->banner_rc.height > 0)
+            availHeight -= GENERIC_SPACING(menu->banner_rc.height) + MENU_SPACING;
+
+        if (totalHeight > availHeight) {
+            // validate scrollOffset
+            if (menu->scrollOffset < 0)
+                menu->scrollOffset = 0;
+            if (menu->scrollOffset >= menu->nitems)
+                menu->scrollOffset = 0;
+
+            // compute pre-scroll height (items above scrollOffset)
+            int preHeight = 0;
+            for (i = 0; i < menu->scrollOffset && i < menu->nitems; i++) {
+                item = menu->items[i];
+                if (item->flags & QMF_HIDDEN) continue;
+                if (item->type == MTYPE_BITMAP)
+                    preHeight += GENERIC_SPACING(item->height);
+                else
+                    preHeight += MENU_SPACING;
+            }
+
+            // reposition banner at top for scrollable menu
+            if (menu->banner) {
+                menu->banner_rc.x = (uis.width - menu->banner_rc.width) / 2;
+                menu->banner_rc.y = MENU_SPACING;
+            }
+
+            // base Y: top of items area minus scroll pre-height
+            y = MENU_SPACING;
+            if (menu->banner && menu->banner_rc.height > 0)
+                y += GENERIC_SPACING(menu->banner_rc.height) + MENU_SPACING;
+            y -= preHeight;
+
+            // reposition all items with scroll offset
+            for (i = 0; i < menu->nitems; i++) {
+                item = menu->items[i];
+                if (item->flags & QMF_HIDDEN) continue;
+                item->x = x;
+                item->y = y;
+                item->rect.y = y;
+                if (item->type == MTYPE_BITMAP)
+                    y += GENERIC_SPACING(item->height);
+                else
+                    y += MENU_SPACING;
+            }
+
+            // compute maxVisible
+            menu->maxVisible = 0;
+            int visibleY = y;
+            if (menu->banner && menu->banner_rc.height > 0)
+                visibleY = MENU_SPACING + GENERIC_SPACING(menu->banner_rc.height) + MENU_SPACING;
+            else
+                visibleY = MENU_SPACING;
+            for (i = menu->scrollOffset; i < menu->nitems; i++) {
+                item = menu->items[i];
+                if (item->flags & QMF_HIDDEN) continue;
+                int itemH = (item->type == MTYPE_BITMAP)
+                    ? GENERIC_SPACING(item->height) : MENU_SPACING;
+                if (visibleY + itemH > uis.height - MENU_SPACING)
+                    break;
+                menu->maxVisible++;
+                visibleY += itemH;
+            }
+            if (menu->maxVisible < 1)
+                menu->maxVisible = 1;
+        } else {
+            menu->scrollOffset = 0;
+            menu->maxVisible = menu->nitems;
+        }
+    }
 }
 
 menuCommon_t *Menu_ItemAtCursor(menuFrameWork_t *m)
@@ -2077,6 +2155,21 @@ menuSound_t Menu_AdjustCursor(menuFrameWork_t *m, int dir)
 
     Menu_SetFocus(item);
 
+    // scroll to keep cursor visible
+    if (m->maxVisible && m->maxVisible < m->nitems) {
+        if (cursor < m->scrollOffset) {
+            m->scrollOffset = cursor;
+            if (m->size)
+                m->size(m);
+        } else if (cursor >= m->scrollOffset + m->maxVisible) {
+            m->scrollOffset = cursor - m->maxVisible + 1;
+            if (m->scrollOffset < 0)
+                m->scrollOffset = 0;
+            if (m->size)
+                m->size(m);
+        }
+    }
+
     return QMS_MOVE;
 }
 
@@ -2176,6 +2269,12 @@ void Menu_Draw(menuFrameWork_t *menu)
             continue;
         }
 
+        // skip items scrolled off screen
+        if (menu->maxVisible && i < menu->scrollOffset)
+            continue;
+        if (menu->maxVisible && i >= menu->scrollOffset + menu->maxVisible)
+            break;
+
         switch (((menuCommon_t *)item)->type) {
         case MTYPE_FIELD:
             Field_Draw(item);
@@ -2217,6 +2316,23 @@ void Menu_Draw(menuFrameWork_t *menu)
 
         if (ui_debug->integer) {
             UI_DrawRect8(&((menuCommon_t *)item)->rect, 1, 223);
+        }
+    }
+
+    // draw scroll indicators for scrollable menus
+    if (menu->maxVisible && menu->maxVisible < menu->nitems) {
+        if (menu->scrollOffset > 0) {
+            int y = menu->banner_rc.y;
+            if (menu->banner)
+                y += GENERIC_SPACING(menu->banner_rc.height) + MENU_SPACING;
+            else
+                y = MENU_SPACING;
+            UI_DrawString(uis.width / 2, y - CONCHAR_HEIGHT,
+                          UI_CENTER | UI_ALTCOLOR, "...");
+        }
+        if (menu->scrollOffset + menu->maxVisible < menu->nitems) {
+            UI_DrawString(uis.width / 2, uis.height - MENU_SPACING - CONCHAR_HEIGHT,
+                          UI_CENTER | UI_ALTCOLOR, "...");
         }
     }
 
@@ -2349,15 +2465,33 @@ static menuSound_t Menu_DefaultKey(menuFrameWork_t *m, int key)
     case 'j':
         return Menu_AdjustCursor(m, 1);
 
+    case K_MWHEELDOWN:
+        if (m->maxVisible && m->maxVisible < m->nitems) {
+            m->scrollOffset++;
+            if (m->scrollOffset + m->maxVisible > m->nitems)
+                m->scrollOffset = m->nitems - m->maxVisible;
+            if (m->size) m->size(m);
+            return QMS_SILENT;
+        }
+        return Menu_SlideItem(m, -1);
+
+    case K_MWHEELUP:
+        if (m->maxVisible && m->maxVisible < m->nitems) {
+            m->scrollOffset--;
+            if (m->scrollOffset < 0)
+                m->scrollOffset = 0;
+            if (m->size) m->size(m);
+            return QMS_SILENT;
+        }
+        return Menu_SlideItem(m, 1);
+
     case K_KP_LEFTARROW:
     case K_LEFTARROW:
-    case K_MWHEELDOWN:
     case 'h':
         return Menu_SlideItem(m, -1);
 
     case K_KP_RIGHTARROW:
     case K_RIGHTARROW:
-    case K_MWHEELUP:
     case 'l':
         return Menu_SlideItem(m, 1);
 
