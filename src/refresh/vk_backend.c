@@ -6292,7 +6292,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 if (!vk_world_face_glowmap_enabled(face->face, image))
                     continue;
 
-                const vk_texture_t *glow = vk_texture_for_index(image->texnum2, true);
+                const vk_texture_t *glow = vk_texture_for_index(image->texnum2, false);
                 if (!glow)
                     continue;
 
@@ -6343,7 +6343,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                  (pass == VK_WORLD_ENTITY_ALPHA &&
                   !(face->face->drawflags & SURF_TRANS_MASK))) &&
                 vk_world_face_glowmap_enabled(face->face, image)) {
-                const vk_texture_t *glow = vk_texture_for_index(image->texnum2, true);
+                const vk_texture_t *glow = vk_texture_for_index(image->texnum2, false);
                 if (glow) {
                     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                        vk.world_glow_pipeline);
@@ -7330,7 +7330,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
                                texture, &push);
         if (skin->texnum2 && skin->texnum2 < MAX_RIMAGES &&
             vk.alias_blend_pipeline) {
-            const vk_texture_t *glow = vk_texture_for_index(skin->texnum2, true);
+            const vk_texture_t *glow = vk_texture_for_index(skin->texnum2, false);
 
             if (glow) {
                 vk_alias_push_t glow_push = push;
