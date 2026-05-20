@@ -21,6 +21,11 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 extern cvar_t *gl_fontshadow;
 
+static int Con_FontShadow(void)
+{
+    return gl_fontshadow ? gl_fontshadow->integer : 0;
+}
+
 #define CON_TIMES       16
 #define CON_TIMES_MASK  (CON_TIMES - 1)
 
@@ -778,7 +783,7 @@ static void Con_DrawNotify(void)
 
         Con_DrawLine(v, i, alpha, true);
 
-        v += CONCHAR_HEIGHT + gl_fontshadow->integer;
+        v += CONCHAR_HEIGHT + Con_FontShadow();
     }
 
     R_ClearColor();
@@ -839,7 +844,7 @@ static void Con_DrawSolidConsole(void)
 
 // draw the text
     y = vislines - CON_PRESTEP;
-    rows = y / (CONCHAR_HEIGHT + gl_fontshadow->integer) + 1;
+    rows = y / (CONCHAR_HEIGHT + Con_FontShadow()) + 1;
 
 // draw arrows to show the buffer is backscrolled
     if (con.display != con.current) {
@@ -848,7 +853,7 @@ static void Con_DrawSolidConsole(void)
             R_DrawChar(i * CONCHAR_WIDTH, y, 0, '^', con.charsetImage);
         }
 
-        y -= CONCHAR_HEIGHT + gl_fontshadow->integer;
+        y -= CONCHAR_HEIGHT + Con_FontShadow();
         rows--;
     }
 
@@ -867,7 +872,7 @@ static void Con_DrawSolidConsole(void)
             widths[i] = x;
         }
 
-        y -= CONCHAR_HEIGHT + gl_fontshadow->integer;
+        y -= CONCHAR_HEIGHT + Con_FontShadow();
         row--;
     }
 
