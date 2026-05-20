@@ -7341,8 +7341,11 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     };
 
     vk_entity_axis(ent, axis);
-    if (vk_alias_model_culled(model, ent, axis, lerp.frame, lerp.oldframe))
+    if (vk_alias_model_culled(model, ent, axis, lerp.frame, lerp.oldframe)) {
+        if (!vk.drawing_bloom)
+            vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp);
         return;
+    }
 
     vk_entity_mvp(mvp, fd, ent, axis);
     memcpy(push.mvp, mvp, sizeof(push.mvp));
