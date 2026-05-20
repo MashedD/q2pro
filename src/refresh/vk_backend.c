@@ -399,6 +399,7 @@ typedef struct {
     VkPipeline sprite_pipeline;
     VkPipeline sprite_alpha_pipeline;
     VkPipeline particle_add_pipeline;
+    VkPipeline glare_pipeline;
     VkPipeline alias_pipeline;
     VkPipeline alias_alpha_pipeline;
     VkPipeline alias_depth_pipeline;
@@ -516,6 +517,10 @@ static cvar_t *vk_showtearing;
 static cvar_t *vk_showbloom;
 static cvar_t *vk_waterwarp;
 static cvar_t *vk_bloom_sigma;
+static cvar_t *vk_glare;
+static cvar_t *vk_glare_threshold;
+static cvar_t *vk_glare_size;
+static cvar_t *vk_glare_intensity;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
 #endif
@@ -996,6 +1001,7 @@ static const vk_texture_t *vk_texture_for_index(unsigned index, bool allow_nobin
 
 static void vk_free_world(void)
 {
+    glr.num_glare_sources = 0;
     vk_destroy_mesh(&vk.world.mesh);
     vk_destroy_buffer(&vk.world.line_indices);
     if (vk.world.batches) {
@@ -3105,6 +3111,11 @@ static void vk_destroy_swapchain(void)
         vk.particle_add_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.glare_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.glare_pipeline, NULL);
+        vk.glare_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.alias_pipeline) {
         vk.DestroyPipeline(vk.device, vk.alias_pipeline, NULL);
         vk.alias_pipeline = VK_NULL_HANDLE;
@@ -4408,6 +4419,7 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.particle_add_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.glare_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.debug_text_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
         !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
@@ -7500,6 +7512,21 @@ static bool vk_flare_occluded(const entity_t *ent, const refdef_t *fd)
     return point.surf && point.fraction < 0.995f;
 }
 
+static bool vk_point_occluded(const vec3_t origin, const refdef_t *fd)
+{
+    bsp_t *bsp = vk.world.cache;
+    lightpoint_t point;
+
+    if (!fd || !bsp || !bsp->nodes)
+        return false;
+
+    BSP_LightPoint(&point, fd->vieworg, origin, bsp->nodes,
+                   vk.world.nolm_mask | SURF_TRANS_MASK);
+    vk_trace_bmodel_light_points(fd, bsp, fd->vieworg, origin, &point);
+
+    return point.surf && point.fraction < 0.995f;
+}
+
 static bool vk_flare_visible(const entity_t *ent, const refdef_t *fd)
 {
     for (int i = 0; i < 4; i++) {
@@ -7738,6 +7765,115 @@ static void vk_draw_particles(const refdef_t *fd)
                                   VK_INDEX_TYPE_UINT32);
             vk_bind_texture_descriptor(cmd, vk.particle_texture.descriptor_set);
         }
+    }
+}
+
+static void vk_draw_glare(const refdef_t *fd)
+{
+    if (!vk_glare || !vk_glare->integer || !glr.num_glare_sources || !fd ||
+        !vk.world.cache || !vk.world.cache->nodes ||
+        !vk.glare_pipeline || !vk.particle_texture.descriptor_set ||
+        !vk.sprite_quad.vertices.buffer || !vk.sprite_quad.indices.buffer)
+        return;
+
+    vec3_t viewaxis[3];
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    AnglesToAxis(fd->viewangles, viewaxis);
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.glare_pipeline);
+    vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0,
+                          VK_INDEX_TYPE_UINT32);
+    vk_bind_texture_descriptor(cmd, vk.particle_texture.descriptor_set);
+
+    for (int i = 0; i < glr.num_glare_sources; i++) {
+        glare_source_t *gs = &glr.glare_sources[i];
+        vec3_t to_src, view_dir, to_viewer;
+        bool visible = true;
+
+        for (int j = 0; j < 4; j++) {
+            if (PlaneDiff(gs->origin, &vk.world.frustum[j]) < -2.5f) {
+                visible = false;
+                break;
+            }
+        }
+
+        VectorSubtract(gs->origin, fd->vieworg, to_src);
+        float dist = VectorNormalize2(to_src, view_dir);
+        if (dist < 1.0f)
+            visible = false;
+        VectorNegate(view_dir, to_viewer);
+        float view_angle = DotProduct(to_viewer, gs->normal);
+        if (view_angle < 0.01f)
+            visible = false;
+        if (visible && vk_point_occluded(gs->origin, fd))
+            visible = false;
+
+        gs->visible = visible;
+        float speed = vk_flarespeed ? vk_flarespeed->value : 8.0f;
+        if (speed <= 0.0f) {
+            gs->visibility = visible ? 1.0f : 0.0f;
+        } else if (gs->visibility < (visible ? 1.0f : 0.0f)) {
+            gs->visibility = min(gs->visibility + speed * fd->frametime, 1.0f);
+        } else if (gs->visibility > (visible ? 1.0f : 0.0f)) {
+            gs->visibility = max(gs->visibility - speed * fd->frametime, 0.0f);
+        }
+        if (gs->visibility <= 0.0f)
+            continue;
+
+        float scale = (vk_glare_size ? vk_glare_size->value : 24.0f) * gs->brightness;
+        if (dist > 20.0f)
+            scale *= 1.0f + dist * 0.004f;
+        scale = min(scale, 200.0f);
+
+        float alpha = view_angle * gs->brightness *
+            (vk_glare_intensity ? vk_glare_intensity->value : 0.5f) *
+            gs->visibility;
+        alpha = min(alpha, 1.0f);
+        if (alpha < 0.01f || scale <= 0.0f)
+            continue;
+
+        vec3_t left, right, down, up, xaxis, yaxis, origin;
+        mat4_t model_matrix, mvp;
+        vk_world_push_t push;
+
+        VectorScale(viewaxis[1], scale, left);
+        VectorScale(viewaxis[1], -scale, right);
+        VectorScale(viewaxis[2], -scale, down);
+        VectorScale(viewaxis[2], scale, up);
+        VectorSubtract(right, left, xaxis);
+        VectorSubtract(up, down, yaxis);
+        VectorAdd3(gs->origin, left, down, origin);
+
+        memset(model_matrix, 0, sizeof(model_matrix));
+        model_matrix[0] = xaxis[0];
+        model_matrix[1] = xaxis[1];
+        model_matrix[2] = xaxis[2];
+        model_matrix[4] = yaxis[0];
+        model_matrix[5] = yaxis[1];
+        model_matrix[6] = yaxis[2];
+        model_matrix[10] = 1.0f;
+        model_matrix[12] = origin[0];
+        model_matrix[13] = origin[1];
+        model_matrix[14] = origin[2];
+        model_matrix[15] = 1.0f;
+
+        vk_model_mvp(mvp, fd, model_matrix);
+        memcpy(push.mvp, mvp, sizeof(push.mvp));
+        push.color[0] = min(gs->lightcolor[0], 1.0f);
+        push.color[1] = min(gs->lightcolor[1], 1.0f);
+        push.color[2] = min(gs->lightcolor[2], 1.0f);
+        push.color[3] = alpha;
+        Vector4Clear(push.scroll);
+        Vector4Clear(push.dlight);
+        Vector4Clear(push.fog);
+        push.intensity = 1.0f;
+
+        vk_push_constants(cmd, sizeof(push), &push);
+        vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+        c.trisDrawn += vk.sprite_quad.index_count / 3;
+        c.batchesDrawn++;
     }
 }
 
@@ -8782,6 +8918,76 @@ static void vk_mark_world_images_registered(bsp_t *bsp)
     }
 }
 
+static void vk_build_glare_list(bsp_t *bsp)
+{
+    glr.num_glare_sources = 0;
+
+    return;
+
+    if (!vk_glare || !vk_glare->integer)
+        return;
+    if (!bsp || !bsp->faces || (vk_fullbright && vk_fullbright->integer) ||
+        (vk_vertexlight && vk_vertexlight->integer))
+        return;
+
+    for (int i = 0; i < bsp->numfaces; i++) {
+        mface_t *surf = &bsp->faces[i];
+
+        if ((surf->drawflags & SURF_NODRAW) || !surf->texinfo ||
+            !surf->texinfo->image || !surf->texinfo->image->texnum2 ||
+            !surf->lightmap || !surf->plane || !surf->firstsurfedge ||
+            surf->numsurfedges <= 0 || surf->lm_width <= 0 || surf->lm_height <= 0)
+            continue;
+        if (!vk_face_edges_are_valid(bsp, surf))
+            continue;
+
+        int lightmap_size = surf->lm_width * surf->lm_height * 3;
+        if (!bsp->lightmap || surf->lightmap < bsp->lightmap || !surf->numstyles)
+            continue;
+        ptrdiff_t lightmap_offset = surf->lightmap - bsp->lightmap;
+        if (lightmap_offset < 0 ||
+            (uint64_t)lightmap_offset + (uint64_t)surf->numstyles * lightmap_size >
+            (uint64_t)bsp->numlightmapbytes)
+            continue;
+
+        int sc = surf->lm_width / 2;
+        int tc = surf->lm_height / 2;
+        const byte *pixel = surf->lightmap + 3 * (tc * surf->lm_width + sc);
+        float r = pixel[0] / 255.0f;
+        float g = pixel[1] / 255.0f;
+        float b = pixel[2] / 255.0f;
+        float brightness = (r + g + b) * (1.0f / 3.0f);
+
+        if (brightness < (vk_glare_threshold ? vk_glare_threshold->value : 0.3f))
+            continue;
+        if (glr.num_glare_sources >= MAX_GLARE_SOURCES)
+            break;
+
+        vec3_t center = { 0, 0, 0 };
+        const msurfedge_t *src_surfedge = surf->firstsurfedge;
+        for (int j = 0; j < surf->numsurfedges; j++) {
+            const medge_t *src_edge = bsp->edges + src_surfedge->edge;
+            const mvertex_t *src_vert = bsp->vertices + src_edge->v[src_surfedge->vert];
+            VectorAdd(center, src_vert->point, center);
+            src_surfedge++;
+        }
+        VectorScale(center, 1.0f / surf->numsurfedges, center);
+
+        vec3_t normal;
+        VectorCopy(surf->plane->normal, normal);
+        if (surf->drawflags & DSURF_PLANEBACK)
+            VectorNegate(normal, normal);
+
+        glare_source_t *gs = &glr.glare_sources[glr.num_glare_sources++];
+        VectorMA(center, 2.0f, normal, gs->origin);
+        VectorCopy(normal, gs->normal);
+        VectorSet(gs->lightcolor, r, g, b);
+        gs->brightness = brightness;
+        gs->visibility = 0.0f;
+        gs->visible = false;
+    }
+}
+
 static void vk_load_world(const char *name)
 {
     char buffer[MAX_QPATH];
@@ -8800,6 +9006,7 @@ static void vk_load_world(const char *name)
 
     if (vk.world.cache == bsp) {
         vk_mark_world_images_registered(bsp);
+        vk_build_glare_list(bsp);
         bsp->refcount--;
         return;
     }
@@ -8816,6 +9023,7 @@ static void vk_load_world(const char *name)
     else
         Com_Printf("Vulkan world mesh: %u indices, %u faces, %u batches\n",
                    vk.world.mesh.index_count, vk.world.face_count, vk.world.batch_count);
+    vk_build_glare_list(bsp);
     vk_clear_world_lighting_modified();
 }
 
@@ -8991,6 +9199,10 @@ bool VKR_Init(bool total)
     vk_showbloom = Cvar_Get("gl_showbloom", "0", CVAR_CHEAT);
     vk_waterwarp = Cvar_Get("gl_waterwarp", "0", 0);
     vk_bloom_sigma = Cvar_Get("gl_bloom_sigma", "4", 0);
+    vk_glare = Cvar_Get("gl_glare", "1", CVAR_ARCHIVE);
+    vk_glare_threshold = Cvar_Get("gl_glare_threshold", "0.3", 0);
+    vk_glare_size = Cvar_Get("gl_glare_size", "24", 0);
+    vk_glare_intensity = Cvar_Get("gl_glare_intensity", "0.5", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
 #endif
@@ -9422,6 +9634,7 @@ void VKR_RenderFrame(const refdef_t *fd)
     }
     vk_draw_entities(fd, VK_ENTITY_BEAM);
     vk_draw_particles(fd);
+    vk_draw_glare(fd);
     vk_draw_entities(fd, VK_ENTITY_ALPHA_FRONT);
     vk_draw_test_triangle(fd);
 #if USE_DEBUG

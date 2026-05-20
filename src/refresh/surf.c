@@ -1079,13 +1079,15 @@ void GL_BuildGlareList(void)
     // texnum2 will be 0 and no sources will match
 
     for (i = 0, surf = bsp->faces; i < bsp->numfaces; i++, surf++) {
-        if (surf->drawflags & SURF_NODRAW)
+        if ((surf->drawflags & SURF_NODRAW) || !surf->texinfo ||
+            !surf->texinfo->image || !surf->plane || !surf->firstsurfedge ||
+            surf->numsurfedges <= 0 || surf->lm_width <= 0 || surf->lm_height <= 0)
             continue;
 
         if (!surf->texinfo->image->texnum2)
             continue;
 
-        if (!surf->light_m)
+        if (!surf->light_m || !surf->light_m->buffer)
             continue;
 
         // compute face center
