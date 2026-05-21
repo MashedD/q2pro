@@ -111,6 +111,7 @@ typedef struct {
     VkDescriptorSet descriptor_set;
     uint32_t width;
     uint32_t height;
+    uint32_t mip_levels;
 } vk_texture_t;
 
 typedef struct {
@@ -567,7 +568,8 @@ static uint32_t *vk_build_line_indices(const uint32_t *indices,
                                        uint32_t index_count,
                                        uint32_t *line_index_count);
 static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
-                                   uint32_t height, const void *pixels);
+                                   uint32_t height, const void *pixels,
+                                   bool mipmaps);
 static void vk_destroy_texture_resource(vk_texture_t *texture);
 static bool vk_create_particle_texture(void);
 static bool vk_create_beam_texture(void);
@@ -774,6 +776,7 @@ static bool vk_create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
 }
 
 static bool vk_create_texture_image(uint32_t width, uint32_t height,
+                                    uint32_t mip_levels,
                                     VkImage *image, VkDeviceMemory *memory)
 {
 #if USE_BGRA
@@ -787,7 +790,7 @@ static bool vk_create_texture_image(uint32_t width, uint32_t height,
         .imageType = VK_IMAGE_TYPE_2D,
         .format = format,
         .extent = { width, height, 1 },
-        .mipLevels = 1,
+        .mipLevels = mip_levels,
         .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
@@ -1820,6 +1823,37 @@ static void vk_texture_barrier(VkCommandBuffer cmd, VkImage image,
                           0, 0, NULL, 0, NULL, 1, &barrier);
 }
 
+static void vk_texture_mip_barrier(VkCommandBuffer cmd, VkImage image,
+                                   uint32_t mip_levels,
+                                   VkImageLayout old_layout,
+                                   VkImageLayout new_layout,
+                                   VkAccessFlags src_access,
+                                   VkAccessFlags dst_access,
+                                   VkPipelineStageFlags src_stage,
+                                   VkPipelineStageFlags dst_stage)
+{
+    VkImageMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = src_access,
+        .dstAccessMask = dst_access,
+        .oldLayout = old_layout,
+        .newLayout = new_layout,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = mip_levels,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+
+    vk.CmdPipelineBarrier(cmd, src_stage, dst_stage,
+                          0, 0, NULL, 0, NULL, 1, &barrier);
+}
+
 static void vk_update_texture_descriptor_with_sampler(vk_texture_t *texture,
                                                       VkSampler sampler)
 {
@@ -1997,16 +2031,99 @@ static void vk_update_texture_descriptors(void)
     vk_update_texture_descriptor(&vk.beam_texture);
 }
 
-static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
-                                   uint32_t height, const void *pixels)
+static uint32_t vk_mip_level_count(uint32_t width, uint32_t height)
 {
-    VkDeviceSize upload_size = (VkDeviceSize)width * height * 4;
+    uint32_t levels = 1;
+
+    while (width > 1 || height > 1) {
+        width = max(width >> 1, 1);
+        height = max(height >> 1, 1);
+        levels++;
+    }
+
+    return levels;
+}
+
+static void vk_mip_map(byte *out, const byte *in, uint32_t width, uint32_t height)
+{
+    uint32_t out_width = max(width >> 1, 1);
+    uint32_t out_height = max(height >> 1, 1);
+
+    for (uint32_t y = 0; y < out_height; y++) {
+        for (uint32_t x = 0; x < out_width; x++) {
+            uint32_t x0 = min(x * 2, width - 1);
+            uint32_t x1 = min(x0 + 1, width - 1);
+            uint32_t y0 = min(y * 2, height - 1);
+            uint32_t y1 = min(y0 + 1, height - 1);
+            const byte *p0 = in + 4 * (y0 * width + x0);
+            const byte *p1 = in + 4 * (y0 * width + x1);
+            const byte *p2 = in + 4 * (y1 * width + x0);
+            const byte *p3 = in + 4 * (y1 * width + x1);
+            byte *dst = out + 4 * (y * out_width + x);
+
+            for (int c = 0; c < 4; c++)
+                dst[c] = (p0[c] + p1[c] + p2[c] + p3[c]) >> 2;
+        }
+    }
+}
+
+static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
+                                   uint32_t height, const void *pixels,
+                                   bool mipmaps)
+{
+    uint32_t mip_levels = mipmaps ? vk_mip_level_count(width, height) : 1;
+    VkDeviceSize upload_size = 0;
     VkBuffer staging = VK_NULL_HANDLE;
     VkDeviceMemory staging_memory = VK_NULL_HANDLE;
     vk_texture_t uploaded = { 0 };
+    VkBufferImageCopy *copies = NULL;
+    byte *mip_data = NULL;
 
     if (!pixels || !width || !height)
         return true;
+
+    uint32_t mip_width = width;
+    uint32_t mip_height = height;
+    for (uint32_t level = 0; level < mip_levels; level++) {
+        upload_size += (VkDeviceSize)mip_width * mip_height * 4;
+        mip_width = max(mip_width >> 1, 1);
+        mip_height = max(mip_height >> 1, 1);
+    }
+
+    copies = FS_AllocTempMem(sizeof(*copies) * mip_levels);
+    mip_data = FS_AllocTempMem(upload_size);
+    if (!copies || !mip_data)
+        goto fail;
+
+    const byte *src = pixels;
+    byte *dst = mip_data;
+    mip_width = width;
+    mip_height = height;
+    VkDeviceSize offset = 0;
+    for (uint32_t level = 0; level < mip_levels; level++) {
+        VkDeviceSize level_size = (VkDeviceSize)mip_width * mip_height * 4;
+
+        memcpy(dst + offset, src, level_size);
+        copies[level] = (VkBufferImageCopy) {
+            .bufferOffset = offset,
+            .imageSubresource = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .mipLevel = level,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .imageExtent = { mip_width, mip_height, 1 },
+        };
+
+        if (level + 1 < mip_levels) {
+            byte *next = dst + offset + level_size;
+            vk_mip_map(next, src, mip_width, mip_height);
+            src = next;
+        }
+        offset += level_size;
+        mip_width = max(mip_width >> 1, 1);
+        mip_height = max(mip_height >> 1, 1);
+    }
 
     if (!vk_create_buffer(upload_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
@@ -2020,10 +2137,10 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
         vk_fail_result("vkMapMemory", result);
         goto fail;
     }
-    memcpy(mapped, pixels, upload_size);
+    memcpy(mapped, mip_data, upload_size);
     vk.UnmapMemory(vk.device, staging_memory);
 
-    if (!vk_create_texture_image(width, height,
+    if (!vk_create_texture_image(width, height, mip_levels,
                                  &uploaded.image, &uploaded.memory))
         goto fail;
 
@@ -2031,37 +2148,24 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
     if (!vk_begin_immediate(&cmd))
         goto fail;
 
-    vk_texture_barrier(cmd, uploaded.image,
-                       VK_IMAGE_LAYOUT_UNDEFINED,
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                       0,
-                       VK_ACCESS_TRANSFER_WRITE_BIT,
-                       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT);
-
-    VkBufferImageCopy copy = {
-        .imageSubresource = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .mipLevel = 0,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        },
-        .imageExtent = {
-            .width = width,
-            .height = height,
-            .depth = 1,
-        },
-    };
+    vk_texture_mip_barrier(cmd, uploaded.image, mip_levels,
+                           VK_IMAGE_LAYOUT_UNDEFINED,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           0,
+                           VK_ACCESS_TRANSFER_WRITE_BIT,
+                           VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                           VK_PIPELINE_STAGE_TRANSFER_BIT);
     vk.CmdCopyBufferToImage(cmd, staging, uploaded.image,
-                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                            mip_levels, copies);
 
-    vk_texture_barrier(cmd, uploaded.image,
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                       VK_ACCESS_TRANSFER_WRITE_BIT,
-                       VK_ACCESS_SHADER_READ_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    vk_texture_mip_barrier(cmd, uploaded.image, mip_levels,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           VK_ACCESS_TRANSFER_WRITE_BIT,
+                           VK_ACCESS_SHADER_READ_BIT,
+                           VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
     if (!vk_end_immediate(cmd))
         goto fail;
@@ -2079,7 +2183,7 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
         .subresourceRange = {
             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
             .baseMipLevel = 0,
-            .levelCount = 1,
+            .levelCount = mip_levels,
             .baseArrayLayer = 0,
             .layerCount = 1,
         },
@@ -2107,11 +2211,16 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
 
     uploaded.width = width;
     uploaded.height = height;
+    uploaded.mip_levels = mip_levels;
 
     if (staging)
         vk.DestroyBuffer(vk.device, staging, NULL);
     if (staging_memory)
         vk.FreeMemory(vk.device, staging_memory, NULL);
+    if (copies)
+        FS_FreeTempMem(copies);
+    if (mip_data)
+        FS_FreeTempMem(mip_data);
 
     vk_destroy_texture_resource(texture);
     *texture = uploaded;
@@ -2123,6 +2232,10 @@ fail:
         vk.DestroyBuffer(vk.device, staging, NULL);
     if (staging_memory)
         vk.FreeMemory(vk.device, staging_memory, NULL);
+    if (copies)
+        FS_FreeTempMem(copies);
+    if (mip_data)
+        FS_FreeTempMem(mip_data);
     vk_destroy_texture_resource(&uploaded);
     return false;
 }
@@ -2199,7 +2312,9 @@ static bool vk_upload_texture(image_t *image, byte *pic)
     image->upload_width = scaled_width;
     image->upload_height = scaled_height;
 
-    bool ok = vk_upload_texture_data(texture, scaled_width, scaled_height, scaled);
+    bool mipmaps = image->type == IT_WALL || image->type == IT_SKIN;
+    bool ok = vk_upload_texture_data(texture, scaled_width, scaled_height, scaled,
+                                     mipmaps);
     if (scaled != pic)
         FS_FreeTempMem(scaled);
 
@@ -2685,6 +2800,32 @@ static void vk_texturemode_filters(VkFilter *min_filter, VkFilter *mag_filter)
     }
 }
 
+static VkSamplerMipmapMode vk_texturemode_mipmap(void)
+{
+    if (!vk_texturemode)
+        return VK_SAMPLER_MIPMAP_MODE_LINEAR;
+
+    const char *mode = vk_texturemode->string;
+
+    if (!Q_stricmp(mode, "GL_NEAREST") ||
+        !Q_stricmp(mode, "GL_LINEAR"))
+        return VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    if (!Q_stricmp(mode, "GL_NEAREST_MIPMAP_NEAREST") ||
+        !Q_stricmp(mode, "GL_LINEAR_MIPMAP_NEAREST"))
+        return VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    return VK_SAMPLER_MIPMAP_MODE_LINEAR;
+}
+
+static bool vk_texturemode_uses_mipmaps(void)
+{
+    if (!vk_texturemode)
+        return true;
+
+    const char *mode = vk_texturemode->string;
+
+    return Q_stricmp(mode, "GL_NEAREST") && Q_stricmp(mode, "GL_LINEAR");
+}
+
 static bool vk_create_sampler(VkSampler *sampler)
 {
     VkFilter min_filter, mag_filter;
@@ -2701,13 +2842,13 @@ static bool vk_create_sampler(VkSampler *sampler)
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .magFilter = mag_filter,
         .minFilter = min_filter,
-        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .mipmapMode = vk_texturemode_mipmap(),
         .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
         .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
         .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
         .anisotropyEnable = anisotropy > 1.0f,
         .maxAnisotropy = anisotropy,
-        .maxLod = 0.0f,
+        .maxLod = vk_texturemode_uses_mipmaps() ? VK_LOD_CLAMP_NONE : 0.0f,
     };
     VkResult result = vk.CreateSampler(vk.device, &sampler_info, NULL, sampler);
     if (result != VK_SUCCESS)
@@ -5532,7 +5673,7 @@ static bool vk_create_particle_texture(void)
         }
     }
 
-    if (!vk_upload_texture_data(&vk.particle_texture, 16, 16, pixels))
+    if (!vk_upload_texture_data(&vk.particle_texture, 16, 16, pixels, false))
         return false;
 
     vk_update_texture_descriptor_with_sampler(&vk.particle_texture,
@@ -5555,7 +5696,7 @@ static bool vk_create_beam_texture(void)
         }
     }
 
-    return vk_upload_texture_data(&vk.beam_texture, 16, 16, pixels);
+    return vk_upload_texture_data(&vk.beam_texture, 16, 16, pixels, false);
 }
 
 static void vk_partshape_changed(cvar_t *self)
@@ -5580,7 +5721,7 @@ static bool vk_create_default_texture(void)
         }
     }
 
-    if (!vk_upload_texture_data(&vk.textures[0], 8, 8, pixels))
+    if (!vk_upload_texture_data(&vk.textures[0], 8, 8, pixels, false))
         return false;
 
     strcpy(image->name, "NOTEXTURE");
@@ -5600,7 +5741,7 @@ static bool vk_create_shell_texture(void)
 {
     uint32_t pixel = U32_WHITE;
 
-    if (!vk_upload_texture_data(&vk.textures[1], 1, 1, &pixel))
+    if (!vk_upload_texture_data(&vk.textures[1], 1, 1, &pixel, false))
         return false;
 
     R_SHELLTEXTURE->texnum = 1;
@@ -9914,7 +10055,7 @@ void VKR_UpdateRawPic(int pic_w, int pic_h, const uint32_t *pic)
     if (pic_w <= 0 || pic_h <= 0 || !pic)
         return;
 
-    if (!vk_upload_texture_data(&vk.raw_texture, pic_w, pic_h, pic)) {
+    if (!vk_upload_texture_data(&vk.raw_texture, pic_w, pic_h, pic, false)) {
         Com_WPrintf("Couldn't upload Vulkan raw texture: %s\n",
                     Com_GetLastError());
     } else {
