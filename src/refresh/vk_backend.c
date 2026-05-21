@@ -220,6 +220,7 @@ typedef struct {
     unsigned visframe;
     float lightstyles[MAX_LIGHTSTYLES];
     bool lightstyles_valid;
+    bool sky_visible;
 } vk_world_t;
 
 typedef struct {
@@ -6492,6 +6493,8 @@ static void vk_draw_skybox(const refdef_t *fd)
     if ((vk_drawsky && !vk_drawsky->integer) ||
         (vk_gl_drawsky && !vk_gl_drawsky->integer))
         return;
+    if (!vk.world.sky_visible)
+        return;
     if (!vk.render_pass_active || !vk.sky_pipeline ||
         !vk.skybox.vertices.buffer || !vk.skybox.indices.buffer)
         return;
@@ -6607,8 +6610,13 @@ static void vk_mark_world_leaf(const mleaf_t *leaf, const refdef_t *fd)
         return;
 
     for (int i = 0; i < leaf->numleaffaces; i++) {
-        if (leaf->firstleafface[i])
-            leaf->firstleafface[i]->drawframe = vk.world.drawframe;
+        mface_t *face = leaf->firstleafface[i];
+
+        if (!face)
+            continue;
+        if (face->drawflags & SURF_SKY)
+            vk.world.sky_visible = true;
+        face->drawframe = vk.world.drawframe;
     }
 
     c.leavesDrawn++;
@@ -6734,6 +6742,7 @@ static void vk_mark_world_faces(const refdef_t *fd)
         return;
 
     vk.world.drawframe++;
+    vk.world.sky_visible = false;
     vk_update_world_view(fd);
     if (!vk_lockpvs || !vk_lockpvs->integer) {
         vk.world.visframe++;
@@ -9597,6 +9606,15 @@ void VKR_RenderFrame(const refdef_t *fd)
 
     bool drawworld = !(fd->rdflags & RDF_NOWORLDMODEL) &&
         (!vk_drawworld || vk_drawworld->integer);
+    bool world_marked = false;
+
+    if (drawworld && vk_world_textures && vk_world_textures->integer &&
+        vk_world_vis && vk_world_vis->integer) {
+        vk_mark_world_faces(fd);
+        world_marked = true;
+    } else {
+        vk.world.sky_visible = drawworld;
+    }
 
     if (drawworld)
         vk_draw_skybox(fd);
@@ -9606,7 +9624,7 @@ void VKR_RenderFrame(const refdef_t *fd)
 
         vk_world_mvp(mvp, fd);
         if (vk_world_textures && vk_world_textures->integer) {
-            if (vk_world_vis && vk_world_vis->integer)
+            if (vk_world_vis && vk_world_vis->integer && !world_marked)
                 vk_mark_world_faces(fd);
             vk_draw_world_mesh(mvp, false, vk.world_pipeline, VK_WORLD_OPAQUE,
                                1.0f, fd, NULL, NULL);
