@@ -1809,6 +1809,8 @@ CL_ClearEffects
 ==============
 */
 static float snow_density;
+static float snow_accum_credit;
+static int snow_accum_time;
 
 void CL_ClearEffects(void)
 {
@@ -1816,6 +1818,8 @@ void CL_ClearEffects(void)
     CL_ClearParticles();
     CL_ClearDlights();
     snow_density = 0;
+    snow_accum_credit = 0;
+    snow_accum_time = 0;
 }
 
 void CL_InitEffects(void)
@@ -1835,11 +1839,12 @@ void CL_InitEffects(void)
 #define RAIN_AREA           2048.0f
 #define RAIN_TRACE_DEPTH    1024.0f
 #define SNOW_SPEED          150.0f
-#define SNOW_ACCUM_PER_FRAME 24
+#define SNOW_ACCUM_RATE     520.0f
+#define SNOW_ACCUM_MAX_CREDIT 120.0f
 
 void CL_RainParticles(void)
 {
-    int i, count, accum_remain;
+    int i, count;
     cparticle_t *p;
     vec3_t start, end;
     trace_t trace;
@@ -1855,8 +1860,19 @@ void CL_RainParticles(void)
     is_snow = (cl_weather->integer == 2);
     count = is_snow ? 70 : 50;
     speed = is_snow ? SNOW_SPEED : RAIN_SPEED;
-    accum_remain = SNOW_ACCUM_PER_FRAME;
     outdoor = false;
+
+    if (is_snow) {
+        float dt = 0;
+        if (snow_accum_time)
+            dt = (cl.time - snow_accum_time) * 0.001f;
+        if (dt < 0 || dt > 1)
+            dt = 0;
+        snow_accum_credit += dt * SNOW_ACCUM_RATE;
+        if (snow_accum_credit > SNOW_ACCUM_MAX_CREDIT)
+            snow_accum_credit = SNOW_ACCUM_MAX_CREDIT;
+        snow_accum_time = cl.time;
+    }
 
     if (is_snow) {
         color.u8[0] = 255;
@@ -1909,15 +1925,15 @@ void CL_RainParticles(void)
         if (dist < 32.0f)
             continue;
 
-        // accumulation — 1 detail + 1 blanket per impact
-        if (is_snow && accum_remain >= 2) {
-            float al = -1.0f / (12.0f + frand() * 8.0f);
+        // accumulation: ground-aligned blanket + billboard bumps
+        if (is_snow && snow_accum_credit >= 2.0f) {
+            float al = -1.0f / (35.0f + frand() * 20.0f);
             p = CL_AllocParticle();
             if (p) {
                 VectorCopy(trace.endpos, p->org);
-                p->org[0] += (frand() - 0.5f) * 8.0f;
-                p->org[1] += (frand() - 0.5f) * 8.0f;
-                p->org[2] += 0.5f + frand() * 4.0f;
+                p->org[0] += (frand() - 0.5f) * 10.0f;
+                p->org[1] += (frand() - 0.5f) * 10.0f;
+                p->org[2] += 1.0f + frand() * 5.0f;
                 VectorClear(p->vel);
                 VectorClear(p->accel);
                 p->color = -1;
@@ -1925,30 +1941,63 @@ void CL_RainParticles(void)
                 p->rgba.u8[1] = 200 + (int)(frand() * 40);
                 p->rgba.u8[2] = 210 + (int)(frand() * 30);
                 p->rgba.u8[3] = 255;
-                p->scale = 1.0f + frand() * 2.5f;
+                p->scale = 1.2f + frand() * 3.0f;
                 p->alpha = 1.0f;
                 p->alphavel = al;
                 p->time = cl.time;
-                accum_remain--;
+                snow_accum_credit -= 1.0f;
             }
-            p = CL_AllocParticle();
-            if (p) {
-                VectorCopy(trace.endpos, p->org);
-                p->org[0] += (frand() - 0.5f) * 12.0f;
-                p->org[1] += (frand() - 0.5f) * 12.0f;
-                p->org[2] += 0.3f + frand() * 0.5f;
-                VectorClear(p->vel);
-                VectorClear(p->accel);
-                p->color = -1;
-                p->rgba.u8[0] = 220;
-                p->rgba.u8[1] = 220;
-                p->rgba.u8[2] = 230;
-                p->rgba.u8[3] = (int)(40 + frand() * 40);
-                p->scale = 6.0f + frand() * 10.0f;
-                p->alpha = 1.0f;
-                p->alphavel = al;
-                p->time = cl.time;
-                accum_remain--;
+            // verify solid ground before placing blanket
+            if (snow_accum_credit >= 1.0f) {
+                vec3_t ck, ck_end, ground_pos;
+                float ps, half, rx, ry;
+                bool solid;
+                int j;
+
+                VectorCopy(trace.endpos, ground_pos);
+                ps = 30.0f + frand() * 34.0f;
+                half = ps * 2.0f; // matches gl_partscale default 2
+                rx = (frand() - 0.5f) * 36.0f;
+                ry = (frand() - 0.5f) * 36.0f;
+                solid = true;
+
+                // trace at 4 corners of the projected quad
+                for (j = 0; solid && j < 4; j++) {
+                    float ox = rx, oy = ry;
+                    switch (j) {
+                    case 0: ox -= half; oy -= half; break;
+                    case 1: ox += half; oy -= half; break;
+                    case 2: ox += half; oy += half; break;
+                    case 3: ox -= half; oy += half; break;
+                    }
+                    VectorSet(ck, ground_pos[0] + ox, ground_pos[1] + oy, ground_pos[2] + 8.0f);
+                    VectorSet(ck_end, ck[0], ck[1], ck[2] - 32.0f);
+                    CM_BoxTrace(&trace, ck, ck_end, vec3_origin, vec3_origin,
+                                 cl.bsp->nodes, MASK_SOLID, cl.csr.extended);
+                    if (trace.fraction >= 1.0f || fabsf(trace.endpos[2] - ground_pos[2]) > 6.0f)
+                        solid = false;
+                }
+                if (solid) {
+                    p = CL_AllocParticle();
+                    if (p) {
+                        VectorCopy(ground_pos, p->org);
+                        p->org[0] += rx;
+                        p->org[1] += ry;
+                        p->org[2] += 0.8f + frand() * 0.35f;
+                        VectorClear(p->vel);
+                        VectorClear(p->accel);
+                        p->color = -1;
+                        p->rgba.u8[0] = 220;
+                        p->rgba.u8[1] = 220;
+                        p->rgba.u8[2] = 230;
+                        p->rgba.u8[3] = (int)(180 + frand() * 75);
+                        p->scale = -ps;
+                        p->alpha = 1.0f;
+                        p->alphavel = al;
+                        p->time = cl.time;
+                        snow_accum_credit -= 1.0f;
+                    }
+                }
             }
         }
 

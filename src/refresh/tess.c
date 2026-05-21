@@ -74,7 +74,7 @@ void GL_DrawParticles(void)
     GL_LoadUniforms();
     GL_BindArrays(VA_EFFECT);
 
-    bits = (gl_partstyle->integer ? GLS_BLEND_ADD : GLS_BLEND_BLEND) | GLS_DEPTHMASK_FALSE | glr.fog_bits;
+    bits = (gl_partstyle->integer ? GLS_BLEND_ADD : GLS_BLEND_BLEND) | GLS_DEPTHMASK_FALSE | GLS_CULL_DISABLE | glr.fog_bits;
 
     p = glr.fd.particles;
     total = glr.fd.num_particles;
@@ -83,29 +83,14 @@ void GL_DrawParticles(void)
         GL_StateBits(bits);
         GL_ArrayBits(GLA_VERTEX | GLA_TC | GLA_COLOR);
 
-        count = min(total, TESS_MAX_VERTICES / 3);
+        count = min(total, TESS_MAX_VERTICES / 6);
         total -= count;
 
         dst_vert = tess.vertices;
-        numverts = count * 3;
+        numverts = 0;
         do {
             VectorSubtract(p->origin, glr.fd.vieworg, transformed);
             dist = DotProduct(transformed, glr.viewaxis[0]);
-
-            scale = 1.0f;
-            if (dist > 20)
-                scale += dist * 0.004f;
-            scale *= gl_partscale->value * p->scale;
-            scale2 = scale * PARTICLE_SCALE;
-
-            VectorMA(p->origin, scale2, glr.viewaxis[1], dst_vert);
-            VectorMA(dst_vert, -scale2, glr.viewaxis[2], dst_vert);
-            VectorMA(dst_vert,  scale,  glr.viewaxis[2], dst_vert +  6);
-            VectorMA(dst_vert, -scale,  glr.viewaxis[1], dst_vert + 12);
-
-            dst_vert[ 3] = 0;               dst_vert[ 4] = 0;
-            dst_vert[ 9] = 0;               dst_vert[10] = PARTICLE_SIZE;
-            dst_vert[15] = PARTICLE_SIZE;   dst_vert[16] = 0;
 
             if (p->color == -1)
                 color.u32 = p->rgba.u32;
@@ -113,11 +98,89 @@ void GL_DrawParticles(void)
                 color.u32 = d_8to24table[p->color & 0xff];
             color.u8[3] *= p->alpha;
 
-            WN32(dst_vert +  5, color.u32);
-            WN32(dst_vert + 11, color.u32);
-            WN32(dst_vert + 17, color.u32);
+            if (p->scale < 0) {
+                int orient = ((int)p->origin[0] ^ ((int)p->origin[1] << 1)) & 3;
+                vec3_t v[4];
 
-            dst_vert += 18;
+                scale = -p->scale * gl_partscale->value;
+                VectorCopy(p->origin, v[0]);
+                VectorCopy(p->origin, v[1]);
+                VectorCopy(p->origin, v[2]);
+                VectorCopy(p->origin, v[3]);
+
+                switch (orient) {
+                case 0:
+                    v[0][0] -= scale;  v[0][1] -= scale;
+                    v[1][0] += scale;  v[1][1] -= scale;
+                    v[2][0] += scale;  v[2][1] += scale;
+                    v[3][0] -= scale;  v[3][1] += scale;
+                    break;
+                case 1:
+                    v[0][0] += scale;  v[0][1] -= scale;
+                    v[1][0] += scale;  v[1][1] += scale;
+                    v[2][0] -= scale;  v[2][1] += scale;
+                    v[3][0] -= scale;  v[3][1] -= scale;
+                    break;
+                case 2:
+                    v[0][0] += scale;  v[0][1] += scale;
+                    v[1][0] -= scale;  v[1][1] += scale;
+                    v[2][0] -= scale;  v[2][1] -= scale;
+                    v[3][0] += scale;  v[3][1] -= scale;
+                    break;
+                default:
+                    v[0][0] -= scale;  v[0][1] += scale;
+                    v[1][0] -= scale;  v[1][1] -= scale;
+                    v[2][0] += scale;  v[2][1] -= scale;
+                    v[3][0] += scale;  v[3][1] += scale;
+                    break;
+                }
+
+                VectorCopy(v[0], dst_vert);
+                VectorCopy(v[1], dst_vert +  6);
+                VectorCopy(v[2], dst_vert + 12);
+                VectorCopy(v[0], dst_vert + 18);
+                VectorCopy(v[2], dst_vert + 24);
+                VectorCopy(v[3], dst_vert + 30);
+
+                dst_vert[ 3] = 0;               dst_vert[ 4] = 0;
+                dst_vert[ 9] = PARTICLE_SIZE;   dst_vert[10] = 0;
+                dst_vert[15] = PARTICLE_SIZE;   dst_vert[16] = PARTICLE_SIZE;
+                dst_vert[21] = 0;               dst_vert[22] = 0;
+                dst_vert[27] = PARTICLE_SIZE;   dst_vert[28] = PARTICLE_SIZE;
+                dst_vert[33] = 0;               dst_vert[34] = PARTICLE_SIZE;
+
+                WN32(dst_vert +  5, color.u32);
+                WN32(dst_vert + 11, color.u32);
+                WN32(dst_vert + 17, color.u32);
+                WN32(dst_vert + 23, color.u32);
+                WN32(dst_vert + 29, color.u32);
+                WN32(dst_vert + 35, color.u32);
+
+                dst_vert += 36;
+                numverts += 6;
+            } else {
+                scale = 1.0f;
+                if (dist > 20)
+                    scale += dist * 0.004f;
+                scale *= gl_partscale->value * p->scale;
+                scale2 = scale * PARTICLE_SCALE;
+
+                VectorMA(p->origin, scale2, glr.viewaxis[1], dst_vert);
+                VectorMA(dst_vert, -scale2, glr.viewaxis[2], dst_vert);
+                VectorMA(dst_vert,  scale,  glr.viewaxis[2], dst_vert +  6);
+                VectorMA(dst_vert, -scale,  glr.viewaxis[1], dst_vert + 12);
+
+                dst_vert[ 3] = 0;               dst_vert[ 4] = 0;
+                dst_vert[ 9] = 0;               dst_vert[10] = PARTICLE_SIZE;
+                dst_vert[15] = PARTICLE_SIZE;   dst_vert[16] = 0;
+
+                WN32(dst_vert +  5, color.u32);
+                WN32(dst_vert + 11, color.u32);
+                WN32(dst_vert + 17, color.u32);
+
+                dst_vert += 18;
+                numverts += 3;
+            }
             p++;
         } while (--count);
 
