@@ -8925,8 +8925,6 @@ static void vk_build_glare_list(bsp_t *bsp)
 {
     glr.num_glare_sources = 0;
 
-    return;
-
     if (!vk_glare || !vk_glare->integer)
         return;
     if (!bsp || !bsp->faces || (vk_fullbright && vk_fullbright->integer) ||
