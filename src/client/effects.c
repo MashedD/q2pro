@@ -1808,11 +1808,14 @@ CL_ClearEffects
 
 ==============
 */
+static float snow_density;
+
 void CL_ClearEffects(void)
 {
     CL_ClearLightStyles();
     CL_ClearParticles();
     CL_ClearDlights();
+    snow_density = 0;
 }
 
 void CL_InitEffects(void)
@@ -1831,27 +1834,41 @@ void CL_InitEffects(void)
 #define RAIN_SPEED          800.0f
 #define RAIN_AREA           2048.0f
 #define RAIN_TRACE_DEPTH    1024.0f
+#define SNOW_SPEED          150.0f
+#define SNOW_ACCUM_PER_FRAME 24
 
 void CL_RainParticles(void)
 {
-    int i, count;
+    int i, count, accum_remain;
     cparticle_t *p;
     vec3_t start, end;
     trace_t trace;
-    float dist, lifetime;
+    float dist, lifetime, speed, a;
     color_t color;
+    bool is_snow, outdoor;
 
     if (cl_weather->integer < 1)
         return;
     if (!cl.bsp)
         return;
 
-    count = 50;
+    is_snow = (cl_weather->integer == 2);
+    count = is_snow ? 70 : 50;
+    speed = is_snow ? SNOW_SPEED : RAIN_SPEED;
+    accum_remain = SNOW_ACCUM_PER_FRAME;
+    outdoor = false;
 
-    color.u8[0] = 180;
-    color.u8[1] = 200;
-    color.u8[2] = 255;
-    color.u8[3] = 255;
+    if (is_snow) {
+        color.u8[0] = 255;
+        color.u8[1] = 255;
+        color.u8[2] = 255;
+        color.u8[3] = 255;
+    } else {
+        color.u8[0] = 180;
+        color.u8[1] = 200;
+        color.u8[2] = 255;
+        color.u8[3] = 255;
+    }
 
     for (i = 0; i < count; i++) {
         float clear_h;
@@ -1859,7 +1876,6 @@ void CL_RainParticles(void)
         start[0] = cl.refdef.vieworg[0] + (frand() - 0.5f) * RAIN_AREA;
         start[1] = cl.refdef.vieworg[1] + (frand() - 0.5f) * RAIN_AREA;
 
-        // trace UP to find what's above this XY
         VectorSet(start, start[0], start[1], cl.refdef.vieworg[2] + 4.0f);
         VectorSet(end, start[0], start[1], cl.refdef.vieworg[2] + 1024.0f);
 
@@ -1867,22 +1883,20 @@ void CL_RainParticles(void)
                      cl.bsp->nodes, MASK_SOLID, cl.csr.extended);
 
         if (trace.fraction >= 1.0f) {
-            // completely open — spawn at normal height
             start[2] = cl.refdef.vieworg[2] + 128.0f + frand() * 256.0f;
+            outdoor = true;
         } else if (trace.surface && (trace.surface->flags & SURF_SKY)) {
-            // skybox ceiling — outdoor, spawn just below it
             clear_h = trace.endpos[2] - cl.refdef.vieworg[2];
             if (clear_h < 32.0f)
                 continue;
             start[2] = trace.endpos[2] - 4.0f - frand() * 8.0f;
             if (start[2] < cl.refdef.vieworg[2] + 32.0f)
                 start[2] = cl.refdef.vieworg[2] + 32.0f;
+            outdoor = true;
         } else {
-            // regular ceiling/roof — indoor, no rain here
             continue;
         }
 
-        // trace DOWN to find ground
         VectorSet(end, start[0], start[1], start[2] - RAIN_TRACE_DEPTH);
 
         CM_BoxTrace(&trace, start, end, vec3_origin, vec3_origin,
@@ -1895,22 +1909,90 @@ void CL_RainParticles(void)
         if (dist < 32.0f)
             continue;
 
+        // accumulation — 1 detail + 1 blanket per impact
+        if (is_snow && accum_remain >= 2) {
+            float al = -1.0f / (12.0f + frand() * 8.0f);
+            p = CL_AllocParticle();
+            if (p) {
+                VectorCopy(trace.endpos, p->org);
+                p->org[0] += (frand() - 0.5f) * 8.0f;
+                p->org[1] += (frand() - 0.5f) * 8.0f;
+                p->org[2] += 0.5f + frand() * 4.0f;
+                VectorClear(p->vel);
+                VectorClear(p->accel);
+                p->color = -1;
+                p->rgba.u8[0] = 200 + (int)(frand() * 40);
+                p->rgba.u8[1] = 200 + (int)(frand() * 40);
+                p->rgba.u8[2] = 210 + (int)(frand() * 30);
+                p->rgba.u8[3] = 255;
+                p->scale = 1.0f + frand() * 2.5f;
+                p->alpha = 1.0f;
+                p->alphavel = al;
+                p->time = cl.time;
+                accum_remain--;
+            }
+            p = CL_AllocParticle();
+            if (p) {
+                VectorCopy(trace.endpos, p->org);
+                p->org[0] += (frand() - 0.5f) * 12.0f;
+                p->org[1] += (frand() - 0.5f) * 12.0f;
+                p->org[2] += 0.3f + frand() * 0.5f;
+                VectorClear(p->vel);
+                VectorClear(p->accel);
+                p->color = -1;
+                p->rgba.u8[0] = 220;
+                p->rgba.u8[1] = 220;
+                p->rgba.u8[2] = 230;
+                p->rgba.u8[3] = (int)(40 + frand() * 40);
+                p->scale = 6.0f + frand() * 10.0f;
+                p->alpha = 1.0f;
+                p->alphavel = al;
+                p->time = cl.time;
+                accum_remain--;
+            }
+        }
+
         p = CL_AllocParticle();
         if (!p)
-            return;
+            goto done;
 
         VectorCopy(start, p->org);
-        p->vel[0] = p->vel[1] = 0;
-        p->vel[2] = -RAIN_SPEED;
-        VectorClear(p->accel);
+        if (is_snow) {
+            p->vel[0] = crand() * 30.0f;
+            p->vel[1] = crand() * 30.0f;
+            p->vel[2] = -speed;
+            p->accel[0] = frand() * 20.0f - 10.0f;
+            p->accel[1] = frand() * 20.0f - 10.0f;
+            p->accel[2] = 0;
+        } else {
+            p->vel[0] = p->vel[1] = 0;
+            p->vel[2] = -speed;
+            VectorClear(p->accel);
+        }
 
-        lifetime = dist / RAIN_SPEED;
+        lifetime = dist / speed;
         p->alpha = 1.0f;
         p->alphavel = -1.0f / lifetime;
 
         p->color = -1;
         p->rgba = color;
-        p->scale = 1.5f;
+        p->scale = is_snow ? 0.8f : 1.5f;
         p->time = cl.time;
+    }
+
+done:
+    // snow density tracker for screen blend
+    if (is_snow) {
+        if (outdoor) {
+            snow_density = snow_density * 0.995f + 0.005f;
+            if (snow_density > 1.0f) snow_density = 1.0f;
+        } else {
+            snow_density *= 0.95f;
+        }
+        if (snow_density > 0.3f) {
+            a = (snow_density - 0.3f) / 0.7f * 0.08f;
+            if (a > cl.refdef.screen_blend[3])
+                Vector4Set(cl.refdef.screen_blend, 1, 1, 1, a);
+        }
     }
 }
