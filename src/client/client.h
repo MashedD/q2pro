@@ -905,6 +905,7 @@ void CL_TeleportParticles(const vec3_t org);
 void CL_ParticleEffect(const vec3_t org, const vec3_t dir, int color, int count);
 void CL_ParticleEffect2(const vec3_t org, const vec3_t dir, int color, int count);
 cparticle_t *CL_AllocParticle(void);
+void CL_RainParticles(void);
 void CL_AddParticles(void);
 cdlight_t *CL_AllocDlight(int key);
 void CL_AddDLights(void);

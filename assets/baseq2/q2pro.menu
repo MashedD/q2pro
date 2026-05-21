@@ -157,6 +157,8 @@ begin effects
     toggle "grenade explosions" cl_disable_explosions ~0
     toggle "rocket explosions" cl_disable_explosions ~1
     blank
+    values "weather" cl_weather off rain
+    blank
     action --align "railgun trail setup..." pushmenu railtrail
 end
 

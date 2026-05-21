@@ -1767,6 +1767,7 @@ void CL_AddEntities(void)
     CL_FinishViewValues();
     CL_AddPacketEntities();
     CL_AddTEnts();
+    CL_RainParticles();
     CL_AddParticles();
     CL_AddDLights();
     CL_AddLightStyles();

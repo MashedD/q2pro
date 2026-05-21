@@ -62,6 +62,7 @@ features include:
 - input: added `m_r1q2_mouse` to enable R1Q2-style mouse movement logic
 - input: added `cl_movement_feel_mode` and `cl_step_smoothing_mode` for
   optional R1Q2-style client-side movement prediction feel and step smoothing
+- effects: added `cl_weather` rain effect (1=rain, 2=reserved for snow)
 
 # TODO
 

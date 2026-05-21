@@ -245,6 +245,11 @@ cl_railspiral_color::
 cl_railspiral_radius::
     Radius of the rail spiral. Default value is 3.
 
+cl_weather::
+    Weather effect mode. Value 0 disables (default). Value 1 enables rain
+    (~50 drops/frame). Falls from skybox-only areas, stops at solid surfaces.
+    Value 2 reserved for future snow.
+
 cl_disable_particles::
     Disables rendering of particles for the following effects. This variable is
     a bitmask. Default value is 0.

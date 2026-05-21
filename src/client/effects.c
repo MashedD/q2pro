@@ -26,6 +26,7 @@ static vec3_t avelocities[NUMVERTEXNORMALS];
 
 static cvar_t *cl_lerp_lightstyles;
 static cvar_t *cl_muzzlelight_time;
+static cvar_t *cl_weather;
 
 /*
 ==============================================================
@@ -1824,4 +1825,92 @@ void CL_InitEffects(void)
 
     cl_lerp_lightstyles = Cvar_Get("cl_lerp_lightstyles", "0", 0);
     cl_muzzlelight_time = Cvar_Get("cl_muzzlelight_time", "16", 0);
+    cl_weather = Cvar_Get("cl_weather", "0", 0);
+}
+
+#define RAIN_SPEED          800.0f
+#define RAIN_AREA           2048.0f
+#define RAIN_TRACE_DEPTH    1024.0f
+
+void CL_RainParticles(void)
+{
+    int i, count;
+    cparticle_t *p;
+    vec3_t start, end;
+    trace_t trace;
+    float dist, lifetime;
+    color_t color;
+
+    if (cl_weather->integer < 1)
+        return;
+    if (!cl.bsp)
+        return;
+
+    count = 50;
+
+    color.u8[0] = 180;
+    color.u8[1] = 200;
+    color.u8[2] = 255;
+    color.u8[3] = 255;
+
+    for (i = 0; i < count; i++) {
+        float clear_h;
+
+        start[0] = cl.refdef.vieworg[0] + (frand() - 0.5f) * RAIN_AREA;
+        start[1] = cl.refdef.vieworg[1] + (frand() - 0.5f) * RAIN_AREA;
+
+        // trace UP to find what's above this XY
+        VectorSet(start, start[0], start[1], cl.refdef.vieworg[2] + 4.0f);
+        VectorSet(end, start[0], start[1], cl.refdef.vieworg[2] + 1024.0f);
+
+        CM_BoxTrace(&trace, start, end, vec3_origin, vec3_origin,
+                     cl.bsp->nodes, MASK_SOLID, cl.csr.extended);
+
+        if (trace.fraction >= 1.0f) {
+            // completely open — spawn at normal height
+            start[2] = cl.refdef.vieworg[2] + 128.0f + frand() * 256.0f;
+        } else if (trace.surface && (trace.surface->flags & SURF_SKY)) {
+            // skybox ceiling — outdoor, spawn just below it
+            clear_h = trace.endpos[2] - cl.refdef.vieworg[2];
+            if (clear_h < 32.0f)
+                continue;
+            start[2] = trace.endpos[2] - 4.0f - frand() * 8.0f;
+            if (start[2] < cl.refdef.vieworg[2] + 32.0f)
+                start[2] = cl.refdef.vieworg[2] + 32.0f;
+        } else {
+            // regular ceiling/roof — indoor, no rain here
+            continue;
+        }
+
+        // trace DOWN to find ground
+        VectorSet(end, start[0], start[1], start[2] - RAIN_TRACE_DEPTH);
+
+        CM_BoxTrace(&trace, start, end, vec3_origin, vec3_origin,
+                     cl.bsp->nodes, MASK_SOLID, cl.csr.extended);
+
+        if (trace.fraction >= 1.0f)
+            continue;
+
+        dist = start[2] - trace.endpos[2];
+        if (dist < 32.0f)
+            continue;
+
+        p = CL_AllocParticle();
+        if (!p)
+            return;
+
+        VectorCopy(start, p->org);
+        p->vel[0] = p->vel[1] = 0;
+        p->vel[2] = -RAIN_SPEED;
+        VectorClear(p->accel);
+
+        lifetime = dist / RAIN_SPEED;
+        p->alpha = 1.0f;
+        p->alphavel = -1.0f / lifetime;
+
+        p->color = -1;
+        p->rgba = color;
+        p->scale = 1.5f;
+        p->time = cl.time;
+    }
 }
