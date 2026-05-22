@@ -336,6 +336,7 @@ typedef struct {
     PFN_vkCmdBindIndexBuffer CmdBindIndexBuffer;
     PFN_vkCmdSetViewport CmdSetViewport;
     PFN_vkCmdSetScissor CmdSetScissor;
+    PFN_vkCmdSetLineWidth CmdSetLineWidth;
     PFN_vkCmdPushConstants CmdPushConstants;
     PFN_vkCmdDraw CmdDraw;
     PFN_vkCmdDrawIndexed CmdDrawIndexed;
@@ -2492,6 +2493,7 @@ static bool vk_load_device(void)
     LOAD(CmdBindIndexBuffer);
     LOAD(CmdSetViewport);
     LOAD(CmdSetScissor);
+    LOAD(CmdSetLineWidth);
     LOAD(CmdPushConstants);
     LOAD(CmdDraw);
     LOAD(CmdDrawIndexed);
@@ -2749,6 +2751,10 @@ static bool vk_create_device(void)
 
     if (vk.physical_device_features.samplerAnisotropy)
         features.samplerAnisotropy = VK_TRUE;
+    if (vk.physical_device_features.fillModeNonSolid)
+        features.fillModeNonSolid = VK_TRUE;
+    if (vk.physical_device_features.wideLines)
+        features.wideLines = VK_TRUE;
     VkDeviceCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = queue_info_count,
@@ -3653,6 +3659,7 @@ static VkShaderModule vk_create_shader_module(const uint32_t *code, size_t code_
 static const VkDynamicState vk_3d_dynamic_states[] = {
     VK_DYNAMIC_STATE_VIEWPORT,
     VK_DYNAMIC_STATE_SCISSOR,
+    VK_DYNAMIC_STATE_LINE_WIDTH,
 };
 
 static const VkPipelineDynamicStateCreateInfo vk_3d_dynamic_state = {
@@ -4212,7 +4219,8 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
                                      bool alpha_test,
                                      VkCullModeFlags cull_mode,
                                      VkPolygonMode polygon_mode,
-                                     VkPrimitiveTopology topology)
+                                     VkPrimitiveTopology topology,
+                                     VkCompareOp depth_compare)
 {
     VkShaderModule vert = vk_create_shader_module(vk_alias_vert_spv,
                                                   sizeof(vk_alias_vert_spv));
@@ -4355,7 +4363,7 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = VK_TRUE,
         .depthWriteEnable = depth_write,
-        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+        .depthCompareOp = depth_compare,
     };
     VkGraphicsPipelineCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -4575,22 +4583,22 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_world_pipeline(&vk.glare_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.debug_text_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
         !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL) ||
         !vk_create_alias_pipeline(&vk.alias_alpha_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL) ||
         !vk_create_alias_pipeline(&vk.alias_depth_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL) ||
         !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL) ||
         !vk_create_alias_pipeline(&vk.alias_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
-                                  VK_PRIMITIVE_TOPOLOGY_LINE_LIST) ||
+                                  VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL) ||
         !vk_create_depth_resources() ||
         !vk_create_framebuffers() ||
         !vk_create_scene_target())
         return false;
 
     if (!vk_create_alias_pipeline(&vk.alias_cel_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_CULL_MODE_FRONT_BIT, VK_POLYGON_MODE_FILL,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST))
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS))
         return false;
 
     if (!vk_allocate_swapchain_commands())
@@ -4792,6 +4800,8 @@ static void vk_set_3d_viewport(const refdef_t *fd)
 
     vk.CmdSetViewport(cmd, 0, 1, &viewport);
     vk.CmdSetScissor(cmd, 0, 1, &scissor);
+    if (vk.CmdSetLineWidth)
+        vk.CmdSetLineWidth(cmd, 1.0f);
 }
 
 static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
@@ -7250,6 +7260,47 @@ static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
     c.batchesDrawn++;
 }
 
+static void vk_draw_alias_cel_edges(const vk_model_t *model,
+                                    const vk_alias_batch_t *batch,
+                                    const VkBuffer buffers[2],
+                                    const VkDeviceSize offsets[2],
+                                    const vk_texture_t *texture,
+                                    const vk_alias_push_t *alias_push,
+                                    float alpha,
+                                    const entity_t *ent,
+                                    const refdef_t *fd)
+{
+    if (!vk.alias_cel_pipeline || !model->mesh.indices.buffer)
+        return;
+
+    uint32_t first_index = batch ? batch->first_index : 0;
+    uint32_t index_count = batch ? batch->index_count : model->mesh.index_count;
+    if (!index_count)
+        return;
+
+    vk_alias_push_t push = *alias_push;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+
+    Vector4Set(push.color, 0.0f, 0.0f, 0.0f, alpha);
+    Vector4Clear(push.shadedir);
+    float line_width = Cvar_ClampValue(vk_celshading, 0.0f, 10.0f) * alpha;
+    float celdist = max(Distance(ent->origin, fd->vieworg), 1.0f);
+    float view_height = max(fd->height, 1);
+    float world_per_pixel = 2.0f * celdist * tanf(DEG2RAD(fd->fov_y) * 0.5f) / view_height;
+    push.shellscale = line_width * world_per_pixel;
+    push.depthscale = 1.0f;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.alias_cel_pipeline);
+    if (vk.CmdSetLineWidth)
+        vk.CmdSetLineWidth(cmd, 1.0f);
+    vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
+    vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+    vk_push_constants(cmd, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
+    c.batchesDrawn++;
+}
+
 static void vk_draw_alias_outlines(VkCommandBuffer cmd,
                                     const VkBuffer buffers[2],
                                     const VkDeviceSize offsets[2],
@@ -7257,17 +7308,17 @@ static void vk_draw_alias_outlines(VkCommandBuffer cmd,
                                     const vk_alias_batch_t *batch,
                                     const vk_texture_t *texture,
                                     const vk_alias_push_t *push,
+                                    const vk_alias_lerp_t *lerp,
                                     const entity_t *ent,
                                     const refdef_t *fd)
 {
     bool showtris = gl_showtris && (gl_showtris->integer & SHOWTRIS_MESH);
     bool celshading = false;
     float celalpha = 1.0f;
-    float celdist = 0.0f;
 
     if (vk_celshading && vk_celshading->value > 0.0f &&
         !(ent->flags & (RF_TRANSLUCENT | RF_SHELL_MASK | RF_TRACKER))) {
-        celdist = Distance(ent->origin, fd->vieworg);
+        float celdist = Distance(ent->origin, fd->vieworg);
         celalpha = 1.0f - celdist / 700.0f;
         celshading = celalpha >= 0.01f;
     }
@@ -7275,32 +7326,9 @@ static void vk_draw_alias_outlines(VkCommandBuffer cmd,
     if (!showtris && !celshading)
         return;
 
-    if (celshading && vk.alias_cel_pipeline) {
-        uint32_t first_index = batch ? batch->first_index : 0;
-        uint32_t index_count = batch ? batch->index_count : model->mesh.index_count;
-
-        if (index_count) {
-            vk_alias_push_t cel = *push;
-            float line_width = Cvar_ClampValue(vk_celshading, 0.0f, 10.0f) * celalpha;
-            float view_height = max(fd->height, 1);
-            float world_per_pixel = 2.0f * celdist * tanf(DEG2RAD(fd->fov_y) * 0.5f) / view_height;
-
-            Vector4Set(cel.color, 0.0f, 0.0f, 0.0f, celalpha);
-            Vector4Clear(cel.shadedir);
-            cel.shellscale = line_width * world_per_pixel;
-            cel.depthscale = 1.0f;
-
-            vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                               vk.alias_cel_pipeline);
-            vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
-            vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0,
-                                  VK_INDEX_TYPE_UINT32);
-            vk_bind_texture_descriptor(cmd, texture->descriptor_set);
-            vk_push_constants(cmd, sizeof(cel), &cel);
-            vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
-            c.batchesDrawn++;
-        }
-    }
+    if (celshading)
+        vk_draw_alias_cel_edges(model, batch, buffers, offsets, texture,
+                                push, celalpha, ent, fd);
 
     if (!showtris)
         return;
@@ -7603,7 +7631,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         }
         if (!vk.drawing_bloom)
             vk_draw_alias_outlines(cmd, buffers, offsets, model, batch,
-                                   texture, &push, ent, fd);
+                                   texture, &push, &lerp, ent, fd);
     }
 
     if (!vk.drawing_bloom)
