@@ -1811,6 +1811,8 @@ CL_ClearEffects
 static float snow_density;
 static float snow_accum_credit;
 static int snow_accum_time;
+static int last_weather_snd_time;
+static int last_weather_snd_mode;
 
 void CL_ClearEffects(void)
 {
@@ -1951,51 +1953,53 @@ void CL_RainParticles(void)
             if (snow_accum_credit >= 1.0f) {
                 vec3_t ck, ck_end, ground_pos;
                 float ps, half, rx, ry;
-                bool solid;
-                int j;
+                int tier, j;
 
                 VectorCopy(trace.endpos, ground_pos);
                 ps = 30.0f + frand() * 34.0f;
-                half = ps * 2.0f; // matches gl_partscale default 2
                 rx = (frand() - 0.5f) * 36.0f;
                 ry = (frand() - 0.5f) * 36.0f;
-                solid = true;
 
-                // trace at 4 corners of the projected quad
-                for (j = 0; solid && j < 4; j++) {
-                    float ox = rx, oy = ry;
-                    switch (j) {
-                    case 0: ox -= half; oy -= half; break;
-                    case 1: ox += half; oy -= half; break;
-                    case 2: ox += half; oy += half; break;
-                    case 3: ox -= half; oy += half; break;
+                for (tier = 0; tier < 3; tier++) {
+                    float div = (float)(1 << tier);
+                    bool solid = true;
+                    half = ps * 2.0f / div;
+                    for (j = 0; solid && j < 4; j++) {
+                        float ox = rx, oy = ry;
+                        switch (j) {
+                        case 0: ox -= half; oy -= half; break;
+                        case 1: ox += half; oy -= half; break;
+                        case 2: ox += half; oy += half; break;
+                        case 3: ox -= half; oy += half; break;
+                        }
+                        VectorSet(ck, ground_pos[0] + ox, ground_pos[1] + oy, ground_pos[2] + 8.0f);
+                        VectorSet(ck_end, ck[0], ck[1], ck[2] - 32.0f);
+                        CM_BoxTrace(&trace, ck, ck_end, vec3_origin, vec3_origin,
+                                     cl.bsp->nodes, MASK_SOLID, cl.csr.extended);
+                        if (trace.fraction >= 1.0f || fabsf(trace.endpos[2] - ground_pos[2]) > 6.0f)
+                            solid = false;
                     }
-                    VectorSet(ck, ground_pos[0] + ox, ground_pos[1] + oy, ground_pos[2] + 8.0f);
-                    VectorSet(ck_end, ck[0], ck[1], ck[2] - 32.0f);
-                    CM_BoxTrace(&trace, ck, ck_end, vec3_origin, vec3_origin,
-                                 cl.bsp->nodes, MASK_SOLID, cl.csr.extended);
-                    if (trace.fraction >= 1.0f || fabsf(trace.endpos[2] - ground_pos[2]) > 6.0f)
-                        solid = false;
-                }
-                if (solid) {
-                    p = CL_AllocParticle();
-                    if (p) {
-                        VectorCopy(ground_pos, p->org);
-                        p->org[0] += rx;
-                        p->org[1] += ry;
-                        p->org[2] += 0.8f + frand() * 0.35f;
-                        VectorClear(p->vel);
-                        VectorClear(p->accel);
-                        p->color = -1;
-                        p->rgba.u8[0] = 220;
-                        p->rgba.u8[1] = 220;
-                        p->rgba.u8[2] = 230;
-                        p->rgba.u8[3] = (int)(180 + frand() * 75);
-                        p->scale = -ps;
-                        p->alpha = 1.0f;
-                        p->alphavel = al;
-                        p->time = cl.time;
-                        snow_accum_credit -= 1.0f;
+                    if (solid) {
+                        p = CL_AllocParticle();
+                        if (p) {
+                            VectorCopy(ground_pos, p->org);
+                            p->org[0] += rx;
+                            p->org[1] += ry;
+                            p->org[2] += 0.8f + frand() * 0.35f;
+                            VectorClear(p->vel);
+                            VectorClear(p->accel);
+                            p->color = -1;
+                            p->rgba.u8[0] = 220;
+                            p->rgba.u8[1] = 220;
+                            p->rgba.u8[2] = 230;
+                            p->rgba.u8[3] = (int)(180 + frand() * 75);
+                            p->scale = -(ps / div);
+                            p->alpha = 1.0f;
+                            p->alphavel = al;
+                            p->time = cl.time;
+                            snow_accum_credit -= 1.0f;
+                        }
+                        break;
                     }
                 }
             }
@@ -2042,6 +2046,31 @@ done:
             a = (snow_density - 0.3f) / 0.7f * 0.08f;
             if (a > cl.refdef.screen_blend[3])
                 Vector4Set(cl.refdef.screen_blend, 1, 1, 1, a);
+        }
+    }
+
+    // ambient weather sound — dedicated channel 240 so mode changes replace old sound
+    if (cl_weather->integer) {
+        if (!outdoor) {
+            last_weather_snd_mode = 0;
+        } else {
+            int now = cl.time;
+            const char *snd;
+            int restart;
+            if (cl_weather->integer == 2) {
+                snd = "weather/snow_soft1.wav";
+                restart = 15000;
+            } else {
+                snd = "weather/rain_loop.wav";
+                restart = 24000;
+            }
+            if (last_weather_snd_mode != cl_weather->integer ||
+                now - last_weather_snd_time > restart) {
+                qhandle_t sfx = S_RegisterSound(snd);
+                S_StartSound(NULL, cl.frame.clientNum + 1, 240, sfx, 1, ATTN_NONE, 0);
+                last_weather_snd_time = now;
+                last_weather_snd_mode = cl_weather->integer;
+            }
         }
     }
 }
