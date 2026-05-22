@@ -286,7 +286,6 @@ extern statCounters_t c;
 extern cvar_t *gl_partscale;
 extern cvar_t *gl_partstyle;
 extern cvar_t *gl_beamstyle;
-extern cvar_t *gl_celshading;
 extern cvar_t *gl_dotshading;
 extern cvar_t *gl_shadows;
 extern cvar_t *gl_modulate;

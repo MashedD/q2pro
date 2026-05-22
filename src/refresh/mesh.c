@@ -39,8 +39,6 @@ static GLuint           buffer;
 
 static vec3_t   shadedir;
 static bool     dotshading;
-
-static float    celscale;
 static float    shadowalpha;
 
 static drawshadow_t drawshadow;
@@ -417,16 +415,6 @@ static void setup_color(void)
         color[3] = 1;
 }
 
-static void setup_celshading(void)
-{
-    float value = Cvar_ClampValue(gl_celshading, 0, 10);
-
-    if (value == 0 || (glr.ent->flags & (RF_TRANSLUCENT | RF_SHELL_MASK | RF_TRACKER)) || !qglPolygonMode || !qglLineWidth)
-        celscale = 0;
-    else
-        celscale = 1.0f - Distance(origin, glr.fd.vieworg) / 700.0f;
-}
-
 static void uniform_mesh_color(float r, float g, float b, float a)
 {
     if (gls.currentva) {
@@ -435,28 +423,6 @@ static void uniform_mesh_color(float r, float g, float b, float a)
         Vector4Set(gls.u_block.mesh.color, r, g, b, a);
         gls.u_block_dirty = true;
     }
-}
-
-static void draw_celshading(const uint16_t *indices, int num_indices)
-{
-    if (celscale < 0.01f)
-        return;
-
-    GL_BindTexture(TMU_TEXTURE, TEXNUM_BLACK);
-    GL_StateBits(GLS_BLEND_BLEND | (meshbits & ~GLS_MESH_SHADE) | glr.fog_bits);
-    if (gls.currentva)
-        GL_ArrayBits(GLA_VERTEX);
-
-    uniform_mesh_color(0, 0, 0, color[3] * celscale);
-    GL_LoadUniforms();
-
-    qglLineWidth(gl_celshading->value * celscale);
-    qglPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-    qglCullFace(GL_FRONT);
-    qglDrawElements(GL_TRIANGLES, num_indices, GL_UNSIGNED_SHORT, indices);
-    qglCullFace(GL_BACK);
-    qglPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-    qglLineWidth(1);
 }
 
 static drawshadow_t cull_shadow(const model_t *model)
@@ -723,8 +689,6 @@ static void draw_alias_mesh(const uint16_t *indices, int num_indices,
 
     qglDrawElements(GL_TRIANGLES, num_indices, GL_UNSIGNED_SHORT, indices);
 
-    draw_celshading(indices, num_indices);
-
     if (gl_showtris->integer & SHOWTRIS_MESH)
         GL_DrawOutlines(num_indices, GL_UNSIGNED_SHORT, indices);
 
@@ -987,7 +951,6 @@ void GL_DrawAliasModel(const model_t *model)
     // setup parameters common for all meshes
     if (!drawshadow)
         setup_color();
-    setup_celshading();
     setup_dotshading();
     setup_shadow();
 

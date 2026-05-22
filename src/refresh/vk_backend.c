@@ -127,6 +127,7 @@ typedef struct {
     float normal[3];
 } vk_vertex_t;
 
+
 typedef struct {
     vk_buffer_t vertices;
     vk_buffer_t indices;
@@ -407,7 +408,6 @@ typedef struct {
     VkPipeline alias_alpha_pipeline;
     VkPipeline alias_depth_pipeline;
     VkPipeline alias_blend_pipeline;
-    VkPipeline alias_cel_pipeline;
     VkPipeline alias_line_pipeline;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
@@ -513,7 +513,6 @@ static cvar_t *vk_gl_lightgrid;
 static cvar_t *vk_fullbright;
 static cvar_t *vk_cull_models;
 static cvar_t *vk_shadows;
-static cvar_t *vk_celshading;
 static cvar_t *vk_dotshading;
 static cvar_t *vk_draworder;
 static cvar_t *vk_showorigins;
@@ -1058,7 +1057,6 @@ static void vk_free_model(vk_model_t *model)
     vk_destroy_mesh(&model->mesh);
     vk_destroy_buffer(&model->alias_line_indices);
     model->alias_line_index_count = 0;
-
     memset(model, 0, sizeof(*model));
 }
 
@@ -3288,11 +3286,6 @@ static void vk_destroy_swapchain(void)
         vk.alias_blend_pipeline = VK_NULL_HANDLE;
     }
 
-    if (vk.alias_cel_pipeline) {
-        vk.DestroyPipeline(vk.device, vk.alias_cel_pipeline, NULL);
-        vk.alias_cel_pipeline = VK_NULL_HANDLE;
-    }
-
     if (vk.alias_line_pipeline) {
         vk.DestroyPipeline(vk.device, vk.alias_line_pipeline, NULL);
         vk.alias_line_pipeline = VK_NULL_HANDLE;
@@ -4220,7 +4213,11 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
                                      VkCullModeFlags cull_mode,
                                      VkPolygonMode polygon_mode,
                                      VkPrimitiveTopology topology,
-                                     VkCompareOp depth_compare)
+                                     VkCompareOp depth_compare,
+                                     bool depth_bias_enable,
+                                     float depth_bias_constant,
+                                     float depth_bias_slope,
+                                     VkPipelineDepthStencilStateCreateInfo *stencil_state)
 {
     VkShaderModule vert = vk_create_shader_module(vk_alias_vert_spv,
                                                   sizeof(vk_alias_vert_spv));
@@ -4337,6 +4334,9 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
         .cullMode = cull_mode,
         .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .lineWidth = 1.0f,
+        .depthBiasEnable = depth_bias_enable,
+        .depthBiasConstantFactor = depth_bias_constant,
+        .depthBiasSlopeFactor = depth_bias_slope,
     };
     VkPipelineMultisampleStateCreateInfo multisample = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
@@ -4359,12 +4359,17 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
         .attachmentCount = 1,
         .pAttachments = &color_blend_attachment,
     };
-    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable = VK_TRUE,
-        .depthWriteEnable = depth_write,
-        .depthCompareOp = depth_compare,
-    };
+    VkPipelineDepthStencilStateCreateInfo depth_stencil;
+    if (stencil_state) {
+        depth_stencil = *stencil_state;
+    } else {
+        depth_stencil = (VkPipelineDepthStencilStateCreateInfo){
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            .depthTestEnable = VK_TRUE,
+            .depthWriteEnable = depth_write,
+            .depthCompareOp = depth_compare,
+        };
+    }
     VkGraphicsPipelineCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .stageCount = q_countof(stages),
@@ -4583,22 +4588,18 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_world_pipeline(&vk.glare_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.debug_text_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
         !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL) ||
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_alpha_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL) ||
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_depth_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL) ||
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL) ||
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
-                                  VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL) ||
+                                  VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_depth_resources() ||
         !vk_create_framebuffers() ||
         !vk_create_scene_target())
-        return false;
-
-    if (!vk_create_alias_pipeline(&vk.alias_cel_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_CULL_MODE_FRONT_BIT, VK_POLYGON_MODE_FILL,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS))
         return false;
 
     if (!vk_allocate_swapchain_commands())
@@ -7260,77 +7261,17 @@ static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
     c.batchesDrawn++;
 }
 
-static void vk_draw_alias_cel_edges(const vk_model_t *model,
-                                    const vk_alias_batch_t *batch,
-                                    const VkBuffer buffers[2],
-                                    const VkDeviceSize offsets[2],
-                                    const vk_texture_t *texture,
-                                    const vk_alias_push_t *alias_push,
-                                    float alpha,
-                                    const entity_t *ent,
-                                    const refdef_t *fd)
-{
-    if (!vk.alias_cel_pipeline || !model->mesh.indices.buffer)
-        return;
-
-    uint32_t first_index = batch ? batch->first_index : 0;
-    uint32_t index_count = batch ? batch->index_count : model->mesh.index_count;
-    if (!index_count)
-        return;
-
-    vk_alias_push_t push = *alias_push;
-    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
-
-    Vector4Set(push.color, 0.0f, 0.0f, 0.0f, alpha);
-    Vector4Clear(push.shadedir);
-    float line_width = Cvar_ClampValue(vk_celshading, 0.0f, 10.0f) * alpha;
-    float celdist = max(Distance(ent->origin, fd->vieworg), 1.0f);
-    float view_height = max(fd->height, 1);
-    float world_per_pixel = 2.0f * celdist * tanf(DEG2RAD(fd->fov_y) * 0.5f) / view_height;
-    push.shellscale = line_width * world_per_pixel;
-    push.depthscale = 1.0f;
-
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.alias_cel_pipeline);
-    if (vk.CmdSetLineWidth)
-        vk.CmdSetLineWidth(cmd, 1.0f);
-    vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
-    vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk_bind_texture_descriptor(cmd, texture->descriptor_set);
-    vk_push_constants(cmd, sizeof(push), &push);
-    vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
-    c.batchesDrawn++;
-}
-
 static void vk_draw_alias_outlines(VkCommandBuffer cmd,
                                     const VkBuffer buffers[2],
                                     const VkDeviceSize offsets[2],
-                                    const vk_model_t *model,
+                                    vk_model_t *model,
                                     const vk_alias_batch_t *batch,
                                     const vk_texture_t *texture,
                                     const vk_alias_push_t *push,
-                                    const vk_alias_lerp_t *lerp,
                                     const entity_t *ent,
                                     const refdef_t *fd)
 {
-    bool showtris = gl_showtris && (gl_showtris->integer & SHOWTRIS_MESH);
-    bool celshading = false;
-    float celalpha = 1.0f;
-
-    if (vk_celshading && vk_celshading->value > 0.0f &&
-        !(ent->flags & (RF_TRANSLUCENT | RF_SHELL_MASK | RF_TRACKER))) {
-        float celdist = Distance(ent->origin, fd->vieworg);
-        celalpha = 1.0f - celdist / 700.0f;
-        celshading = celalpha >= 0.01f;
-    }
-
-    if (!showtris && !celshading)
-        return;
-
-    if (celshading)
-        vk_draw_alias_cel_edges(model, batch, buffers, offsets, texture,
-                                push, celalpha, ent, fd);
-
-    if (!showtris)
+    if (!gl_showtris || !(gl_showtris->integer & SHOWTRIS_MESH))
         return;
 
     if (!vk.alias_line_pipeline || !model->alias_line_indices.buffer ||
@@ -7631,7 +7572,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         }
         if (!vk.drawing_bloom)
             vk_draw_alias_outlines(cmd, buffers, offsets, model, batch,
-                                   texture, &push, &lerp, ent, fd);
+                                   texture, &push, ent, fd);
     }
 
     if (!vk.drawing_bloom)
@@ -9419,7 +9360,6 @@ bool VKR_Init(bool total)
     vk_fullbright = Cvar_Get("r_fullbright", "0", CVAR_CHEAT);
     vk_cull_models = Cvar_Get("gl_cull_models", "1", 0);
     vk_shadows = Cvar_Get("gl_shadows", "0", CVAR_ARCHIVE);
-    vk_celshading = Cvar_Get("gl_celshading", "0", 0);
     vk_dotshading = Cvar_Get("gl_dotshading", "1", 0);
     vk_draworder = Cvar_Get("gl_draworder", "1", 0);
     vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
