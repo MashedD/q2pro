@@ -567,6 +567,10 @@ static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
 static uint32_t *vk_build_line_indices(const uint32_t *indices,
                                        uint32_t index_count,
                                        uint32_t *line_index_count);
+static void vk_begin_render_pass(VkRenderPass render_pass,
+                                 VkFramebuffer framebuffer,
+                                 VkClearColorValue color);
+static void vk_finish_postprocess_scene(void);
 static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, const void *pixels,
                                    bool mipmaps);
@@ -9836,6 +9840,8 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk_draw_debug_lines(fd);
     vk_draw_debug_texts(fd);
 #endif
+
+    vk_finish_postprocess_scene();
 }
 
 void VKR_LightPoint(const vec3_t origin, vec3_t light)
@@ -10296,6 +10302,151 @@ static void vk_begin_render_pass(VkRenderPass render_pass, VkFramebuffer framebu
     vk_begin_render_pass_sized(render_pass, framebuffer, color,
                                vk.swapchain_extent.width,
                                vk.swapchain_extent.height);
+}
+
+static void vk_finish_postprocess_scene(void)
+{
+    if (!vk.frame_bloom && !vk.frame_waterwarp)
+        return;
+
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    bool bloom = vk.frame_bloom;
+    bool waterwarp = vk.frame_waterwarp;
+
+    if (bloom) {
+        const vec4_t white = { 1.0f, 1.0f, 1.0f, 1.0f };
+        const VkClearColorValue black = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
+        uint32_t bloom_w = max(vk.bloom_texture.width, 1);
+        uint32_t bloom_h = max(vk.bloom_texture.height, 1);
+        vec4_t downscale_step = {
+            1.0f / (float)bloom_w,
+            1.0f / (float)bloom_h,
+            0.0f,
+            1.0f,
+        };
+        float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
+        sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
+        sigma = max(sigma, 1.0f) / 4.0f;
+        vec4_t blur_x = {
+            sigma / (float)bloom_w,
+            0.0f,
+            0.0f,
+            1.0f,
+        };
+        vec4_t blur_y = {
+            0.0f,
+            sigma / (float)bloom_h,
+            0.0f,
+            1.0f,
+        };
+
+        if (vk.render_pass_active) {
+            vk.CmdEndRenderPass(cmd);
+            vk.render_pass_active = false;
+        }
+
+        vk_transition_scene(cmd,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_ACCESS_SHADER_READ_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+        vk_transition_color_target(cmd, &vk.bloom_source_texture, &vk.bloom_source_layout,
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        vk_begin_render_pass(vk.bloom_render_pass, vk.bloom_source_framebuffer, black);
+        if (vk.fd_valid) {
+            vk_draw_bloom_world_glowmaps(&vk.fd);
+            vk_draw_bloom_source_entities(&vk.fd);
+            vk_draw_bloom_beams(&vk.fd);
+            vk_draw_bloom_only_entities(&vk.fd);
+        }
+        vk.CmdEndRenderPass(cmd);
+        vk.render_pass_active = false;
+
+        vk_transition_color_target(cmd, &vk.bloom_source_texture, &vk.bloom_source_layout,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_ACCESS_SHADER_READ_BIT,
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        vk_transition_color_target(cmd, &vk.bloom_texture, &vk.bloom_layout,
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        vk_begin_render_pass_sized(vk.bloom_render_pass, vk.bloom_framebuffer,
+                                   black, bloom_w, bloom_h);
+        vk_draw_fullscreen_texture_sized(vk.bloom_downscale_pipeline,
+                                         &vk.bloom_source_texture, downscale_step,
+                                         bloom_w, bloom_h);
+        vk.CmdEndRenderPass(cmd);
+        vk.render_pass_active = false;
+
+        int iterations = gl_bloom ? Cvar_ClampInteger(gl_bloom, 1, 8) : 1;
+        for (int i = 0; i < iterations; i++) {
+            vk_transition_color_target(cmd, &vk.bloom_texture, &vk.bloom_layout,
+                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                       VK_ACCESS_SHADER_READ_BIT,
+                                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            vk_transition_color_target(cmd, &vk.blur_texture, &vk.blur_layout,
+                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            vk_begin_render_pass_sized(vk.bloom_render_pass, vk.blur_framebuffer,
+                                       black, bloom_w, bloom_h);
+            vk_draw_fullscreen_texture_sized(vk.bloom_blur_pipeline,
+                                             &vk.bloom_texture, blur_x,
+                                             bloom_w, bloom_h);
+            vk.CmdEndRenderPass(cmd);
+            vk.render_pass_active = false;
+
+            vk_transition_color_target(cmd, &vk.blur_texture, &vk.blur_layout,
+                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                       VK_ACCESS_SHADER_READ_BIT,
+                                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            vk_transition_color_target(cmd, &vk.bloom_texture, &vk.bloom_layout,
+                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            vk_begin_render_pass_sized(vk.bloom_render_pass, vk.bloom_framebuffer,
+                                       black, bloom_w, bloom_h);
+            vk_draw_fullscreen_texture_sized(vk.bloom_blur_pipeline,
+                                             &vk.blur_texture, blur_y,
+                                             bloom_w, bloom_h);
+            vk.CmdEndRenderPass(cmd);
+            vk.render_pass_active = false;
+        }
+
+        vk_transition_color_target(cmd, &vk.bloom_texture, &vk.bloom_layout,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_ACCESS_SHADER_READ_BIT,
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+        vk_begin_render_pass(vk.render_pass, vk.framebuffers[vk.current_image],
+                             vk_frame_clear_color());
+        if (vk_showbloom && vk_showbloom->integer) {
+            vk_draw_refdef_texture(vk.texture_pipeline, &vk.bloom_texture, white);
+        } else {
+            vk_composite_scene_texture();
+            vk_draw_refdef_texture(vk.bloom_add_pipeline, &vk.bloom_texture, white);
+        }
+    }
+
+    if (!bloom && waterwarp) {
+        if (vk.render_pass_active) {
+            vk.CmdEndRenderPass(cmd);
+            vk.render_pass_active = false;
+        }
+
+        vk_transition_scene(cmd,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_ACCESS_SHADER_READ_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        vk_begin_render_pass(vk.render_pass, vk.framebuffers[vk.current_image],
+                             vk_frame_clear_color());
+        vk_composite_scene_texture();
+    }
+
+    vk.frame_bloom = false;
+    vk.frame_waterwarp = false;
 }
 
 void VKR_BeginFrame(void)
