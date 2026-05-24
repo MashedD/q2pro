@@ -6912,10 +6912,10 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     (float)vk.world.pixel_lightmap_texture.width : 1.0f;
                 float ah = vk.world.pixel_lightmap_texture.height ?
                     (float)vk.world.pixel_lightmap_texture.height : 1.0f;
-                push.lm_scale[0] = face->pixel_lm_w / aw;
-                push.lm_scale[1] = face->pixel_lm_h / ah;
-                push.lm_offset[0] = face->pixel_lm_x / aw;
-                push.lm_offset[1] = face->pixel_lm_y / ah;
+                push.lm_scale[0] = max(face->pixel_lm_w - 1, 0) / aw;
+                push.lm_scale[1] = max(face->pixel_lm_h - 1, 0) / ah;
+                push.lm_offset[0] = (face->pixel_lm_x + 0.5f) / aw;
+                push.lm_offset[1] = (face->pixel_lm_y + 0.5f) / ah;
             } else {
                 push.lm_scale[0] = -1.0f;
                 push.lm_scale[1] = -1.0f;
