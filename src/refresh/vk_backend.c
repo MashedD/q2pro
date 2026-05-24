@@ -35,6 +35,7 @@ the Free Software Foundation; either version 2 of the License, or
 #define VK_MAX_DEBUG_TEXT_CHARS    (TESS_MAX_VERTICES / 4)
 #define VK_MAX_DEBUG_TEXT_VERTICES (VK_MAX_DEBUG_TEXT_CHARS * 4)
 #define VK_MAX_DEBUG_TEXT_INDICES  (VK_MAX_DEBUG_TEXT_CHARS * 6)
+#define VK_MAX_LIGHTMAP_EXTENTS    513
 
 static const uint32_t vk_rect_vert_spv[] =
 #include "vk_rect_vert_spv.h"
@@ -544,6 +545,7 @@ static cvar_t *vk_drawworld;
 static cvar_t *vk_novis;
 static cvar_t *vk_lockpvs;
 static cvar_t *vk_lightmap;
+static cvar_t *vk_pixel_lightmaps;
 static cvar_t *vk_vertexlight;
 static cvar_t *vk_nobind;
 static cvar_t *vk_clear;
@@ -8676,6 +8678,79 @@ static bool vk_sample_surface_light(const bsp_t *bsp, const mface_t *face,
     return true;
 }
 
+static bool vk_face_has_valid_lightmap(const bsp_t *bsp, const mface_t *face)
+{
+    if (!bsp || !bsp->lightmap || !face || !face->lightmap || !face->numstyles)
+        return false;
+    if (face->drawflags & vk.world.nolm_mask)
+        return false;
+    if (face->lm_width < 1 || face->lm_height < 1 ||
+        face->lm_width > VK_MAX_LIGHTMAP_EXTENTS ||
+        face->lm_height > VK_MAX_LIGHTMAP_EXTENTS)
+        return false;
+    if (face->lightmap < bsp->lightmap)
+        return false;
+
+    uint64_t size = (uint64_t)face->lm_width * face->lm_height * 3;
+    ptrdiff_t offset = face->lightmap - bsp->lightmap;
+    if (offset < 0 ||
+        (uint64_t)offset + (uint64_t)face->numstyles * size >
+        (uint64_t)bsp->numlightmapbytes)
+        return false;
+
+    return true;
+}
+
+static void vk_pixel_lightmap_plan(const bsp_t *bsp,
+                                   const vk_world_face_t *faces,
+                                   uint32_t face_count)
+{
+    if (!vk_pixel_lightmaps || !vk_pixel_lightmaps->integer)
+        return;
+
+    uint32_t valid = 0;
+    uint32_t invalid = 0;
+    uint64_t total_area = 1;
+    int max_w = 1;
+
+    for (uint32_t i = 0; i < face_count; i++) {
+        const mface_t *face = faces[i].face;
+        if (!vk_face_has_valid_lightmap(bsp, face)) {
+            invalid++;
+            continue;
+        }
+        valid++;
+        max_w = max(max_w, face->lm_width);
+        total_area += (uint64_t)face->lm_width * face->lm_height;
+    }
+
+    int atlas_w = 1;
+    while (atlas_w < max_w || (uint64_t)atlas_w * atlas_w < total_area)
+        atlas_w <<= 1;
+    atlas_w = min(atlas_w, 4096);
+
+    int cx = 0, cy = 0, row_h = 0;
+    for (uint32_t i = 0; i < face_count; i++) {
+        const mface_t *face = faces[i].face;
+        if (!vk_face_has_valid_lightmap(bsp, face))
+            continue;
+        if (cx + face->lm_width > atlas_w) {
+            cx = 0;
+            cy += row_h;
+            row_h = 0;
+        }
+        cx += face->lm_width;
+        row_h = max(row_h, face->lm_height);
+    }
+
+    int atlas_h = 1;
+    while (atlas_h < cy + row_h)
+        atlas_h <<= 1;
+
+    Com_Printf("Vulkan pixel lightmap plan: %u valid, %u skipped, atlas %dx%d\n",
+               valid, invalid, atlas_w, atlas_h);
+}
+
 static void vk_surface_vertex_color(const bsp_t *bsp, const mface_t *face,
                                     const refdef_t *fd,
                                     const vec3_t point, const float fallback[4],
@@ -8886,6 +8961,8 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
             world_batch->face_count++;
         }
     }
+
+    vk_pixel_lightmap_plan(bsp, draw_faces, draw_face_count);
 
     line_indices = vk_build_line_indices(indices, idx, &line_index_count);
 
@@ -9400,6 +9477,7 @@ bool VKR_Init(bool total)
     vk_novis = Cvar_Get("gl_novis", "0", 0);
     vk_lockpvs = Cvar_Get("gl_lockpvs", "0", CVAR_CHEAT);
     vk_lightmap = Cvar_Get("gl_lightmap", "0", CVAR_CHEAT);
+    vk_pixel_lightmaps = Cvar_Get("vk_pixel_lightmaps", "0", 0);
     vk_vertexlight = Cvar_Get("gl_vertexlight", "0", 0);
     vk_nobind = Cvar_Get("gl_nobind", "0", CVAR_CHEAT);
     vk_clear = Cvar_Get("gl_clear", "0", 0);
