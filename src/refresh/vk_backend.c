@@ -89,6 +89,18 @@ static const uint32_t vk_world_alpha_frag_spv[] =
 #include "vk_world_alpha_frag_spv.h"
 ;
 
+static const uint32_t vk_world_pixel_vert_spv[] =
+#include "vk_world_pixel_vert_spv.h"
+;
+
+static const uint32_t vk_world_pixel_frag_spv[] =
+#include "vk_world_pixel_frag_spv.h"
+;
+
+static const uint32_t vk_world_pixel_alpha_frag_spv[] =
+#include "vk_world_pixel_alpha_frag_spv.h"
+;
+
 static const uint32_t vk_world_glow_frag_spv[] =
 #include "vk_world_glow_frag_spv.h"
 ;
@@ -3655,6 +3667,31 @@ static VkShaderModule vk_create_shader_module(const uint32_t *code, size_t code_
     return module;
 }
 
+static bool vk_validate_pixel_lightmap_shaders(void)
+{
+    if (!vk_pixel_lightmaps || !vk_pixel_lightmaps->integer)
+        return true;
+
+    VkShaderModule vert = vk_create_shader_module(vk_world_pixel_vert_spv,
+                                                  sizeof(vk_world_pixel_vert_spv));
+    VkShaderModule frag = vk_create_shader_module(vk_world_pixel_frag_spv,
+                                                  sizeof(vk_world_pixel_frag_spv));
+    VkShaderModule alpha = vk_create_shader_module(vk_world_pixel_alpha_frag_spv,
+                                                   sizeof(vk_world_pixel_alpha_frag_spv));
+    bool ok = vert && frag && alpha;
+
+    if (vert)
+        vk.DestroyShaderModule(vk.device, vert, NULL);
+    if (frag)
+        vk.DestroyShaderModule(vk.device, frag, NULL);
+    if (alpha)
+        vk.DestroyShaderModule(vk.device, alpha, NULL);
+
+    if (ok)
+        Com_Printf("Vulkan pixel lightmap shader modules validated (unused)\n");
+    return ok;
+}
+
 static const VkDynamicState vk_3d_dynamic_states[] = {
     VK_DYNAMIC_STATE_VIEWPORT,
     VK_DYNAMIC_STATE_SCISSOR,
@@ -4550,7 +4587,8 @@ static bool vk_create_swapchain(int width, int height)
         max(vk.swapchain_extent.height / 4, 1),
     };
 
-    if (!vk_create_render_pass() ||
+    if (!vk_validate_pixel_lightmap_shaders() ||
+        !vk_create_render_pass() ||
         !vk_create_rect_pipeline() ||
         !vk_create_rect_pipeline_ex(&vk.vignette_pipeline,
                                     vk_vignette_vert_spv,
