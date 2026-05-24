@@ -3711,7 +3711,7 @@ static bool vk_validate_pixel_lightmap_shaders(void)
 
 static bool vk_create_pixel_world_pipeline_layout(void)
 {
-    if (!vk_pixel_lightmaps || !vk_pixel_lightmaps->integer)
+    if (!vk_pixel_lightmaps || vk_pixel_lightmaps->integer < 2)
         return true;
 
     VkDescriptorSetLayout set_layouts[] = {
@@ -4300,7 +4300,7 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
 
 static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test)
 {
-    if (!vk_pixel_lightmaps || !vk_pixel_lightmaps->integer)
+    if (!vk_pixel_lightmaps || vk_pixel_lightmaps->integer < 2)
         return true;
     if (!vk.pixel_world_pipeline_layout) {
         Com_SetLastError("No Vulkan pixel world pipeline layout");
@@ -6742,7 +6742,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         return;
 
     if (pixel_requested && !pixel_ready) {
-        Com_WPrintf("Vulkan pixel lightmaps mode 2 needs resources created at video init; using mode 1\n");
+        Com_WPrintf("Vulkan pixel lightmaps mode 2 needs vk_pixel_lightmaps 2 before video init; using mode 1\n");
         vk_pixel_lightmaps->integer = 1;
     }
 
