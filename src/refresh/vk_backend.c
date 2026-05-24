@@ -9160,6 +9160,7 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
 
     if (!valid) {
         Com_Printf("Vulkan pixel lightmap CPU atlas: no valid lightmaps\n");
+        vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
         return;
     }
 
@@ -9348,6 +9349,10 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
     bool pixel_lm_debug = vk_pixel_lightmap_mode() > 0;
     float *lmuv_data = pixel_lm_debug ?
         Z_Malloc(sizeof(*lmuv_data) * 2 * vertex_count) : NULL;
+    if (!pixel_lm_debug) {
+        vk_destroy_buffer(&vk.world.pixel_lmuv_buffer);
+        vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
+    }
 
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *face = &bsp->faces[i];
