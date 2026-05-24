@@ -6745,8 +6745,12 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     const vk_mesh_t *mesh = &vk.world.mesh;
     bool use_marked = marked_only ||
         (vk_world_vis && vk_world_vis->integer && vk.world.face_count);
+    bool special_light_mode = (vk_lightmap && vk_lightmap->integer) ||
+        (vk_fullbright && vk_fullbright->integer) ||
+        (vk_vertexlight && vk_vertexlight->integer);
     bool pixel_requested = vk_pixel_lightmaps && vk_pixel_lightmaps->integer >= 2 &&
-        pass == VK_WORLD_OPAQUE && !vk.drawing_bloom && !ent;
+        pass == VK_WORLD_OPAQUE && !vk.drawing_bloom && !ent &&
+        !special_light_mode;
     bool pixel_ready = vk.pixel_world_pipeline && vk.pixel_world_alpha_pipeline &&
         vk.pixel_world_pipeline_layout && vk.world.pixel_lmuv_buffer.buffer &&
         vk.world.pixel_lightmap_texture.descriptor_set;
