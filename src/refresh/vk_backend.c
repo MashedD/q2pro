@@ -399,6 +399,7 @@ typedef struct {
     VkSampler nearest_sampler;
     VkSampler sky_nearest_sampler;
     VkPipelineLayout rect_pipeline_layout;
+    VkPipelineLayout pixel_world_pipeline_layout;
     VkPipeline rect_pipeline;
     VkPipeline vignette_pipeline;
     VkPipeline texture_pipeline;
@@ -3692,6 +3693,37 @@ static bool vk_validate_pixel_lightmap_shaders(void)
     return ok;
 }
 
+static bool vk_create_pixel_world_pipeline_layout(void)
+{
+    if (!vk_pixel_lightmaps || !vk_pixel_lightmaps->integer)
+        return true;
+
+    VkDescriptorSetLayout set_layouts[] = {
+        vk.texture_set_layout,
+        vk.texture_set_layout,
+    };
+    VkPushConstantRange push_range = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset = 0,
+        .size = max(max(max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
+                        sizeof(vk_world_push_t)), sizeof(vk_alias_push_t)),
+    };
+    VkPipelineLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = q_countof(set_layouts),
+        .pSetLayouts = set_layouts,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &push_range,
+    };
+    VkResult result = vk.CreatePipelineLayout(vk.device, &layout_info, NULL,
+                                              &vk.pixel_world_pipeline_layout);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreatePipelineLayout(pixel_world)", result);
+
+    Com_Printf("Vulkan pixel lightmap pipeline layout created (unused)\n");
+    return true;
+}
+
 static const VkDynamicState vk_3d_dynamic_states[] = {
     VK_DYNAMIC_STATE_VIEWPORT,
     VK_DYNAMIC_STATE_SCISSOR,
@@ -4588,6 +4620,7 @@ static bool vk_create_swapchain(int width, int height)
     };
 
     if (!vk_validate_pixel_lightmap_shaders() ||
+        !vk_create_pixel_world_pipeline_layout() ||
         !vk_create_render_pass() ||
         !vk_create_rect_pipeline() ||
         !vk_create_rect_pipeline_ex(&vk.vignette_pipeline,
@@ -9851,6 +9884,10 @@ void VKR_Shutdown(bool total)
     if (vk.rect_pipeline_layout) {
         vk.DestroyPipelineLayout(vk.device, vk.rect_pipeline_layout, NULL);
         vk.rect_pipeline_layout = VK_NULL_HANDLE;
+    }
+    if (vk.pixel_world_pipeline_layout) {
+        vk.DestroyPipelineLayout(vk.device, vk.pixel_world_pipeline_layout, NULL);
+        vk.pixel_world_pipeline_layout = VK_NULL_HANDLE;
     }
 
     if (vk.device && vk.DestroyDevice) {
