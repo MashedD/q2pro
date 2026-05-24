@@ -6729,17 +6729,22 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     const vk_mesh_t *mesh = &vk.world.mesh;
     bool use_marked = marked_only ||
         (vk_world_vis && vk_world_vis->integer && vk.world.face_count);
-    bool pixel_world = vk_pixel_lightmaps && vk_pixel_lightmaps->integer >= 2 &&
-        pass == VK_WORLD_OPAQUE && !vk.drawing_bloom && !ent &&
-        vk.pixel_world_pipeline && vk.pixel_world_alpha_pipeline &&
-        vk.pixel_world_pipeline_layout &&
-        vk.world.pixel_lmuv_buffer.buffer &&
+    bool pixel_requested = vk_pixel_lightmaps && vk_pixel_lightmaps->integer >= 2 &&
+        pass == VK_WORLD_OPAQUE && !vk.drawing_bloom && !ent;
+    bool pixel_ready = vk.pixel_world_pipeline && vk.pixel_world_alpha_pipeline &&
+        vk.pixel_world_pipeline_layout && vk.world.pixel_lmuv_buffer.buffer &&
         vk.world.pixel_lightmap_texture.descriptor_set;
+    bool pixel_world = pixel_requested && pixel_ready;
 
     if (!vk.render_pass_active || !pipeline ||
         !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count ||
         !vk.world.batch_count || !vk.world.batches || !vk.world.faces)
         return;
+
+    if (pixel_requested && !pixel_ready) {
+        Com_WPrintf("Vulkan pixel lightmaps requested but resources are unavailable; using vertex-lit world\n");
+        vk_pixel_lightmaps->integer = 1;
+    }
 
     vk_world_push_t push;
     memcpy(push.mvp, mvp, sizeof(push.mvp));
@@ -9498,6 +9503,7 @@ static bool vk_world_lighting_modified(void)
            (vk_dynamic && vk_dynamic->modified) ||
            (vk_fullbright && vk_fullbright->modified) ||
            (vk_lightmap && vk_lightmap->modified) ||
+           (vk_pixel_lightmaps && vk_pixel_lightmaps->modified) ||
            (vk_coloredlightmaps && vk_coloredlightmaps->modified) ||
            (vk_vertexlight && vk_vertexlight->modified);
 }
@@ -9548,6 +9554,8 @@ static void vk_clear_world_lighting_modified(void)
         vk_fullbright->modified = false;
     if (vk_lightmap)
         vk_lightmap->modified = false;
+    if (vk_pixel_lightmaps)
+        vk_pixel_lightmaps->modified = false;
     if (vk_coloredlightmaps)
         vk_coloredlightmaps->modified = false;
     if (vk_vertexlight)
