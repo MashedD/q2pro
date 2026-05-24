@@ -9118,6 +9118,11 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
         atlas_w <<= 1;
     atlas_w = min(atlas_w, 4096);
 
+    if (!valid) {
+        Com_Printf("Vulkan pixel lightmap CPU atlas: no valid lightmaps\n");
+        return;
+    }
+
     vk_lm_plan_t *plan = Z_Mallocz(sizeof(*plan) * face_count);
     int cx = 0, cy = 0, row_h = 0;
     for (uint32_t i = 0; i < face_count; i++) {
@@ -9170,8 +9175,8 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
 
     uint32_t checksum = vk_pixel_lightmap_checksum(pixels, pixel_count);
 
-    Com_Printf("Vulkan pixel lightmap CPU atlas: %u valid, %u skipped, %dx%d, checksum %08x\n",
-               valid, invalid, atlas_w, atlas_h, checksum);
+    Com_Printf("Vulkan pixel lightmap CPU atlas (mode %d): %u valid, %u skipped, %dx%d, checksum %08x\n",
+               vk_pixel_lightmaps->integer, valid, invalid, atlas_w, atlas_h, checksum);
     if (vk_upload_texture_data(&vk.world.pixel_lightmap_texture,
                                atlas_w, atlas_h, pixels, false)) {
         Com_Printf("Vulkan pixel lightmap atlas texture uploaded: %dx%d (unused)\n",
@@ -9417,8 +9422,8 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
 
     vk_pixel_lightmap_plan(bsp, draw_faces, draw_face_count, fd);
     if (pixel_lm_debug)
-        Com_Printf("Vulkan pixel lightmap CPU lmuv: %u verts, checksum %08x\n",
-                   lmuv_count, lmuv_hash);
+        Com_Printf("Vulkan pixel lightmap CPU lmuv (mode %d): %u verts, checksum %08x\n",
+                   vk_pixel_lightmaps->integer, lmuv_count, lmuv_hash);
 
     line_indices = vk_build_line_indices(indices, idx, &line_index_count);
 
