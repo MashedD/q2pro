@@ -258,6 +258,8 @@ typedef struct {
     float dlight[4];
     float fog[4];
     float intensity;
+    float lm_scale[2];
+    float lm_offset[2];
 } vk_world_push_t;
 
 typedef struct {
@@ -6722,6 +6724,10 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     Vector4Clear(push.dlight);
     vk_fog_params(fd, push.fog);
     push.intensity = vk_texture_intensity();
+    push.lm_scale[0] = -1.0f;
+    push.lm_scale[1] = -1.0f;
+    push.lm_offset[0] = 0.0f;
+    push.lm_offset[1] = 0.0f;
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
