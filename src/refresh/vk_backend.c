@@ -581,6 +581,7 @@ static cvar_t *vk_world_cull;
 static cvar_t *vk_debug_distfrac;
 #endif
 static byte vk_gammatable[256];
+static bool vk_pixel_lightmaps_warned;
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static void vk_destroy_texture(image_t *image);
@@ -6742,8 +6743,11 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         return;
 
     if (pixel_requested && !pixel_ready) {
-        Com_WPrintf("Vulkan pixel lightmaps mode 2 needs vk_pixel_lightmaps 2 before video init; using mode 1\n");
-        vk_pixel_lightmaps->integer = 1;
+        if (!vk_pixel_lightmaps_warned) {
+            Com_WPrintf("Vulkan pixel lightmaps mode 2 needs vk_pixel_lightmaps 2 before video init; using mode 1\n");
+            vk_pixel_lightmaps_warned = true;
+        }
+        Cvar_Set("vk_pixel_lightmaps", "1");
     }
 
     vk_world_push_t push;
@@ -9559,8 +9563,11 @@ static void vk_clear_world_lighting_modified(void)
         vk_fullbright->modified = false;
     if (vk_lightmap)
         vk_lightmap->modified = false;
-    if (vk_pixel_lightmaps)
+    if (vk_pixel_lightmaps) {
+        if (vk_pixel_lightmaps->integer < 2)
+            vk_pixel_lightmaps_warned = false;
         vk_pixel_lightmaps->modified = false;
+    }
     if (vk_coloredlightmaps)
         vk_coloredlightmaps->modified = false;
     if (vk_vertexlight)
