@@ -8701,12 +8701,56 @@ static bool vk_face_has_valid_lightmap(const bsp_t *bsp, const mface_t *face)
     return true;
 }
 
+static uint32_t vk_pixel_lightmap_texel(const mface_t *face, const refdef_t *fd,
+                                        int s, int t)
+{
+    int size = face->lm_width * face->lm_height * 3;
+    const byte *lightmap = face->lightmap;
+    float rgb[3] = { 0.0f, 0.0f, 0.0f };
+
+    for (int i = 0; i < face->numstyles; i++) {
+        const byte *src = &lightmap[3 * (t * face->lm_width + s)];
+        float style = vk_lightstyle_value(fd, face->styles[i]);
+        rgb[0] += style * src[0];
+        rgb[1] += style * src[1];
+        rgb[2] += style * src[2];
+        lightmap += size;
+    }
+
+    if (vk_coloredlightmaps && !vk_coloredlightmaps->integer) {
+        float y = LUMINANCE(rgb[0], rgb[1], rgb[2]);
+        rgb[0] = rgb[1] = rgb[2] = y;
+    }
+
+    return MakeColor(Q_clipf(rgb[0], 0.0f, 255.0f),
+                     Q_clipf(rgb[1], 0.0f, 255.0f),
+                     Q_clipf(rgb[2], 0.0f, 255.0f), 255);
+}
+
+static uint32_t vk_pixel_lightmap_checksum(const uint32_t *pixels, size_t count)
+{
+    uint32_t hash = 2166136261u;
+
+    for (size_t i = 0; i < count; i++) {
+        hash ^= pixels[i];
+        hash *= 16777619u;
+    }
+
+    return hash;
+}
+
 static void vk_pixel_lightmap_plan(const bsp_t *bsp,
                                    const vk_world_face_t *faces,
-                                   uint32_t face_count)
+                                   uint32_t face_count,
+                                   const refdef_t *fd)
 {
     if (!vk_pixel_lightmaps || !vk_pixel_lightmaps->integer)
         return;
+
+    typedef struct {
+        const mface_t *face;
+        int x, y;
+    } vk_lm_plan_t;
 
     uint32_t valid = 0;
     uint32_t invalid = 0;
@@ -8729,6 +8773,7 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
         atlas_w <<= 1;
     atlas_w = min(atlas_w, 4096);
 
+    vk_lm_plan_t *plan = Z_Mallocz(sizeof(*plan) * face_count);
     int cx = 0, cy = 0, row_h = 0;
     for (uint32_t i = 0; i < face_count; i++) {
         const mface_t *face = faces[i].face;
@@ -8739,6 +8784,9 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
             cy += row_h;
             row_h = 0;
         }
+        plan[i].face = face;
+        plan[i].x = cx;
+        plan[i].y = cy;
         cx += face->lm_width;
         row_h = max(row_h, face->lm_height);
     }
@@ -8747,8 +8795,36 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
     while (atlas_h < cy + row_h)
         atlas_h <<= 1;
 
-    Com_Printf("Vulkan pixel lightmap plan: %u valid, %u skipped, atlas %dx%d\n",
-               valid, invalid, atlas_w, atlas_h);
+    if (atlas_w > 4096 || atlas_h > 4096) {
+        Com_WPrintf("Vulkan pixel lightmap plan too large: %dx%d\n",
+                    atlas_w, atlas_h);
+        Z_Free(plan);
+        return;
+    }
+
+    size_t pixel_count = (size_t)atlas_w * atlas_h;
+    uint32_t *pixels = Z_Malloc(sizeof(*pixels) * pixel_count);
+    for (size_t i = 0; i < pixel_count; i++)
+        pixels[i] = MakeColor(255, 255, 255, 255);
+
+    for (uint32_t i = 0; i < face_count; i++) {
+        const mface_t *face = plan[i].face;
+        if (!face)
+            continue;
+        for (int t = 0; t < face->lm_height; t++) {
+            for (int s = 0; s < face->lm_width; s++) {
+                pixels[(plan[i].y + t) * atlas_w + plan[i].x + s] =
+                    vk_pixel_lightmap_texel(face, fd, s, t);
+            }
+        }
+    }
+
+    uint32_t checksum = vk_pixel_lightmap_checksum(pixels, pixel_count);
+
+    Com_Printf("Vulkan pixel lightmap CPU atlas: %u valid, %u skipped, %dx%d, checksum %08x\n",
+               valid, invalid, atlas_w, atlas_h, checksum);
+    Z_Free(pixels);
+    Z_Free(plan);
 }
 
 static void vk_surface_vertex_color(const bsp_t *bsp, const mface_t *face,
@@ -8962,7 +9038,7 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
         }
     }
 
-    vk_pixel_lightmap_plan(bsp, draw_faces, draw_face_count);
+    vk_pixel_lightmap_plan(bsp, draw_faces, draw_face_count, fd);
 
     line_indices = vk_build_line_indices(indices, idx, &line_index_count);
 
