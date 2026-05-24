@@ -9144,8 +9144,8 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
             continue;
         }
         valid++;
-        max_w = max(max_w, face->lm_width);
-        total_area += (uint64_t)face->lm_width * face->lm_height;
+        max_w = max(max_w, face->lm_width + 2);
+        total_area += (uint64_t)(face->lm_width + 2) * (face->lm_height + 2);
     }
 
     int atlas_w = 1;
@@ -9164,20 +9164,22 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
         const mface_t *face = faces[i].face;
         if (!vk_face_has_valid_lightmap(bsp, face))
             continue;
-        if (cx + face->lm_width > atlas_w) {
+        int pack_w = face->lm_width + 2;
+        int pack_h = face->lm_height + 2;
+        if (cx + pack_w > atlas_w) {
             cx = 0;
             cy += row_h;
             row_h = 0;
         }
         plan[i].face = face;
-        plan[i].x = cx;
-        plan[i].y = cy;
-        faces[i].pixel_lm_x = cx;
-        faces[i].pixel_lm_y = cy;
+        plan[i].x = cx + 1;
+        plan[i].y = cy + 1;
+        faces[i].pixel_lm_x = cx + 1;
+        faces[i].pixel_lm_y = cy + 1;
         faces[i].pixel_lm_w = face->lm_width;
         faces[i].pixel_lm_h = face->lm_height;
-        cx += face->lm_width;
-        row_h = max(row_h, face->lm_height);
+        cx += pack_w;
+        row_h = max(row_h, pack_h);
     }
 
     int atlas_h = 1;
@@ -9200,10 +9202,12 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
         const mface_t *face = plan[i].face;
         if (!face)
             continue;
-        for (int t = 0; t < face->lm_height; t++) {
-            for (int s = 0; s < face->lm_width; s++) {
+        for (int t = -1; t <= face->lm_height; t++) {
+            int src_t = Q_clipf(t, 0, face->lm_height - 1);
+            for (int s = -1; s <= face->lm_width; s++) {
+                int src_s = Q_clipf(s, 0, face->lm_width - 1);
                 pixels[(plan[i].y + t) * atlas_w + plan[i].x + s] =
-                    vk_pixel_lightmap_texel(face, fd, s, t);
+                    vk_pixel_lightmap_texel(face, fd, src_s, src_t);
             }
         }
     }
