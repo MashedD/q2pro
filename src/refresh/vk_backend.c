@@ -3052,7 +3052,7 @@ static bool vk_create_frame_resources(void)
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreateDescriptorSetLayout", result);
 
-    const uint32_t texture_descriptor_count = MAX_RIMAGES * 2 + 8;
+    const uint32_t texture_descriptor_count = MAX_RIMAGES * 2 + 9;
     VkDescriptorPoolSize pool_size = {
         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount = texture_descriptor_count,
@@ -6742,7 +6742,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         return;
 
     if (pixel_requested && !pixel_ready) {
-        Com_WPrintf("Vulkan pixel lightmaps requested but resources are unavailable; using vertex-lit world\n");
+        Com_WPrintf("Vulkan pixel lightmaps mode 2 needs resources created at video init; using mode 1\n");
         vk_pixel_lightmaps->integer = 1;
     }
 
