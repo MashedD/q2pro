@@ -3278,6 +3278,11 @@ static void vk_destroy_swapchain(void)
         vk.pixel_world_alpha_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.pixel_world_pipeline_layout) {
+        vk.DestroyPipelineLayout(vk.device, vk.pixel_world_pipeline_layout, NULL);
+        vk.pixel_world_pipeline_layout = VK_NULL_HANDLE;
+    }
+
     if (vk.sky_pipeline) {
         vk.DestroyPipeline(vk.device, vk.sky_pipeline, NULL);
         vk.sky_pipeline = VK_NULL_HANDLE;
