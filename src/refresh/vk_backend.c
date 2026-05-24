@@ -3741,6 +3741,19 @@ static bool vk_create_pixel_world_pipeline_layout(void)
     return true;
 }
 
+static void vk_print_pixel_lightmap_mode(void)
+{
+    int mode = vk_pixel_lightmaps ? vk_pixel_lightmaps->integer : 0;
+
+    if (mode <= 0) {
+        Com_Printf("Vulkan pixel lightmaps: disabled\n");
+    } else if (mode == 1) {
+        Com_Printf("Vulkan pixel lightmaps: upload-only validation mode\n");
+    } else {
+        Com_Printf("Vulkan pixel lightmaps: draw mode requested\n");
+    }
+}
+
 static const VkDynamicState vk_3d_dynamic_states[] = {
     VK_DYNAMIC_STATE_VIEWPORT,
     VK_DYNAMIC_STATE_SCISSOR,
@@ -4791,6 +4804,8 @@ static bool vk_create_swapchain(int width, int height)
         max(vk.swapchain_extent.width / 4, 1),
         max(vk.swapchain_extent.height / 4, 1),
     };
+
+    vk_print_pixel_lightmap_mode();
 
     if (!vk_validate_pixel_lightmap_shaders() ||
         !vk_create_pixel_world_pipeline_layout() ||
