@@ -582,6 +582,7 @@ static cvar_t *vk_debug_distfrac;
 #endif
 static byte vk_gammatable[256];
 static bool vk_pixel_lightmaps_warned;
+static bool vk_pixel_lightmaps_draw_logged;
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static void vk_destroy_texture(image_t *image);
@@ -6768,6 +6769,10 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         }
         Cvar_Set("vk_pixel_lightmaps", "1");
     }
+    if (pixel_world && !vk_pixel_lightmaps_draw_logged) {
+        Com_Printf("Vulkan pixel lightmaps: drawing opaque world with pixel pipeline\n");
+        vk_pixel_lightmaps_draw_logged = true;
+    }
 
     vk_world_push_t push;
     memcpy(push.mvp, mvp, sizeof(push.mvp));
@@ -9583,8 +9588,10 @@ static void vk_clear_world_lighting_modified(void)
     if (vk_lightmap)
         vk_lightmap->modified = false;
     if (vk_pixel_lightmaps) {
-        if (vk_pixel_lightmaps->integer < 2)
+        if (vk_pixel_lightmaps->integer < 2) {
             vk_pixel_lightmaps_warned = false;
+            vk_pixel_lightmaps_draw_logged = false;
+        }
         vk_pixel_lightmaps->modified = false;
     }
     if (vk_coloredlightmaps)
