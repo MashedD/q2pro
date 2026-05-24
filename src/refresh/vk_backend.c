@@ -209,6 +209,7 @@ typedef struct {
     bsp_t *cache;
     vk_mesh_t mesh;
     vk_buffer_t pixel_lmuv_buffer;
+    vk_texture_t pixel_lightmap_texture;
     vk_buffer_t line_indices;
     vk_world_batch_t *batches;
     vk_world_face_t *faces;
@@ -1016,6 +1017,7 @@ static void vk_free_world(void)
     glr.num_glare_sources = 0;
     vk_destroy_mesh(&vk.world.mesh);
     vk_destroy_buffer(&vk.world.pixel_lmuv_buffer);
+    vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
     vk_destroy_buffer(&vk.world.line_indices);
     if (vk.world.batches) {
         Z_Free(vk.world.batches);
@@ -8839,6 +8841,14 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
 
     Com_Printf("Vulkan pixel lightmap CPU atlas: %u valid, %u skipped, %dx%d, checksum %08x\n",
                valid, invalid, atlas_w, atlas_h, checksum);
+    if (vk_upload_texture_data(&vk.world.pixel_lightmap_texture,
+                               atlas_w, atlas_h, pixels, false)) {
+        Com_Printf("Vulkan pixel lightmap atlas texture uploaded: %dx%d (unused)\n",
+                   atlas_w, atlas_h);
+    } else {
+        Com_WPrintf("Couldn't upload Vulkan pixel lightmap atlas texture: %s\n",
+                    Com_GetLastError());
+    }
     Z_Free(pixels);
     Z_Free(plan);
 }
