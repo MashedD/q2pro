@@ -208,6 +208,7 @@ typedef struct {
 typedef struct {
     bsp_t *cache;
     vk_mesh_t mesh;
+    vk_buffer_t pixel_lmuv_buffer;
     vk_buffer_t line_indices;
     vk_world_batch_t *batches;
     vk_world_face_t *faces;
@@ -1014,6 +1015,7 @@ static void vk_free_world(void)
 {
     glr.num_glare_sources = 0;
     vk_destroy_mesh(&vk.world.mesh);
+    vk_destroy_buffer(&vk.world.pixel_lmuv_buffer);
     vk_destroy_buffer(&vk.world.line_indices);
     if (vk.world.batches) {
         Z_Free(vk.world.batches);
@@ -8954,6 +8956,8 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
     uint32_t lmuv_hash = 2166136261u;
     uint32_t lmuv_count = 0;
     bool pixel_lm_debug = vk_pixel_lightmaps && vk_pixel_lightmaps->integer;
+    float *lmuv_data = pixel_lm_debug ?
+        Z_Malloc(sizeof(*lmuv_data) * 2 * vertex_count) : NULL;
 
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *face = &bsp->faces[i];
@@ -9003,6 +9007,8 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                 }
                 lmuv_hash = vk_pixel_lightmap_hash_float(lmuv_hash, lms);
                 lmuv_hash = vk_pixel_lightmap_hash_float(lmuv_hash, lmt);
+                lmuv_data[v * 2 + 0] = lms;
+                lmuv_data[v * 2 + 1] = lmt;
                 lmuv_count++;
             }
             v++;
@@ -9077,6 +9083,17 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
 
     bool ok = vk_upload_mesh(&vk.world.mesh, vertices, v, indices, idx);
     if (ok) {
+        vk_destroy_buffer(&vk.world.pixel_lmuv_buffer);
+        if (lmuv_data) {
+            size_t lmuv_size = sizeof(*lmuv_data) * 2 * v;
+            if (vk_upload_buffer(&vk.world.pixel_lmuv_buffer, lmuv_data, lmuv_size,
+                                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
+                Com_Printf("Vulkan pixel lightmap lmuv buffer uploaded: %zu bytes (unused)\n",
+                           lmuv_size);
+            } else {
+                Com_WPrintf("Couldn't upload Vulkan pixel lightmap lmuv buffer\n");
+            }
+        }
         vk_destroy_buffer(&vk.world.line_indices);
         vk.world.line_index_count = 0;
         if (line_indices && line_index_count) {
@@ -9104,6 +9121,8 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
 
     Z_Free(vertices);
     Z_Free(indices);
+    if (lmuv_data)
+        Z_Free(lmuv_data);
     if (line_indices)
         Z_Free(line_indices);
     Z_Free(build_faces);
