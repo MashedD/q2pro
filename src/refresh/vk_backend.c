@@ -8739,6 +8739,20 @@ static uint32_t vk_pixel_lightmap_checksum(const uint32_t *pixels, size_t count)
     return hash;
 }
 
+static uint32_t vk_pixel_lightmap_hash_u32(uint32_t hash, uint32_t value)
+{
+    hash ^= value;
+    return hash * 16777619u;
+}
+
+static uint32_t vk_pixel_lightmap_hash_float(uint32_t hash, float value)
+{
+    uint32_t bits;
+
+    memcpy(&bits, &value, sizeof(bits));
+    return vk_pixel_lightmap_hash_u32(hash, bits);
+}
+
 static void vk_pixel_lightmap_plan(const bsp_t *bsp,
                                    const vk_world_face_t *faces,
                                    uint32_t face_count,
@@ -8937,6 +8951,9 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
     uint32_t line_index_count = 0;
     uint32_t v = 0;
     uint32_t face_index = 0;
+    uint32_t lmuv_hash = 2166136261u;
+    uint32_t lmuv_count = 0;
+    bool pixel_lm_debug = vk_pixel_lightmaps && vk_pixel_lightmaps->integer;
 
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *face = &bsp->faces[i];
@@ -8975,6 +8992,19 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                                  face->texinfo->offset[0]) * scale_s;
             vertices[v].uv[1] = (DotProduct(src->point, face->texinfo->axis[1]) +
                                  face->texinfo->offset[1]) * scale_t;
+            if (pixel_lm_debug) {
+                float lms = 0.0f;
+                float lmt = 0.0f;
+                if (vk_face_has_valid_lightmap(bsp, face)) {
+                    lms = (DotProduct(src->point, face->lm_axis[0]) +
+                           face->lm_offset[0]) / max(face->lm_width, 1);
+                    lmt = (DotProduct(src->point, face->lm_axis[1]) +
+                           face->lm_offset[1]) / max(face->lm_height, 1);
+                }
+                lmuv_hash = vk_pixel_lightmap_hash_float(lmuv_hash, lms);
+                lmuv_hash = vk_pixel_lightmap_hash_float(lmuv_hash, lmt);
+                lmuv_count++;
+            }
             v++;
         }
 
@@ -9039,6 +9069,9 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
     }
 
     vk_pixel_lightmap_plan(bsp, draw_faces, draw_face_count, fd);
+    if (pixel_lm_debug)
+        Com_Printf("Vulkan pixel lightmap CPU lmuv: %u verts, checksum %08x\n",
+                   lmuv_count, lmuv_hash);
 
     line_indices = vk_build_line_indices(indices, idx, &line_index_count);
 
