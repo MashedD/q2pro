@@ -583,6 +583,7 @@ static cvar_t *vk_debug_distfrac;
 static byte vk_gammatable[256];
 static bool vk_pixel_lightmaps_warned;
 static bool vk_pixel_lightmaps_draw_logged;
+static bool vk_pixel_lightmaps_scope_logged;
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static void vk_destroy_texture(image_t *image);
@@ -6761,6 +6762,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     bool special_light_mode = (vk_lightmap && vk_lightmap->integer) ||
         (vk_fullbright && vk_fullbright->integer) ||
         (vk_vertexlight && vk_vertexlight->integer);
+    bool pixel_mode = vk_pixel_lightmap_mode() >= 2;
     bool pixel_requested = vk_pixel_lightmap_mode() >= 2 &&
         pass == VK_WORLD_OPAQUE && !vk.drawing_bloom && !ent &&
         !special_light_mode;
@@ -6773,6 +6775,11 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count ||
         !vk.world.batch_count || !vk.world.batches || !vk.world.faces)
         return;
+
+    if (pixel_mode && !pixel_requested && !vk_pixel_lightmaps_scope_logged) {
+        Com_Printf("Vulkan pixel lightmaps mode 2 applies only to opaque world surfaces\n");
+        vk_pixel_lightmaps_scope_logged = true;
+    }
 
     if (pixel_requested && !pixel_ready) {
         if (!vk_pixel_lightmaps_warned) {
@@ -6958,10 +6965,16 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     c.batchesDrawn++;
                     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                        face_pipeline);
+                    if (pixel_world) {
+                        vk_bind_pixel_world_descriptor(cmd, 0, texture->descriptor_set);
+                        vk_bind_pixel_world_descriptor(cmd, 1,
+                                                       vk.world.pixel_lightmap_texture.descriptor_set);
+                        bound_texture_index = image->texnum;
+                    }
                 }
             }
 
-            if (face_pipeline != pipeline)
+            if (!pixel_world && face_pipeline != pipeline)
                 vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         }
     }
@@ -9612,6 +9625,7 @@ static void vk_clear_world_lighting_modified(void)
         if (vk_pixel_lightmap_mode() < 2) {
             vk_pixel_lightmaps_warned = false;
             vk_pixel_lightmaps_draw_logged = false;
+            vk_pixel_lightmaps_scope_logged = false;
         }
         vk_pixel_lightmaps->modified = false;
     }
