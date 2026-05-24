@@ -4987,10 +4987,29 @@ static void vk_bind_texture_descriptor(VkCommandBuffer cmd, VkDescriptorSet set)
     c.texSwitches++;
 }
 
+static void vk_bind_pixel_world_descriptor(VkCommandBuffer cmd,
+                                           uint32_t set_index,
+                                           VkDescriptorSet set)
+{
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.pixel_world_pipeline_layout, set_index, 1,
+                             &set, 0, NULL);
+    c.texSwitches++;
+}
+
 static void vk_push_constants(VkCommandBuffer cmd, uint32_t size,
                               const void *data)
 {
     vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, size, data);
+    c.uniformUploads++;
+}
+
+static void vk_push_pixel_world_constants(VkCommandBuffer cmd, uint32_t size,
+                                          const void *data)
+{
+    vk.CmdPushConstants(cmd, vk.pixel_world_pipeline_layout,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, size, data);
     c.uniformUploads++;
@@ -6710,6 +6729,12 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     const vk_mesh_t *mesh = &vk.world.mesh;
     bool use_marked = marked_only ||
         (vk_world_vis && vk_world_vis->integer && vk.world.face_count);
+    bool pixel_world = vk_pixel_lightmaps && vk_pixel_lightmaps->integer >= 2 &&
+        pass == VK_WORLD_OPAQUE && !vk.drawing_bloom && !ent &&
+        vk.pixel_world_pipeline && vk.pixel_world_alpha_pipeline &&
+        vk.pixel_world_pipeline_layout &&
+        vk.world.pixel_lmuv_buffer.buffer &&
+        vk.world.pixel_lightmap_texture.descriptor_set;
 
     if (!vk.render_pass_active || !pipeline ||
         !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count ||
@@ -6733,11 +6758,26 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
+    VkBuffer pixel_buffers[] = {
+        mesh->vertices.buffer,
+        vk.world.pixel_lmuv_buffer.buffer,
+    };
+    VkDeviceSize pixel_offsets[] = { 0, 0 };
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vk_bind_vertex_buffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                       pixel_world ? vk.pixel_world_pipeline : pipeline);
+    if (pixel_world)
+        vk_bind_vertex_buffers(cmd, 0, 2, pixel_buffers, pixel_offsets);
+    else
+        vk_bind_vertex_buffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk_push_constants(cmd, sizeof(push), &push);
+    if (pixel_world) {
+        vk_bind_pixel_world_descriptor(cmd, 1,
+                                       vk.world.pixel_lightmap_texture.descriptor_set);
+        vk_push_pixel_world_constants(cmd, sizeof(push), &push);
+    } else {
+        vk_push_constants(cmd, sizeof(push), &push);
+    }
 
     for (uint32_t i = 0; i < vk.world.batch_count; i++) {
         const vk_world_batch_t *batch = &vk.world.batches[i];
@@ -6748,7 +6788,10 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         if (!texture)
             continue;
 
-        vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+        if (pixel_world)
+            vk_bind_pixel_world_descriptor(cmd, 0, texture->descriptor_set);
+        else
+            vk_bind_texture_descriptor(cmd, texture->descriptor_set);
         uint32_t bound_texture_index = batch->texture_index;
 
         if (batch->first_face > vk.world.face_count ||
@@ -6799,12 +6842,22 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 texture = vk_texture_for_index(image->texnum, true);
                 if (!texture)
                     continue;
-                vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+                if (pixel_world)
+                    vk_bind_pixel_world_descriptor(cmd, 0, texture->descriptor_set);
+                else
+                    vk_bind_texture_descriptor(cmd, texture->descriptor_set);
                 bound_texture_index = image->texnum;
             }
 
-            face_pipeline = vk_world_face_pipeline(face->face, pipeline, pass);
-            if (face_pipeline != pipeline)
+            if (pixel_world) {
+                face_pipeline = (face->face->drawflags & SURF_ALPHATEST) ?
+                    vk.pixel_world_alpha_pipeline : vk.pixel_world_pipeline;
+                vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                   face_pipeline);
+            } else {
+                face_pipeline = vk_world_face_pipeline(face->face, pipeline, pass);
+            }
+            if (!pixel_world && face_pipeline != pipeline)
                 vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, face_pipeline);
 
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
@@ -6814,7 +6867,25 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             push.dlight[3] = fd ? fd->time : 0.0f;
             push.intensity = vk_texture_intensity();
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
-            vk_push_constants(cmd, sizeof(push), &push);
+            if (pixel_world && face->pixel_lm_w && face->pixel_lm_h) {
+                float aw = vk.world.pixel_lightmap_texture.width ?
+                    (float)vk.world.pixel_lightmap_texture.width : 1.0f;
+                float ah = vk.world.pixel_lightmap_texture.height ?
+                    (float)vk.world.pixel_lightmap_texture.height : 1.0f;
+                push.lm_scale[0] = face->pixel_lm_w / aw;
+                push.lm_scale[1] = face->pixel_lm_h / ah;
+                push.lm_offset[0] = face->pixel_lm_x / aw;
+                push.lm_offset[1] = face->pixel_lm_y / ah;
+            } else {
+                push.lm_scale[0] = -1.0f;
+                push.lm_scale[1] = -1.0f;
+                push.lm_offset[0] = 0.0f;
+                push.lm_offset[1] = 0.0f;
+            }
+            if (pixel_world)
+                vk_push_pixel_world_constants(cmd, sizeof(push), &push);
+            else
+                vk_push_constants(cmd, sizeof(push), &push);
             vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
             c.facesDrawn++;
             c.facesTris += face->index_count / 3;
