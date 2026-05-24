@@ -174,6 +174,8 @@ typedef struct {
     uint32_t first_index;
     uint32_t index_count;
     vec3_t center;
+    uint16_t pixel_lm_x, pixel_lm_y;
+    uint16_t pixel_lm_w, pixel_lm_h;
 } vk_world_face_t;
 
 typedef struct {
@@ -9005,7 +9007,7 @@ static uint32_t vk_pixel_lightmap_hash_float(uint32_t hash, float value)
 }
 
 static void vk_pixel_lightmap_plan(const bsp_t *bsp,
-                                   const vk_world_face_t *faces,
+                                   vk_world_face_t *faces,
                                    uint32_t face_count,
                                    const refdef_t *fd)
 {
@@ -9023,6 +9025,8 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
     int max_w = 1;
 
     for (uint32_t i = 0; i < face_count; i++) {
+        faces[i].pixel_lm_x = faces[i].pixel_lm_y = 0;
+        faces[i].pixel_lm_w = faces[i].pixel_lm_h = 0;
         const mface_t *face = faces[i].face;
         if (!vk_face_has_valid_lightmap(bsp, face)) {
             invalid++;
@@ -9052,6 +9056,10 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
         plan[i].face = face;
         plan[i].x = cx;
         plan[i].y = cy;
+        faces[i].pixel_lm_x = cx;
+        faces[i].pixel_lm_y = cy;
+        faces[i].pixel_lm_w = face->lm_width;
+        faces[i].pixel_lm_h = face->lm_height;
         cx += face->lm_width;
         row_h = max(row_h, face->lm_height);
     }
