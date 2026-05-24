@@ -3686,9 +3686,16 @@ static VkShaderModule vk_create_shader_module(const uint32_t *code, size_t code_
     return module;
 }
 
+static int vk_pixel_lightmap_mode(void)
+{
+    if (!vk_pixel_lightmaps)
+        return 0;
+    return Cvar_ClampInteger(vk_pixel_lightmaps, 0, 2);
+}
+
 static bool vk_validate_pixel_lightmap_shaders(void)
 {
-    if (!vk_pixel_lightmaps || !vk_pixel_lightmaps->integer)
+    if (vk_pixel_lightmap_mode() < 1)
         return true;
 
     VkShaderModule vert = vk_create_shader_module(vk_world_pixel_vert_spv,
@@ -3713,7 +3720,7 @@ static bool vk_validate_pixel_lightmap_shaders(void)
 
 static bool vk_create_pixel_world_pipeline_layout(void)
 {
-    if (!vk_pixel_lightmaps || vk_pixel_lightmaps->integer < 2)
+    if (vk_pixel_lightmap_mode() < 2)
         return true;
 
     VkDescriptorSetLayout set_layouts[] = {
@@ -3744,7 +3751,7 @@ static bool vk_create_pixel_world_pipeline_layout(void)
 
 static void vk_print_pixel_lightmap_mode(void)
 {
-    int mode = vk_pixel_lightmaps ? vk_pixel_lightmaps->integer : 0;
+    int mode = vk_pixel_lightmap_mode();
 
     if (mode <= 0) {
         Com_Printf("Vulkan pixel lightmaps: disabled\n");
@@ -4315,7 +4322,7 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
 
 static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test)
 {
-    if (!vk_pixel_lightmaps || vk_pixel_lightmaps->integer < 2)
+    if (vk_pixel_lightmap_mode() < 2)
         return true;
     if (!vk.pixel_world_pipeline_layout) {
         Com_SetLastError("No Vulkan pixel world pipeline layout");
@@ -6749,7 +6756,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     bool special_light_mode = (vk_lightmap && vk_lightmap->integer) ||
         (vk_fullbright && vk_fullbright->integer) ||
         (vk_vertexlight && vk_vertexlight->integer);
-    bool pixel_requested = vk_pixel_lightmaps && vk_pixel_lightmaps->integer >= 2 &&
+    bool pixel_requested = vk_pixel_lightmap_mode() >= 2 &&
         pass == VK_WORLD_OPAQUE && !vk.drawing_bloom && !ent &&
         !special_light_mode;
     bool pixel_ready = vk.pixel_world_pipeline && vk.pixel_world_alpha_pipeline &&
@@ -9115,7 +9122,7 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
                                    uint32_t face_count,
                                    const refdef_t *fd)
 {
-    if (!vk_pixel_lightmaps || !vk_pixel_lightmaps->integer)
+    if (vk_pixel_lightmap_mode() < 1)
         return;
 
     typedef struct {
@@ -9204,7 +9211,7 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
     uint32_t checksum = vk_pixel_lightmap_checksum(pixels, pixel_count);
 
     Com_Printf("Vulkan pixel lightmap CPU atlas (mode %d): %u valid, %u skipped, %dx%d, checksum %08x\n",
-               vk_pixel_lightmaps->integer, valid, invalid, atlas_w, atlas_h, checksum);
+               vk_pixel_lightmap_mode(), valid, invalid, atlas_w, atlas_h, checksum);
     if (vk_upload_texture_data(&vk.world.pixel_lightmap_texture,
                                atlas_w, atlas_h, pixels, false)) {
         Com_Printf("Vulkan pixel lightmap atlas texture uploaded: %dx%d (unused)\n",
@@ -9329,7 +9336,7 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
     uint32_t face_index = 0;
     uint32_t lmuv_hash = 2166136261u;
     uint32_t lmuv_count = 0;
-    bool pixel_lm_debug = vk_pixel_lightmaps && vk_pixel_lightmaps->integer;
+    bool pixel_lm_debug = vk_pixel_lightmap_mode() > 0;
     float *lmuv_data = pixel_lm_debug ?
         Z_Malloc(sizeof(*lmuv_data) * 2 * vertex_count) : NULL;
 
@@ -9451,7 +9458,7 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
     vk_pixel_lightmap_plan(bsp, draw_faces, draw_face_count, fd);
     if (pixel_lm_debug)
         Com_Printf("Vulkan pixel lightmap CPU lmuv (mode %d): %u verts, checksum %08x\n",
-                   vk_pixel_lightmaps->integer, lmuv_count, lmuv_hash);
+                   vk_pixel_lightmap_mode(), lmuv_count, lmuv_hash);
 
     line_indices = vk_build_line_indices(indices, idx, &line_index_count);
 
@@ -9588,7 +9595,7 @@ static void vk_clear_world_lighting_modified(void)
     if (vk_lightmap)
         vk_lightmap->modified = false;
     if (vk_pixel_lightmaps) {
-        if (vk_pixel_lightmaps->integer < 2) {
+        if (vk_pixel_lightmap_mode() < 2) {
             vk_pixel_lightmaps_warned = false;
             vk_pixel_lightmaps_draw_logged = false;
         }
