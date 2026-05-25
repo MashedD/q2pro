@@ -445,6 +445,7 @@ typedef struct {
     VkPipeline alias_alpha_pipeline;
     VkPipeline alias_depth_pipeline;
     VkPipeline alias_blend_pipeline;
+    VkPipeline alias_shadow_pipeline;
     VkPipeline alias_line_pipeline;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
@@ -3349,6 +3350,11 @@ static void vk_destroy_swapchain(void)
         vk.alias_blend_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.alias_shadow_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_shadow_pipeline, NULL);
+        vk.alias_shadow_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.alias_line_pipeline) {
         vk.DestroyPipeline(vk.device, vk.alias_line_pipeline, NULL);
         vk.alias_line_pipeline = VK_NULL_HANDLE;
@@ -4901,6 +4907,8 @@ static bool vk_create_swapchain(int width, int height)
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
+        !vk_create_alias_pipeline(&vk.alias_shadow_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_TRUE, -1.0f, -2.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_depth_resources() ||
@@ -7811,7 +7819,7 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     mat4_t proj, view, model_matrix, shadow_proj, shadow_model, view_model;
     vk_alias_push_t push;
 
-    if (!vk_shadows || !vk_shadows->integer || !vk.alias_blend_pipeline)
+    if (!vk_shadows || !vk_shadows->integer || !vk.alias_shadow_pipeline)
         return;
     if (ent->flags & (RF_WEAPONMODEL | RF_NOSHADOW))
         return;
@@ -7880,7 +7888,7 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
             continue;
 
         vk_draw_alias_pass(vk.command_buffers[vk.current_image],
-                           vk.alias_blend_pipeline, buffers, offsets, model,
+                           vk.alias_shadow_pipeline, buffers, offsets, model,
                            batch, texture, &push);
     }
 }
