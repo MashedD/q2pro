@@ -2075,6 +2075,7 @@ static void vk_update_texture_descriptors(void)
         vk_sampler_for_pic_flags((vk_partshape && vk_partshape->integer == 1) ?
                                  IF_NEAREST : IF_NONE));
     vk_update_texture_descriptor(&vk.beam_texture);
+    vk_update_texture_descriptor(&vk.world.pixel_lightmap_texture);
 }
 
 static uint32_t vk_mip_level_count(uint32_t width, uint32_t height)
