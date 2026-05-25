@@ -7687,18 +7687,14 @@ static void vk_draw_alias_color_pass(VkCommandBuffer cmd, VkPipeline pipeline,
                                      const VkBuffer buffers[2],
                                      const VkDeviceSize offsets[2],
                                      const vk_model_t *model,
-                                     const vk_alias_batch_t *batch,
                                      const vk_alias_push_t *push)
 {
-    uint32_t first_index = batch ? batch->first_index : 0;
-    uint32_t index_count = batch ? batch->index_count : model->mesh.index_count;
-
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
     vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(*push), push);
-    vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
-    c.trisDrawn += index_count / 3;
+    vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0, 0, 0);
+    c.trisDrawn += model->mesh.index_count / 3;
     c.batchesDrawn++;
 }
 
@@ -7901,7 +7897,7 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
 
     vk_draw_alias_color_pass(vk.command_buffers[vk.current_image],
                              vk.alias_shadow_pipeline, buffers, offsets,
-                             model, NULL, &push);
+                             model, &push);
 }
 
 static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
