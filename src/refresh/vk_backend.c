@@ -240,6 +240,7 @@ typedef struct {
     vk_texture_t pixel_lightmap_texture;
     vk_buffer_t line_indices;
     vk_buffer_t batch_indices;
+    void *batch_index_mapped;
     uint32_t *batch_index_data;
     uint32_t batch_index_capacity;
     vk_world_batch_t *batches;
@@ -525,6 +526,7 @@ typedef struct {
     vk_buffer_t debug_text_vertices;
     vk_buffer_t debug_text_indices;
     vk_buffer_t particle_vertices;
+    void *particle_vertices_mapped;
     vk_vertex_t particle_batch[VK_MAX_PARTICLE_VERTICES];
     uint32_t sky_images[6];
     float sky_rotate;
@@ -1001,6 +1003,14 @@ static void vk_destroy_buffer(vk_buffer_t *buffer)
     memset(buffer, 0, sizeof(*buffer));
 }
 
+static void vk_unmap_world_batch_indices(void)
+{
+    if (vk.device && vk.world.batch_index_mapped) {
+        vk.UnmapMemory(vk.device, vk.world.batch_indices.memory);
+        vk.world.batch_index_mapped = NULL;
+    }
+}
+
 static bool vk_upload_buffer(vk_buffer_t *dst, const void *data,
                              VkDeviceSize size, VkBufferUsageFlags usage)
 {
@@ -1094,6 +1104,7 @@ static void vk_free_world(void)
     vk_pixel_lightmaps_atlas_logged = false;
     vk_pixel_lightmaps_lmuv_logged = false;
     vk_destroy_buffer(&vk.world.line_indices);
+    vk_unmap_world_batch_indices();
     vk_destroy_buffer(&vk.world.batch_indices);
     if (vk.world.batch_index_data) {
         Z_Free(vk.world.batch_index_data);
@@ -6006,12 +6017,26 @@ static bool vk_create_sprite_quad(void)
 
 static bool vk_create_particle_buffer(void)
 {
-    return vk_create_buffer(sizeof(vk.particle_batch),
-                            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                            &vk.particle_vertices.buffer,
-                            &vk.particle_vertices.memory);
+    VkDeviceSize size = sizeof(vk.particle_batch);
+
+    if (!vk_create_buffer(size,
+                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          &vk.particle_vertices.buffer,
+                          &vk.particle_vertices.memory))
+        return false;
+
+    VkResult result = vk.MapMemory(vk.device, vk.particle_vertices.memory,
+                                   0, size, 0,
+                                   &vk.particle_vertices_mapped);
+    if (result != VK_SUCCESS) {
+        vk.particle_vertices_mapped = NULL;
+        vk_destroy_buffer(&vk.particle_vertices);
+        return false;
+    }
+
+    return true;
 }
 
 #define VK_BEAM_POINTS 12
@@ -6984,6 +7009,8 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         vk.world.pixel_lmuv_buffer.buffer,
     };
     VkDeviceSize pixel_offsets[] = { 0, 0 };
+    uint32_t *batch_index_mapped = vk.world.batch_index_mapped;
+    uint32_t batch_index_cursor = 0;
 
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                        pixel_world ? vk.pixel_world_pipeline : pipeline);
@@ -7026,24 +7053,26 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
 
 #define VK_FLUSH_WORLD_GROUP() do { \
             if (group_active) { \
-                void *mapped; \
-                VkDeviceSize size = sizeof(uint32_t) * group_count; \
-                VkResult result = vk.MapMemory(vk.device, vk.world.batch_indices.memory, 0, size, 0, &mapped); \
-                if (result == VK_SUCCESS) { \
-                    memcpy(mapped, vk.world.batch_index_data, size); \
-                    vk.UnmapMemory(vk.device, vk.world.batch_indices.memory); \
-                    vk.CmdBindIndexBuffer(cmd, vk.world.batch_indices.buffer, 0, VK_INDEX_TYPE_UINT32); \
+                bool draw_group = batch_index_mapped && \
+                    batch_index_cursor <= vk.world.batch_index_capacity && \
+                    group_count <= vk.world.batch_index_capacity - batch_index_cursor; \
+                if (draw_group) { \
+                    VkDeviceSize bind_offset = sizeof(uint32_t) * batch_index_cursor; \
+                    VkDeviceSize size = sizeof(uint32_t) * group_count; \
+                    memcpy(&batch_index_mapped[batch_index_cursor], vk.world.batch_index_data, size); \
+                    batch_index_cursor += group_count; \
+                    vk.CmdBindIndexBuffer(cmd, vk.world.batch_indices.buffer, bind_offset, VK_INDEX_TYPE_UINT32); \
                 } \
                 vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline); \
                 vk_bind_texture_descriptor(cmd, texture->descriptor_set); \
                 vk_push_constants(cmd, sizeof(vk_world_push_t), &push); \
-                if (result == VK_SUCCESS) \
+                if (draw_group) \
                     vk.CmdDrawIndexed(cmd, group_count, 1, 0, 0, 0); \
                 vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32); \
                 c.facesDrawn += group_faces; \
                 c.facesTris += group_tris; \
                 c.trisDrawn += group_count / 3; \
-                if (result == VK_SUCCESS) \
+                if (draw_group) \
                     vk_count_batch3d(); \
                 group_active = false; \
             } \
@@ -7099,7 +7128,8 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
 
             vec4_t group_dlight;
             bool can_group = world_batching &&
-                vk.world.batch_indices.buffer && vk.world.batch_index_data &&
+                batch_index_mapped && vk.world.batch_indices.buffer &&
+                vk.world.batch_index_data &&
                 image->texnum == batch->texture_index &&
                 !(face->face->drawflags & (SURF_ALPHATEST | SURF_FLOWING |
                                            SURF_N64_SCROLL_X | SURF_N64_SCROLL_Y |
@@ -7111,6 +7141,11 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 vk_world_dynamic_light(face, fd, ent, axis, group_dlight);
                 can_group = group_dlight[0] == 0.0f && group_dlight[1] == 0.0f &&
                     group_dlight[2] == 0.0f;
+            }
+            if (can_group) {
+                uint32_t used_indices = batch_index_cursor + group_count;
+                can_group = used_indices <= vk.world.batch_index_capacity &&
+                    face->index_count <= vk.world.batch_index_capacity - used_indices;
             }
 
             if (can_group) {
@@ -8497,7 +8532,8 @@ static void vk_draw_particles(const refdef_t *fd)
 {
     if (!fd->num_particles || !fd->particles ||
         !vk.sprite_pipeline || !vk.particle_texture.descriptor_set ||
-        !vk.particle_vertices.buffer || !vk.particle_vertices.memory)
+        !vk.particle_vertices.buffer || !vk.particle_vertices.memory ||
+        !vk.particle_vertices_mapped)
         return;
 
     vk_draw_scope_t old_scope = vk.draw_scope;
@@ -8574,17 +8610,8 @@ static void vk_draw_particles(const refdef_t *fd)
         return;
     }
 
-    void *mapped;
     VkDeviceSize size = vertex_count * sizeof(vk.particle_batch[0]);
-    VkResult result = vk.MapMemory(vk.device, vk.particle_vertices.memory,
-                                   0, size, 0, &mapped);
-    if (result != VK_SUCCESS) {
-        vk_fail_result("vkMapMemory", result);
-        vk.draw_scope = old_scope;
-        return;
-    }
-    memcpy(mapped, vk.particle_batch, size);
-    vk.UnmapMemory(vk.device, vk.particle_vertices.memory);
+    memcpy(vk.particle_vertices_mapped, vk.particle_batch, size);
 
     vk_matrix_multiply(mvp, proj, view);
     memcpy(push.mvp, mvp, sizeof(push.mvp));
@@ -9812,14 +9839,25 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                 Com_WPrintf("Couldn't upload Vulkan world outline indices\n");
             }
         }
+        VkDeviceSize batch_index_size = sizeof(uint32_t) * idx;
+        vk_unmap_world_batch_indices();
         vk_destroy_buffer(&vk.world.batch_indices);
-        if (!vk_create_buffer(sizeof(uint32_t) * idx,
+        if (!vk_create_buffer(batch_index_size,
                               VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                               &vk.world.batch_indices.buffer,
                               &vk.world.batch_indices.memory)) {
             Com_WPrintf("Couldn't create Vulkan world batch index buffer\n");
+        } else {
+            VkResult result = vk.MapMemory(vk.device,
+                                           vk.world.batch_indices.memory,
+                                           0, batch_index_size, 0,
+                                           &vk.world.batch_index_mapped);
+            if (result != VK_SUCCESS) {
+                vk.world.batch_index_mapped = NULL;
+                Com_WPrintf("Couldn't map Vulkan world batch index buffer\n");
+            }
         }
         if (vk.world.batch_index_capacity < idx) {
             if (vk.world.batch_index_data)
@@ -10570,6 +10608,10 @@ void VKR_Shutdown(bool total)
     vk_destroy_mesh(&vk.beam_cylinder);
     vk_destroy_buffer(&vk.beam_cylinder_line_indices);
     vk.beam_cylinder_line_index_count = 0;
+    if (vk.particle_vertices_mapped) {
+        vk.UnmapMemory(vk.device, vk.particle_vertices.memory);
+        vk.particle_vertices_mapped = NULL;
+    }
     vk_destroy_buffer(&vk.particle_vertices);
     vk_destroy_buffer(&vk.debug_lines);
     vk_destroy_buffer(&vk.debug_text_vertices);
