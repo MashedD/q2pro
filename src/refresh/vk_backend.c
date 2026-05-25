@@ -260,10 +260,19 @@ typedef struct {
     float dlight[4];
     float fog[4];
     float intensity;
+} vk_world_push_t;
+
+typedef struct {
+    mat4_t mvp;
+    float color[4];
+    float scroll[4];
+    float dlight[4];
+    float fog[4];
+    float intensity;
     float _pad;
     float lm_scale[2];
     float lm_offset[2];
-} vk_world_push_t;
+} vk_world_pixel_push_t;
 
 typedef struct {
     mat4_t mvp;
@@ -3729,6 +3738,11 @@ static bool vk_create_pixel_world_pipeline_layout(void)
 {
     if (vk_pixel_lightmap_mode() < 2)
         return true;
+    if (sizeof(vk_world_pixel_push_t) >
+        vk.physical_device_properties.limits.maxPushConstantsSize) {
+        Com_SetLastError("Vulkan pixel world push constants exceed device limit");
+        return false;
+    }
 
     VkDescriptorSetLayout set_layouts[] = {
         vk.texture_set_layout,
@@ -3737,8 +3751,7 @@ static bool vk_create_pixel_world_pipeline_layout(void)
     VkPushConstantRange push_range = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
-        .size = max(max(max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
-                        sizeof(vk_world_push_t)), sizeof(vk_alias_push_t)),
+        .size = sizeof(vk_world_pixel_push_t),
     };
     VkPipelineLayoutCreateInfo layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -6794,7 +6807,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         vk_pixel_lightmaps_draw_logged = true;
     }
 
-    vk_world_push_t push;
+    vk_world_pixel_push_t push;
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     push.color[0] = 1.0f;
     push.color[1] = 1.0f;
@@ -6830,7 +6843,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                        vk.world.pixel_lightmap_texture.descriptor_set);
         vk_push_pixel_world_constants(cmd, sizeof(push), &push);
     } else {
-        vk_push_constants(cmd, sizeof(push), &push);
+        vk_push_constants(cmd, sizeof(vk_world_push_t), &push);
     }
 
     for (uint32_t i = 0; i < vk.world.batch_count; i++) {
@@ -6885,7 +6898,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
                 Vector4Clear(push.dlight);
                 vk_world_face_scroll(face->face, fd ? fd->time : 0.0f, push.scroll);
-                vk_push_constants(cmd, sizeof(push), &push);
+                vk_push_constants(cmd, sizeof(vk_world_push_t), &push);
                 vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
                 c.trisDrawn += face->index_count / 3;
                 c.batchesDrawn++;
@@ -6939,7 +6952,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             if (pixel_world)
                 vk_push_pixel_world_constants(cmd, sizeof(push), &push);
             else
-                vk_push_constants(cmd, sizeof(push), &push);
+                vk_push_constants(cmd, sizeof(vk_world_push_t), &push);
             vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
             c.facesDrawn++;
             c.facesTris += face->index_count / 3;
@@ -6961,7 +6974,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     push.color[1] = 1.0f;
                     push.color[2] = 1.0f;
                     push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
-                    vk_push_constants(cmd, sizeof(push), &push);
+                    vk_push_constants(cmd, sizeof(vk_world_push_t), &push);
                     vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
                     c.trisDrawn += face->index_count / 3;
                     c.batchesDrawn++;
@@ -9210,6 +9223,11 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
     if (atlas_w > 4096 || atlas_h > 4096) {
         Com_WPrintf("Vulkan pixel lightmap plan too large: %dx%d\n",
                     atlas_w, atlas_h);
+        for (uint32_t i = 0; i < face_count; i++) {
+            faces[i].pixel_lm_x = faces[i].pixel_lm_y = 0;
+            faces[i].pixel_lm_w = faces[i].pixel_lm_h = 0;
+        }
+        vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
         Z_Free(plan);
         return;
     }
@@ -9237,6 +9255,7 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
 
     Com_Printf("Vulkan pixel lightmap CPU atlas (mode %d): %u valid, %u skipped, %dx%d, checksum %08x\n",
                vk_pixel_lightmap_mode(), valid, invalid, atlas_w, atlas_h, checksum);
+    vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
     if (vk_upload_texture_data(&vk.world.pixel_lightmap_texture,
                                atlas_w, atlas_h, pixels, false)) {
         Com_Printf("Vulkan pixel lightmap atlas texture uploaded: %dx%d (unused)\n",
