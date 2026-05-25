@@ -599,6 +599,8 @@ static byte vk_gammatable[256];
 static bool vk_pixel_lightmaps_warned;
 static bool vk_pixel_lightmaps_draw_logged;
 static bool vk_pixel_lightmaps_scope_logged;
+static bool vk_pixel_lightmaps_atlas_logged;
+static bool vk_pixel_lightmaps_lmuv_logged;
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static void vk_destroy_texture(image_t *image);
@@ -1055,6 +1057,8 @@ static void vk_free_world(void)
     vk_destroy_mesh(&vk.world.mesh);
     vk_destroy_buffer(&vk.world.pixel_lmuv_buffer);
     vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
+    vk_pixel_lightmaps_atlas_logged = false;
+    vk_pixel_lightmaps_lmuv_logged = false;
     vk_destroy_buffer(&vk.world.line_indices);
     if (vk.world.batches) {
         Z_Free(vk.world.batches);
@@ -9260,13 +9264,19 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
 
     uint32_t checksum = vk_pixel_lightmap_checksum(pixels, pixel_count);
 
-    Com_Printf("Vulkan pixel lightmap CPU atlas (mode %d): %u valid, %u skipped, %dx%d, checksum %08x\n",
-               vk_pixel_lightmap_mode(), valid, invalid, atlas_w, atlas_h, checksum);
+    bool log_atlas = !vk_pixel_lightmaps_atlas_logged;
+    if (log_atlas) {
+        Com_Printf("Vulkan pixel lightmap CPU atlas (mode %d): %u valid, %u skipped, %dx%d, checksum %08x\n",
+                   vk_pixel_lightmap_mode(), valid, invalid, atlas_w, atlas_h, checksum);
+        vk_pixel_lightmaps_atlas_logged = true;
+    }
     vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
     if (vk_upload_texture_data(&vk.world.pixel_lightmap_texture,
                                atlas_w, atlas_h, pixels, false)) {
-        Com_Printf("Vulkan pixel lightmap atlas texture uploaded: %dx%d (unused)\n",
-                   atlas_w, atlas_h);
+        if (log_atlas) {
+            Com_Printf("Vulkan pixel lightmap atlas texture uploaded: %dx%d (unused)\n",
+                       atlas_w, atlas_h);
+        }
     } else {
         Com_WPrintf("Couldn't upload Vulkan pixel lightmap atlas texture: %s\n",
                     Com_GetLastError());
@@ -9511,7 +9521,7 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
     }
 
     vk_pixel_lightmap_plan(bsp, draw_faces, draw_face_count, fd);
-    if (pixel_lm_debug)
+    if (pixel_lm_debug && !vk_pixel_lightmaps_lmuv_logged)
         Com_Printf("Vulkan pixel lightmap CPU lmuv (mode %d): %u verts, checksum %08x\n",
                    vk_pixel_lightmap_mode(), lmuv_count, lmuv_hash);
 
@@ -9524,8 +9534,11 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
             size_t lmuv_size = sizeof(*lmuv_data) * 2 * v;
             if (vk_upload_buffer(&vk.world.pixel_lmuv_buffer, lmuv_data, lmuv_size,
                                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
-                Com_Printf("Vulkan pixel lightmap lmuv buffer uploaded: %zu bytes (unused)\n",
-                           lmuv_size);
+                if (!vk_pixel_lightmaps_lmuv_logged) {
+                    Com_Printf("Vulkan pixel lightmap lmuv buffer uploaded: %zu bytes (unused)\n",
+                               lmuv_size);
+                    vk_pixel_lightmaps_lmuv_logged = true;
+                }
             } else {
                 Com_WPrintf("Couldn't upload Vulkan pixel lightmap lmuv buffer\n");
             }
