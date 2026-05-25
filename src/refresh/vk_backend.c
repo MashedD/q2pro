@@ -9700,6 +9700,52 @@ static void vk_register_world_images(bsp_t *bsp)
     }
 }
 
+static void vk_prepare_face_lightmap(const bsp_t *bsp, mface_t *face)
+{
+    if (!bsp || !face || !face->texinfo)
+        return;
+    if (bsp->lm_decoupled) {
+        float len0 = VectorLength(face->lm_axis[0]);
+        float len1 = VectorLength(face->lm_axis[1]);
+        face->lm_scale[0] = len0 ? 1.0f / len0 : 0.0f;
+        face->lm_scale[1] = len1 ? 1.0f / len1 : 0.0f;
+        return;
+    }
+    if (!vk_face_edges_are_valid(bsp, face))
+        return;
+
+    vec2_t mins = { 99999.0f, 99999.0f };
+    vec2_t maxs = { -99999.0f, -99999.0f };
+
+    for (int i = 0; i < face->numsurfedges; i++) {
+        const msurfedge_t *surfedge = face->firstsurfedge + i;
+        const medge_t *edge = bsp->edges + surfedge->edge;
+        const mvertex_t *vert = bsp->vertices + edge->v[surfedge->vert];
+
+        for (int axis = 0; axis < 2; axis++) {
+            float tc = DotProduct(vert->point, face->texinfo->axis[axis]) +
+                       face->texinfo->offset[axis];
+            mins[axis] = min(mins[axis], tc);
+            maxs[axis] = max(maxs[axis], tc);
+        }
+    }
+
+    int bmins[2], bmaxs[2];
+    bmins[0] = floorf(mins[0] / 16.0f);
+    bmins[1] = floorf(mins[1] / 16.0f);
+    bmaxs[0] = ceilf(maxs[0] / 16.0f);
+    bmaxs[1] = ceilf(maxs[1] / 16.0f);
+
+    VectorScale(face->texinfo->axis[0], 1.0f / 16.0f, face->lm_axis[0]);
+    VectorScale(face->texinfo->axis[1], 1.0f / 16.0f, face->lm_axis[1]);
+    face->lm_offset[0] = face->texinfo->offset[0] / 16.0f - bmins[0];
+    face->lm_offset[1] = face->texinfo->offset[1] / 16.0f - bmins[1];
+    face->lm_width = bmaxs[0] - bmins[0] + 1;
+    face->lm_height = bmaxs[1] - bmins[1] + 1;
+    face->lm_scale[0] = 16.0f;
+    face->lm_scale[1] = 16.0f;
+}
+
 static void vk_prepare_world_surfaces(bsp_t *bsp)
 {
     if (!bsp || !bsp->faces)
@@ -9720,6 +9766,8 @@ static void vk_prepare_world_surfaces(bsp_t *bsp)
 
         if (face->drawflags & (SURF_N64_UV | SURF_N64_SCROLL_X | SURF_N64_SCROLL_Y))
             n64surfs++;
+
+        vk_prepare_face_lightmap(bsp, face);
     }
 
     vk.world.nolm_mask = SURF_NOLM_MASK_DEFAULT;
