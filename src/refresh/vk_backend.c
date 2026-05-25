@@ -109,6 +109,10 @@ static const uint32_t vk_alias_vert_spv[] =
 #include "vk_alias_vert_spv.h"
 ;
 
+static const uint32_t vk_alias_shadow_frag_spv[] =
+#include "vk_alias_shadow_frag_spv.h"
+;
+
 typedef struct {
     float rect[4];
     float color[4];
@@ -4532,8 +4536,8 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
         return false;
 
     VkShaderModule frag = color_only ?
-        vk_create_shader_module(vk_color3d_frag_spv,
-                                sizeof(vk_color3d_frag_spv)) :
+        vk_create_shader_module(vk_alias_shadow_frag_spv,
+                                sizeof(vk_alias_shadow_frag_spv)) :
         alpha_test ?
         vk_create_shader_module(vk_world_alpha_frag_spv,
                                 sizeof(vk_world_alpha_frag_spv)) :
