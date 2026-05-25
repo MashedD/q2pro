@@ -274,6 +274,11 @@ typedef struct {
     float lm_offset[2];
 } vk_world_pixel_push_t;
 
+typedef char vk_world_pixel_lm_scale_offset_check[
+    offsetof(vk_world_pixel_push_t, lm_scale) == 136 ? 1 : -1];
+typedef char vk_world_pixel_lm_offset_offset_check[
+    offsetof(vk_world_pixel_push_t, lm_offset) == 144 ? 1 : -1];
+
 typedef struct {
     mat4_t mvp;
     float color[4];
@@ -3740,8 +3745,9 @@ static bool vk_create_pixel_world_pipeline_layout(void)
         return true;
     if (sizeof(vk_world_pixel_push_t) >
         vk.physical_device_properties.limits.maxPushConstantsSize) {
-        Com_SetLastError("Vulkan pixel world push constants exceed device limit");
-        return false;
+        Com_WPrintf("Vulkan pixel lightmaps mode 2 exceeds push constant limit; using mode 1\n");
+        Cvar_Set("vk_pixel_lightmaps", "1");
+        return true;
     }
 
     VkDescriptorSetLayout set_layouts[] = {
