@@ -7890,7 +7890,8 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     vk_matrix_multiply(view_model, view, shadow_model);
     vk_matrix_multiply(push.mvp, proj, view_model);
 
-    Vector4Set(push.color, 0.0f, 0.0f, 0.0f, alpha);
+    Vector4Set(push.color, 0.0f, 0.0f, 0.0f,
+               ((ent->flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f) * alpha);
     Vector4Clear(push.shadedir);
     push.backlerp = lerp->backlerp;
     push.shellscale = 0.0f;
