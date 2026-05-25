@@ -7683,6 +7683,25 @@ static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
     c.batchesDrawn++;
 }
 
+static void vk_draw_alias_color_pass(VkCommandBuffer cmd, VkPipeline pipeline,
+                                     const VkBuffer buffers[2],
+                                     const VkDeviceSize offsets[2],
+                                     const vk_model_t *model,
+                                     const vk_alias_batch_t *batch,
+                                     const vk_alias_push_t *push)
+{
+    uint32_t first_index = batch ? batch->first_index : 0;
+    uint32_t index_count = batch ? batch->index_count : model->mesh.index_count;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
+    vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk_push_constants(cmd, sizeof(*push), push);
+    vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
+    c.trisDrawn += index_count / 3;
+    c.batchesDrawn++;
+}
+
 static void vk_draw_alias_outlines(VkCommandBuffer cmd,
                                     const VkBuffer buffers[2],
                                     const VkDeviceSize offsets[2],
@@ -7880,21 +7899,9 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     vk_fog_params(fd, push.fog);
     push.intensity = 1.0f;
 
-    for (int i = 0; i < model->alias_batch_count; i++) {
-        const vk_alias_batch_t *batch = &model->alias_batches[i];
-        const image_t *skin = vk_skin_for_alias_batch(model, batch, ent);
-
-        if (!skin || skin->texnum >= MAX_RIMAGES)
-            continue;
-
-        const vk_texture_t *texture = vk_texture_for_index(skin->texnum, true);
-        if (!texture)
-            continue;
-
-        vk_draw_alias_pass(vk.command_buffers[vk.current_image],
-                           vk.alias_shadow_pipeline, buffers, offsets, model,
-                           batch, texture, &push);
-    }
+    vk_draw_alias_color_pass(vk.command_buffers[vk.current_image],
+                             vk.alias_shadow_pipeline, buffers, offsets,
+                             model, NULL, &push);
 }
 
 static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
