@@ -35,10 +35,17 @@ the Free Software Foundation; either version 2 of the License, or
 #define VK_MAX_DEBUG_TEXT_CHARS    (TESS_MAX_VERTICES / 4)
 #define VK_MAX_DEBUG_TEXT_VERTICES (VK_MAX_DEBUG_TEXT_CHARS * 4)
 #define VK_MAX_DEBUG_TEXT_INDICES  (VK_MAX_DEBUG_TEXT_CHARS * 6)
+#define VK_MAX_2D_BATCH_QUADS      4096
+#define VK_MAX_2D_BATCH_VERTICES   (VK_MAX_2D_BATCH_QUADS * 6)
+#define VK_MAX_PARTICLE_VERTICES   (MAX_PARTICLES * 6)
 #define VK_MAX_LIGHTMAP_EXTENTS    513
 
 static const uint32_t vk_rect_vert_spv[] =
 #include "vk_rect_vert_spv.h"
+;
+
+static const uint32_t vk_rect_batch_vert_spv[] =
+#include "vk_rect_batch_vert_spv.h"
 ;
 
 static const uint32_t vk_rect_frag_spv[] =
@@ -51,6 +58,10 @@ static const uint32_t vk_vignette_vert_spv[] =
 
 static const uint32_t vk_tex_vert_spv[] =
 #include "vk_tex_vert_spv.h"
+;
+
+static const uint32_t vk_tex_batch_vert_spv[] =
+#include "vk_tex_batch_vert_spv.h"
 ;
 
 static const uint32_t vk_tex_frag_spv[] =
@@ -144,6 +155,19 @@ typedef struct {
     float normal[3];
 } vk_vertex_t;
 
+typedef struct {
+    float pos[2];
+    float uv[2];
+    float color[4];
+} vk_2d_vertex_t;
+
+typedef enum {
+    VK_DRAW_OTHER,
+    VK_DRAW_WORLD,
+    VK_DRAW_ENTITY,
+    VK_DRAW_PARTICLE,
+} vk_draw_scope_t;
+
 
 typedef struct {
     vk_buffer_t vertices;
@@ -175,6 +199,8 @@ typedef enum {
 
 typedef struct {
     mface_t *face;
+    uint32_t first_vertex;
+    uint32_t edge_count;
     uint32_t first_index;
     uint32_t index_count;
     vec3_t center;
@@ -229,6 +255,9 @@ typedef struct {
     vk_buffer_t pixel_lmuv_buffer;
     vk_texture_t pixel_lightmap_texture;
     vk_buffer_t line_indices;
+    vk_buffer_t batch_indices;
+    uint32_t *batch_index_data;
+    uint32_t batch_index_capacity;
     vk_world_batch_t *batches;
     vk_world_face_t *faces;
     uint32_t batch_count;
@@ -424,8 +453,10 @@ typedef struct {
     VkPipelineLayout rect_pipeline_layout;
     VkPipelineLayout pixel_world_pipeline_layout;
     VkPipeline rect_pipeline;
+    VkPipeline rect_batch_pipeline;
     VkPipeline vignette_pipeline;
     VkPipeline texture_pipeline;
+    VkPipeline texture_batch_pipeline;
     VkPipeline waterwarp_pipeline;
     VkPipeline bloom_downscale_pipeline;
     VkPipeline bloom_blur_pipeline;
@@ -483,6 +514,7 @@ typedef struct {
     bool frame_active;
     bool render_pass_active;
     bool drawing_bloom;
+    vk_draw_scope_t draw_scope;
     bool frame_bloom;
     bool frame_waterwarp;
     float scale;
@@ -510,6 +542,13 @@ typedef struct {
     vk_buffer_t debug_lines;
     vk_buffer_t debug_text_vertices;
     vk_buffer_t debug_text_indices;
+    vk_buffer_t batch_2d_vertices;
+    vk_buffer_t particle_vertices;
+    vk_vertex_t particle_batch[VK_MAX_PARTICLE_VERTICES];
+    vk_2d_vertex_t batch_2d[VK_MAX_2D_BATCH_VERTICES];
+    uint32_t batch_2d_vertex_count;
+    uint32_t batch_2d_rect_vertex_count;
+    const vk_texture_t *batch_2d_texture;
     uint32_t sky_images[6];
     float sky_rotate;
     bool sky_autorotate;
@@ -522,6 +561,16 @@ typedef struct {
     vk_texture_t textures[MAX_RIMAGES];
     float flare_fracs[MAX_EDICTS];
     uint32_t flare_times[MAX_EDICTS];
+    float perf_stats_time;
+    uint64_t frame_start_usec;
+    unsigned wait_usec;
+    unsigned acquire_usec;
+    unsigned record_usec;
+    unsigned submit_usec;
+    unsigned present_usec;
+    VkPipeline bound_pipeline;
+    VkDescriptorSet bound_texture_descriptor;
+    VkDescriptorSet bound_pixel_world_descriptors[2];
 } vk_state_t;
 
 static vk_state_t vk;
@@ -562,10 +611,12 @@ static cvar_t *vk_showtearing;
 static cvar_t *vk_showbloom;
 static cvar_t *vk_waterwarp;
 static cvar_t *vk_bloom_sigma;
+static cvar_t *vk_bloom_downsample;
 static cvar_t *vk_glare;
 static cvar_t *vk_glare_threshold;
 static cvar_t *vk_glare_size;
 static cvar_t *vk_glare_intensity;
+static cvar_t *vk_perf_stats;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
 #endif
@@ -625,6 +676,7 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
 static void vk_destroy_texture_resource(vk_texture_t *texture);
 static bool vk_create_particle_texture(void);
 static bool vk_create_beam_texture(void);
+static uint32_t vk_bloom_downsample_value(void);
 static void vk_entity_axis(const entity_t *ent, vec3_t axis[3]);
 static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
                           const entity_t *ent, const vec3_t axis[3]);
@@ -1065,6 +1117,12 @@ static void vk_free_world(void)
     vk_pixel_lightmaps_atlas_logged = false;
     vk_pixel_lightmaps_lmuv_logged = false;
     vk_destroy_buffer(&vk.world.line_indices);
+    vk_destroy_buffer(&vk.world.batch_indices);
+    if (vk.world.batch_index_data) {
+        Z_Free(vk.world.batch_index_data);
+        vk.world.batch_index_data = NULL;
+    }
+    vk.world.batch_index_capacity = 0;
     if (vk.world.batches) {
         Z_Free(vk.world.batches);
         vk.world.batches = NULL;
@@ -3224,6 +3282,11 @@ static void vk_destroy_swapchain(void)
         vk.rect_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.rect_batch_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.rect_batch_pipeline, NULL);
+        vk.rect_batch_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.vignette_pipeline) {
         vk.DestroyPipeline(vk.device, vk.vignette_pipeline, NULL);
         vk.vignette_pipeline = VK_NULL_HANDLE;
@@ -3232,6 +3295,11 @@ static void vk_destroy_swapchain(void)
     if (vk.texture_pipeline) {
         vk.DestroyPipeline(vk.device, vk.texture_pipeline, NULL);
         vk.texture_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.texture_batch_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.texture_batch_pipeline, NULL);
+        vk.texture_batch_pipeline = VK_NULL_HANDLE;
     }
 
     if (vk.waterwarp_pipeline) {
@@ -3651,6 +3719,7 @@ static bool vk_create_framebuffers(void)
 
 static bool vk_create_scene_target(void)
 {
+    uint32_t bloom_downsample = vk_bloom_downsample_value();
     struct {
         vk_texture_t *texture;
         VkFramebuffer *framebuffer;
@@ -3665,11 +3734,11 @@ static bool vk_create_scene_target(void)
           &vk.bloom_source_layout, vk.bloom_render_pass,
           vk.swapchain_extent.width, vk.swapchain_extent.height },
         { &vk.bloom_texture, &vk.bloom_framebuffer, &vk.bloom_layout,
-          vk.bloom_render_pass, max(vk.swapchain_extent.width / 4, 1),
-          max(vk.swapchain_extent.height / 4, 1) },
+          vk.bloom_render_pass, max(vk.swapchain_extent.width / bloom_downsample, 1),
+          max(vk.swapchain_extent.height / bloom_downsample, 1) },
         { &vk.blur_texture, &vk.blur_framebuffer, &vk.blur_layout,
-          vk.bloom_render_pass, max(vk.swapchain_extent.width / 4, 1),
-          max(vk.swapchain_extent.height / 4, 1) },
+          vk.bloom_render_pass, max(vk.swapchain_extent.width / bloom_downsample, 1),
+          max(vk.swapchain_extent.height / bloom_downsample, 1) },
     };
 
     for (size_t i = 0; i < q_countof(targets); i++) {
@@ -4057,10 +4126,165 @@ static bool vk_create_texture_pipeline_ex(VkPipeline *pipeline,
 static bool vk_create_texture_pipeline(void)
 {
     return vk_create_texture_pipeline_ex(&vk.texture_pipeline,
-                                         vk_tex_frag_spv,
-                                         sizeof(vk_tex_frag_spv),
-                                         false,
-                                         vk.swapchain_extent);
+                                          vk_tex_frag_spv,
+                                          sizeof(vk_tex_frag_spv),
+                                          false,
+                                          vk.swapchain_extent);
+}
+
+static bool vk_create_2d_batch_pipeline(VkPipeline *pipeline,
+                                        const uint32_t *vert_spv,
+                                        size_t vert_size,
+                                        const uint32_t *frag_spv,
+                                        size_t frag_size)
+{
+    VkShaderModule vert = vk_create_shader_module(vert_spv, vert_size);
+    if (!vert)
+        return false;
+
+    VkShaderModule frag = vk_create_shader_module(frag_spv, frag_size);
+    if (!frag) {
+        vk.DestroyShaderModule(vk.device, vert, NULL);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vert,
+            .pName = "main",
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = frag,
+            .pName = "main",
+        },
+    };
+    VkVertexInputBindingDescription binding = {
+        .binding = 0,
+        .stride = sizeof(vk_2d_vertex_t),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+    VkVertexInputAttributeDescription attributes[] = {
+        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,
+          .offset = offsetof(vk_2d_vertex_t, pos) },
+        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,
+          .offset = offsetof(vk_2d_vertex_t, uv) },
+        { .location = 2, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+          .offset = offsetof(vk_2d_vertex_t, color) },
+    };
+    VkPipelineVertexInputStateCreateInfo vertex_input = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding,
+        .vertexAttributeDescriptionCount = q_countof(attributes),
+        .pVertexAttributeDescriptions = attributes,
+    };
+    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = vk.swapchain_extent.width,
+        .height = vk.swapchain_extent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    VkRect2D scissor = { .offset = { 0, 0 }, .extent = vk.swapchain_extent };
+    VkPipelineViewportStateCreateInfo viewport_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = &viewport,
+        .scissorCount = 1,
+        .pScissors = &scissor,
+    };
+    VkPipelineRasterizationStateCreateInfo raster = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth = 1.0f,
+    };
+    VkPipelineMultisampleStateCreateInfo multisample = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    VkPipelineColorBlendAttachmentState color_blend_attachment = {
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    VkPipelineColorBlendStateCreateInfo color_blend = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &color_blend_attachment,
+    };
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_FALSE,
+        .depthWriteEnable = VK_FALSE,
+    };
+    VkGraphicsPipelineCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = q_countof(stages),
+        .pStages = stages,
+        .pVertexInputState = &vertex_input,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &raster,
+        .pMultisampleState = &multisample,
+        .pDepthStencilState = &depth_stencil,
+        .pColorBlendState = &color_blend,
+        .layout = vk.rect_pipeline_layout,
+        .renderPass = vk.render_pass,
+        .subpass = 0,
+    };
+
+    VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
+                                                  &create_info, NULL,
+                                                  pipeline);
+    vk.DestroyShaderModule(vk.device, frag, NULL);
+    vk.DestroyShaderModule(vk.device, vert, NULL);
+
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateGraphicsPipelines", result);
+
+    return true;
+}
+
+static bool vk_create_rect_batch_pipeline(void)
+{
+    return vk_create_2d_batch_pipeline(&vk.rect_batch_pipeline,
+                                       vk_rect_batch_vert_spv,
+                                       sizeof(vk_rect_batch_vert_spv),
+                                       vk_rect_frag_spv,
+                                       sizeof(vk_rect_frag_spv));
+}
+
+static bool vk_create_texture_batch_pipeline(void)
+{
+    return vk_create_2d_batch_pipeline(&vk.texture_batch_pipeline,
+                                       vk_tex_batch_vert_spv,
+                                       sizeof(vk_tex_batch_vert_spv),
+                                       vk_tex_frag_spv,
+                                       sizeof(vk_tex_frag_spv));
+}
+
+static uint32_t vk_bloom_downsample_value(void)
+{
+    int value = vk_bloom_downsample ? Cvar_ClampInteger(vk_bloom_downsample, 2, 16) : 4;
+
+    return max(value, 1);
 }
 
 static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
@@ -4854,8 +5078,8 @@ static bool vk_create_swapchain(int width, int height)
     }
 
     VkExtent2D bloom_extent = {
-        max(vk.swapchain_extent.width / 4, 1),
-        max(vk.swapchain_extent.height / 4, 1),
+        max(vk.swapchain_extent.width / vk_bloom_downsample_value(), 1),
+        max(vk.swapchain_extent.height / vk_bloom_downsample_value(), 1),
     };
 
     vk_print_pixel_lightmap_mode();
@@ -4864,10 +5088,12 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_pixel_world_pipeline_layout() ||
         !vk_create_render_pass() ||
         !vk_create_rect_pipeline() ||
+        !vk_create_rect_batch_pipeline() ||
         !vk_create_rect_pipeline_ex(&vk.vignette_pipeline,
                                     vk_vignette_vert_spv,
                                     sizeof(vk_vignette_vert_spv)) ||
         !vk_create_texture_pipeline() ||
+        !vk_create_texture_batch_pipeline() ||
         !vk_create_texture_pipeline_ex(&vk.waterwarp_pipeline,
                                        vk_waterwarp_frag_spv,
                                        sizeof(vk_waterwarp_frag_spv),
@@ -5053,8 +5279,12 @@ static VkClearColorValue vk_frame_clear_color(void)
 
 static void vk_bind_texture_descriptor(VkCommandBuffer cmd, VkDescriptorSet set)
 {
+    if (vk.bound_texture_descriptor == set)
+        return;
+
     vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                              vk.rect_pipeline_layout, 0, 1, &set, 0, NULL);
+    vk.bound_texture_descriptor = set;
     c.texSwitches++;
 }
 
@@ -5062,10 +5292,49 @@ static void vk_bind_pixel_world_descriptor(VkCommandBuffer cmd,
                                            uint32_t set_index,
                                            VkDescriptorSet set)
 {
+    if (set_index < q_countof(vk.bound_pixel_world_descriptors) &&
+        vk.bound_pixel_world_descriptors[set_index] == set)
+        return;
+
     vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                              vk.pixel_world_pipeline_layout, set_index, 1,
                              &set, 0, NULL);
+    if (set_index < q_countof(vk.bound_pixel_world_descriptors))
+        vk.bound_pixel_world_descriptors[set_index] = set;
     c.texSwitches++;
+}
+
+static void vk_bind_pipeline(VkCommandBuffer cmd, VkPipelineBindPoint bind_point,
+                             VkPipeline pipeline)
+{
+    if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS &&
+        vk.bound_pipeline == pipeline)
+        return;
+
+    vk.CmdBindPipeline(cmd, bind_point, pipeline);
+    if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+        vk.bound_pipeline = pipeline;
+        vk.bound_texture_descriptor = VK_NULL_HANDLE;
+        memset(vk.bound_pixel_world_descriptors, 0,
+               sizeof(vk.bound_pixel_world_descriptors));
+    }
+    c.pipelineBinds++;
+}
+
+static void vk_reset_bind_cache(void)
+{
+    vk.bound_pipeline = VK_NULL_HANDLE;
+    vk.bound_texture_descriptor = VK_NULL_HANDLE;
+    memset(vk.bound_pixel_world_descriptors, 0,
+           sizeof(vk.bound_pixel_world_descriptors));
+}
+
+static uint64_t vk_time_usec(void)
+{
+    struct timespec ts;
+
+    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
 static void vk_push_constants(VkCommandBuffer cmd, uint32_t size,
@@ -5094,6 +5363,105 @@ static void vk_bind_vertex_buffers(VkCommandBuffer cmd, uint32_t first,
     c.vertexArrayBinds++;
 }
 
+static void vk_count_batch3d(void)
+{
+    c.batchesDrawn++;
+    if (vk.drawing_bloom) {
+        c.bloomBatches++;
+        return;
+    }
+
+    switch (vk.draw_scope) {
+    case VK_DRAW_WORLD:
+        c.worldBatches++;
+        break;
+    case VK_DRAW_ENTITY:
+        c.entityBatches++;
+        break;
+    case VK_DRAW_PARTICLE:
+        c.particleBatches++;
+        break;
+    default:
+        c.otherBatches++;
+        break;
+    }
+}
+
+static void vk_flush_2d_batch(void)
+{
+    if (!vk.batch_2d_vertex_count)
+        return;
+    if (!vk.render_pass_active || !vk.texture_batch_pipeline ||
+        !vk.batch_2d_vertices.buffer || !vk.batch_2d_vertices.memory ||
+        !vk.batch_2d_texture || !vk.batch_2d_texture->descriptor_set) {
+        vk.batch_2d_vertex_count = 0;
+        vk.batch_2d_texture = NULL;
+        return;
+    }
+
+    VkDeviceSize size = sizeof(vk.batch_2d[0]) * vk.batch_2d_vertex_count;
+    void *mapped;
+    VkResult result = vk.MapMemory(vk.device, vk.batch_2d_vertices.memory,
+                                   0, size, 0, &mapped);
+    if (result != VK_SUCCESS) {
+        vk_fail_result("vkMapMemory", result);
+        vk.batch_2d_vertex_count = 0;
+        vk.batch_2d_texture = NULL;
+        return;
+    }
+    memcpy(mapped, vk.batch_2d, size);
+    vk.UnmapMemory(vk.device, vk.batch_2d_vertices.memory);
+
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                     vk.texture_batch_pipeline);
+    vk_bind_vertex_buffers(cmd, 0, 1, &vk.batch_2d_vertices.buffer, &offset);
+    vk_bind_texture_descriptor(cmd, vk.batch_2d_texture->descriptor_set);
+    vk.CmdDraw(cmd, vk.batch_2d_vertex_count, 1, 0, 0);
+    c.trisDrawn += vk.batch_2d_vertex_count / 3;
+    c.batchesDrawn2D++;
+    c.batches2DTexture++;
+
+    vk.batch_2d_vertex_count = 0;
+    vk.batch_2d_texture = NULL;
+}
+
+static void vk_flush_2d_rect_batch(void)
+{
+    if (!vk.batch_2d_rect_vertex_count)
+        return;
+    if (!vk.render_pass_active || !vk.rect_batch_pipeline ||
+        !vk.batch_2d_vertices.buffer || !vk.batch_2d_vertices.memory) {
+        vk.batch_2d_rect_vertex_count = 0;
+        return;
+    }
+
+    VkDeviceSize size = sizeof(vk.batch_2d[0]) * vk.batch_2d_rect_vertex_count;
+    void *mapped;
+    VkResult result = vk.MapMemory(vk.device, vk.batch_2d_vertices.memory,
+                                   0, size, 0, &mapped);
+    if (result != VK_SUCCESS) {
+        vk_fail_result("vkMapMemory", result);
+        vk.batch_2d_rect_vertex_count = 0;
+        return;
+    }
+    memcpy(mapped, vk.batch_2d, size);
+    vk.UnmapMemory(vk.device, vk.batch_2d_vertices.memory);
+
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                     vk.rect_batch_pipeline);
+    vk_bind_vertex_buffers(cmd, 0, 1, &vk.batch_2d_vertices.buffer, &offset);
+    vk.CmdDraw(cmd, vk.batch_2d_rect_vertex_count, 1, 0, 0);
+    c.trisDrawn += vk.batch_2d_rect_vertex_count / 3;
+    c.batchesDrawn2D++;
+    c.batches2DRect++;
+
+    vk.batch_2d_rect_vertex_count = 0;
+}
+
 static int vk_2d_width(void)
 {
     int width = r_config.width > 0 ? r_config.width : (int)vk.swapchain_extent.width;
@@ -5112,6 +5480,34 @@ static int vk_2d_height(void)
         height = Q_rint(height * vk.scale);
 
     return max(height, 1);
+}
+
+static bool vk_batch_2d_rect(int x, int y, int w, int h, int screen_w,
+                             int screen_h, const float color[4])
+{
+    if (!vk.rect_batch_pipeline || !vk.batch_2d_vertices.buffer)
+        return false;
+
+    vk_flush_2d_batch();
+    if (vk.batch_2d_rect_vertex_count + 6 > VK_MAX_2D_BATCH_VERTICES)
+        vk_flush_2d_rect_batch();
+
+    float x1 = x / (float)screen_w * 2.0f - 1.0f;
+    float y1 = y / (float)screen_h * 2.0f - 1.0f;
+    float x2 = (x + w) / (float)screen_w * 2.0f - 1.0f;
+    float y2 = (y + h) / (float)screen_h * 2.0f - 1.0f;
+    vk_2d_vertex_t verts[6] = {
+        { { x1, y1 }, { 0.0f, 0.0f }, { color[0], color[1], color[2], color[3] } },
+        { { x2, y1 }, { 0.0f, 0.0f }, { color[0], color[1], color[2], color[3] } },
+        { { x1, y2 }, { 0.0f, 0.0f }, { color[0], color[1], color[2], color[3] } },
+        { { x1, y2 }, { 0.0f, 0.0f }, { color[0], color[1], color[2], color[3] } },
+        { { x2, y1 }, { 0.0f, 0.0f }, { color[0], color[1], color[2], color[3] } },
+        { { x2, y2 }, { 0.0f, 0.0f }, { color[0], color[1], color[2], color[3] } },
+    };
+
+    memcpy(&vk.batch_2d[vk.batch_2d_rect_vertex_count], verts, sizeof(verts));
+    vk.batch_2d_rect_vertex_count += q_countof(verts);
+    return true;
 }
 
 static void vk_set_3d_viewport(const refdef_t *fd)
@@ -5150,6 +5546,7 @@ static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
 {
     if (!vk.render_pass_active || !vk.rect_pipeline || w <= 0 || h <= 0)
         return;
+    vk_flush_2d_batch();
 
     if (vk.clip_set) {
         int x2 = min(x + w, vk.clip.right);
@@ -5174,6 +5571,9 @@ static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
         return;
 
     VkClearColorValue clear = vk_color_to_clear(color);
+    if (false && vk_batch_2d_rect(x, y, w, h, screen_w, screen_h, clear.float32))
+        return;
+
     vk_rect_push_t push = {
         .rect = { x, y, w, h },
         .color = {
@@ -5189,11 +5589,12 @@ static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
     };
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.rect_pipeline);
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.rect_pipeline);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
+    c.batches2DRect++;
 }
 
 static void vk_blend_rect(int x, int y, int w, int h, const vec4_t color)
@@ -5201,29 +5602,36 @@ static void vk_blend_rect(int x, int y, int w, int h, const vec4_t color)
     if (!vk.render_pass_active || !vk.rect_pipeline || w <= 0 || h <= 0 ||
         color[3] <= 0.0f)
         return;
+    vk_flush_2d_batch();
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     int screen_w = vk_2d_width();
     int screen_h = vk_2d_height();
+    float rgba[4] = {
+        Q_clipf(color[0], 0.0f, 1.0f),
+        Q_clipf(color[1], 0.0f, 1.0f),
+        Q_clipf(color[2], 0.0f, 1.0f),
+        Q_clipf(color[3], 0.0f, 1.0f),
+    };
+
+    if (false && vk_batch_2d_rect(x, y, w, h, screen_w, screen_h, rgba))
+        return;
+
     vk_rect_push_t push = {
         .rect = { x, y, w, h },
-        .color = {
-            Q_clipf(color[0], 0.0f, 1.0f),
-            Q_clipf(color[1], 0.0f, 1.0f),
-            Q_clipf(color[2], 0.0f, 1.0f),
-            Q_clipf(color[3], 0.0f, 1.0f),
-        },
+        .color = { rgba[0], rgba[1], rgba[2], rgba[3] },
         .screen = {
             screen_w,
             screen_h,
         },
     };
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.rect_pipeline);
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.rect_pipeline);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
+    c.batches2DRect++;
 }
 
 static void vk_blend_vignette(int x, int y, int w, int h, const vec4_t color,
@@ -5241,6 +5649,8 @@ static void vk_blend_vignette(int x, int y, int w, int h, const vec4_t color,
     if (!vk.render_pass_active || !vk.vignette_pipeline || inner_w <= 0 ||
         inner_h <= 0 || color[3] <= 0.0f)
         return;
+    vk_flush_2d_batch();
+    vk_flush_2d_rect_batch();
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     vk_draw_push_t push = {
@@ -5255,12 +5665,13 @@ static void vk_blend_vignette(int x, int y, int w, int h, const vec4_t color,
         .uv = { x + distance, y + distance, inner_w, inner_h },
     };
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                        vk.vignette_pipeline);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDraw(cmd, 24, 1, 0, 0);
     c.trisDrawn += 8;
     c.batchesDrawn2D++;
+    c.batches2DRect++;
 }
 
 static void vk_draw_pic_showtris(int x, int y, int w, int h)
@@ -5350,6 +5761,37 @@ static void vk_draw_texture_resource(int x, int y, int w, int h,
     h = y2i - ny;
 
     color_t color = { .u32 = vk.color_set ? vk.color.u32 : MakeColor(255, 255, 255, 255) };
+    vk_flush_2d_rect_batch();
+    if (false && vk.texture_batch_pipeline && vk.batch_2d_vertices.buffer) {
+        if (vk.batch_2d_texture != texture ||
+            vk.batch_2d_vertex_count + 6 > VK_MAX_2D_BATCH_VERTICES)
+            vk_flush_2d_batch();
+
+        float r = color.u8[0] / 255.0f;
+        float g = color.u8[1] / 255.0f;
+        float b = color.u8[2] / 255.0f;
+        float a = color.u8[3] / 255.0f;
+        float x1 = x / (float)screen_w * 2.0f - 1.0f;
+        float y1 = y / (float)screen_h * 2.0f - 1.0f;
+        float x2 = (x + w) / (float)screen_w * 2.0f - 1.0f;
+        float y2 = (y + h) / (float)screen_h * 2.0f - 1.0f;
+        vk_2d_vertex_t verts[6] = {
+            { { x1, y1 }, { s1, t1 }, { r, g, b, a } },
+            { { x2, y1 }, { s2, t1 }, { r, g, b, a } },
+            { { x1, y2 }, { s1, t2 }, { r, g, b, a } },
+            { { x1, y2 }, { s1, t2 }, { r, g, b, a } },
+            { { x2, y1 }, { s2, t1 }, { r, g, b, a } },
+            { { x2, y2 }, { s2, t2 }, { r, g, b, a } },
+        };
+
+        memcpy(&vk.batch_2d[vk.batch_2d_vertex_count], verts, sizeof(verts));
+        vk.batch_2d_vertex_count += q_countof(verts);
+        vk.batch_2d_texture = texture;
+
+        vk_draw_pic_showtris(x, y, w, h);
+        return;
+    }
+
     vk_draw_push_t push = {
         .rect = { x, y, w, h },
         .color = {
@@ -5366,12 +5808,13 @@ static void vk_draw_texture_resource(int x, int y, int w, int h,
     };
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.texture_pipeline);
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.texture_pipeline);
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
+    c.batches2DFallback++;
 
     vk_draw_pic_showtris(x, y, w, h);
 }
@@ -5441,6 +5884,8 @@ static void vk_draw_texture_rect_sized(VkPipeline pipeline,
     if (!vk.render_pass_active || !pipeline || !texture->descriptor_set ||
         w <= 0 || h <= 0)
         return;
+    vk_flush_2d_batch();
+    vk_flush_2d_rect_batch();
 
     vk_draw_push_t push = {
         .rect = { x, y, w, h },
@@ -5450,12 +5895,13 @@ static void vk_draw_texture_rect_sized(VkPipeline pipeline,
     };
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
+    c.batches2DFallback++;
 }
 
 static void vk_draw_refdef_texture(VkPipeline pipeline,
@@ -5509,6 +5955,8 @@ static void vk_draw_fullscreen_texture_sized(VkPipeline pipeline,
 {
     if (!vk.render_pass_active || !pipeline || !texture->descriptor_set)
         return;
+    vk_flush_2d_batch();
+    vk_flush_2d_rect_batch();
 
     vk_draw_push_t push = {
         .rect = { 0, 0, width, height },
@@ -5518,12 +5966,13 @@ static void vk_draw_fullscreen_texture_sized(VkPipeline pipeline,
     };
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
+    c.batches2DFallback++;
 }
 
 static float vk_projection_zfar(int rdflags)
@@ -5892,6 +6341,26 @@ static bool vk_create_sprite_quad(void)
     return true;
 }
 
+static bool vk_create_2d_batch_buffer(void)
+{
+    return vk_create_buffer(sizeof(vk.batch_2d),
+                            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            &vk.batch_2d_vertices.buffer,
+                            &vk.batch_2d_vertices.memory);
+}
+
+static bool vk_create_particle_buffer(void)
+{
+    return vk_create_buffer(sizeof(vk.particle_batch),
+                            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            &vk.particle_vertices.buffer,
+                            &vk.particle_vertices.memory);
+}
+
 #define VK_BEAM_POINTS 12
 
 static bool vk_create_beam_cylinder(void)
@@ -6119,13 +6588,13 @@ static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float co
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.color3d_pipeline);
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.color3d_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, mesh->index_count, 1, 0, 0, 0);
     c.trisDrawn += mesh->index_count / 3;
-    c.batchesDrawn++;
+    vk_count_batch3d();
 }
 
 static void vk_draw_null_model(const entity_t *ent, const refdef_t *fd)
@@ -6149,14 +6618,14 @@ static void vk_draw_null_model(const entity_t *ent, const refdef_t *fd)
     push.color[2] = 1.0f;
     push.color[3] = 1.0f;
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.line3d_pipeline);
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.line3d_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.null_model.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.null_model.indices.buffer, 0,
                           VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.null_model.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.null_model.index_count / 3;
-    c.batchesDrawn++;
+    vk_count_batch3d();
 }
 
 #if USE_DEBUG
@@ -6236,18 +6705,18 @@ static void vk_draw_debug_lines(const refdef_t *fd)
     vk_push_constants(cmd, sizeof(push), &push);
 
     if (build.depth_vertices) {
-        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            vk.line3d_pipeline);
         vk.CmdDraw(cmd, build.depth_vertices, 1, 0, 0);
-        c.batchesDrawn++;
+        vk_count_batch3d();
     }
 
     if (build.nodepth_vertices) {
-        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            vk.debug_line_pipeline);
         vk.CmdDraw(cmd, build.nodepth_vertices, 1,
                    VK_MAX_DEBUG_LINE_VERTICES - build.nodepth_vertices, 0);
-        c.batchesDrawn++;
+        vk_count_batch3d();
     }
 }
 
@@ -6453,21 +6922,21 @@ static void vk_draw_debug_texts(const refdef_t *fd)
     vk_push_constants(cmd, sizeof(push), &push);
 
     if (build.depth_indices) {
-        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            vk.sprite_pipeline);
         vk.CmdDrawIndexed(cmd, build.depth_indices, 1, 0, 0, 0);
         c.trisDrawn += build.depth_indices / 3;
-        c.batchesDrawn++;
+        vk_count_batch3d();
     }
 
     if (build.nodepth_indices) {
-        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            vk.debug_text_pipeline);
         vk.CmdDrawIndexed(cmd, build.nodepth_indices, 1,
                           VK_MAX_DEBUG_TEXT_INDICES - build.nodepth_indices,
                           0, 0);
         c.trisDrawn += build.nodepth_indices / 3;
-        c.batchesDrawn++;
+        vk_count_batch3d();
     }
 }
 #endif
@@ -6738,7 +7207,7 @@ static void vk_draw_world_outlines(const mat4_t mvp, bool marked_only,
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.line3d_pipeline);
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.line3d_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.world.mesh.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.world.line_indices.buffer, 0,
                           VK_INDEX_TYPE_UINT32);
@@ -6770,7 +7239,7 @@ static void vk_draw_world_outlines(const mat4_t mvp, bool marked_only,
                 continue;
 
             vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
-            c.batchesDrawn++;
+            vk_count_batch3d();
         }
     }
 }
@@ -6811,11 +7280,16 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         vk.pixel_world_pipeline_layout && vk.world.pixel_lmuv_buffer.buffer &&
         vk.world.pixel_lightmap_texture.descriptor_set;
     bool pixel_world = pixel_requested && pixel_ready;
+    bool world_batching = pass == VK_WORLD_OPAQUE && !ent && !vk.drawing_bloom &&
+        !pixel_world;
 
     if (!vk.render_pass_active || !pipeline ||
         !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count ||
         !vk.world.batch_count || !vk.world.batches || !vk.world.faces)
         return;
+
+    vk_draw_scope_t old_scope = vk.draw_scope;
+    vk.draw_scope = VK_DRAW_WORLD;
 
     if (pixel_mode && !pixel_requested && !vk_pixel_lightmaps_scope_logged) {
         Com_Printf("Vulkan pixel lightmaps mode 2 applies only to opaque world surfaces\n");
@@ -6858,7 +7332,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     };
     VkDeviceSize pixel_offsets[] = { 0, 0 };
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                        pixel_world ? vk.pixel_world_pipeline : pipeline);
     if (pixel_world)
         vk_bind_vertex_buffers(cmd, 0, 2, pixel_buffers, pixel_offsets);
@@ -6892,20 +7366,58 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             batch->face_count > vk.world.face_count - batch->first_face)
             continue;
 
+        uint32_t group_count = 0;
+        uint32_t group_faces = 0;
+        uint32_t group_tris = 0;
+        bool group_active = false;
+
+#define VK_FLUSH_WORLD_GROUP() do { \
+            if (group_active) { \
+                void *mapped; \
+                VkDeviceSize size = sizeof(uint32_t) * group_count; \
+                VkResult result = vk.MapMemory(vk.device, vk.world.batch_indices.memory, 0, size, 0, &mapped); \
+                if (result == VK_SUCCESS) { \
+                    memcpy(mapped, vk.world.batch_index_data, size); \
+                    vk.UnmapMemory(vk.device, vk.world.batch_indices.memory); \
+                    vk.CmdBindIndexBuffer(cmd, vk.world.batch_indices.buffer, 0, VK_INDEX_TYPE_UINT32); \
+                } \
+                vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline); \
+                vk_bind_texture_descriptor(cmd, texture->descriptor_set); \
+                vk_push_constants(cmd, sizeof(vk_world_push_t), &push); \
+                if (result == VK_SUCCESS) \
+                    vk.CmdDrawIndexed(cmd, group_count, 1, 0, 0, 0); \
+                vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32); \
+                c.facesDrawn += group_faces; \
+                c.facesTris += group_tris; \
+                c.trisDrawn += group_count / 3; \
+                if (result == VK_SUCCESS) \
+                    vk_count_batch3d(); \
+                group_active = false; \
+            } \
+        } while (0)
+
         for (uint32_t j = 0; j < batch->face_count; j++) {
             const vk_world_face_t *face = &vk.world.faces[batch->first_face + j];
             VkPipeline face_pipeline;
 
-            if (!face->face || !face->face->texinfo || !face->face->plane)
+            if (!face->face || !face->face->texinfo || !face->face->plane) {
+                VK_FLUSH_WORLD_GROUP();
                 continue;
-            if (use_marked && face->face->drawframe != vk.world.drawframe)
+            }
+            if (use_marked && face->face->drawframe != vk.world.drawframe) {
+                VK_FLUSH_WORLD_GROUP();
                 continue;
-            if (!vk_world_face_in_pass(face->face, pass))
+            }
+            if (!vk_world_face_in_pass(face->face, pass)) {
+                VK_FLUSH_WORLD_GROUP();
                 continue;
+            }
 
             const image_t *image = vk_world_face_image(face->face, fd, ent);
-            if (!image || image->texnum >= MAX_RIMAGES)
+            if (!image || image->texnum >= MAX_RIMAGES) {
+                VK_FLUSH_WORLD_GROUP();
                 continue;
+            }
 
             if (vk.drawing_bloom) {
                 if (!vk_world_face_glowmap_enabled(face->face, image))
@@ -6915,7 +7427,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 if (!glow)
                     continue;
 
-                vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                    vk.world_glow_pipeline);
                 vk_bind_texture_descriptor(cmd, glow->descriptor_set);
                 push.intensity = vk_glowmap_intensity();
@@ -6928,9 +7440,55 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 vk_push_constants(cmd, sizeof(vk_world_push_t), &push);
                 vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
                 c.trisDrawn += face->index_count / 3;
-                c.batchesDrawn++;
+                vk_count_batch3d();
                 continue;
             }
+
+            vec4_t group_dlight;
+            bool can_group = world_batching &&
+                vk.world.batch_indices.buffer && vk.world.batch_index_data &&
+                image->texnum == batch->texture_index &&
+                !(face->face->drawflags & (SURF_ALPHATEST | SURF_FLOWING |
+                                           SURF_N64_SCROLL_X | SURF_N64_SCROLL_Y |
+                                           SURF_WARP | SURF_TRANS33 | SURF_TRANS66)) &&
+                !(face->face->drawflags & vk.world.nolm_mask) &&
+                !vk_world_face_glowmap_enabled(face->face, image);
+
+            if (can_group && fd && fd->num_dlights > 0 && vk_dynamic_lights_enabled()) {
+                vk_world_dynamic_light(face, fd, ent, axis, group_dlight);
+                can_group = group_dlight[0] == 0.0f && group_dlight[1] == 0.0f &&
+                    group_dlight[2] == 0.0f;
+            }
+
+            if (can_group) {
+                if (!group_active) {
+                    group_count = 0;
+                    group_faces = 0;
+                    group_tris = 0;
+                    group_active = true;
+
+                    push.color[3] = entity_alpha;
+                    Vector4Clear(push.scroll);
+                    vk_world_light_params(face->face, push.color, push.scroll);
+                    Vector4Clear(push.dlight);
+                    push.dlight[3] = fd ? fd->time : 0.0f;
+                    push.intensity = vk_texture_intensity();
+                    push.lm_scale[0] = -1.0f;
+                    push.lm_scale[1] = -1.0f;
+                    push.lm_offset[0] = 0.0f;
+                    push.lm_offset[1] = 0.0f;
+                }
+                for (uint32_t k = 0; k < face->edge_count - 2; k++) {
+                    vk.world.batch_index_data[group_count++] = face->first_vertex;
+                    vk.world.batch_index_data[group_count++] = face->first_vertex + k + 1;
+                    vk.world.batch_index_data[group_count++] = face->first_vertex + k + 2;
+                }
+                group_faces++;
+                group_tris += face->index_count / 3;
+                continue;
+            }
+
+            VK_FLUSH_WORLD_GROUP();
 
             if (image->texnum != bound_texture_index) {
                 texture = vk_texture_for_index(image->texnum, true);
@@ -6946,13 +7504,13 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             if (pixel_world) {
                 face_pipeline = (face->face->drawflags & SURF_ALPHATEST) ?
                     vk.pixel_world_alpha_pipeline : vk.pixel_world_pipeline;
-                vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                    face_pipeline);
             } else {
                 face_pipeline = vk_world_face_pipeline(face->face, pipeline, pass);
             }
             if (!pixel_world && face_pipeline != pipeline)
-                vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, face_pipeline);
+                vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, face_pipeline);
 
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
             vk_world_face_scroll(face->face, fd ? fd->time : 0.0f, push.scroll);
@@ -6984,7 +7542,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             c.facesDrawn++;
             c.facesTris += face->index_count / 3;
             c.trisDrawn += face->index_count / 3;
-            c.batchesDrawn++;
+            vk_count_batch3d();
 
             if ((pass == VK_WORLD_OPAQUE ||
                  (pass == VK_WORLD_ENTITY_ALPHA &&
@@ -6992,7 +7550,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 vk_world_face_glowmap_enabled(face->face, image)) {
                 const vk_texture_t *glow = vk_texture_for_index(image->texnum2, false);
                 if (glow) {
-                    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                        vk.world_glow_pipeline);
                     vk_bind_texture_descriptor(cmd, glow->descriptor_set);
                     bound_texture_index = image->texnum2;
@@ -7004,8 +7562,8 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     vk_push_constants(cmd, sizeof(vk_world_push_t), &push);
                     vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
                     c.trisDrawn += face->index_count / 3;
-                    c.batchesDrawn++;
-                    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    vk_count_batch3d();
+                    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                        face_pipeline);
                     if (pixel_world) {
                         vk_bind_pixel_world_descriptor(cmd, 0, texture->descriptor_set);
@@ -7017,9 +7575,14 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             }
 
             if (!pixel_world && face_pipeline != pipeline)
-                vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+                vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         }
+
+        VK_FLUSH_WORLD_GROUP();
+#undef VK_FLUSH_WORLD_GROUP
     }
+
+    vk.draw_scope = old_scope;
 }
 
 static void vk_draw_fx_outlines(const vk_mesh_t *mesh, const vk_buffer_t *indices,
@@ -7037,12 +7600,12 @@ static void vk_draw_fx_outlines(const vk_mesh_t *mesh, const vk_buffer_t *indice
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.line3d_pipeline);
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.line3d_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, indices->buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, index_count, 1, 0, 0, 0);
-    c.batchesDrawn++;
+    vk_count_batch3d();
 }
 
 static void vk_sky_mvp(mat4_t out, const refdef_t *fd)
@@ -7108,7 +7671,7 @@ static void vk_draw_skybox(const refdef_t *fd)
     vk_sky_fog_params(fd, push.fog);
     push.intensity = 1.0f;
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sky_pipeline);
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sky_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.skybox.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.skybox.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(push), &push);
@@ -7126,7 +7689,7 @@ static void vk_draw_skybox(const refdef_t *fd)
         vk_bind_texture_descriptor(cmd, texture->descriptor_set);
         vk.CmdDrawIndexed(cmd, 6, 1, face * 6, 0, 0);
         c.trisDrawn += 2;
-        c.batchesDrawn++;
+        vk_count_batch3d();
     }
 }
 
@@ -7677,14 +8240,14 @@ static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
     uint32_t first_index = batch ? batch->first_index : 0;
     uint32_t index_count = batch ? batch->index_count : model->mesh.index_count;
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
     vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(*push), push);
     vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
     c.trisDrawn += index_count / 3;
-    c.batchesDrawn++;
+    vk_count_batch3d();
 }
 
 static void vk_draw_alias_color_pass(VkCommandBuffer cmd, VkPipeline pipeline,
@@ -7693,13 +8256,13 @@ static void vk_draw_alias_color_pass(VkCommandBuffer cmd, VkPipeline pipeline,
                                      const vk_model_t *model,
                                      const vk_alias_push_t *push)
 {
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
     vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(*push), push);
     vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0, 0, 0);
     c.trisDrawn += model->mesh.index_count / 3;
-    c.batchesDrawn++;
+    vk_count_batch3d();
 }
 
 static void vk_draw_alias_outlines(VkCommandBuffer cmd,
@@ -7732,7 +8295,7 @@ static void vk_draw_alias_outlines(VkCommandBuffer cmd,
     Vector4Clear(outline.shadedir);
     outline.depthscale = 0.0f;
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                        vk.alias_line_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
     vk.CmdBindIndexBuffer(cmd, model->alias_line_indices.buffer, 0,
@@ -7740,7 +8303,7 @@ static void vk_draw_alias_outlines(VkCommandBuffer cmd,
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(outline), &outline);
     vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
-    c.batchesDrawn++;
+    vk_count_batch3d();
 }
 
 static void vk_trace_bmodel_light_points(const refdef_t *fd, const bsp_t *bsp,
@@ -8075,14 +8638,14 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     vk_fog_params(fd, push.fog);
     push.intensity = 1.0f;
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.sprite_quad.index_count / 3;
-    c.batchesDrawn++;
+    vk_count_batch3d();
     vk_draw_fx_outlines(&vk.sprite_quad, &vk.sprite_quad_line_indices,
                         vk.sprite_quad_line_index_count, mvp);
 }
@@ -8262,14 +8825,14 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
     VkPipeline pipeline = (def && vk.particle_add_pipeline) ?
         vk.particle_add_pipeline : vk.sprite_pipeline;
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.sprite_quad.index_count / 3;
-    c.batchesDrawn++;
+    vk_count_batch3d();
     vk_draw_fx_outlines(&vk.sprite_quad, &vk.sprite_quad_line_indices,
                         vk.sprite_quad_line_index_count, mvp);
 }
@@ -8281,28 +8844,34 @@ static void vk_draw_particles(const refdef_t *fd)
 {
     if (!fd->num_particles || !fd->particles ||
         !vk.sprite_pipeline || !vk.particle_texture.descriptor_set ||
-        !vk.sprite_quad.vertices.buffer || !vk.sprite_quad.indices.buffer)
+        !vk.particle_vertices.buffer || !vk.particle_vertices.memory)
         return;
+
+    vk_draw_scope_t old_scope = vk.draw_scope;
+    vk.draw_scope = VK_DRAW_PARTICLE;
 
     vec3_t viewaxis[3];
     VkPipeline pipeline = (vk_partstyle && vk_partstyle->integer &&
         vk.particle_add_pipeline) ? vk.particle_add_pipeline : vk.sprite_pipeline;
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
+    mat4_t proj, view, mvp;
+    vk_world_push_t push;
+    uint32_t vertex_count = 0;
 
     AnglesToAxis(fd->viewangles, viewaxis);
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
-    vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk_bind_texture_descriptor(cmd, vk.particle_texture.descriptor_set);
+    vk_projection_matrix(proj, fd->fov_x, fd->fov_y, fd->rdflags);
+    vk_view_matrix(view, fd);
+    Vector4Clear(push.scroll);
+    Vector4Clear(push.dlight);
+    vk_fog_params(fd, push.fog);
+    push.intensity = 1.0f;
 
-    for (int i = 0; i < fd->num_particles; i++) {
+    for (int i = 0; i < fd->num_particles && vertex_count + 6 <= VK_MAX_PARTICLE_VERTICES; i++) {
         const particle_t *particle = &fd->particles[i];
-        vec3_t transformed, left, right, down, up, xaxis, yaxis, origin;
+        vec3_t transformed, left, right, down, up, corners[4];
         vec_t dist, scale, scale2;
-        mat4_t model_matrix, mvp;
-        vk_world_push_t push;
         color_t color;
 
         VectorSubtract(particle->origin, fd->vieworg, transformed);
@@ -8318,25 +8887,6 @@ static void vk_draw_particles(const refdef_t *fd)
         VectorScale(viewaxis[1], -scale, right);
         VectorScale(viewaxis[2], -scale2, down);
         VectorScale(viewaxis[2], scale, up);
-        VectorSubtract(right, left, xaxis);
-        VectorSubtract(up, down, yaxis);
-        VectorAdd3(particle->origin, left, down, origin);
-
-        memset(model_matrix, 0, sizeof(model_matrix));
-        model_matrix[0] = xaxis[0];
-        model_matrix[1] = xaxis[1];
-        model_matrix[2] = xaxis[2];
-        model_matrix[4] = yaxis[0];
-        model_matrix[5] = yaxis[1];
-        model_matrix[6] = yaxis[2];
-        model_matrix[10] = 1.0f;
-        model_matrix[12] = origin[0];
-        model_matrix[13] = origin[1];
-        model_matrix[14] = origin[2];
-        model_matrix[15] = 1.0f;
-
-        vk_model_mvp(mvp, fd, model_matrix);
-        memcpy(push.mvp, mvp, sizeof(push.mvp));
 
         if (particle->color == -1)
             color.u32 = particle->rgba.u32;
@@ -8344,29 +8894,57 @@ static void vk_draw_particles(const refdef_t *fd)
             color.u32 = d_8to24table[particle->color & 0xff];
         color.u8[3] *= particle->alpha;
 
-        push.color[0] = color.u8[0] / 255.0f;
-        push.color[1] = color.u8[1] / 255.0f;
-        push.color[2] = color.u8[2] / 255.0f;
-        push.color[3] = color.u8[3] / 255.0f;
-        Vector4Clear(push.scroll);
-        Vector4Clear(push.dlight);
-        vk_fog_params(fd, push.fog);
-        push.intensity = 1.0f;
+        VectorAdd3(particle->origin, left, down, corners[0]);
+        VectorAdd3(particle->origin, right, down, corners[1]);
+        VectorAdd3(particle->origin, left, up, corners[2]);
+        VectorAdd3(particle->origin, right, up, corners[3]);
 
-        vk_push_constants(cmd, sizeof(push), &push);
-        vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
-        c.trisDrawn += vk.sprite_quad.index_count / 3;
-        c.batchesDrawn++;
-        vk_draw_fx_outlines(&vk.sprite_quad, &vk.sprite_quad_line_indices,
-                            vk.sprite_quad_line_index_count, mvp);
-        if (gl_showtris && (gl_showtris->integer & SHOWTRIS_FX)) {
-            vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-            vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
-            vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0,
-                                  VK_INDEX_TYPE_UINT32);
-            vk_bind_texture_descriptor(cmd, vk.particle_texture.descriptor_set);
+        static const int order[6] = { 0, 2, 1, 1, 2, 3 };
+        static const float uv[4][2] = {
+            { 0.0f, 1.0f }, { 1.0f, 1.0f }, { 0.0f, 0.0f }, { 1.0f, 0.0f },
+        };
+        for (int j = 0; j < 6; j++) {
+            int idx = order[j];
+            vk_vertex_t *v = &vk.particle_batch[vertex_count++];
+            VectorCopy(corners[idx], v->position);
+            v->uv[0] = uv[idx][0];
+            v->uv[1] = uv[idx][1];
+            v->color[0] = color.u8[0] / 255.0f;
+            v->color[1] = color.u8[1] / 255.0f;
+            v->color[2] = color.u8[2] / 255.0f;
+            v->color[3] = color.u8[3] / 255.0f;
         }
     }
+
+    if (!vertex_count) {
+        vk.draw_scope = old_scope;
+        return;
+    }
+
+    void *mapped;
+    VkDeviceSize size = vertex_count * sizeof(vk.particle_batch[0]);
+    VkResult result = vk.MapMemory(vk.device, vk.particle_vertices.memory,
+                                   0, size, 0, &mapped);
+    if (result != VK_SUCCESS) {
+        vk_fail_result("vkMapMemory", result);
+        vk.draw_scope = old_scope;
+        return;
+    }
+    memcpy(mapped, vk.particle_batch, size);
+    vk.UnmapMemory(vk.device, vk.particle_vertices.memory);
+
+    vk_matrix_multiply(mvp, proj, view);
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    Vector4Set(push.color, 1.0f, 1.0f, 1.0f, 1.0f);
+
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk_bind_vertex_buffers(cmd, 0, 1, &vk.particle_vertices.buffer, &offset);
+    vk_bind_texture_descriptor(cmd, vk.particle_texture.descriptor_set);
+    vk_push_constants(cmd, sizeof(push), &push);
+    vk.CmdDraw(cmd, vertex_count, 1, 0, 0);
+    c.trisDrawn += vertex_count / 3;
+    vk_count_batch3d();
+    vk.draw_scope = old_scope;
 }
 
 static void vk_draw_glare(const refdef_t *fd)
@@ -8382,7 +8960,7 @@ static void vk_draw_glare(const refdef_t *fd)
     VkDeviceSize offset = 0;
 
     AnglesToAxis(fd->viewangles, viewaxis);
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.glare_pipeline);
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.glare_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0,
                           VK_INDEX_TYPE_UINT32);
@@ -8474,7 +9052,7 @@ static void vk_draw_glare(const refdef_t *fd)
         vk_push_constants(cmd, sizeof(push), &push);
         vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
         c.trisDrawn += vk.sprite_quad.index_count / 3;
-        c.batchesDrawn++;
+        vk_count_batch3d();
     }
 }
 
@@ -8526,11 +9104,11 @@ static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.sprite_quad.index_count / 3;
-    c.batchesDrawn++;
+    vk_count_batch3d();
     vk_draw_fx_outlines(&vk.sprite_quad, &vk.sprite_quad_line_indices,
                         vk.sprite_quad_line_index_count, mvp);
     if (gl_showtris && (gl_showtris->integer & SHOWTRIS_FX)) {
-        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sprite_pipeline);
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sprite_pipeline);
         vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
         vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0,
                               VK_INDEX_TYPE_UINT32);
@@ -8585,11 +9163,11 @@ static void vk_draw_poly_beam_segment(const vec3_t start, const vec3_t end,
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.beam_cylinder.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.beam_cylinder.index_count / 3;
-    c.batchesDrawn++;
+    vk_count_batch3d();
     vk_draw_fx_outlines(&vk.beam_cylinder, &vk.beam_cylinder_line_indices,
                         vk.beam_cylinder_line_index_count, mvp);
     if (gl_showtris && (gl_showtris->integer & SHOWTRIS_FX))
-        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.beam_pipeline);
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.beam_pipeline);
 }
 
 #define VK_MIN_LIGHTNING_SEGMENTS   3
@@ -8681,11 +9259,11 @@ static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
     if (poly) {
         if (!vk.beam_pipeline)
             return;
-        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.beam_pipeline);
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.beam_pipeline);
     } else {
         if (!vk.sprite_pipeline || !vk.beam_texture.descriptor_set)
             return;
-        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sprite_pipeline);
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sprite_pipeline);
         vk_bind_texture_descriptor(cmd, vk.beam_texture.descriptor_set);
     }
 
@@ -8952,12 +9530,17 @@ static void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass)
     if (fd->num_entities <= 0 || !fd->entities)
         return;
 
+    vk_draw_scope_t old_scope = vk.draw_scope;
+    vk.draw_scope = VK_DRAW_ENTITY;
+
     for (int i = fd->num_entities - 1; i >= 0; i--) {
         const entity_t *ent = &fd->entities[i];
 
         if (vk_entity_in_pass(ent, pass))
             vk_draw_entity(ent, fd, pass);
     }
+
+    vk.draw_scope = old_scope;
 }
 
 static void vk_draw_bloom_only_entities(const refdef_t *fd)
@@ -9532,6 +10115,8 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
 
             draw_faces[draw_face_count++] = (vk_world_face_t) {
                 .face = face->face,
+                .first_vertex = face->first_vertex,
+                .edge_count = face->edge_count,
                 .first_index = first_index,
                 .index_count = face_index_count,
                 .center = { face->center[0], face->center[1], face->center[2] },
@@ -9573,6 +10158,21 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
             } else {
                 Com_WPrintf("Couldn't upload Vulkan world outline indices\n");
             }
+        }
+        vk_destroy_buffer(&vk.world.batch_indices);
+        if (!vk_create_buffer(sizeof(uint32_t) * idx,
+                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                              &vk.world.batch_indices.buffer,
+                              &vk.world.batch_indices.memory)) {
+            Com_WPrintf("Couldn't create Vulkan world batch index buffer\n");
+        }
+        if (vk.world.batch_index_capacity < idx) {
+            if (vk.world.batch_index_data)
+                Z_Free(vk.world.batch_index_data);
+            vk.world.batch_index_data = Z_Malloc(sizeof(uint32_t) * idx);
+            vk.world.batch_index_capacity = idx;
         }
     }
     if (ok) {
@@ -10002,7 +10602,7 @@ static void vk_draw_stats(void)
     int x = 10, y = 10;
 
     VKR_SetScale(1.0f / vk_auto_scale());
-    VKR_DrawFill8(8, 8, 25 * 8, 24 * 10 + 2, 4);
+    VKR_DrawFill8(8, 8, 25 * 8, 26 * 10 + 2, 4);
 
     vk_draw_stat_string(x, y, "Nodes visible  : %i", glr.nodes_visible); y += 10;
     vk_draw_stat_string(x, y, "Nodes culled   : %i", c.nodesCulled); y += 10;
@@ -10022,6 +10622,8 @@ static void vk_draw_stats(void)
     vk_draw_stat_string(x, y, "Faces / batch  : %.1f", c.batchesDrawn ? (float)c.facesDrawn / c.batchesDrawn : 0.0f); y += 10;
     vk_draw_stat_string(x, y, "Tris / batch   : %.1f", c.batchesDrawn ? (float)c.facesTris / c.batchesDrawn : 0.0f); y += 10;
     vk_draw_stat_string(x, y, "2D batches     : %i", c.batchesDrawn2D); y += 10;
+    vk_draw_stat_string(x, y, "Draw calls     : %i", c.batchesDrawn + c.batchesDrawn2D); y += 10;
+    vk_draw_stat_string(x, y, "Pipeline binds : %i", c.pipelineBinds); y += 10;
     vk_draw_stat_string(x, y, "Total entities : %i", glr.fd.num_entities); y += 10;
     vk_draw_stat_string(x, y, "Total dlights  : %i", glr.fd.num_dlights); y += 10;
     vk_draw_stat_string(x, y, "Total particles: %i", glr.fd.num_particles); y += 10;
@@ -10032,6 +10634,27 @@ static void vk_draw_stats(void)
     VKR_SetScale(1.0f);
 }
 #endif
+
+static void vk_log_perf_stats(void)
+{
+    if (!vk_perf_stats || !vk_perf_stats->integer || !vk.fd_valid)
+        return;
+    if (vk.fd.time < vk.perf_stats_time + 1.0f)
+        return;
+
+    vk.perf_stats_time = vk.fd.time;
+    Com_Printf("VK perf: draws=%i 3d=%i world=%i ent=%i part=%i bloom=%i other=%i 2d=%i tex2d=%i fb2d=%i rect2d=%i pipe=%i desc=%i push=%i vb=%i tris=%i faces=%i ents=%i parts=%i wait=%uus acq=%uus rec=%uus sub=%uus pres=%uus\n",
+               c.batchesDrawn + c.batchesDrawn2D,
+               c.batchesDrawn, c.worldBatches, c.entityBatches,
+               c.particleBatches, c.bloomBatches, c.otherBatches,
+               c.batchesDrawn2D,
+               c.batches2DTexture, c.batches2DFallback, c.batches2DRect,
+               c.pipelineBinds, c.texSwitches, c.uniformUploads,
+               c.vertexArrayBinds, c.trisDrawn, c.facesDrawn,
+               glr.fd.num_entities, glr.fd.num_particles,
+               vk.wait_usec, vk.acquire_usec, vk.record_usec,
+               vk.submit_usec, vk.present_usec);
+}
 
 bool VKR_Init(bool total)
 {
@@ -10098,10 +10721,12 @@ bool VKR_Init(bool total)
     vk_showbloom = Cvar_Get("gl_showbloom", "0", CVAR_CHEAT);
     vk_waterwarp = Cvar_Get("gl_waterwarp", "0", 0);
     vk_bloom_sigma = Cvar_Get("gl_bloom_sigma", "4", 0);
+    vk_bloom_downsample = Cvar_Get("vk_bloom_downsample", "4", 0);
     vk_glare = Cvar_Get("gl_glare", "1", CVAR_ARCHIVE);
     vk_glare_threshold = Cvar_Get("gl_glare_threshold", "0.3", 0);
     vk_glare_size = Cvar_Get("gl_glare_size", "24", 0);
     vk_glare_intensity = Cvar_Get("gl_glare_intensity", "0.5", 0);
+    vk_perf_stats = Cvar_Get("vk_perf_stats", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
 #endif
@@ -10167,6 +10792,10 @@ bool VKR_Init(bool total)
         Com_WPrintf("Couldn't create Vulkan skybox mesh: %s\n", Com_GetLastError());
     if (!vk_create_sprite_quad())
         Com_WPrintf("Couldn't create Vulkan sprite quad: %s\n", Com_GetLastError());
+    if (!vk_create_2d_batch_buffer())
+        Com_WPrintf("Couldn't create Vulkan 2D batch buffer: %s\n", Com_GetLastError());
+    if (!vk_create_particle_buffer())
+        Com_WPrintf("Couldn't create Vulkan particle buffer: %s\n", Com_GetLastError());
     if (!vk_create_beam_cylinder())
         Com_WPrintf("Couldn't create Vulkan beam cylinder: %s\n", Com_GetLastError());
     if (!vk_create_null_model())
@@ -10291,6 +10920,8 @@ void VKR_Shutdown(bool total)
     vk_destroy_mesh(&vk.beam_cylinder);
     vk_destroy_buffer(&vk.beam_cylinder_line_indices);
     vk.beam_cylinder_line_index_count = 0;
+    vk_destroy_buffer(&vk.batch_2d_vertices);
+    vk_destroy_buffer(&vk.particle_vertices);
     vk_destroy_buffer(&vk.debug_lines);
     vk_destroy_buffer(&vk.debug_text_vertices);
     vk_destroy_buffer(&vk.debug_text_indices);
@@ -11166,19 +11797,29 @@ static void vk_finish_postprocess_scene(void)
 void VKR_BeginFrame(void)
 {
     memset(&c, 0, sizeof(c));
+    vk.wait_usec = 0;
+    vk.acquire_usec = 0;
+    vk.record_usec = 0;
+    vk.submit_usec = 0;
+    vk.present_usec = 0;
+    vk.frame_start_usec = 0;
 
     if (!vk.swapchain || !vk.frame_fence || vk.frame_active)
         return;
 
+    uint64_t start = vk_time_usec();
     VkResult result = vk.WaitForFences(vk.device, 1, &vk.frame_fence, VK_TRUE, UINT64_MAX);
+    vk.wait_usec = vk_time_usec() - start;
     if (result != VK_SUCCESS) {
         Com_EPrintf("vkWaitForFences failed: Vulkan error %d\n", result);
         return;
     }
 
+    start = vk_time_usec();
     result = vk.AcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX,
-                                    vk.image_available, VK_NULL_HANDLE,
-                                    &vk.current_image);
+                                     vk.image_available, VK_NULL_HANDLE,
+                                     &vk.current_image);
+    vk.acquire_usec = vk_time_usec() - start;
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         vk_recreate_swapchain();
         return;
@@ -11188,12 +11829,17 @@ void VKR_BeginFrame(void)
         return;
     }
 
+    vk.frame_start_usec = vk_time_usec();
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     result = vk.ResetCommandBuffer(cmd, 0);
     if (result != VK_SUCCESS) {
         Com_EPrintf("vkResetCommandBuffer failed: Vulkan error %d\n", result);
         return;
     }
+    vk_reset_bind_cache();
+    vk.batch_2d_vertex_count = 0;
+    vk.batch_2d_rect_vertex_count = 0;
+    vk.batch_2d_texture = NULL;
 
     VkCommandBufferBeginInfo begin_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -11256,6 +11902,9 @@ void VKR_EndFrame(void)
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     bool bloom = vk.frame_bloom;
     bool waterwarp = vk.frame_waterwarp;
+    vk_flush_2d_batch();
+    vk_flush_2d_rect_batch();
+
     if (bloom) {
         const vec4_t white = { 1.0f, 1.0f, 1.0f, 1.0f };
         const VkClearColorValue black = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
@@ -11408,7 +12057,9 @@ void VKR_EndFrame(void)
                         0,
                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
+    uint64_t start = vk_time_usec();
     VkResult result = vk.EndCommandBuffer(cmd);
+    vk.record_usec = vk_time_usec() - vk.frame_start_usec;
     if (result != VK_SUCCESS) {
         Com_EPrintf("vkEndCommandBuffer failed: Vulkan error %d\n", result);
         vk.frame_active = false;
@@ -11434,7 +12085,9 @@ void VKR_EndFrame(void)
         return;
     }
 
+    start = vk_time_usec();
     result = vk.QueueSubmit(vk.graphics_queue, 1, &submit_info, vk.frame_fence);
+    vk.submit_usec = vk_time_usec() - start;
     if (result != VK_SUCCESS) {
         Com_EPrintf("vkQueueSubmit failed: Vulkan error %d\n", result);
         vk_recreate_signaled_frame_fence();
@@ -11451,7 +12104,9 @@ void VKR_EndFrame(void)
         .pImageIndices = &vk.current_image,
     };
 
+    start = vk_time_usec();
     result = vk.QueuePresentKHR(vk.present_queue, &present_info);
+    vk.present_usec = vk_time_usec() - start;
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
         vk_recreate_swapchain();
     } else if (result != VK_SUCCESS) {
@@ -11460,6 +12115,8 @@ void VKR_EndFrame(void)
 
     if (vk_finish && vk_finish->integer)
         vk.DeviceWaitIdle(vk.device);
+
+    vk_log_perf_stats();
 
     vk.frame_active = false;
 }

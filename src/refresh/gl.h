@@ -268,6 +268,11 @@ typedef struct {
     int lightTexels;
     int trisDrawn;
     int batchesDrawn;
+    int worldBatches;
+    int entityBatches;
+    int particleBatches;
+    int bloomBatches;
+    int otherBatches;
     int nodesCulled;
     int facesCulled;
     int boxesCulled;
@@ -275,6 +280,10 @@ typedef struct {
     int rotatedBoxesCulled;
     int shadowsCulled;
     int batchesDrawn2D;
+    int batches2DTexture;
+    int batches2DFallback;
+    int batches2DRect;
+    int pipelineBinds;
     int uniformUploads;
     int vertexArrayBinds;
     int occlusionQueries;

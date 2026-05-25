@@ -358,8 +358,8 @@ vulkan = dependency('vulkan', required: get_option('vulkan'))
 if vulkan.found()
   glslc = find_program('glslc', required: get_option('vulkan'))
   vk_shader_headers = []
-  foreach shader : ['vk_rect.vert', 'vk_rect.frag', 'vk_vignette.vert',
-                    'vk_tex.vert', 'vk_tex.frag',
+  foreach shader : ['vk_rect.vert', 'vk_rect_batch.vert', 'vk_rect.frag', 'vk_vignette.vert',
+                    'vk_tex.vert', 'vk_tex_batch.vert', 'vk_tex.frag',
                     'vk_waterwarp.frag',
                     'vk_bloom_downscale.frag', 'vk_bloom_blur.frag',
                     'vk_color3d.vert', 'vk_color3d.frag',
