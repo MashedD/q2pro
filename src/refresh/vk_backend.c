@@ -3740,7 +3740,7 @@ static bool vk_validate_pixel_lightmap_shaders(void)
         vk.DestroyShaderModule(vk.device, alpha, NULL);
 
     if (ok)
-        Com_Printf("Vulkan pixel lightmap shader modules validated (unused)\n");
+        Com_Printf("Vulkan pixel lightmap shader modules validated\n");
     return ok;
 }
 
@@ -3776,7 +3776,7 @@ static bool vk_create_pixel_world_pipeline_layout(void)
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreatePipelineLayout(pixel_world)", result);
 
-    Com_Printf("Vulkan pixel lightmap pipeline layout created (unused)\n");
+    Com_Printf("Vulkan pixel lightmap pipeline layout created\n");
     return true;
 }
 
@@ -4502,7 +4502,7 @@ static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreateGraphicsPipelines(pixel_world)", result);
 
-    Com_Printf("Vulkan pixel lightmap %s pipeline created (unused)\n",
+    Com_Printf("Vulkan pixel lightmap %s pipeline created\n",
                alpha_test ? "alpha" : "opaque");
     return true;
 }
@@ -9274,7 +9274,7 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
     if (vk_upload_texture_data(&vk.world.pixel_lightmap_texture,
                                atlas_w, atlas_h, pixels, false)) {
         if (log_atlas) {
-            Com_Printf("Vulkan pixel lightmap atlas texture uploaded: %dx%d (unused)\n",
+            Com_Printf("Vulkan pixel lightmap atlas texture uploaded: %dx%d\n",
                        atlas_w, atlas_h);
         }
     } else {
@@ -9535,7 +9535,7 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
             if (vk_upload_buffer(&vk.world.pixel_lmuv_buffer, lmuv_data, lmuv_size,
                                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
                 if (!vk_pixel_lightmaps_lmuv_logged) {
-                    Com_Printf("Vulkan pixel lightmap lmuv buffer uploaded: %zu bytes (unused)\n",
+                    Com_Printf("Vulkan pixel lightmap lmuv buffer uploaded: %zu bytes\n",
                                lmuv_size);
                     vk_pixel_lightmaps_lmuv_logged = true;
                 }
