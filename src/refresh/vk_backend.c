@@ -920,6 +920,7 @@ static bool vk_create_texture_image(uint32_t width, uint32_t height,
 static VkFormat vk_choose_depth_format(void)
 {
     static const VkFormat candidates[] = {
+        VK_FORMAT_D32_SFLOAT_S8_UINT,
         VK_FORMAT_D24_UNORM_S8_UINT,
         VK_FORMAT_D32_SFLOAT,
         VK_FORMAT_D16_UNORM,
