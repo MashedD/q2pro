@@ -8214,14 +8214,13 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     bool translucent = ent->flags & RF_TRANSLUCENT;
     bool bloom_only = ent->flags & RF_BLOOM_ONLY;
     bool bloom_shell = (ent->flags & RF_SHELL_MASK) && !(ent->flags & RF_NOBLOOM);
+    bool draw_model = !bloom_only || vk.drawing_bloom;
 
     if (!model || model->type != VK_MODEL_ALIAS ||
         !model->mesh.vertices.buffer || !model->mesh.indices.buffer ||
         !model->vertex_count || !model->alias_batch_count)
         return;
 
-    if (bloom_only && !vk.drawing_bloom)
-        return;
     if (vk.drawing_bloom && !bloom_only && !bloom_shell &&
         !vk_alias_model_has_glowmap(model))
         return;
@@ -8244,6 +8243,11 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     if (vk_alias_model_culled(model, ent, axis, lerp.frame, lerp.oldframe)) {
         if (!vk.drawing_bloom)
             vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp);
+        return;
+    }
+
+    if (!draw_model) {
+        vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp);
         return;
     }
 
