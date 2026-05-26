@@ -920,8 +920,8 @@ static bool vk_create_texture_image(uint32_t width, uint32_t height,
 static VkFormat vk_choose_depth_format(void)
 {
     static const VkFormat candidates[] = {
-        VK_FORMAT_D32_SFLOAT,
         VK_FORMAT_D24_UNORM_S8_UINT,
+        VK_FORMAT_D32_SFLOAT,
         VK_FORMAT_D16_UNORM,
     };
 
@@ -937,6 +937,12 @@ static VkFormat vk_choose_depth_format(void)
     }
 
     return VK_FORMAT_UNDEFINED;
+}
+
+static bool vk_depth_format_has_stencil(VkFormat format)
+{
+    return format == VK_FORMAT_D24_UNORM_S8_UINT ||
+        format == VK_FORMAT_D32_SFLOAT_S8_UINT;
 }
 
 static bool vk_begin_immediate(VkCommandBuffer *cmd)
@@ -3585,7 +3591,8 @@ static bool vk_create_render_pass(void)
             .samples = VK_SAMPLE_COUNT_1_BIT,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilLoadOp = vk_depth_format_has_stencil(vk.depth_format) ?
+                VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
             .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
@@ -3622,6 +3629,7 @@ static bool vk_create_render_pass(void)
 
     attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     result = vk.CreateRenderPass(vk.device, &create_info, NULL, &vk.bloom_render_pass);
     if (result != VK_SUCCESS)
@@ -3688,7 +3696,9 @@ static bool vk_create_depth_resources(void)
         .viewType = VK_IMAGE_VIEW_TYPE_2D,
         .format = vk.depth_format,
         .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT |
+                (vk_depth_format_has_stencil(vk.depth_format) ?
+                 VK_IMAGE_ASPECT_STENCIL_BIT : 0),
             .baseMipLevel = 0,
             .levelCount = 1,
             .baseArrayLayer = 0,
@@ -4806,6 +4816,29 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
     return true;
 }
 
+static VkPipelineDepthStencilStateCreateInfo vk_shadow_depth_stencil_state(void)
+{
+    VkStencilOpState stencil = {
+        .failOp = VK_STENCIL_OP_KEEP,
+        .passOp = VK_STENCIL_OP_INCREMENT_AND_CLAMP,
+        .depthFailOp = VK_STENCIL_OP_KEEP,
+        .compareOp = VK_COMPARE_OP_EQUAL,
+        .compareMask = 0xff,
+        .writeMask = 0xff,
+        .reference = 0,
+    };
+
+    return (VkPipelineDepthStencilStateCreateInfo){
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_FALSE,
+        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+        .stencilTestEnable = vk_depth_format_has_stencil(vk.depth_format),
+        .front = stencil,
+        .back = stencil,
+    };
+}
+
 static bool vk_create_swapchain(int width, int height)
 {
     VkSurfaceCapabilitiesKHR caps;
@@ -4954,6 +4987,8 @@ static bool vk_create_swapchain(int width, int height)
     };
 
     vk_print_pixel_lightmap_mode();
+    VkPipelineDepthStencilStateCreateInfo shadow_depth_stencil =
+        vk_shadow_depth_stencil_state();
 
     if (!vk_validate_pixel_lightmap_shaders() ||
         !vk_create_pixel_world_pipeline_layout() ||
@@ -5011,7 +5046,7 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_shadow_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_TRUE, -1.0f, -2.0f, NULL) ||
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_TRUE, -1.0f, -2.0f, &shadow_depth_stencil) ||
         !vk_create_alias_pipeline(&vk.alias_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_depth_resources() ||
