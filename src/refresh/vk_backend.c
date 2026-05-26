@@ -37,6 +37,7 @@ the Free Software Foundation; either version 2 of the License, or
 #define VK_MAX_DEBUG_TEXT_INDICES  (VK_MAX_DEBUG_TEXT_CHARS * 6)
 #define VK_MAX_PARTICLE_VERTICES   (MAX_PARTICLES * 6)
 #define VK_MAX_LIGHTMAP_EXTENTS    513
+#define VK_MAX_FRAMES_IN_FLIGHT    3
 
 static const uint32_t vk_rect_vert_spv[] =
 #include "vk_rect_vert_spv.h"
@@ -477,6 +478,8 @@ typedef struct {
     VkImage *swapchain_images;
     VkImageView *swapchain_views;
     VkFramebuffer *framebuffers;
+    VkPresentModeKHR present_mode;
+    VkFence *image_fences;
     VkFramebuffer scene_framebuffer;
     VkFramebuffer bloom_source_framebuffer;
     VkFramebuffer bloom_framebuffer;
@@ -490,9 +493,10 @@ typedef struct {
     uint32_t swapchain_image_count;
     bool swapchain_transfer_src;
     vk_queue_families_t queues;
-    VkSemaphore image_available;
-    VkSemaphore render_finished;
-    VkFence frame_fence;
+    VkSemaphore image_available[VK_MAX_FRAMES_IN_FLIGHT];
+    VkSemaphore render_finished[VK_MAX_FRAMES_IN_FLIGHT];
+    VkFence frame_fence[VK_MAX_FRAMES_IN_FLIGHT];
+    uint32_t frame_index;
     uint32_t current_image;
     bool frame_active;
     bool render_pass_active;
@@ -596,6 +600,7 @@ static cvar_t *vk_glare_threshold;
 static cvar_t *vk_glare_size;
 static cvar_t *vk_glare_intensity;
 static cvar_t *vk_perf_stats;
+static cvar_t *vk_frames_in_flight;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
 #endif
@@ -655,6 +660,7 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
 static void vk_destroy_texture_resource(vk_texture_t *texture);
 static bool vk_create_particle_texture(void);
 static bool vk_create_beam_texture(void);
+static uint32_t vk_frames_in_flight_value(void);
 static uint32_t vk_bloom_downsample_value(void);
 static void vk_entity_axis(const entity_t *ent, vec3_t axis[3]);
 static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
@@ -3186,20 +3192,24 @@ static bool vk_create_frame_resources(void)
     VkSemaphoreCreateInfo semaphore_info = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
     };
-    result = vk.CreateSemaphore(vk.device, &semaphore_info, NULL, &vk.image_available);
-    if (result != VK_SUCCESS)
-        return vk_fail_result("vkCreateSemaphore", result);
-    result = vk.CreateSemaphore(vk.device, &semaphore_info, NULL, &vk.render_finished);
-    if (result != VK_SUCCESS)
-        return vk_fail_result("vkCreateSemaphore", result);
-
     VkFenceCreateInfo fence_info = {
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
     };
-    result = vk.CreateFence(vk.device, &fence_info, NULL, &vk.frame_fence);
-    if (result != VK_SUCCESS)
-        return vk_fail_result("vkCreateFence", result);
+    for (uint32_t i = 0; i < VK_MAX_FRAMES_IN_FLIGHT; i++) {
+        result = vk.CreateSemaphore(vk.device, &semaphore_info, NULL,
+                                    &vk.image_available[i]);
+        if (result != VK_SUCCESS)
+            return vk_fail_result("vkCreateSemaphore", result);
+        result = vk.CreateSemaphore(vk.device, &semaphore_info, NULL,
+                                    &vk.render_finished[i]);
+        if (result != VK_SUCCESS)
+            return vk_fail_result("vkCreateSemaphore", result);
+        result = vk.CreateFence(vk.device, &fence_info, NULL,
+                                &vk.frame_fence[i]);
+        if (result != VK_SUCCESS)
+            return vk_fail_result("vkCreateFence", result);
+    }
 
     return true;
 }
@@ -3234,6 +3244,22 @@ static VkPresentModeKHR vk_choose_present_mode(const VkPresentModeKHR *modes,
     }
 
     return VK_PRESENT_MODE_FIFO_KHR;
+}
+
+static const char *vk_present_mode_name(VkPresentModeKHR mode)
+{
+    switch (mode) {
+    case VK_PRESENT_MODE_IMMEDIATE_KHR:
+        return "immediate";
+    case VK_PRESENT_MODE_MAILBOX_KHR:
+        return "mailbox";
+    case VK_PRESENT_MODE_FIFO_KHR:
+        return "fifo";
+    case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+        return "fifo_relaxed";
+    default:
+        return "unknown";
+    }
 }
 
 static VkExtent2D vk_choose_extent(const VkSurfaceCapabilitiesKHR *caps,
@@ -3490,6 +3516,11 @@ static void vk_destroy_swapchain(void)
     if (vk.swapchain_layouts) {
         Z_Free(vk.swapchain_layouts);
         vk.swapchain_layouts = NULL;
+    }
+
+    if (vk.image_fences) {
+        Z_Free(vk.image_fences);
+        vk.image_fences = NULL;
     }
 
     if (vk.swapchain) {
@@ -4113,6 +4144,14 @@ static bool vk_create_texture_pipeline(void)
 static uint32_t vk_bloom_downsample_value(void)
 {
     int value = vk_bloom_downsample ? Cvar_ClampInteger(vk_bloom_downsample, 2, 16) : 4;
+
+    return max(value, 1);
+}
+
+static uint32_t vk_frames_in_flight_value(void)
+{
+    int value = vk_frames_in_flight ?
+        Cvar_ClampInteger(vk_frames_in_flight, 1, VK_MAX_FRAMES_IN_FLIGHT) : 2;
 
     return max(value, 1);
 }
@@ -4855,6 +4894,7 @@ static bool vk_create_swapchain(int width, int height)
         return vk_fail_result("vkCreateSwapchainKHR", result);
 
     vk.swapchain_format = surface_format.format;
+    vk.present_mode = present_mode;
     vk.depth_format = vk_choose_depth_format();
     if (vk.depth_format == VK_FORMAT_UNDEFINED) {
         Com_SetLastError("No supported Vulkan depth format");
@@ -4878,6 +4918,7 @@ static bool vk_create_swapchain(int width, int height)
 
     vk.swapchain_views = Z_Mallocz(sizeof(*vk.swapchain_views) * vk.swapchain_image_count);
     vk.swapchain_layouts = Z_Malloc(sizeof(*vk.swapchain_layouts) * vk.swapchain_image_count);
+    vk.image_fences = Z_Mallocz(sizeof(*vk.image_fences) * vk.swapchain_image_count);
     for (uint32_t i = 0; i < vk.swapchain_image_count; i++)
         vk.swapchain_layouts[i] = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -4981,9 +5022,10 @@ static bool vk_create_swapchain(int width, int height)
     if (!vk_allocate_swapchain_commands())
         return false;
 
-    Com_Printf("Vulkan swapchain: requested %dx%d, actual %ux%u, %u images\n",
+    Com_Printf("Vulkan swapchain: requested %dx%d, actual %ux%u, %u images, %s present\n",
                width, height, vk.swapchain_extent.width,
-               vk.swapchain_extent.height, vk.swapchain_image_count);
+               vk.swapchain_extent.height, vk.swapchain_image_count,
+               vk_present_mode_name(vk.present_mode));
     return true;
 }
 
@@ -5315,6 +5357,7 @@ static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
+    c.rectsDrawn2D++;
 }
 
 static void vk_blend_rect(int x, int y, int w, int h, const vec4_t color)
@@ -5347,6 +5390,7 @@ static void vk_blend_rect(int x, int y, int w, int h, const vec4_t color)
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
+    c.rectsDrawn2D++;
 }
 
 static void vk_blend_vignette(int x, int y, int w, int h, const vec4_t color,
@@ -5384,6 +5428,7 @@ static void vk_blend_vignette(int x, int y, int w, int h, const vec4_t color,
     vk.CmdDraw(cmd, 24, 1, 0, 0);
     c.trisDrawn += 8;
     c.batchesDrawn2D++;
+    c.rectsDrawn2D++;
 }
 
 static void vk_draw_pic_showtris(int x, int y, int w, int h)
@@ -5495,6 +5540,7 @@ static void vk_draw_texture_resource(int x, int y, int w, int h,
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
+    c.picsDrawn2D++;
 
     vk_draw_pic_showtris(x, y, w, h);
 }
@@ -5579,6 +5625,7 @@ static void vk_draw_texture_rect_sized(VkPipeline pipeline,
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
+    c.picsDrawn2D++;
 }
 
 static void vk_draw_refdef_texture(VkPipeline pipeline,
@@ -5647,6 +5694,7 @@ static void vk_draw_fullscreen_texture_sized(VkPipeline pipeline,
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
+    c.picsDrawn2D++;
 }
 
 static float vk_projection_zfar(int rdflags)
@@ -6017,7 +6065,8 @@ static bool vk_create_sprite_quad(void)
 
 static bool vk_create_particle_buffer(void)
 {
-    VkDeviceSize size = sizeof(vk.particle_batch);
+    VkDeviceSize size = sizeof(vk.particle_batch) *
+        max(vk.swapchain_image_count, 1);
 
     if (!vk_create_buffer(size,
                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
@@ -6264,7 +6313,7 @@ static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float co
     memcpy(push.color, color, sizeof(push.color));
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
-    VkDeviceSize offset = 0;
+    VkDeviceSize offset = sizeof(vk.particle_batch) * vk.current_image;
 
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.color3d_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
@@ -7010,6 +7059,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     };
     VkDeviceSize pixel_offsets[] = { 0, 0 };
     uint32_t *batch_index_mapped = vk.world.batch_index_mapped;
+    uint32_t batch_index_base = vk.current_image * vk.world.batch_index_capacity;
     uint32_t batch_index_cursor = 0;
 
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -7057,9 +7107,10 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     batch_index_cursor <= vk.world.batch_index_capacity && \
                     group_count <= vk.world.batch_index_capacity - batch_index_cursor; \
                 if (draw_group) { \
-                    VkDeviceSize bind_offset = sizeof(uint32_t) * batch_index_cursor; \
+                    VkDeviceSize bind_offset = sizeof(uint32_t) * \
+                        (batch_index_base + batch_index_cursor); \
                     VkDeviceSize size = sizeof(uint32_t) * group_count; \
-                    memcpy(&batch_index_mapped[batch_index_cursor], vk.world.batch_index_data, size); \
+                    memcpy(&batch_index_mapped[batch_index_base + batch_index_cursor], vk.world.batch_index_data, size); \
                     batch_index_cursor += group_count; \
                     vk.CmdBindIndexBuffer(cmd, vk.world.batch_indices.buffer, bind_offset, VK_INDEX_TYPE_UINT32); \
                 } \
@@ -8611,7 +8662,7 @@ static void vk_draw_particles(const refdef_t *fd)
     }
 
     VkDeviceSize size = vertex_count * sizeof(vk.particle_batch[0]);
-    memcpy(vk.particle_vertices_mapped, vk.particle_batch, size);
+    memcpy((byte *)vk.particle_vertices_mapped + offset, vk.particle_batch, size);
 
     vk_matrix_multiply(mvp, proj, view);
     memcpy(push.mvp, mvp, sizeof(push.mvp));
@@ -9839,7 +9890,8 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                 Com_WPrintf("Couldn't upload Vulkan world outline indices\n");
             }
         }
-        VkDeviceSize batch_index_size = sizeof(uint32_t) * idx;
+        VkDeviceSize batch_index_size = sizeof(uint32_t) * idx *
+            max(vk.swapchain_image_count, 1);
         vk_unmap_world_batch_indices();
         vk_destroy_buffer(&vk.world.batch_indices);
         if (!vk_create_buffer(batch_index_size,
@@ -10334,11 +10386,14 @@ static void vk_log_perf_stats(void)
         return;
 
     vk.perf_stats_time = vk.fd.time;
-    Com_Printf("VK perf: draws=%i 3d=%i world=%i ent=%i part=%i bloom=%i other=%i 2d=%i pipe=%i desc=%i push=%i vb=%i tris=%i faces=%i ents=%i parts=%i wait=%uus acq=%uus rec=%uus sub=%uus pres=%uus\n",
+    Com_Printf("VK perf: mode=%s imgs=%u fif=%u draws=%i 3d=%i world=%i ent=%i part=%i bloom=%i other=%i 2d=%i chars=%i pics=%i rects=%i pipe=%i desc=%i push=%i vb=%i tris=%i faces=%i ents=%i parts=%i wait=%uus acq=%uus rec=%uus sub=%uus pres=%uus\n",
+               vk_present_mode_name(vk.present_mode),
+               vk.swapchain_image_count, vk_frames_in_flight_value(),
                c.batchesDrawn + c.batchesDrawn2D,
                c.batchesDrawn, c.worldBatches, c.entityBatches,
                c.particleBatches, c.bloomBatches, c.otherBatches,
                c.batchesDrawn2D,
+               c.charsDrawn2D, c.picsDrawn2D, c.rectsDrawn2D,
                c.pipelineBinds, c.texSwitches, c.uniformUploads,
                c.vertexArrayBinds, c.trisDrawn, c.facesDrawn,
                glr.fd.num_entities, glr.fd.num_particles,
@@ -10417,6 +10472,7 @@ bool VKR_Init(bool total)
     vk_glare_size = Cvar_Get("gl_glare_size", "24", 0);
     vk_glare_intensity = Cvar_Get("gl_glare_intensity", "0.5", 0);
     vk_perf_stats = Cvar_Get("vk_perf_stats", "0", 0);
+    vk_frames_in_flight = Cvar_Get("vk_frames_in_flight", "2", CVAR_ARCHIVE);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
 #endif
@@ -10577,19 +10633,19 @@ void VKR_Shutdown(bool total)
     if (vk.device && vk.DeviceWaitIdle)
         vk.DeviceWaitIdle(vk.device);
 
-    if (vk.frame_fence) {
-        vk.DestroyFence(vk.device, vk.frame_fence, NULL);
-        vk.frame_fence = VK_NULL_HANDLE;
-    }
-
-    if (vk.render_finished) {
-        vk.DestroySemaphore(vk.device, vk.render_finished, NULL);
-        vk.render_finished = VK_NULL_HANDLE;
-    }
-
-    if (vk.image_available) {
-        vk.DestroySemaphore(vk.device, vk.image_available, NULL);
-        vk.image_available = VK_NULL_HANDLE;
+    for (uint32_t i = 0; i < VK_MAX_FRAMES_IN_FLIGHT; i++) {
+        if (vk.frame_fence[i]) {
+            vk.DestroyFence(vk.device, vk.frame_fence[i], NULL);
+            vk.frame_fence[i] = VK_NULL_HANDLE;
+        }
+        if (vk.render_finished[i]) {
+            vk.DestroySemaphore(vk.device, vk.render_finished[i], NULL);
+            vk.render_finished[i] = VK_NULL_HANDLE;
+        }
+        if (vk.image_available[i]) {
+            vk.DestroySemaphore(vk.device, vk.image_available[i], NULL);
+            vk.image_available[i] = VK_NULL_HANDLE;
+        }
     }
 
     if (vk.command_pool) {
@@ -10982,6 +11038,8 @@ void VKR_SetScale(float scale)
 
 void VKR_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
 {
+    int old_2d = c.batchesDrawn2D;
+
     if ((ch & 127) == 32)
         return;
 
@@ -11022,6 +11080,7 @@ void VKR_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
                          s, t, s + 0.0625f, t + 0.0625f, font);
     vk.color = saved;
     vk.color_set = saved_set;
+    c.charsDrawn2D += c.batchesDrawn2D - old_2d;
 }
 
 int VKR_DrawString(int x, int y, int flags, size_t max_chars,
@@ -11135,18 +11194,19 @@ static void vk_recreate_signaled_frame_fence(void)
     if (!vk.device || !vk.CreateFence || !vk.DestroyFence)
         return;
 
-    if (vk.frame_fence) {
-        vk.DestroyFence(vk.device, vk.frame_fence, NULL);
-        vk.frame_fence = VK_NULL_HANDLE;
+    if (vk.frame_fence[vk.frame_index]) {
+        vk.DestroyFence(vk.device, vk.frame_fence[vk.frame_index], NULL);
+        vk.frame_fence[vk.frame_index] = VK_NULL_HANDLE;
     }
 
     VkFenceCreateInfo fence_info = {
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
     };
-    VkResult result = vk.CreateFence(vk.device, &fence_info, NULL, &vk.frame_fence);
+    VkResult result = vk.CreateFence(vk.device, &fence_info, NULL,
+                                     &vk.frame_fence[vk.frame_index]);
     if (result != VK_SUCCESS) {
-        vk.frame_fence = VK_NULL_HANDLE;
+        vk.frame_fence[vk.frame_index] = VK_NULL_HANDLE;
         Com_EPrintf("vkCreateFence failed while recovering submit failure: Vulkan error %d\n", result);
     }
 }
@@ -11495,11 +11555,15 @@ void VKR_BeginFrame(void)
     vk.present_usec = 0;
     vk.frame_start_usec = 0;
 
-    if (!vk.swapchain || !vk.frame_fence || vk.frame_active)
+    VkSemaphore image_available = vk.image_available[vk.frame_index];
+    VkFence frame_fence = vk.frame_fence[vk.frame_index];
+
+    if (!vk.swapchain || !frame_fence || !image_available || vk.frame_active)
         return;
 
     uint64_t start = vk_time_usec();
-    VkResult result = vk.WaitForFences(vk.device, 1, &vk.frame_fence, VK_TRUE, UINT64_MAX);
+    VkResult result = vk.WaitForFences(vk.device, 1, &frame_fence,
+                                       VK_TRUE, UINT64_MAX);
     vk.wait_usec = vk_time_usec() - start;
     if (result != VK_SUCCESS) {
         Com_EPrintf("vkWaitForFences failed: Vulkan error %d\n", result);
@@ -11508,7 +11572,7 @@ void VKR_BeginFrame(void)
 
     start = vk_time_usec();
     result = vk.AcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX,
-                                     vk.image_available, VK_NULL_HANDLE,
+                                     image_available, VK_NULL_HANDLE,
                                      &vk.current_image);
     vk.acquire_usec = vk_time_usec() - start;
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -11520,6 +11584,17 @@ void VKR_BeginFrame(void)
         return;
     }
 
+    if (vk.image_fences[vk.current_image]) {
+        start = vk_time_usec();
+        result = vk.WaitForFences(vk.device, 1,
+                                  &vk.image_fences[vk.current_image],
+                                  VK_TRUE, UINT64_MAX);
+        vk.wait_usec += vk_time_usec() - start;
+        if (result != VK_SUCCESS) {
+            Com_EPrintf("vkWaitForFences failed: Vulkan error %d\n", result);
+            return;
+        }
+    }
     vk.frame_start_usec = vk_time_usec();
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     result = vk.ResetCommandBuffer(cmd, 0);
@@ -11752,19 +11827,23 @@ void VKR_EndFrame(void)
         return;
     }
 
+    VkSemaphore image_available = vk.image_available[vk.frame_index];
+    VkSemaphore render_finished = vk.render_finished[vk.frame_index];
+    VkFence frame_fence = vk.frame_fence[vk.frame_index];
+
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo submit_info = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &vk.image_available,
+        .pWaitSemaphores = &image_available,
         .pWaitDstStageMask = &wait_stage,
         .commandBufferCount = 1,
         .pCommandBuffers = &cmd,
         .signalSemaphoreCount = 1,
-        .pSignalSemaphores = &vk.render_finished,
+        .pSignalSemaphores = &render_finished,
     };
 
-    result = vk.ResetFences(vk.device, 1, &vk.frame_fence);
+    result = vk.ResetFences(vk.device, 1, &frame_fence);
     if (result != VK_SUCCESS) {
         Com_EPrintf("vkResetFences failed: Vulkan error %d\n", result);
         vk.frame_active = false;
@@ -11772,7 +11851,7 @@ void VKR_EndFrame(void)
     }
 
     start = vk_time_usec();
-    result = vk.QueueSubmit(vk.graphics_queue, 1, &submit_info, vk.frame_fence);
+    result = vk.QueueSubmit(vk.graphics_queue, 1, &submit_info, frame_fence);
     vk.submit_usec = vk_time_usec() - start;
     if (result != VK_SUCCESS) {
         Com_EPrintf("vkQueueSubmit failed: Vulkan error %d\n", result);
@@ -11780,11 +11859,12 @@ void VKR_EndFrame(void)
         vk.frame_active = false;
         return;
     }
+    vk.image_fences[vk.current_image] = frame_fence;
 
     VkPresentInfoKHR present_info = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &vk.render_finished,
+        .pWaitSemaphores = &render_finished,
         .swapchainCount = 1,
         .pSwapchains = &vk.swapchain,
         .pImageIndices = &vk.current_image,
@@ -11805,6 +11885,7 @@ void VKR_EndFrame(void)
     vk_log_perf_stats();
 
     vk.frame_active = false;
+    vk.frame_index = (vk.frame_index + 1) % vk_frames_in_flight_value();
 }
 
 void VKR_ModeChanged(int width, int height, int flags)
@@ -11821,10 +11902,12 @@ void VKR_ModeChanged(int width, int height, int flags)
 
 bool VKR_VideoSync(void)
 {
-    if (!vk.frame_fence)
+    VkFence frame_fence = vk.frame_fence[vk.frame_index];
+
+    if (!frame_fence)
         return true;
 
-    return vk.WaitForFences(vk.device, 1, &vk.frame_fence, VK_TRUE, 0) == VK_SUCCESS;
+    return vk.WaitForFences(vk.device, 1, &frame_fence, VK_TRUE, 0) == VK_SUCCESS;
 }
 
 r_opengl_config_t VKR_GetGLConfig(void)

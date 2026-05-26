@@ -280,6 +280,9 @@ typedef struct {
     int rotatedBoxesCulled;
     int shadowsCulled;
     int batchesDrawn2D;
+    int charsDrawn2D;
+    int picsDrawn2D;
+    int rectsDrawn2D;
     int pipelineBinds;
     int uniformUploads;
     int vertexArrayBinds;
