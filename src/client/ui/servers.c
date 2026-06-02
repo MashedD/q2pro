@@ -233,9 +233,6 @@ void UI_StatusEvent(const serverStatus_t *status)
         if (m_servers.list.numItems >= MAX_STATUS_SERVERS) {
             return;
         }
-        // reject stale replies from previous ping cycle
-        if (com_eventTime > m_servers.timestamp)
-            return;
         m_servers.list.numItems++;
         hostname = UI_CopyString(NET_AdrToString(&net_from));
         timestamp = m_servers.timestamp;
