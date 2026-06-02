@@ -35,8 +35,6 @@ features include:
 - fixed playback of some demos
 - fixed `ch_scale` so that `scr_scale` doesn't affect crosshair size
 - fixed compilation warnings
-- fixed problem with displaying excessive items in address book after
-  quickly switching from Server Browser
 - fixed OpenTDM crash on Windows when loading q2dm1 twice
 
 # Changes
@@ -66,6 +64,6 @@ features include:
 
 # TODO
 
-- fix transparency problems in game menu background
-- check q2repro for useful changes (like in manuals)
-- consider adding Vulkan renderer
+- fix problem with displaying excessive items in address book after
+  quickly switching from Server Browser
+
