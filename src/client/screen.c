@@ -2357,7 +2357,6 @@ typedef struct {
     int deaths;
     int net;
     int ping;
-    bool captain;
     bool quad;
     bool pent;
     char location[32];
@@ -2378,10 +2377,10 @@ typedef struct {
 } open_tdm_string_t;
 
 #define STREAM_SCOREBOARD_NAME_CHARS   15
-#define STREAM_SCOREBOARD_STATS_COL    16
+#define STREAM_SCOREBOARD_STATS_COL    14
 #define STREAM_SCOREBOARD_LOC_COL      (STREAM_SCOREBOARD_STATS_COL + 22)
 #define STREAM_SCOREBOARD_LOC_CHARS    12
-#define STREAM_SCOREBOARD_COLUMNS      "Name            Frags Dths Net Ping C Loc"
+#define STREAM_SCOREBOARD_COLUMNS      "Name            Frags Dths Net Ping Loc"
 #define STREAM_SCOREBOARD_COLUMN_CHARS (sizeof(STREAM_SCOREBOARD_COLUMNS) - 1 + STREAM_SCOREBOARD_LOC_CHARS)
 
 static bool SCR_IsOpenTDMColumnHeader(const char *line)
@@ -2645,9 +2644,8 @@ static void SCR_DrawOpenTDMTeamScore(int x, int y, const stream_team_t *team)
         }
 
         HUD_DrawString(x, row_y, player->name);
-        Q_snprintf(buf, sizeof(buf), "%5d %4d %3d %4d %s",
-                   player->frags, player->deaths, player->net, player->ping,
-                   player->captain ? "*" : "");
+        Q_snprintf(buf, sizeof(buf), "%5d %4d %3d %4d",
+                   player->frags, player->deaths, player->net, player->ping);
         HUD_DrawString(x + CONCHAR_WIDTH * STREAM_SCOREBOARD_STATS_COL, row_y, buf);
 
         if (player->location[0])
@@ -2755,8 +2753,6 @@ static bool SCR_DrawOpenTDMScores(const char *s)
             continue;
 
         if (!strcmp(line, "*")) {
-            if (last_player)
-                last_player->captain = true;
             continue;
         }
 
