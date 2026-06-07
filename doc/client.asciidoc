@@ -609,16 +609,6 @@ ch_y::
 scr_hit_marker_time::
     Hit marker visibility time in milliseconds. Default value is 500.
 
-scr_damage_indicator::
-    Toggles drawing of directional HUD markers when damage is taken. Default
-    value is 1.
-
-scr_damage_indicator_time::
-    Damage indicator visibility time in milliseconds. Default value is 800.
-
-scr_damage_indicator_scale::
-    Scaling factor of the damage indicator. Default value is 1.
-
 Video Modes
 ~~~~~~~~~~~
 

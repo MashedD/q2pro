@@ -87,13 +87,6 @@ static void P_DamageFeedback(edict_t *player)
     if (count == 0)
         return;     // didn't take any damage
 
-    VectorSubtract(client->damage_from, player->s.origin, v);
-    VectorNormalize(v);
-    int yaw = Q_rint(180.0f * atan2f(DotProduct(v, right), DotProduct(v, forward)) / M_PIf);
-    if (yaw < 0)
-        yaw += 360;
-    client->ps.stats[STAT_FLASHES] |= ((yaw & 511) << 2) | ((++client->damage_indicator_count & 15) << 11);
-
     // start a pain animation if still in the player model
     if (client->anim_priority < ANIM_PAIN && player->s.modelindex == MODELINDEX_PLAYER) {
         static int      i;
@@ -168,6 +161,9 @@ static void P_DamageFeedback(edict_t *player)
             kick = count * 0.5f;
         if (kick > 50)
             kick = 50;
+
+        VectorSubtract(client->damage_from, player->s.origin, v);
+        VectorNormalize(v);
 
         side = DotProduct(v, right);
         client->v_dmg_roll = kick * side * 0.3f;

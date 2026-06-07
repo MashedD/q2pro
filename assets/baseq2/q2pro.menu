@@ -179,7 +179,6 @@ begin screen
     range "HUD opacity" scr_alpha 0 1
     range "console opacity" con_alpha 0 1
     pairs "HUD scale" scr_scale auto 0 1x 1 2x 2 4x 4 5x 5
-    toggle "damage indicator" scr_damage_indicator
     pairs "console scale" con_scale auto 0 1x 1 2x 2 4x 4 5x 5
     pairs "menu scale" ui_scale auto 0 1x 1 2x 2 4x 4 5x 5
     blank
