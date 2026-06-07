@@ -313,8 +313,9 @@ typedef struct {
         } muzzle;
     } weapon;
 
+    int     hit_marker_frame;
     unsigned hit_marker_time;
-    int hit_marker_count;
+    int     hit_marker_count;
 
     player_fog_t custom_fog;
 } client_state_t;

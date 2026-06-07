@@ -295,6 +295,21 @@ static void CL_UpdateFlaresSetting(void)
     MSG_FlushTo(&cls.netchan.message);
 }
 
+static void CL_UpdateDamageDealtSetting(void)
+{
+    if (cls.netchan.protocol != PROTOCOL_VERSION_Q2PRO) {
+        return;
+    }
+    if (!cl.csr.extended) {
+        return;
+    }
+
+    MSG_WriteByte(clc_setting);
+    MSG_WriteShort(CLS_DAMAGE_DEALT);
+    MSG_WriteShort(1);
+    MSG_FlushTo(&cls.netchan.message);
+}
+
 /*
 ===================
 CL_ClientCommand
@@ -1707,6 +1722,7 @@ void CL_Begin(void)
     CL_UpdatePredictSetting();
     CL_UpdateRecordingSetting();
     CL_UpdateFlaresSetting();
+    CL_UpdateDamageDealtSetting();
 }
 
 /*

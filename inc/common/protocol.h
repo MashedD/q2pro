@@ -405,6 +405,7 @@ typedef enum {
     CLS_NOFOOTSTEPS,
     CLS_NOPREDICT,
     CLS_NOFLARES,
+    CLS_DAMAGE_DEALT,
 
     CLS_MAX
 } clientSetting_t;

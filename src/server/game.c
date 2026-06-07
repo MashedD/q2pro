@@ -81,6 +81,13 @@ static int PF_ImageIndex(const char *name)
     return PF_FindIndex(name, svs.csr.images, svs.csr.max_images, 0, __func__);
 }
 
+static bool client_supports_damage_dealt(client_t *client)
+{
+    return client->protocol == PROTOCOL_VERSION_Q2PRO &&
+           client->csr->extended &&
+           client->settings[CLS_DAMAGE_DEALT];
+}
+
 /*
 ===============
 PF_Unicast
@@ -119,6 +126,12 @@ static void PF_Unicast(edict_t *ent, qboolean reliable)
     }
 
     cmd = msg_write.data[0];
+
+    if (cmd == svc_temp_entity && msg_write.cursize >= 2 &&
+        msg_write.data[1] == TE_DAMAGE_DEALT &&
+        !client_supports_damage_dealt(client)) {
+        goto clear;
+    }
 
     flags = 0;
     if (reliable) {
