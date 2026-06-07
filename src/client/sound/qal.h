@@ -23,6 +23,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #endif
 
 #include <AL/al.h>
+#include <AL/alc.h>
 #include <AL/alext.h>
 #include <AL/efx.h>
 
@@ -65,6 +66,11 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define qalSourcei alSourcei
 #define qalcGetString alcGetString
 #define qalcGetIntegerv alcGetIntegerv
+#define qalcCaptureCloseDevice alcCaptureCloseDevice
+#define qalcCaptureOpenDevice alcCaptureOpenDevice
+#define qalcCaptureSamples alcCaptureSamples
+#define qalcCaptureStart alcCaptureStart
+#define qalcCaptureStop alcCaptureStop
 #else
 // AL 1.1
 QALAPI LPALBUFFERDATA qalBufferData;
@@ -95,6 +101,13 @@ QALAPI LPALSOURCESTOP qalSourceStop;
 QALAPI LPALSOURCEUNQUEUEBUFFERS qalSourceUnqueueBuffers;
 QALAPI LPALSOURCEF qalSourcef;
 QALAPI LPALSOURCEI qalSourcei;
+QALAPI LPALCGETINTEGERV qalcGetIntegerv;
+QALAPI LPALCGETSTRING qalcGetString;
+QALAPI LPALCCAPTURECLOSEDEVICE qalcCaptureCloseDevice;
+QALAPI LPALCCAPTUREOPENDEVICE qalcCaptureOpenDevice;
+QALAPI LPALCCAPTURESAMPLES qalcCaptureSamples;
+QALAPI LPALCCAPTURESTART qalcCaptureStart;
+QALAPI LPALCCAPTURESTOP qalcCaptureStop;
 #endif
 
 // ALC_EXT_EFX

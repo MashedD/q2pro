@@ -101,6 +101,11 @@ option('openal',
   value: 'auto',
   description: 'OpenAL sound backend')
 
+option('opus',
+  type: 'feature',
+  value: 'auto',
+  description: 'Opus voice chat codec support')
+
 option('opengl-es1',
   type: 'boolean',
   value: false,

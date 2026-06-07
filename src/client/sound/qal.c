@@ -36,18 +36,30 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define qalcCloseDevice alcCloseDevice
 #define qalcCreateContext alcCreateContext
 #define qalcDestroyContext alcDestroyContext
+#define qalcGetIntegerv alcGetIntegerv
+#define qalcGetString alcGetString
 #define qalcIsExtensionPresent alcIsExtensionPresent
 #define qalcMakeContextCurrent alcMakeContextCurrent
 #define qalcOpenDevice alcOpenDevice
+#define qalcCaptureCloseDevice alcCaptureCloseDevice
+#define qalcCaptureOpenDevice alcCaptureOpenDevice
+#define qalcCaptureSamples alcCaptureSamples
+#define qalcCaptureStart alcCaptureStart
+#define qalcCaptureStop alcCaptureStop
 #else
 static LPALCCLOSEDEVICE qalcCloseDevice;
 static LPALCCREATECONTEXT qalcCreateContext;
-static LPALCGETINTEGERV qalcGetIntegerv;
-static LPALCGETSTRING qalcGetString;
+LPALCGETINTEGERV qalcGetIntegerv;
+LPALCGETSTRING qalcGetString;
 static LPALCDESTROYCONTEXT qalcDestroyContext;
 static LPALCISEXTENSIONPRESENT qalcIsExtensionPresent;
 static LPALCMAKECONTEXTCURRENT qalcMakeContextCurrent;
 static LPALCOPENDEVICE qalcOpenDevice;
+LPALCCAPTURECLOSEDEVICE qalcCaptureCloseDevice;
+LPALCCAPTUREOPENDEVICE qalcCaptureOpenDevice;
+LPALCCAPTURESAMPLES qalcCaptureSamples;
+LPALCCAPTURESTART qalcCaptureStart;
+LPALCCAPTURESTOP qalcCaptureStop;
 #endif
 
 typedef struct {
@@ -75,6 +87,11 @@ static const alsection_t sections[] = {
             QALC_FN(IsExtensionPresent),
             QALC_FN(MakeContextCurrent),
             QALC_FN(OpenDevice),
+            QALC_FN(CaptureCloseDevice),
+            QALC_FN(CaptureOpenDevice),
+            QALC_FN(CaptureSamples),
+            QALC_FN(CaptureStart),
+            QALC_FN(CaptureStop),
             QAL_FN(BufferData),
             QAL_FN(Bufferiv),
             QAL_FN(DeleteBuffers),

@@ -52,7 +52,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define PROTOCOL_VERSION_Q2PRO_EXTENDED_LIMITS      1024    // r2894
 #define PROTOCOL_VERSION_Q2PRO_EXTENDED_LIMITS_2    1025    // r3300
 #define PROTOCOL_VERSION_Q2PRO_PLAYERFOG            1026    // r3579
-#define PROTOCOL_VERSION_Q2PRO_CURRENT              1026    // r3579
+#define PROTOCOL_VERSION_Q2PRO_VOICE                1027
+#define PROTOCOL_VERSION_Q2PRO_CURRENT              1027
 
 #define PROTOCOL_VERSION_MVD_MINIMUM            2009    // r168
 #define PROTOCOL_VERSION_MVD_DEFAULT            2010    // r177
@@ -159,6 +160,7 @@ typedef enum {
     // Q2PRO specific operations
     svc_configstringstream,
     svc_baselinestream,
+    svc_voice,
 
     svc_num_types
 } svc_ops_t;
@@ -217,8 +219,14 @@ typedef enum {
     // Q2PRO specific operations
     clc_move_nodelta = 10,
     clc_move_batched,
-    clc_userinfo_delta
+    clc_userinfo_delta,
+    clc_voice
 } clc_ops_t;
+
+#define VOICE_RATE          16000
+#define VOICE_FRAME_MS      20
+#define VOICE_FRAME_SAMPLES (VOICE_RATE * VOICE_FRAME_MS / 1000)
+#define VOICE_MAX_BYTES     256
 
 //==============================================
 
