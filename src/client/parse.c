@@ -1411,6 +1411,19 @@ void CL_ParseServerMessage(void)
             }
             CL_ParseSetting();
             continue;
+
+        case svc_voice:
+            if (cls.serverProtocol != PROTOCOL_VERSION_Q2PRO || cls.protocolVersion < PROTOCOL_VERSION_Q2PRO_VOICE) {
+                goto badbyte;
+            }
+#if USE_VOICE
+            CL_ParseVoice();
+#else
+            MSG_ReadByte();
+            MSG_ReadByte();
+            MSG_ReadData(MSG_ReadWord());
+#endif
+            break;
         }
 
         // if recording demos, copy off protocol invariant stuff
@@ -1533,6 +1546,12 @@ bool CL_SeekDemoMessage(void)
 
         case svc_layout:
             CL_ParseLayout();
+            break;
+
+        case svc_voice:
+            MSG_ReadByte();
+            MSG_ReadByte();
+            MSG_ReadData(MSG_ReadWord());
             break;
         }
     }

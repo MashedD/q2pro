@@ -696,6 +696,26 @@ void CL_UpdateCmd(int msec);
 void CL_FinalizeCmd(void);
 void CL_SendCmd(void);
 
+#if USE_VOICE
+void CL_InitVoice(void);
+void CL_ShutdownVoice(void);
+void CL_VoiceDown(void);
+void CL_VoiceUp(void);
+void CL_VoiceFrame(void);
+bool CL_HasVoice(void);
+void CL_WriteVoice(void);
+void CL_ParseVoice(void);
+#else
+#define CL_InitVoice()      (void)0
+#define CL_ShutdownVoice()  (void)0
+#define CL_VoiceDown()      (void)0
+#define CL_VoiceUp()        (void)0
+#define CL_VoiceFrame()     (void)0
+#define CL_HasVoice()       false
+#define CL_WriteVoice()     (void)0
+#define CL_ParseVoice()     (void)0
+#endif
+
 
 //
 // parse.c

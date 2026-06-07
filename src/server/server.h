@@ -301,6 +301,10 @@ typedef struct client_s {
     int             cmd_msec_used;
     float           timescale;
 
+    unsigned        voice_time;
+    unsigned        voice_bytes;
+    byte            voice_sequence;
+
     int             ping, min_ping, max_ping;
     int             avg_ping_time, avg_ping_count;
 

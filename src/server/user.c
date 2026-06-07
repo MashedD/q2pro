@@ -31,6 +31,7 @@ sv_client and sv_player will be valid.
 */
 
 static int      stringCmdCount;
+static cvar_t   *sv_voice;
 
 /*
 ================
@@ -1580,6 +1581,57 @@ static void SV_ParseClientCommand(void)
     stringCmdCount++;
 }
 
+static void SV_ParseVoice(void)
+{
+    client_t *client;
+    const byte *data;
+    int sequence, len;
+
+    sequence = MSG_ReadByte();
+    len = MSG_ReadWord();
+    if (len <= 0 || len > VOICE_MAX_BYTES) {
+        SV_DropClient(sv_client, "bad voice packet length");
+        return;
+    }
+
+    data = MSG_ReadData(len);
+
+    if (!sv_voice) {
+        sv_voice = Cvar_Get("sv_voice", "1", 0);
+    }
+    if (!sv_voice->integer || sv_client->state != cs_spawned) {
+        return;
+    }
+
+    if (svs.realtime - sv_client->voice_time >= 1000) {
+        sv_client->voice_time = svs.realtime;
+        sv_client->voice_bytes = 0;
+    }
+    sv_client->voice_bytes += len;
+    if (sv_client->voice_bytes > 5000) {
+        return;
+    }
+
+    sv_client->voice_sequence = sequence;
+
+    FOR_EACH_CLIENT(client) {
+        if (client == sv_client || client->state != cs_spawned) {
+            continue;
+        }
+        if (client->protocol != PROTOCOL_VERSION_Q2PRO || client->version < PROTOCOL_VERSION_Q2PRO_VOICE) {
+            continue;
+        }
+
+        MSG_BeginWriting();
+        MSG_WriteByte(svc_voice);
+        MSG_WriteByte(sv_client->number);
+        MSG_WriteByte(sequence);
+        MSG_WriteShort(len);
+        MSG_WriteData(data, len);
+        SV_ClientAddMessage(client, MSG_CLEAR);
+    }
+}
+
 /*
 ===================
 SV_ExecuteClientMessage
@@ -1651,6 +1703,13 @@ badbyte:
                 goto badbyte;
 
             SV_ParseDeltaUserinfo();
+            break;
+
+        case clc_voice:
+            if (client->protocol != PROTOCOL_VERSION_Q2PRO || client->version < PROTOCOL_VERSION_Q2PRO_VOICE)
+                goto badbyte;
+
+            SV_ParseVoice();
             break;
         }
 

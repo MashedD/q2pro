@@ -410,6 +410,16 @@ static void IN_MLookUp(void)
         IN_CenterView();
 }
 
+static void IN_VoiceDown(void)
+{
+    CL_VoiceDown();
+}
+
+static void IN_VoiceUp(void)
+{
+    CL_VoiceUp();
+}
+
 /*
 ===============
 CL_KeyState
@@ -680,6 +690,8 @@ static const cmdreg_t c_input[] = {
     { "-klook", IN_KLookUp },
     { "+mlook", IN_MLookDown },
     { "-mlook", IN_MLookUp },
+    { "+voice", IN_VoiceDown },
+    { "-voice", IN_VoiceUp },
     { "in_restart", IN_Restart_f },
     { NULL }
 };
@@ -929,6 +941,8 @@ static void CL_SendDefaultCmd(void)
     MSG_WriteDeltaUsercmd(oldcmd, cmd, version);
     MSG_WriteByte(cl.lightlevel);
 
+    CL_WriteVoice();
+
     if (cls.serverProtocol <= PROTOCOL_VERSION_DEFAULT) {
         // calculate a checksum over the move commands
         msg_write.data[checksumIndex] = COM_BlockSequenceCRCByte(
@@ -1034,6 +1048,8 @@ static void CL_SendBatchedCmd(void)
     }
 
     MSG_FlushBits();
+
+    CL_WriteVoice();
 
     P_FRAMES++;
 
@@ -1152,7 +1168,7 @@ void CL_SendCmd(void)
     }
 
     // are there any new usercmds to send after all?
-    if (cl.lastTransmitCmdNumber == cl.cmdNumber) {
+    if (cl.lastTransmitCmdNumber == cl.cmdNumber && !CL_HasVoice()) {
         return; // nothing to send
     }
 

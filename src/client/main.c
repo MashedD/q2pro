@@ -2715,6 +2715,7 @@ static void CL_InitLocal(void)
     CL_InitTEnts();
     CL_InitDownloads();
     CL_GTV_Init();
+    CL_InitVoice();
 
     Cmd_Register(c_client);
 
@@ -3345,6 +3346,7 @@ unsigned CL_Frame(unsigned msec)
     }
 
     // send pending cmds
+    CL_VoiceFrame();
     CL_SendCmd();
 
     // predict all unacknowledged movements
@@ -3495,6 +3497,7 @@ void CL_Shutdown(void)
     }
 
     CL_GTV_Shutdown();
+    CL_ShutdownVoice();
 
     CL_Disconnect(ERR_FATAL);
 

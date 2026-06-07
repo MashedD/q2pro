@@ -397,6 +397,15 @@ if openal.found()
   endif
 endif
 
+opus = dependency('opus', required: get_option('opus'))
+if opus.found() and openal.found()
+  client_src += 'src/client/voice.c'
+  client_deps += opus
+  config.set10('USE_VOICE', true)
+elif get_option('opus').enabled()
+  error('Voice chat requires both opus and openal')
+endif
+
 if get_option('qal-hard-linked')
   config.set('QAL_HARD_LINKED', true)
 

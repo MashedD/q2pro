@@ -2917,6 +2917,7 @@ const char *MSG_ServerCommandString(int cmd)
         S(setting)
         S(configstringstream)
         S(baselinestream)
+        S(voice)
 #undef S
     }
 }
