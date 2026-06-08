@@ -2841,7 +2841,8 @@ static void SCR_DrawPlayerNames(void)
         return;
 
     if (!prochars_font)
-        prochars_font = R_RegisterFont("prochars.png");
+        prochars_font = R_RegisterImage("prochars.png", IT_FONT,
+                                        IF_PERMANENT | IF_TRANSPARENT);
     if (!prochars_font)
         prochars_font = scr.font_pic;
 
