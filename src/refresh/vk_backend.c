@@ -587,6 +587,7 @@ static cvar_t *vk_gl_lightgrid;
 static cvar_t *vk_fullbright;
 static cvar_t *vk_cull_models;
 static cvar_t *vk_shadows;
+static cvar_t *vk_stencilbits;
 static cvar_t *vk_dotshading;
 static cvar_t *vk_draworder;
 static cvar_t *vk_showorigins;
@@ -917,16 +918,58 @@ static bool vk_create_texture_image(uint32_t width, uint32_t height,
     return true;
 }
 
-static VkFormat vk_choose_depth_format(void)
+static bool vk_depth_format_has_stencil(VkFormat format)
 {
-    static const VkFormat candidates[] = {
+    return format == VK_FORMAT_D24_UNORM_S8_UINT ||
+        format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+}
+
+static const char *vk_format_name(VkFormat format)
+{
+    switch (format) {
+    case VK_FORMAT_D32_SFLOAT_S8_UINT:
+        return "D32_SFLOAT_S8_UINT";
+    case VK_FORMAT_D24_UNORM_S8_UINT:
+        return "D24_UNORM_S8_UINT";
+    case VK_FORMAT_D32_SFLOAT:
+        return "D32_SFLOAT";
+    case VK_FORMAT_D16_UNORM:
+        return "D16_UNORM";
+    default:
+        return "unknown";
+    }
+}
+
+static bool vk_shadow_stencil_requested(void)
+{
+    return vk_stencilbits && Cvar_ClampInteger(vk_stencilbits, 0, 8) > 0;
+}
+
+static bool vk_shadow_stencil_enabled(void)
+{
+    return vk_shadow_stencil_requested() &&
+        vk_depth_format_has_stencil(vk.depth_format);
+}
+
+static VkFormat vk_choose_depth_format(bool stencil)
+{
+    static const VkFormat stencil_candidates[] = {
         VK_FORMAT_D32_SFLOAT_S8_UINT,
         VK_FORMAT_D24_UNORM_S8_UINT,
         VK_FORMAT_D32_SFLOAT,
         VK_FORMAT_D16_UNORM,
     };
+    static const VkFormat depth_candidates[] = {
+        VK_FORMAT_D32_SFLOAT,
+        VK_FORMAT_D16_UNORM,
+        VK_FORMAT_D32_SFLOAT_S8_UINT,
+        VK_FORMAT_D24_UNORM_S8_UINT,
+    };
+    const VkFormat *candidates = stencil ? stencil_candidates : depth_candidates;
+    size_t count = stencil ? q_countof(stencil_candidates) :
+        q_countof(depth_candidates);
 
-    for (size_t i = 0; i < q_countof(candidates); i++) {
+    for (size_t i = 0; i < count; i++) {
         VkFormatProperties props;
 
         vk.GetPhysicalDeviceFormatProperties(vk.physical_device,
@@ -938,12 +981,6 @@ static VkFormat vk_choose_depth_format(void)
     }
 
     return VK_FORMAT_UNDEFINED;
-}
-
-static bool vk_depth_format_has_stencil(VkFormat format)
-{
-    return format == VK_FORMAT_D24_UNORM_S8_UINT ||
-        format == VK_FORMAT_D32_SFLOAT_S8_UINT;
 }
 
 static bool vk_begin_immediate(VkCommandBuffer *cmd)
@@ -3592,7 +3629,7 @@ static bool vk_create_render_pass(void)
             .samples = VK_SAMPLE_COUNT_1_BIT,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .stencilLoadOp = vk_depth_format_has_stencil(vk.depth_format) ?
+            .stencilLoadOp = vk_shadow_stencil_enabled() ?
                 VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
@@ -4834,7 +4871,7 @@ static VkPipelineDepthStencilStateCreateInfo vk_shadow_depth_stencil_state(void)
         .depthTestEnable = VK_TRUE,
         .depthWriteEnable = VK_FALSE,
         .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
-        .stencilTestEnable = vk_depth_format_has_stencil(vk.depth_format),
+        .stencilTestEnable = vk_shadow_stencil_enabled(),
         .front = stencil,
         .back = stencil,
     };
@@ -4929,11 +4966,14 @@ static bool vk_create_swapchain(int width, int height)
 
     vk.swapchain_format = surface_format.format;
     vk.present_mode = present_mode;
-    vk.depth_format = vk_choose_depth_format();
+    vk.depth_format = vk_choose_depth_format(vk_shadow_stencil_requested());
     if (vk.depth_format == VK_FORMAT_UNDEFINED) {
         Com_SetLastError("No supported Vulkan depth format");
         return false;
     }
+    Com_Printf("Vulkan depth format: %s, shadow stencil %s\n",
+               vk_format_name(vk.depth_format),
+               vk_shadow_stencil_enabled() ? "enabled" : "disabled");
     vk.swapchain_extent = extent;
 
     result = vk.GetSwapchainImagesKHR(vk.device, vk.swapchain, &vk.swapchain_image_count, NULL);
@@ -8177,6 +8217,7 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     lightpoint_t point;
     vec3_t dir;
     float w, radius, alpha = 0.5f;
+    vec4_t color;
     mat4_t proj, view, model_matrix, shadow_proj, shadow_model, view_model;
     vk_alias_push_t push;
 
@@ -8228,8 +8269,8 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     vk_matrix_multiply(view_model, view, shadow_model);
     vk_matrix_multiply(push.mvp, proj, view_model);
 
-    Vector4Set(push.color, 0.0f, 0.0f, 0.0f,
-               ((ent->flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f) * alpha);
+    vk_entity_light_color(ent, fd, color);
+    Vector4Set(push.color, 0.0f, 0.0f, 0.0f, color[3] * alpha);
     Vector4Clear(push.shadedir);
     push.backlerp = lerp->backlerp;
     push.shellscale = 0.0f;
@@ -10499,6 +10540,7 @@ bool VKR_Init(bool total)
     vk_fullbright = Cvar_Get("r_fullbright", "0", CVAR_CHEAT);
     vk_cull_models = Cvar_Get("gl_cull_models", "1", 0);
     vk_shadows = Cvar_Get("gl_shadows", "0", CVAR_ARCHIVE);
+    vk_stencilbits = Cvar_Get("gl_stencilbits", "8", CVAR_REFRESH);
     vk_dotshading = Cvar_Get("gl_dotshading", "1", 0);
     vk_draworder = Cvar_Get("gl_draworder", "1", 0);
     vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
