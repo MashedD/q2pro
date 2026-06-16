@@ -8277,7 +8277,8 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     Vector4Set(push.color, 0.0f, 0.0f, 0.0f, color[3] * alpha);
     Vector4Clear(push.shadedir);
     push.backlerp = lerp->backlerp;
-    push.shellscale = 0.0f;
+    push.shellscale = (ent->flags & RF_SHELL_MASK) && !(ent->flags & RF_NOSHELLSCALE) ?
+        ((ent->flags & RF_WEAPONMODEL) ? WEAPONSHELL_SCALE : POWERSUIT_SCALE) : 0.0f;
     push.depthscale = 1.0f;
     push._pad = 0.0f;
     vk_fog_params(fd, push.fog);
