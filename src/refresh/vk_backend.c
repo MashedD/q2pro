@@ -8069,15 +8069,18 @@ static void vk_draw_alias_color_pass(VkCommandBuffer cmd, VkPipeline pipeline,
                                      const VkBuffer buffers[2],
                                      const VkDeviceSize offsets[2],
                                      const vk_model_t *model,
-                                     const vk_alias_push_t *push)
+                                     const vk_alias_push_t *push,
+                                     bool count_stats)
 {
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
     vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(*push), push);
     vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0, 0, 0);
-    c.trisDrawn += model->mesh.index_count / 3;
-    vk_count_batch3d();
+    if (count_stats) {
+        c.trisDrawn += model->mesh.index_count / 3;
+        vk_count_batch3d();
+    }
 }
 
 static void vk_draw_alias_outlines(VkCommandBuffer cmd,
@@ -8212,7 +8215,8 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
                                  const vk_model_t *model,
                                  const VkBuffer buffers[2],
                                  const VkDeviceSize offsets[2],
-                                 const vk_alias_lerp_t *lerp)
+                                 const vk_alias_lerp_t *lerp,
+                                 bool count_stats)
 {
     lightpoint_t point;
     vec3_t dir;
@@ -8280,8 +8284,8 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     push.intensity = 1.0f;
 
     vk_draw_alias_color_pass(vk.command_buffers[vk.current_image],
-                             vk.alias_shadow_pipeline, buffers, offsets,
-                             model, &push);
+                              vk.alias_shadow_pipeline, buffers, offsets,
+                              model, &push, count_stats);
 }
 
 static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
@@ -8319,12 +8323,12 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     vk_entity_axis(ent, axis);
     if (vk_alias_model_culled(model, ent, axis, lerp.frame, lerp.oldframe)) {
         if (!vk.drawing_bloom)
-            vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp);
+            vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp, true);
         return;
     }
 
     if (!draw_model) {
-        vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp);
+        vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp, true);
         return;
     }
 
@@ -8389,7 +8393,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     }
 
     if (!vk.drawing_bloom)
-        vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp);
+        vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp, false);
 }
 
 static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
