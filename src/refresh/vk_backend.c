@@ -9268,8 +9268,15 @@ static bool vk_entity_in_pass(const entity_t *ent, vk_entity_pass_t pass)
     if (ent->flags & RF_BEAM)
         return pass == VK_ENTITY_BEAM;
 
-    if (ent->flags & RF_BLOOM_ONLY)
-        return pass == VK_ENTITY_BLOOM_ONLY;
+    if (ent->flags & RF_BLOOM_ONLY) {
+        if (pass == VK_ENTITY_BLOOM_ONLY)
+            return true;
+        if (pass != VK_ENTITY_OPAQUE || (ent->model & BIT(31)))
+            return false;
+
+        vk_model_t *model = vk_model_for_handle(ent->model);
+        return model && model->type == VK_MODEL_ALIAS;
+    }
 
     if (pass == VK_ENTITY_BLOOM_ONLY)
         return false;
