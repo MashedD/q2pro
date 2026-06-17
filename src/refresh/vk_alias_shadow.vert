@@ -10,6 +10,14 @@ layout(push_constant) uniform Push {
     float _pad;
     vec4 fog;
     float intensity;
+    vec3 _pad2;
+    vec4 height_x;
+    vec4 height_y;
+    vec4 height_z;
+    vec4 heightfog_start;
+    vec4 heightfog_end;
+    vec4 heightfog_view;
+    vec4 heightfog_params;
 } pc;
 
 layout(location = 0) in vec3 in_position;
@@ -21,6 +29,7 @@ layout(location = 5) in vec3 in_old_normal;
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_uv;
 layout(location = 2) flat out float v_mode;
+layout(location = 3) out vec3 v_world_pos;
 
 void main()
 {
@@ -32,13 +41,9 @@ void main()
     gl_Position = pc.mvp * vec4(position, 1.0);
     gl_Position.z *= pc.depthscale;
     v_color = in_color * pc.color;
-    if (pc.shadedir.w != 0.0) {
-        float d = dot(normal, pc.shadedir.xyz);
-        if (d < 0.0) {
-            d *= 0.3;
-        }
-        v_color.rgb *= d + 1.0;
-    }
     v_uv = in_uv;
     v_mode = 0.0;
+    vec4 pos = vec4(position, 1.0);
+    v_world_pos = vec3(dot(pc.height_x, pos), dot(pc.height_y, pos),
+                       dot(pc.height_z, pos));
 }

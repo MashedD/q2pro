@@ -111,6 +111,10 @@ static const uint32_t vk_alias_vert_spv[] =
 #include "vk_alias_vert_spv.h"
 ;
 
+static const uint32_t vk_alias_shadow_vert_spv[] =
+#include "vk_alias_shadow_vert_spv.h"
+;
+
 static const uint32_t vk_alias_shadow_frag_spv[] =
 #include "vk_alias_shadow_frag_spv.h"
 ;
@@ -308,12 +312,27 @@ typedef struct {
     float _pad;
     float fog[4];
     float intensity;
+} vk_alias_push_t;
+
+typedef struct {
+    mat4_t mvp;
+    float color[4];
+    float shadedir[4];
+    float backlerp;
+    float shellscale;
+    float depthscale;
+    float _pad;
+    float fog[4];
+    float intensity;
     float _pad2[3];
+    float height_x[4];
+    float height_y[4];
     float height_z[4];
     float heightfog_start[4];
     float heightfog_end[4];
+    float heightfog_view[4];
     float heightfog_params[4];
-} vk_alias_push_t;
+} vk_alias_shadow_push_t;
 
 typedef struct {
     uint32_t frame;
@@ -3214,8 +3233,9 @@ static bool vk_create_frame_resources(void)
     VkPushConstantRange push_range = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
-        .size = max(max(max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
-                        sizeof(vk_world_push_t)), sizeof(vk_alias_push_t)),
+        .size = max(max(max(max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
+                            sizeof(vk_world_push_t)), sizeof(vk_alias_push_t)),
+                    sizeof(vk_alias_shadow_push_t)),
     };
     VkPipelineLayoutCreateInfo layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -4676,8 +4696,11 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
                                      float depth_bias_slope,
                                      VkPipelineDepthStencilStateCreateInfo *stencil_state)
 {
-    VkShaderModule vert = vk_create_shader_module(vk_alias_vert_spv,
-                                                  sizeof(vk_alias_vert_spv));
+    VkShaderModule vert = color_only ?
+        vk_create_shader_module(vk_alias_shadow_vert_spv,
+                                sizeof(vk_alias_shadow_vert_spv)) :
+        vk_create_shader_module(vk_alias_vert_spv,
+                                sizeof(vk_alias_vert_spv));
     if (!vert)
         return false;
 
@@ -6846,10 +6869,12 @@ static void vk_fog_params(const refdef_t *fd, float fog[4])
 }
 
 static void vk_height_fog_params(const refdef_t *fd, float start[4],
-                                 float end[4], float params[4])
+                                 float end[4], float view[4],
+                                 float params[4])
 {
     Vector4Clear(start);
     Vector4Clear(end);
+    Vector4Clear(view);
     Vector4Clear(params);
 
     if (!fd || (vk_fog && !vk_fog->integer) ||
@@ -6860,9 +6885,9 @@ static void vk_height_fog_params(const refdef_t *fd, float start[4],
     start[3] = fd->heightfog.start.dist;
     VectorCopy(fd->heightfog.end.color, end);
     end[3] = fd->heightfog.end.dist;
-    params[0] = fd->vieworg[2];
-    params[1] = fd->heightfog.density;
-    params[2] = fd->heightfog.falloff;
+    VectorCopy(fd->vieworg, view);
+    params[0] = fd->heightfog.density;
+    params[1] = fd->heightfog.falloff;
     params[3] = 1.0f;
 }
 
@@ -8095,7 +8120,7 @@ static void vk_draw_alias_color_pass(VkCommandBuffer cmd, VkPipeline pipeline,
                                      const VkBuffer buffers[2],
                                      const VkDeviceSize offsets[2],
                                      const vk_model_t *model,
-                                     const vk_alias_push_t *push,
+                                     const vk_alias_shadow_push_t *push,
                                      bool count_stats)
 {
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -8249,7 +8274,7 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     float w, radius, alpha = 0.5f;
     vec4_t color;
     mat4_t proj, view, model_matrix, shadow_proj, shadow_model, view_model;
-    vk_alias_push_t push;
+    vk_alias_shadow_push_t push;
 
     if (!vk_shadows || !vk_shadows->integer || !vk.alias_shadow_pipeline)
         return;
@@ -8310,10 +8335,14 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     vk_fog_params(fd, push.fog);
     push.intensity = 1.0f;
     VectorClear(push._pad2);
+    Vector4Set(push.height_x, shadow_model[0], shadow_model[4],
+               shadow_model[8], shadow_model[12]);
+    Vector4Set(push.height_y, shadow_model[1], shadow_model[5],
+               shadow_model[9], shadow_model[13]);
     Vector4Set(push.height_z, shadow_model[2], shadow_model[6],
                shadow_model[10], shadow_model[14]);
     vk_height_fog_params(fd, push.heightfog_start, push.heightfog_end,
-                         push.heightfog_params);
+                         push.heightfog_view, push.heightfog_params);
 
     vk_draw_alias_color_pass(vk.command_buffers[vk.current_image],
                               vk.alias_shadow_pipeline, buffers, offsets,
@@ -8375,11 +8404,6 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     push._pad = 0.0f;
     vk_fog_params(fd, push.fog);
     push.intensity = vk_texture_intensity();
-    VectorClear(push._pad2);
-    Vector4Clear(push.height_z);
-    Vector4Clear(push.heightfog_start);
-    Vector4Clear(push.heightfog_end);
-    Vector4Clear(push.heightfog_params);
 
     for (int i = 0; i < model->alias_batch_count; i++) {
         const vk_alias_batch_t *batch = &model->alias_batches[i];
