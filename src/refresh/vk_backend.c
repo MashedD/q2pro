@@ -308,6 +308,11 @@ typedef struct {
     float _pad;
     float fog[4];
     float intensity;
+    float _pad2[3];
+    float height_z[4];
+    float heightfog_start[4];
+    float heightfog_end[4];
+    float heightfog_params[4];
 } vk_alias_push_t;
 
 typedef struct {
@@ -4802,7 +4807,7 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
         .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
         .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .colorBlendOp = VK_BLEND_OP_ADD,
-        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .alphaBlendOp = VK_BLEND_OP_ADD,
         .colorWriteMask = color_write ?
@@ -6840,6 +6845,27 @@ static void vk_fog_params(const refdef_t *fd, float fog[4])
     fog[3] = fd->fog.density / 64.0f;
 }
 
+static void vk_height_fog_params(const refdef_t *fd, float start[4],
+                                 float end[4], float params[4])
+{
+    Vector4Clear(start);
+    Vector4Clear(end);
+    Vector4Clear(params);
+
+    if (!fd || (vk_fog && !vk_fog->integer) ||
+        fd->heightfog.density <= 0.0f || fd->heightfog.falloff <= 0.0f)
+        return;
+
+    VectorCopy(fd->heightfog.start.color, start);
+    start[3] = fd->heightfog.start.dist;
+    VectorCopy(fd->heightfog.end.color, end);
+    end[3] = fd->heightfog.end.dist;
+    params[0] = fd->vieworg[2];
+    params[1] = fd->heightfog.density;
+    params[2] = fd->heightfog.falloff;
+    params[3] = 1.0f;
+}
+
 static void vk_sky_fog_params(const refdef_t *fd, float fog[4])
 {
     Vector4Clear(fog);
@@ -8283,6 +8309,11 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     push._pad = 0.0f;
     vk_fog_params(fd, push.fog);
     push.intensity = 1.0f;
+    VectorClear(push._pad2);
+    Vector4Set(push.height_z, shadow_model[2], shadow_model[6],
+               shadow_model[10], shadow_model[14]);
+    vk_height_fog_params(fd, push.heightfog_start, push.heightfog_end,
+                         push.heightfog_params);
 
     vk_draw_alias_color_pass(vk.command_buffers[vk.current_image],
                               vk.alias_shadow_pipeline, buffers, offsets,
@@ -8344,6 +8375,11 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     push._pad = 0.0f;
     vk_fog_params(fd, push.fog);
     push.intensity = vk_texture_intensity();
+    VectorClear(push._pad2);
+    Vector4Clear(push.height_z);
+    Vector4Clear(push.heightfog_start);
+    Vector4Clear(push.heightfog_end);
+    Vector4Clear(push.heightfog_params);
 
     for (int i = 0; i < model->alias_batch_count; i++) {
         const vk_alias_batch_t *batch = &model->alias_batches[i];

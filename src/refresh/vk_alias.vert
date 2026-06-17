@@ -10,6 +10,11 @@ layout(push_constant) uniform Push {
     float _pad;
     vec4 fog;
     float intensity;
+    vec3 _pad2;
+    vec4 height_z;
+    vec4 heightfog_start;
+    vec4 heightfog_end;
+    vec4 heightfog_params;
 } pc;
 
 layout(location = 0) in vec3 in_position;
@@ -21,6 +26,7 @@ layout(location = 5) in vec3 in_old_normal;
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_uv;
 layout(location = 2) flat out float v_mode;
+layout(location = 3) out float v_world_z;
 
 void main()
 {
@@ -41,4 +47,5 @@ void main()
     }
     v_uv = in_uv;
     v_mode = 0.0;
+    v_world_z = dot(pc.height_z, vec4(position, 1.0));
 }
