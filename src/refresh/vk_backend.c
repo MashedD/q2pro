@@ -8175,7 +8175,7 @@ static bool vk_alias_shadow_point(const entity_t *ent, const refdef_t *fd,
     const bsp_t *bsp = vk.world.cache;
     vec3_t end;
 
-    if (!bsp || !bsp->nodes)
+    if (!bsp || !bsp->nodes || !bsp->lightmap)
         return false;
 
     VectorCopy(ent->origin, end);
@@ -8278,7 +8278,7 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     Vector4Clear(push.shadedir);
     push.backlerp = lerp->backlerp;
     push.shellscale = (ent->flags & RF_SHELL_MASK) && !(ent->flags & RF_NOSHELLSCALE) ?
-        ((ent->flags & RF_WEAPONMODEL) ? WEAPONSHELL_SCALE : POWERSUIT_SCALE) : 0.0f;
+        POWERSUIT_SCALE : 0.0f;
     push.depthscale = (ent->flags & RF_DEPTHHACK) ? 0.25f : 1.0f;
     push._pad = 0.0f;
     vk_fog_params(fd, push.fog);
