@@ -4869,7 +4869,7 @@ static VkPipelineDepthStencilStateCreateInfo vk_shadow_depth_stencil_state(void)
     return (VkPipelineDepthStencilStateCreateInfo){
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = VK_TRUE,
-        .depthWriteEnable = VK_FALSE,
+        .depthWriteEnable = VK_TRUE,
         .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
         .stencilTestEnable = vk_shadow_stencil_enabled(),
         .front = stencil,
