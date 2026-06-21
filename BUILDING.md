@@ -88,7 +88,7 @@ Run `sudo ninja -C builddir install` to install Q2PRO system-wide into
 configured prefix (`/usr/local` by default).
 
 **NOTE:** If not using `ninja install`, be sure to copy
-`src/client/ui/q2pro.menu` into your `baseq2` folder.  This file is required
+`assets/baseq2/q2pro.menu` into your `baseq2` folder.  This file is required
 to display in-game menus.
 
 Copy `baseq2/pak*.pak` files and `baseq2/players` directory from unpacked
@@ -290,4 +290,3 @@ OpenAL64.dll // rename from OpenAL32.dll 64-bit version
 ```
 
 Additionally Copy file `assets/baseq2/q2pro.menu` to `baseq2` folder.
-

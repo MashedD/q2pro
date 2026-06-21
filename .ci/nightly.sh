@@ -61,7 +61,7 @@ i686-w64-mingw32-strip q2pro.exe q2proded.exe gamex86.dll
 
 unix2dos -k -n ../$SRC/LICENSE LICENSE.txt ../$SRC/doc/client.asciidoc MANUAL.txt ../README README.txt
 mkdir baseq2
-cp -a ../$SRC/src/client/ui/q2pro.menu baseq2/
+cp -a ../$SRC/assets/baseq2/q2pro.menu baseq2/
 mv gamex86.dll baseq2/
 
 zip -9 ../q2pro-client_win32_x86.zip \
@@ -92,7 +92,7 @@ x86_64-w64-mingw32-strip q2pro.exe q2proded.exe gamex86_64.dll
 
 unix2dos -k -n ../$SRC/LICENSE LICENSE.txt ../$SRC/doc/client.asciidoc MANUAL.txt ../README README.txt
 mkdir baseq2
-cp -a ../$SRC/src/client/ui/q2pro.menu baseq2/
+cp -a ../$SRC/assets/baseq2/q2pro.menu baseq2/
 mv gamex86_64.dll baseq2/
 mv q2pro.exe q2pro64.exe
 mv q2proded.exe q2proded64.exe

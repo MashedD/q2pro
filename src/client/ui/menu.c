@@ -2226,7 +2226,7 @@ Menu_Draw
 void Menu_Draw(menuFrameWork_t *menu)
 {
     void *item;
-    int i;
+    int i, drawn;
 
 //
 // draw background
@@ -2263,6 +2263,7 @@ void Menu_Draw(menuFrameWork_t *menu)
 //
 // draw contents
 //
+    drawn = 0;
     for (i = 0; i < menu->nitems; i++) {
         item = menu->items[i];
         if (((menuCommon_t *)item)->flags & QMF_HIDDEN) {
@@ -2272,7 +2273,7 @@ void Menu_Draw(menuFrameWork_t *menu)
         // skip items scrolled off screen
         if (menu->maxVisible && i < menu->scrollOffset)
             continue;
-        if (menu->maxVisible && i >= menu->scrollOffset + menu->maxVisible)
+        if (menu->maxVisible && drawn >= menu->maxVisible)
             break;
 
         switch (((menuCommon_t *)item)->type) {
@@ -2317,6 +2318,8 @@ void Menu_Draw(menuFrameWork_t *menu)
         if (ui_debug->integer) {
             UI_DrawRect8(&((menuCommon_t *)item)->rect, 1, 223);
         }
+
+        drawn++;
     }
 
     // draw scroll indicators for scrollable menus
@@ -2447,6 +2450,7 @@ menuSound_t Menu_MouseMove(menuCommon_t *item)
 static menuSound_t Menu_DefaultKey(menuFrameWork_t *m, int key)
 {
     menuCommon_t *item;
+    menuSound_t sound;
 
     switch (key) {
     case K_ESCAPE:
@@ -2466,6 +2470,9 @@ static menuSound_t Menu_DefaultKey(menuFrameWork_t *m, int key)
         return Menu_AdjustCursor(m, 1);
 
     case K_MWHEELDOWN:
+        sound = Menu_SlideItem(m, -1);
+        if (sound != QMS_NOTHANDLED)
+            return sound;
         if (m->maxVisible && m->maxVisible < m->nitems) {
             m->scrollOffset++;
             if (m->scrollOffset + m->maxVisible > m->nitems)
@@ -2473,9 +2480,12 @@ static menuSound_t Menu_DefaultKey(menuFrameWork_t *m, int key)
             if (m->size) m->size(m);
             return QMS_SILENT;
         }
-        return Menu_SlideItem(m, -1);
+        return QMS_NOTHANDLED;
 
     case K_MWHEELUP:
+        sound = Menu_SlideItem(m, 1);
+        if (sound != QMS_NOTHANDLED)
+            return sound;
         if (m->maxVisible && m->maxVisible < m->nitems) {
             m->scrollOffset--;
             if (m->scrollOffset < 0)
@@ -2483,7 +2493,7 @@ static menuSound_t Menu_DefaultKey(menuFrameWork_t *m, int key)
             if (m->size) m->size(m);
             return QMS_SILENT;
         }
-        return Menu_SlideItem(m, 1);
+        return QMS_NOTHANDLED;
 
     case K_KP_LEFTARROW:
     case K_LEFTARROW:

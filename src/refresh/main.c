@@ -1302,7 +1302,7 @@ static void GL_Register(void)
     gl_waterwarp = Cvar_Get("gl_waterwarp", "0", 0);
     gl_fog = Cvar_Get("gl_fog", "1", 0);
     gl_bloom = Cvar_Get("gl_bloom", "0", 0);
-    gl_glare = Cvar_Get("gl_glare", "1", CVAR_ARCHIVE);
+    gl_glare = Cvar_Get("gl_glare", "0", CVAR_ARCHIVE);
     gl_glare_threshold = Cvar_Get("gl_glare_threshold", "0.3", 0);
     gl_glare_size = Cvar_Get("gl_glare_size", "24", 0);
     gl_glare_intensity = Cvar_Get("gl_glare_intensity", "0.5", 0);
