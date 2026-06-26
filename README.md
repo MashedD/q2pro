@@ -36,6 +36,8 @@ features include:
 - fixed `ch_scale` so that `scr_scale` doesn't affect crosshair size
 - fixed compilation warnings
 - fixed OpenTDM crash on Windows when loading q2dm1 twice
+- fixed broken textures on some OpenGL drivers by avoiding direct and multi-bind
+  texture paths
 
 # Changes
 
@@ -62,4 +64,3 @@ features include:
 
 - fix problem with displaying excessive items in address book after
   quickly switching from Server Browser
-
