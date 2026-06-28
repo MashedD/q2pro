@@ -91,6 +91,23 @@ cl_maxfps::
     Otherwise, limits both rendering and physics frame rates. Default value is
     60.
 
+cl_movement_feel_mode::
+    Selects client-side movement prediction feel. This affects local prediction
+    and rendering only; commands sent to the server and server-side physics are
+    not changed. Default value is 0.
+      - 0 — use Q2PRO prediction feel
+      - 1 — use R1Q2-style prediction feel, where only completed user commands
+      are predicted and the current in-progress command is not applied
+
+cl_step_smoothing_mode::
+    Selects how the camera smooths stair and step transitions during client
+    prediction. This is visual only and does not affect movement physics.
+    Default value is ‘q2pro’.
+      - q2pro — use standard Q2PRO stair smoothing
+      - r1q2-1 — use R1Q2 smoothsteps mode 1
+      - r1q2-2 — use R1Q2 smoothsteps mode 2
+      - r1q2-3 — use R1Q2 smoothsteps mode 3
+
 cl_gibs::
     Controls rendering of entities with ‘EF_GIB’ flag set. When using Q2PRO
     protocol, disabling this saves some bandwidth since the server stops

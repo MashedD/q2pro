@@ -60,6 +60,8 @@ features include:
 - rendering: added `gl_glare` surface glare effect for bright glowmapped
   surfaces, with size, intensity and brightness threshold controls
 - input: added `m_r1q2_mouse` to enable R1Q2-style mouse movement logic
+- input: added `cl_movement_feel_mode` and `cl_step_smoothing_mode` for
+  optional R1Q2-style client-side movement prediction feel and step smoothing
 
 # TODO
 

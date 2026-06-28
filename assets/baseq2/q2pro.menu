@@ -338,6 +338,8 @@ begin input
     toggle "R1Q2 mouse" m_r1q2_mouse
     toggle "free look" freelook
     toggle "always run" cl_run
+    pairs "movement feel" cl_movement_feel_mode Q2PRO 0 R1Q2 1
+    pairs "step smoothing" cl_step_smoothing_mode Q2PRO q2pro R1Q2-1 r1q2-1 R1Q2-2 r1q2-2 R1Q2-3 r1q2-3
 end
 
 begin keys

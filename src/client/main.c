@@ -25,6 +25,8 @@ cvar_t  *cl_noskins;
 cvar_t  *cl_footsteps;
 cvar_t  *cl_timeout;
 cvar_t  *cl_predict;
+cvar_t  *cl_movement_feel_mode;
+cvar_t  *cl_step_smoothing_mode;
 cvar_t  *cl_gun;
 cvar_t  *cl_gunalpha;
 cvar_t  *cl_gunfov;
@@ -2739,6 +2741,8 @@ static void CL_InitLocal(void)
     cl_noskins->changed = cl_noskins_changed;
     cl_predict = Cvar_Get("cl_predict", "1", 0);
     cl_predict->changed = cl_predict_changed;
+    cl_movement_feel_mode = Cvar_Get("cl_movement_feel_mode", "0", CVAR_ARCHIVE);
+    cl_step_smoothing_mode = Cvar_Get("cl_step_smoothing_mode", "q2pro", CVAR_ARCHIVE);
     cl_kickangles = Cvar_Get("cl_kickangles", "1", CVAR_CHEAT);
     cl_warn_on_fps_rounding = Cvar_Get("cl_warn_on_fps_rounding", "1", 0);
     cl_maxfps = Cvar_Get("cl_maxfps", "62", 0);
