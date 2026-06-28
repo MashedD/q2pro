@@ -33,6 +33,7 @@ static cvar_t    *cl_batchcmds;
 static cvar_t    *m_filter;
 static cvar_t    *m_accel;
 static cvar_t    *m_autosens;
+static cvar_t    *m_r1q2_mouse;
 
 static cvar_t    *cl_upspeed;
 static cvar_t    *cl_forwardspeed;
@@ -477,6 +478,24 @@ static void CL_MouseMove(void)
         return;
     }
 
+    if (m_r1q2_mouse->integer) {
+        mx *= sensitivity->value;
+        my *= sensitivity->value;
+
+        if ((in_strafe.state & 1) || (lookstrafe->integer && in_mlooking)) {
+            cl.mousemove[1] += m_side->value * mx;
+        } else {
+            cl.viewangles[YAW] -= m_yaw->value * mx;
+        }
+
+        if ((in_mlooking || freelook->integer) && !(in_strafe.state & 1)) {
+            cl.viewangles[PITCH] += m_pitch->value * my;
+        } else {
+            cl.mousemove[0] -= m_forward->value * my;
+        }
+        return;
+    }
+
     Cvar_ClampValue(m_accel, 0, 1);
 
     speed = sqrtf(mx * mx + my * my);
@@ -723,6 +742,7 @@ void CL_RegisterInput(void)
     m_filter = Cvar_Get("m_filter", "0", 0);
     m_accel = Cvar_Get("m_accel", "0", 0);
     m_autosens = Cvar_Get("m_autosens", "0", 0);
+    m_r1q2_mouse = Cvar_Get("m_r1q2_mouse", "0", CVAR_ARCHIVE);
     m_autosens->changed = m_autosens_changed;
     m_autosens_changed(m_autosens);
 }

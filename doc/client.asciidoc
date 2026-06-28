@@ -1181,6 +1181,13 @@ m_filter::
     When enabled, mouse movement is averaged between current and previous
     samples.  Default value is 0 (filtering disabled).
 
+m_r1q2_mouse::
+    Enables R1Q2-style mouse movement logic. Mouse deltas are scaled only by
+    ‘sensitivity’ after optional ‘m_filter’ smoothing, bypassing Q2PRO mouse
+    acceleration and automatic FOV sensitivity scaling. When enabled,
+    ‘lookstrafe’ also follows R1Q2 behavior and strafes only while ‘+mlook’ is
+    held. Default value is 0 (disabled).
+
 
 Miscellaneous
 ~~~~~~~~~~~~~

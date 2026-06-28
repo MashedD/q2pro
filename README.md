@@ -59,6 +59,7 @@ features include:
 - rendering: added `r_lava_glowmaps` to toggle lava glowmaps independently
 - rendering: added `gl_glare` surface glare effect for bright glowmapped
   surfaces, with size, intensity and brightness threshold controls
+- input: added `m_r1q2_mouse` to enable R1Q2-style mouse movement logic
 
 # TODO
 
