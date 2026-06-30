@@ -1834,6 +1834,78 @@ void CL_InitEffects(void)
 #define RAIN_SPEED          800.0f
 #define RAIN_AREA           2048.0f
 #define RAIN_TRACE_DEPTH    1024.0f
+#define RAIN_DROP_COUNT     28
+
+static void CL_RainStreak(const vec3_t start, float length)
+{
+    entity_t ent;
+
+    memset(&ent, 0, sizeof(ent));
+    VectorCopy(start, ent.origin);
+    VectorSet(ent.oldorigin, start[0], start[1], start[2] - length);
+    ent.skinnum = -1;
+    ent.rgba.u8[0] = 165;
+    ent.rgba.u8[1] = 190;
+    ent.rgba.u8[2] = 255;
+    ent.rgba.u8[3] = 255;
+    ent.alpha = 0.25f + frand() * 0.15f;
+    ent.frame = 1;
+    ent.flags = RF_TRANSLUCENT | RF_BEAM;
+    V_AddEntity(&ent);
+}
+
+static void CL_RainWaterImpact(const vec3_t org)
+{
+    cparticle_t *p;
+    vec3_t pos;
+
+    if (frand() > 0.25f)
+        return;
+
+    p = CL_AllocParticle();
+    if (!p)
+        return;
+
+    VectorCopy(org, p->org);
+    p->org[2] += 1.0f;
+    VectorClear(p->vel);
+    VectorClear(p->accel);
+    p->color = -1;
+    p->rgba.u8[0] = 150;
+    p->rgba.u8[1] = 185;
+    p->rgba.u8[2] = 230;
+    p->rgba.u8[3] = 255;
+    p->scale = -(4.0f + frand() * 8.0f);
+    p->alpha = 0.22f + frand() * 0.12f;
+    p->alphavel = -1.2f - frand() * 0.8f;
+    p->time = cl.time;
+
+    if (frand() > 0.35f)
+        return;
+
+    p = CL_AllocParticle();
+    if (!p)
+        return;
+
+    VectorCopy(org, pos);
+    pos[0] += crand() * 8.0f;
+    pos[1] += crand() * 8.0f;
+    pos[2] += 1.5f;
+    VectorCopy(pos, p->org);
+    p->vel[0] = crand() * 12.0f;
+    p->vel[1] = crand() * 12.0f;
+    p->vel[2] = 0;
+    VectorClear(p->accel);
+    p->color = -1;
+    p->rgba.u8[0] = 175;
+    p->rgba.u8[1] = 210;
+    p->rgba.u8[2] = 255;
+    p->rgba.u8[3] = 255;
+    p->scale = 0.6f + frand() * 0.6f;
+    p->alpha = 0.35f;
+    p->alphavel = -2.5f - frand();
+    p->time = cl.time;
+}
 
 void CL_RainParticles(void)
 {
@@ -1859,8 +1931,9 @@ void CL_RainParticles(void)
     color.u8[2] = 255;
     color.u8[3] = 255;
 
-    for (i = 0; i < 50; i++) {
+    for (i = 0; i < RAIN_DROP_COUNT; i++) {
         float clear_h;
+        bool water_impact;
 
         start[0] = cl.refdef.vieworg[0] + (frand() - 0.5f) * RAIN_AREA;
         start[1] = cl.refdef.vieworg[1] + (frand() - 0.5f) * RAIN_AREA;
@@ -1889,14 +1962,24 @@ void CL_RainParticles(void)
         VectorSet(end, start[0], start[1], start[2] - RAIN_TRACE_DEPTH);
 
         CM_BoxTrace(&trace, start, end, vec3_origin, vec3_origin,
-                     cl.bsp->nodes, MASK_SOLID, cl.csr.extended);
+                     cl.bsp->nodes, MASK_SOLID | CONTENTS_WATER, cl.csr.extended);
 
         if (trace.fraction >= 1.0f)
             continue;
 
+        water_impact = !!(trace.contents & CONTENTS_WATER);
+
         dist = start[2] - trace.endpos[2];
         if (dist < 32.0f)
             continue;
+
+        if (water_impact)
+            CL_RainWaterImpact(trace.endpos);
+
+        if (frand() < 0.35f) {
+            CL_RainStreak(start, min(dist, 96.0f + frand() * 96.0f));
+            continue;
+        }
 
         p = CL_AllocParticle();
         if (!p)
