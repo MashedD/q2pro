@@ -247,8 +247,7 @@ cl_railspiral_radius::
 
 cl_weather::
     Weather effect mode. Value 0 disables (default). Value 1 enables rain
-    (~50 drops/frame). Value 2 enables snow (~50 flakes/frame) with white
-    ground accumulation. Falls from skybox-only areas, stops at solid surfaces.
+    (~50 drops/frame). Falls from skybox-only areas, stops at solid surfaces.
 
 cl_disable_particles::
     Disables rendering of particles for the following effects. This variable is

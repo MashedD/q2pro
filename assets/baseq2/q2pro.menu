@@ -113,6 +113,7 @@ begin options
     action "screen setup" pushmenu screen
     action "download options" pushmenu downloads
     action "address book" pushmenu addressbook
+    action "compatibility" pushmenu compatibility
 end
 
 begin sound
@@ -157,7 +158,7 @@ begin effects
     toggle "grenade explosions" cl_disable_explosions ~0
     toggle "rocket explosions" cl_disable_explosions ~1
     blank
-    values "weather" cl_weather off rain snow
+    values "weather" cl_weather off rain
     blank
     action --align "railgun trail setup..." pushmenu railtrail
 end
@@ -337,11 +338,8 @@ begin input
     field --numeric --width 8 "mouse sens" sensitivity
     toggle "auto sens" m_autosens
     toggle "mouse filter" m_filter
-    toggle "R1Q2 mouse" m_r1q2_mouse
     toggle "free look" freelook
     toggle "always run" cl_run
-    pairs "movement feel" cl_movement_feel_mode Q2PRO 0 R1Q2 1
-    pairs "step smoothing" cl_step_smoothing_mode Q2PRO q2pro R1Q2-1 r1q2-1 R1Q2-2 r1q2-2 R1Q2-3 r1q2-3
 end
 
 begin keys
@@ -394,4 +392,11 @@ begin weapons
     bind "railgun" "use Railgun"
     bind "bfg10k" "use BFG10K"
     bind "grenades" "use Grenades"
+end
+
+begin compatibility
+    title "Compatibility"
+    toggle "R1Q2 mouse" m_r1q2_mouse
+    pairs "movement feel" cl_movement_feel_mode Q2PRO 0 R1Q2 1
+    pairs "step smoothing" cl_step_smoothing_mode Q2PRO q2pro R1Q2-1 r1q2-1 R1Q2-2 r1q2-2 R1Q2-3 r1q2-3
 end

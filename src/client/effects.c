@@ -1808,9 +1808,6 @@ CL_ClearEffects
 
 ==============
 */
-static float snow_density;
-static float snow_accum_credit;
-static int snow_accum_time;
 static int last_weather_snd_time;
 static int last_weather_snd_mode;
 
@@ -1819,9 +1816,6 @@ void CL_ClearEffects(void)
     CL_ClearLightStyles();
     CL_ClearParticles();
     CL_ClearDlights();
-    snow_density = 0;
-    snow_accum_credit = 0;
-    snow_accum_time = 0;
 }
 
 void CL_InitEffects(void)
@@ -1840,55 +1834,32 @@ void CL_InitEffects(void)
 #define RAIN_SPEED          800.0f
 #define RAIN_AREA           2048.0f
 #define RAIN_TRACE_DEPTH    1024.0f
-#define SNOW_SPEED          150.0f
-#define SNOW_ACCUM_RATE     520.0f
-#define SNOW_ACCUM_MAX_CREDIT 120.0f
 
 void CL_RainParticles(void)
 {
-    int i, count;
+    int i;
     cparticle_t *p;
     vec3_t start, end;
     trace_t trace;
-    float dist, lifetime, speed, a;
+    float dist, lifetime;
     color_t color;
-    bool is_snow, outdoor;
+    bool outdoor;
 
     if (cl_weather->integer < 1)
+        return;
+    if (sv_paused->integer)
         return;
     if (!cl.bsp)
         return;
 
-    is_snow = (cl_weather->integer == 2);
-    count = is_snow ? 70 : 50;
-    speed = is_snow ? SNOW_SPEED : RAIN_SPEED;
     outdoor = false;
 
-    if (is_snow) {
-        float dt = 0;
-        if (snow_accum_time)
-            dt = (cl.time - snow_accum_time) * 0.001f;
-        if (dt < 0 || dt > 1)
-            dt = 0;
-        snow_accum_credit += dt * SNOW_ACCUM_RATE;
-        if (snow_accum_credit > SNOW_ACCUM_MAX_CREDIT)
-            snow_accum_credit = SNOW_ACCUM_MAX_CREDIT;
-        snow_accum_time = cl.time;
-    }
+    color.u8[0] = 180;
+    color.u8[1] = 200;
+    color.u8[2] = 255;
+    color.u8[3] = 255;
 
-    if (is_snow) {
-        color.u8[0] = 255;
-        color.u8[1] = 255;
-        color.u8[2] = 255;
-        color.u8[3] = 255;
-    } else {
-        color.u8[0] = 180;
-        color.u8[1] = 200;
-        color.u8[2] = 255;
-        color.u8[3] = 255;
-    }
-
-    for (i = 0; i < count; i++) {
+    for (i = 0; i < 50; i++) {
         float clear_h;
 
         start[0] = cl.refdef.vieworg[0] + (frand() - 0.5f) * RAIN_AREA;
@@ -1927,149 +1898,38 @@ void CL_RainParticles(void)
         if (dist < 32.0f)
             continue;
 
-        // accumulation: ground-aligned blanket + billboard bumps
-        if (is_snow && snow_accum_credit >= 2.0f) {
-            float al = -1.0f / (35.0f + frand() * 20.0f);
-            p = CL_AllocParticle();
-            if (p) {
-                VectorCopy(trace.endpos, p->org);
-                p->org[0] += (frand() - 0.5f) * 10.0f;
-                p->org[1] += (frand() - 0.5f) * 10.0f;
-                p->org[2] += 1.0f + frand() * 5.0f;
-                VectorClear(p->vel);
-                VectorClear(p->accel);
-                p->color = -1;
-                p->rgba.u8[0] = 200 + (int)(frand() * 40);
-                p->rgba.u8[1] = 200 + (int)(frand() * 40);
-                p->rgba.u8[2] = 210 + (int)(frand() * 30);
-                p->rgba.u8[3] = 255;
-                p->scale = 1.2f + frand() * 3.0f;
-                p->alpha = 1.0f;
-                p->alphavel = al;
-                p->time = cl.time;
-                snow_accum_credit -= 1.0f;
-            }
-            // verify solid ground before placing blanket
-            if (snow_accum_credit >= 1.0f) {
-                vec3_t ck, ck_end, ground_pos;
-                float ps, half, rx, ry;
-                int tier, j;
-
-                VectorCopy(trace.endpos, ground_pos);
-                ps = 30.0f + frand() * 34.0f;
-                rx = (frand() - 0.5f) * 36.0f;
-                ry = (frand() - 0.5f) * 36.0f;
-
-                for (tier = 0; tier < 3; tier++) {
-                    float div = (float)(1 << tier);
-                    bool solid = true;
-                    half = ps * 2.0f / div;
-                    for (j = 0; solid && j < 4; j++) {
-                        float ox = rx, oy = ry;
-                        switch (j) {
-                        case 0: ox -= half; oy -= half; break;
-                        case 1: ox += half; oy -= half; break;
-                        case 2: ox += half; oy += half; break;
-                        case 3: ox -= half; oy += half; break;
-                        }
-                        VectorSet(ck, ground_pos[0] + ox, ground_pos[1] + oy, ground_pos[2] + 8.0f);
-                        VectorSet(ck_end, ck[0], ck[1], ck[2] - 32.0f);
-                        CM_BoxTrace(&trace, ck, ck_end, vec3_origin, vec3_origin,
-                                     cl.bsp->nodes, MASK_SOLID, cl.csr.extended);
-                        if (trace.fraction >= 1.0f || fabsf(trace.endpos[2] - ground_pos[2]) > 6.0f)
-                            solid = false;
-                    }
-                    if (solid) {
-                        p = CL_AllocParticle();
-                        if (p) {
-                            VectorCopy(ground_pos, p->org);
-                            p->org[0] += rx;
-                            p->org[1] += ry;
-                            p->org[2] += 0.8f + frand() * 0.35f;
-                            VectorClear(p->vel);
-                            VectorClear(p->accel);
-                            p->color = -1;
-                            p->rgba.u8[0] = 220;
-                            p->rgba.u8[1] = 220;
-                            p->rgba.u8[2] = 230;
-                            p->rgba.u8[3] = (int)(180 + frand() * 75);
-                            p->scale = -(ps / div);
-                            p->alpha = 1.0f;
-                            p->alphavel = al;
-                            p->time = cl.time;
-                            snow_accum_credit -= 1.0f;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-
         p = CL_AllocParticle();
         if (!p)
             goto done;
 
         VectorCopy(start, p->org);
-        if (is_snow) {
-            p->vel[0] = crand() * 30.0f;
-            p->vel[1] = crand() * 30.0f;
-            p->vel[2] = -speed;
-            p->accel[0] = frand() * 20.0f - 10.0f;
-            p->accel[1] = frand() * 20.0f - 10.0f;
-            p->accel[2] = 0;
-        } else {
-            p->vel[0] = p->vel[1] = 0;
-            p->vel[2] = -speed;
-            VectorClear(p->accel);
-        }
+        p->vel[0] = p->vel[1] = 0;
+        p->vel[2] = -RAIN_SPEED;
+        VectorClear(p->accel);
 
-        lifetime = dist / speed;
+        lifetime = dist / RAIN_SPEED;
         p->alpha = 1.0f;
         p->alphavel = -1.0f / lifetime;
 
         p->color = -1;
         p->rgba = color;
-        p->scale = is_snow ? 0.8f : 1.5f;
+        p->scale = 1.5f;
         p->time = cl.time;
     }
 
 done:
-    // snow density tracker for screen blend
-    if (is_snow) {
-        if (outdoor) {
-            snow_density = snow_density * 0.995f + 0.005f;
-            if (snow_density > 1.0f) snow_density = 1.0f;
-        } else {
-            snow_density *= 0.95f;
-        }
-        if (snow_density > 0.3f) {
-            a = (snow_density - 0.3f) / 0.7f * 0.08f;
-            if (a > cl.refdef.screen_blend[3])
-                Vector4Set(cl.refdef.screen_blend, 1, 1, 1, a);
-        }
-    }
-
     // ambient weather sound — dedicated channel 240 so mode changes replace old sound
     if (cl_weather->integer) {
         if (!outdoor) {
             last_weather_snd_mode = 0;
         } else {
             int now = cl.time;
-            const char *snd;
-            int restart;
-            if (cl_weather->integer == 2) {
-                snd = "weather/snow_soft1.wav";
-                restart = 15000;
-            } else {
-                snd = "weather/rain_loop.wav";
-                restart = 24000;
-            }
-            if (last_weather_snd_mode != cl_weather->integer ||
-                now - last_weather_snd_time > restart) {
-                qhandle_t sfx = S_RegisterSound(snd);
+            if (last_weather_snd_mode != 1 ||
+                now - last_weather_snd_time > 24000) {
+                qhandle_t sfx = S_RegisterSound("weather/rain_loop.wav");
                 S_StartSound(NULL, cl.frame.clientNum + 1, 240, sfx, 1, ATTN_NONE, 0);
                 last_weather_snd_time = now;
-                last_weather_snd_mode = cl_weather->integer;
+                last_weather_snd_mode = 1;
             }
         }
     }
