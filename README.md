@@ -55,7 +55,8 @@ features include:
   checkerboard similar to one seen in original Quake 2
 - sound: added `al_hrtf` option to menu
 - sound: added `al_reverb` option to menu. 1 - softer, 2 - stronger
-- effects: added `cl_itemhighlight`, `cl_playerhighlight` and `cl_itemhighlight_glow`
+- effects: added `cl_itemhighlight`, `cl_weaponhighlight`, `cl_ammohighlight`,
+  `cl_playerhighlight` and `cl_itemhighlight_glow`
 - rendering: added `r_lava_glowmaps` to toggle lava glowmaps independently
 - rendering: added `gl_glare` surface glare effect for bright glowmapped
   surfaces, with size, intensity and brightness threshold controls
