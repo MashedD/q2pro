@@ -861,6 +861,7 @@ static bool Com_AddLateCommands(void)
 void Com_AddConfigFile(const char *name, unsigned flags)
 {
     int ret;
+    int saved = cmd_buffer.execCount;
 
     ret = Cmd_ExecuteFile(name, flags);
     if (ret == Q_ERR_SUCCESS) {
@@ -868,6 +869,8 @@ void Com_AddConfigFile(const char *name, unsigned flags)
     } else if (ret != Q_ERR(ENOENT)) {
         Com_WPrintf("Couldn't exec %s: %s\n", name, Q_ErrorString(ret));
     }
+
+    cmd_buffer.execCount = saved;
 }
 
 /*

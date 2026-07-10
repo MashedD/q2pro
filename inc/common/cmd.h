@@ -25,6 +25,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define CMD_BUFFER_SIZE     (1 << 16) // bumped max config size up to 64K
 
 #define ALIAS_LOOP_COUNT    16
+#define EXEC_LOOP_COUNT     16
 
 // where did current command come from?
 typedef enum {
@@ -42,7 +43,8 @@ typedef struct cmdbuf_s {
     size_t      cursize;
     size_t      maxsize;
     int         waitCount;
-    int         aliasCount; // for detecting runaway loops
+    int         aliasCount; // for detecting runaway alias loops
+    int         execCount;  // for detecting runaway exec loops
     void        (*exec)(struct cmdbuf_s *, const char *);
 } cmdbuf_t;
 

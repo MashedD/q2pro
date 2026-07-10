@@ -201,6 +201,7 @@ void Cbuf_Frame(cmdbuf_t *buf)
         buf->waitCount--;
     }
     buf->aliasCount = 0;        // don't allow infinite alias loops
+    buf->execCount = 0;         // don't allow infinite exec loops
 }
 
 /*
@@ -210,7 +211,7 @@ Cbuf_Clear
 */
 void Cbuf_Clear(cmdbuf_t *buf)
 {
-    buf->cursize = buf->waitCount = buf->aliasCount = 0;
+    buf->cursize = buf->waitCount = buf->aliasCount = buf->execCount = 0;
 }
 
 /*
@@ -1641,7 +1642,7 @@ int Cmd_ExecuteFile(const char *path, unsigned flags)
     buf = &cmd_buffer;
 
     // check for exec loop
-    if (buf->aliasCount >= ALIAS_LOOP_COUNT) {
+    if (buf->execCount >= EXEC_LOOP_COUNT) {
         ret = Q_ERR_INFINITE_LOOP;
         goto finish;
     }
@@ -1655,7 +1656,7 @@ int Cmd_ExecuteFile(const char *path, unsigned flags)
     // everything ok, execute it
     Com_Printf("Execing %s\n", path);
 
-    buf->aliasCount++;
+    buf->execCount++;
     Cbuf_InsertText(buf, f);
 
     ret = Q_ERR_SUCCESS;
