@@ -84,6 +84,7 @@ static m_servers_t  m_servers;
 static cvar_t   *ui_sortservers;
 static cvar_t   *ui_colorservers;
 static cvar_t   *ui_pingrate;
+static cvar_t   *ui_hide_wallfly;
 
 static void UpdateSelection(void)
 {
@@ -219,7 +220,7 @@ void UI_StatusEvent(const serverStatus_t *status)
     const char *info = status->infostring;
     char key[MAX_INFO_STRING];
     char value[MAX_INFO_STRING];
-    int i;
+    int i, slotIndex, numPlayers = 0;
 
     // ignore unless menu is up
     if (!m_servers.args) {
@@ -227,7 +228,7 @@ void UI_StatusEvent(const serverStatus_t *status)
     }
 
     // see if already added
-    slot = FindSlot(&net_from, &i);
+    slot = FindSlot(&net_from, &slotIndex);
     if (!slot) {
         // reply to broadcast, create new slot
         if (m_servers.list.numItems >= MAX_STATUS_SERVERS) {
@@ -270,8 +271,16 @@ void UI_StatusEvent(const serverStatus_t *status)
     if (ping > 999)
         ping = 999;
 
+    for (i = 0; i < status->numPlayers; i++) {
+        if (ui_hide_wallfly->integer &&
+            !strcmp(status->players[i].name, "WallFly[BZZZ]")) {
+            continue;
+        }
+        numPlayers++;
+    }
+
     slot = UI_FormatColumns(SLOT_EXTRASIZE, host, mod, map,
-                            va("%d/%s", status->numPlayers, maxclients),
+                            va("%d/%s", numPlayers, maxclients),
                             va("%u", ping),
                             NULL);
     slot->status = SLOT_VALID;
@@ -279,7 +288,7 @@ void UI_StatusEvent(const serverStatus_t *status)
     slot->hostname = hostname;
     slot->color = ColorForStatus(status, ping);
 
-    m_servers.list.items[i] = slot;
+    m_servers.list.items[slotIndex] = slot;
 
     slot->numRules = 0;
     while (slot->numRules < MAX_STATUS_RULES) {
@@ -297,9 +306,13 @@ void UI_StatusEvent(const serverStatus_t *status)
             UI_FormatColumns(0, key, value, NULL);
     }
 
-    slot->numPlayers = status->numPlayers;
+    slot->numPlayers = 0;
     for (i = 0; i < status->numPlayers; i++) {
-        slot->players[i] =
+        if (ui_hide_wallfly->integer &&
+            !strcmp(status->players[i].name, "WallFly[BZZZ]")) {
+            continue;
+        }
+        slot->players[slot->numPlayers++] =
             UI_FormatColumns(0,
                              va("%d", status->players[i].score),
                              va("%d", status->players[i].ping),
@@ -1083,6 +1096,7 @@ void M_Menu_Servers(void)
     ui_colorservers = Cvar_Get("ui_colorservers", "0", 0);
     ui_colorservers->changed = ui_colorservers_changed;
     ui_pingrate = Cvar_Get("ui_pingrate", "0", 0);
+    ui_hide_wallfly = Cvar_Get("ui_hide_wallfly", "1", CVAR_ARCHIVE);
 
     m_servers.menu.name     = "servers";
     m_servers.menu.title    = "Server Browser";
