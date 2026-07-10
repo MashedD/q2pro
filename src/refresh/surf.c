@@ -980,6 +980,8 @@ void GL_RebuildLighting(void)
 
 void GL_FreeWorld(void)
 {
+    GL_ClearGlareList();
+
     if (!gl_static.world.cache)
         return;
 
@@ -1068,15 +1070,9 @@ void GL_BuildGlareList(void)
     mface_t *surf;
     int i;
 
-    glr.num_glare_sources = 0;
+    GL_ClearGlareList();
 
-    if (!gl_glare->integer)
-        return;
-
-    if (gl_fullbright->integer || gl_vertexlight->integer)
-        return;
-
-    if (!bsp)
+    if (!bsp || !qglBeginQuery)
         return;
 
     // no need to check r_glowmaps: if glowmaps not loaded,
@@ -1114,7 +1110,7 @@ void GL_BuildGlareList(void)
         float b = pixel[2] / 255.0f;
         float brightness = (r + g + b) * (1.0f / 3.0f);
 
-        if (brightness < gl_glare_threshold->value)
+        if (brightness < Cvar_ClampValue(gl_glare_threshold, 0, 1))
             continue;
 
         if (glr.num_glare_sources >= MAX_GLARE_SOURCES)
@@ -1130,7 +1126,22 @@ void GL_BuildGlareList(void)
         VectorCopy(normal, gs->normal);
         VectorSet(gs->lightcolor, r, g, b);
         gs->brightness = brightness;
+        qglGenQueries(1, &gs->query);
+        if (!gs->query) {
+            glr.num_glare_sources--;
+            break;
+        }
     }
+}
+
+void GL_ClearGlareList(void)
+{
+    for (int i = 0; i < glr.num_glare_sources; i++) {
+        if (glr.glare_sources[i].query)
+            qglDeleteQueries(1, &glr.glare_sources[i].query);
+    }
+
+    glr.num_glare_sources = 0;
 }
 
 void GL_LoadWorld(const char *name)

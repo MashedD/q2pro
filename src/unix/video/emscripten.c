@@ -198,6 +198,20 @@ static bool pointerlock_change_cb(int type, const EmscriptenPointerlockChangeEve
     return false;
 }
 
+static bool focus_cb(int type, const EmscriptenFocusEvent *event, void *data)
+{
+    if (type == EMSCRIPTEN_EVENT_BLUR) {
+        Key_ClearStates();
+        htm.mouse.pointerlocked = false;
+        htm.mouse.x = htm.mouse.y = 0;
+        CL_Activate(ACT_RESTORED);
+    } else {
+        CL_Activate(ACT_ACTIVATED);
+    }
+
+    return false;
+}
+
 static void shutdown(void)
 {
     if (htm.context)
@@ -233,6 +247,8 @@ static bool init(void)
     emscripten_set_keyup_callback            (EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, true, keydown_cb);
     emscripten_set_resize_callback           (EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, true, window_resized_cb);
     emscripten_set_pointerlockchange_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, true, pointerlock_change_cb);
+    emscripten_set_focus_callback            (EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, true, focus_cb);
+    emscripten_set_blur_callback             (EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, true, focus_cb);
     emscripten_set_mousedown_callback        (TARGET, NULL, true, mousedown_cb);
     emscripten_set_mouseup_callback          (TARGET, NULL, true, mousedown_cb);
     emscripten_set_mousemove_callback        (TARGET, NULL, true, mousemove_cb);

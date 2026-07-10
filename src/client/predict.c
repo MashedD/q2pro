@@ -25,8 +25,6 @@ typedef enum {
     STEP_SMOOTH_R1Q2_3
 } stepSmoothMode_t;
 
-static unsigned r1q2_step_frame;
-
 static stepSmoothMode_t CL_StepSmoothMode(void)
 {
     const char *s = cl_step_smoothing_mode->string;
@@ -268,10 +266,12 @@ static void CL_DetectR1Q2Step(const pmove_t *pm, unsigned ack, unsigned current)
     oldz = cl.predicted_origins[oldframe][2];
     step = pm->s.origin[2] - oldz;
 
-    if (r1q2_step_frame != current && step > 63 && step < 160) {
+    if ((!cl.r1q2_step_frame_valid || cl.r1q2_step_frame != current) &&
+        step > 63 && step < 160) {
         cl.predicted_step = step * 0.125f;
         cl.predicted_step_time = cls.realtime - (int)(cls.frametime * 500);
-        r1q2_step_frame = current;
+        cl.r1q2_step_frame = current;
+        cl.r1q2_step_frame_valid = true;
     }
 }
 

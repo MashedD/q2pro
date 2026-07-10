@@ -801,8 +801,8 @@ NOTE: Bloom only works with glowmaps. Enabling it with non-remastered content
 
 gl_glare::
     Enables lens glare sprites on bright glowmapped world surfaces. Visibility
-    is checked against the BSP world and fades smoothly using ‘gl_flarespeed’.
-    Default value is 1.
+    is checked against the rendered scene and fades smoothly using
+    ‘gl_flarespeed’. Default value is 0.
 
 gl_glare_threshold::
     Minimum lightmap brightness required for a glowmapped surface to emit glare.

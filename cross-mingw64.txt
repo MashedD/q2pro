@@ -4,7 +4,7 @@ cpp = '/usr/bin/x86_64-w64-mingw32-g++'
 ar = '/usr/bin/x86_64-w64-mingw32-ar'
 strip = '/usr/bin/x86_64-w64-mingw32-strip'
 windres = '/usr/bin/x86_64-w64-mingw32-windres'
-pkgconfig = '/usr/bin/x86_64-w64-mingw32-pkg-config'
+pkg-config = '/usr/bin/x86_64-w64-mingw32-pkg-config'
 
 [host_machine]
 system = 'windows'
@@ -14,4 +14,3 @@ endian = 'little'
 
 [properties]
 needs_exe_wrapper = true
-

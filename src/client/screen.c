@@ -23,7 +23,7 @@ extern cvar_t *gl_fontshadow;
 
 static int SCR_FontShadow(void)
 {
-    return gl_fontshadow ? gl_fontshadow->integer : 0;
+    return gl_fontshadow ? Q_clip(gl_fontshadow->integer, 0, 2) : 0;
 }
 
 #define STAT_PICS       11

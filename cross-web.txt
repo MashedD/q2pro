@@ -4,7 +4,6 @@ cpp = 'em++'
 ar = 'emar'
 ranlib = 'emranlib'
 strip = 'emstrip'
-pkgconfig = ['emmake']
 
 [host_machine]
 system = 'emscripten'
@@ -14,4 +13,3 @@ endian = 'little'
 
 [properties]
 needs_exe_wrapper = true
-

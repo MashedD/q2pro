@@ -138,6 +138,9 @@ typedef struct {
     vec3_t lightcolor;
     float brightness;
     float visibility;
+    GLuint query;
+    unsigned timestamp;
+    bool pending;
     bool visible;
 } glare_source_t;
 
@@ -939,6 +942,7 @@ void GL_DrawParticles(void);
 void GL_DrawBeams(void);
 void GL_DrawFlares(void);
 void GL_BuildGlareList(void);
+void GL_ClearGlareList(void);
 void GL_DrawGlare(void);
 
 void GL_BindArrays(glVertexArray_t va);

@@ -2613,6 +2613,14 @@ static void cl_predict_changed(cvar_t *self)
     CL_UpdatePredictSetting();
 }
 
+static void cl_prediction_feel_changed(cvar_t *self)
+{
+    (void)self;
+    cl.predicted_step = 0;
+    cl.predicted_step_time = 0;
+    cl.r1q2_step_frame_valid = false;
+}
+
 #if USE_FPS
 static void cl_updaterate_changed(cvar_t *self)
 {
@@ -2744,7 +2752,9 @@ static void CL_InitLocal(void)
     cl_predict = Cvar_Get("cl_predict", "1", 0);
     cl_predict->changed = cl_predict_changed;
     cl_movement_feel_mode = Cvar_Get("cl_movement_feel_mode", "0", CVAR_ARCHIVE);
+    cl_movement_feel_mode->changed = cl_prediction_feel_changed;
     cl_step_smoothing_mode = Cvar_Get("cl_step_smoothing_mode", "q2pro", CVAR_ARCHIVE);
+    cl_step_smoothing_mode->changed = cl_prediction_feel_changed;
     cl_kickangles = Cvar_Get("cl_kickangles", "1", CVAR_CHEAT);
     cl_warn_on_fps_rounding = Cvar_Get("cl_warn_on_fps_rounding", "1", 0);
     cl_maxfps = Cvar_Get("cl_maxfps", "62", 0);

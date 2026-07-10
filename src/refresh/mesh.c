@@ -692,15 +692,14 @@ static void draw_alias_mesh(const uint16_t *indices, int num_indices,
 
     if (glr.ent->flags & RF_TRANSLUCENT)
         state |= GLS_BLEND_BLEND | GLS_DEPTHMASK_FALSE;
-    if (glr.ent->flags & RF_BLOOM_ONLY)
-        state |= GLS_BLOOM_ONLY;
-
     skin = skin_for_mesh(skins, num_skins);
     if (skin->texnum2)
         state |= GLS_GLOWMAP_ENABLE;
 
     if (glr.framebuffer_bound && gl_bloom->integer) {
         state |= GLS_BLOOM_GENERATE;
+        if (glr.ent->flags & RF_BLOOM_ONLY)
+            state |= GLS_BLOOM_ONLY;
         if ((glr.ent->flags & RF_SHELL_MASK) && !(glr.ent->flags & RF_NOBLOOM))
             state |= GLS_BLOOM_SHELL;
     }

@@ -288,6 +288,7 @@ endif
 if web
   png = dependency('libpng',
     method: 'system',
+    fallback: 'libpng',
     version:         '>= 1.6.11',
     required: true,
     default_options: fallback_opt,
@@ -379,6 +380,7 @@ endif
 if web
   openal = dependency('openal',
     method: 'system',
+    fallback: 'openal-soft',
     required: true,
   )
 else
