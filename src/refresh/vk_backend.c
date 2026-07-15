@@ -3418,6 +3418,8 @@ static bool vk_create_device(void)
         features.fillModeNonSolid = VK_TRUE;
     if (vk.physical_device_features.wideLines)
         features.wideLines = VK_TRUE;
+    if (vk.physical_device_features.occlusionQueryPrecise)
+        features.occlusionQueryPrecise = VK_TRUE;
     VkDeviceCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = queue_info_count,
@@ -4558,7 +4560,7 @@ static bool vk_validate_pixel_lightmap_shaders(void)
         vk.DestroyShaderModule(vk.device, alpha, NULL);
 
     if (ok)
-        Com_Printf("Vulkan pixel lightmap shader modules validated\n");
+        Com_DPrintf("Vulkan pixel lightmap shader modules validated\n");
     return ok;
 }
 
@@ -4594,7 +4596,7 @@ static bool vk_create_pixel_world_pipeline_layout(void)
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreatePipelineLayout(pixel_world)", result);
 
-    Com_Printf("Vulkan pixel lightmap pipeline layout created\n");
+    Com_DPrintf("Vulkan pixel lightmap pipeline layout created\n");
     return true;
 }
 
@@ -4603,11 +4605,11 @@ static void vk_print_pixel_lightmap_mode(void)
     int mode = vk_pixel_lightmap_mode();
 
     if (mode <= 0) {
-        Com_Printf("Vulkan pixel lightmaps: disabled\n");
+        Com_DPrintf("Vulkan pixel lightmaps: disabled\n");
     } else if (mode == 1) {
-        Com_Printf("Vulkan pixel lightmaps: upload-only validation mode\n");
+        Com_DPrintf("Vulkan pixel lightmaps: upload-only validation mode\n");
     } else {
-        Com_Printf("Vulkan pixel lightmaps: draw mode requested\n");
+        Com_DPrintf("Vulkan pixel lightmaps: draw mode requested\n");
     }
 }
 
@@ -5346,8 +5348,8 @@ static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreateGraphicsPipelines(pixel_world)", result);
 
-    Com_Printf("Vulkan pixel lightmap %s pipeline created\n",
-               alpha_test ? "alpha" : "opaque");
+    Com_DPrintf("Vulkan pixel lightmap %s pipeline created\n",
+                alpha_test ? "alpha" : "opaque");
     return true;
 }
 
@@ -7924,7 +7926,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     vk.draw_scope = VK_DRAW_WORLD;
 
     if (pixel_mode && !pixel_requested && !vk_pixel_lightmaps_scope_logged) {
-        Com_Printf("Vulkan pixel lightmaps mode 2 applies only to opaque world surfaces\n");
+        Com_DPrintf("Vulkan pixel lightmaps mode 2 applies only to opaque world surfaces\n");
         vk_pixel_lightmaps_scope_logged = true;
     }
 
@@ -7936,7 +7938,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         Cvar_Set("vk_pixel_lightmaps", "1");
     }
     if (pixel_world && !vk_pixel_lightmaps_draw_logged) {
-        Com_Printf("Vulkan pixel lightmaps: drawing opaque world with pixel pipeline\n");
+        Com_DPrintf("Vulkan pixel lightmaps: drawing opaque world with pixel pipeline\n");
         vk_pixel_lightmaps_draw_logged = true;
     }
 
@@ -9757,7 +9759,11 @@ static void vk_draw_glare(const refdef_t *fd)
         if (!issue_queries)
             continue;
 
-        vk.CmdBeginQuery(cmd, vk.glare_query_pool, query_base + i, 0);
+        VkQueryControlFlags query_flags =
+            vk.physical_device_features.occlusionQueryPrecise ?
+            VK_QUERY_CONTROL_PRECISE_BIT : 0;
+        vk.CmdBeginQuery(cmd, vk.glare_query_pool, query_base + i,
+                         query_flags);
         if (test) {
             mat4_t mvp;
             vk_world_push_t push = { 0 };
@@ -9794,13 +9800,16 @@ static void vk_draw_glare(const refdef_t *fd)
         if (gs->visibility <= 0.0f)
             continue;
 
-        float scale = (vk_glare_size ? vk_glare_size->value : 24.0f) * gs->brightness;
+        float scale = (vk_glare_size ?
+            Cvar_ClampValue(vk_glare_size, 0.0f, 256.0f) : 24.0f) *
+            gs->brightness;
         if (distances[i] > 20.0f)
             scale *= 1.0f + distances[i] * 0.004f;
         scale = min(scale, 200.0f);
 
         float alpha = view_angles[i] * gs->brightness *
-            (vk_glare_intensity ? vk_glare_intensity->value : 0.5f) *
+            (vk_glare_intensity ?
+             Cvar_ClampValue(vk_glare_intensity, 0.0f, 4.0f) : 0.5f) *
             gs->visibility;
         alpha = min(alpha, 1.0f);
         if (alpha < 0.01f || scale <= 0.0f)
@@ -10509,40 +10518,22 @@ static uint32_t vk_pixel_lightmap_texel(const mface_t *face, const refdef_t *fd,
         lightmap += size;
     }
 
-    if (vk_coloredlightmaps && !vk_coloredlightmaps->integer) {
+    float brightest = max(rgb[0], max(rgb[1], rgb[2]));
+    if (brightest > 255.0f)
+        VectorScale(rgb, 255.0f / brightest, rgb);
+
+    float saturation = vk_coloredlightmaps ?
+        Cvar_ClampValue(vk_coloredlightmaps, 0.0f, 1.0f) : 1.0f;
+    if (saturation != 1.0f) {
         float y = LUMINANCE(rgb[0], rgb[1], rgb[2]);
-        rgb[0] = rgb[1] = rgb[2] = y;
+        rgb[0] = y + (rgb[0] - y) * saturation;
+        rgb[1] = y + (rgb[1] - y) * saturation;
+        rgb[2] = y + (rgb[2] - y) * saturation;
     }
 
     return MakeColor(Q_clipf(rgb[0], 0.0f, 255.0f),
                      Q_clipf(rgb[1], 0.0f, 255.0f),
                      Q_clipf(rgb[2], 0.0f, 255.0f), 255);
-}
-
-static uint32_t vk_pixel_lightmap_checksum(const uint32_t *pixels, size_t count)
-{
-    uint32_t hash = 2166136261u;
-
-    for (size_t i = 0; i < count; i++) {
-        hash ^= pixels[i];
-        hash *= 16777619u;
-    }
-
-    return hash;
-}
-
-static uint32_t vk_pixel_lightmap_hash_u32(uint32_t hash, uint32_t value)
-{
-    hash ^= value;
-    return hash * 16777619u;
-}
-
-static uint32_t vk_pixel_lightmap_hash_float(uint32_t hash, float value)
-{
-    uint32_t bits;
-
-    memcpy(&bits, &value, sizeof(bits));
-    return vk_pixel_lightmap_hash_u32(hash, bits);
 }
 
 static void vk_pixel_lightmap_plan(const bsp_t *bsp,
@@ -10559,7 +10550,6 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
     } vk_lm_plan_t;
 
     uint32_t valid = 0;
-    uint32_t invalid = 0;
     uint64_t total_area = 1;
     int max_w = 1;
 
@@ -10568,7 +10558,6 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
         faces[i].pixel_lm_w = faces[i].pixel_lm_h = 0;
         const mface_t *face = faces[i].face;
         if (!vk_face_has_valid_lightmap(bsp, face)) {
-            invalid++;
             continue;
         }
         valid++;
@@ -10582,7 +10571,7 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
     atlas_w = min(atlas_w, 4096);
 
     if (!valid) {
-        Com_Printf("Vulkan pixel lightmap CPU atlas: no valid lightmaps\n");
+        Com_DPrintf("Vulkan pixel lightmap CPU atlas: no valid lightmaps\n");
         vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
         return;
     }
@@ -10646,20 +10635,16 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
         }
     }
 
-    uint32_t checksum = vk_pixel_lightmap_checksum(pixels, pixel_count);
-
     bool log_atlas = !vk_pixel_lightmaps_atlas_logged;
     if (log_atlas) {
-        Com_Printf("Vulkan pixel lightmap CPU atlas (mode %d): %u valid, %u skipped, %dx%d, checksum %08x\n",
-                   vk_pixel_lightmap_mode(), valid, invalid, atlas_w, atlas_h, checksum);
         vk_pixel_lightmaps_atlas_logged = true;
     }
     vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
     if (vk_upload_texture_data(&vk.world.pixel_lightmap_texture,
                                atlas_w, atlas_h, pixels, false)) {
         if (log_atlas) {
-            Com_Printf("Vulkan pixel lightmap atlas texture uploaded: %dx%d\n",
-                       atlas_w, atlas_h);
+            Com_DPrintf("Vulkan pixel lightmap atlas texture uploaded: %dx%d\n",
+                        atlas_w, atlas_h);
         }
     } else {
         Com_WPrintf("Couldn't upload Vulkan pixel lightmap atlas texture: %s\n",
@@ -10779,8 +10764,6 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
     uint32_t line_index_count = 0;
     uint32_t v = 0;
     uint32_t face_index = 0;
-    uint32_t lmuv_hash = 2166136261u;
-    uint32_t lmuv_count = 0;
     bool pixel_lm_debug = vk_pixel_lightmap_mode() > 0;
     float *lmuv_data = pixel_lm_debug ?
         Z_Malloc(sizeof(*lmuv_data) * 2 * vertex_count) : NULL;
@@ -10831,15 +10814,12 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                 float lmt = 0.0f;
                 if (vk_face_has_valid_lightmap(bsp, face)) {
                     lms = (DotProduct(src->point, face->lm_axis[0]) +
-                           face->lm_offset[0]) / max(face->lm_width, 1);
+                           face->lm_offset[0]) / max(face->lm_width - 1, 1);
                     lmt = (DotProduct(src->point, face->lm_axis[1]) +
-                           face->lm_offset[1]) / max(face->lm_height, 1);
+                           face->lm_offset[1]) / max(face->lm_height - 1, 1);
                 }
-                lmuv_hash = vk_pixel_lightmap_hash_float(lmuv_hash, lms);
-                lmuv_hash = vk_pixel_lightmap_hash_float(lmuv_hash, lmt);
                 lmuv_data[v * 2 + 0] = lms;
                 lmuv_data[v * 2 + 1] = lmt;
-                lmuv_count++;
             }
             v++;
         }
@@ -10907,9 +10887,6 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
     }
 
     vk_pixel_lightmap_plan(bsp, draw_faces, draw_face_count, fd);
-    if (pixel_lm_debug && !vk_pixel_lightmaps_lmuv_logged)
-        Com_Printf("Vulkan pixel lightmap CPU lmuv (mode %d): %u verts, checksum %08x\n",
-                   vk_pixel_lightmap_mode(), lmuv_count, lmuv_hash);
 
     line_indices = vk_build_line_indices(indices, idx, &line_index_count);
 
@@ -10921,8 +10898,8 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
             if (vk_upload_buffer(&vk.world.pixel_lmuv_buffer, lmuv_data, lmuv_size,
                                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
                 if (!vk_pixel_lightmaps_lmuv_logged) {
-                    Com_Printf("Vulkan pixel lightmap lmuv buffer uploaded: %zu bytes\n",
-                               lmuv_size);
+                    Com_DPrintf("Vulkan pixel lightmap lmuv buffer uploaded: %zu bytes\n",
+                                lmuv_size);
                     vk_pixel_lightmaps_lmuv_logged = true;
                 }
             } else {
@@ -11227,6 +11204,55 @@ static void vk_mark_world_images_registered(bsp_t *bsp)
     }
 }
 
+static bool vk_glare_lightmap_color(const bsp_t *bsp, const mface_t *surf,
+                                    vec3_t color)
+{
+    int size = surf->lm_width * surf->lm_height * 3;
+    int sc = surf->lm_width / 2;
+    int tc = surf->lm_height / 2;
+    ptrdiff_t offset;
+    const byte *lightmap;
+
+    if (!bsp->lightmap || !surf->lightmap || !surf->numstyles ||
+        surf->lightmap < bsp->lightmap)
+        return false;
+
+    offset = surf->lightmap - bsp->lightmap;
+    if (offset < 0 ||
+        (uint64_t)offset + (uint64_t)surf->numstyles * size >
+        (uint64_t)bsp->numlightmapbytes)
+        return false;
+
+    VectorClear(color);
+    lightmap = surf->lightmap;
+    for (int i = 0; i < surf->numstyles; i++) {
+        const byte *pixel = lightmap + 3 * (tc * surf->lm_width + sc);
+
+        color[0] += pixel[0];
+        color[1] += pixel[1];
+        color[2] += pixel[2];
+        lightmap += size;
+    }
+
+    // GL_BuildGlareList samples the shader lightmap atlas. Reproduce the
+    // color adjustment performed while that atlas is built.
+    float brightest = max(color[0], max(color[1], color[2]));
+    if (brightest > 255.0f)
+        VectorScale(color, 255.0f / brightest, color);
+
+    float saturation = vk_coloredlightmaps ?
+        Cvar_ClampValue(vk_coloredlightmaps, 0.0f, 1.0f) : 1.0f;
+    if (saturation != 1.0f) {
+        float y = LUMINANCE(color[0], color[1], color[2]);
+        color[0] = y + (color[0] - y) * saturation;
+        color[1] = y + (color[1] - y) * saturation;
+        color[2] = y + (color[2] - y) * saturation;
+    }
+
+    VectorScale(color, 1.0f / 255.0f, color);
+    return true;
+}
+
 static void vk_build_glare_list(bsp_t *bsp)
 {
     glr.num_glare_sources = 0;
@@ -11241,27 +11267,21 @@ static void vk_build_glare_list(bsp_t *bsp)
         if ((surf->drawflags & SURF_NODRAW) || !surf->texinfo ||
             !surf->texinfo->image || !surf->texinfo->image->texnum2 ||
             !surf->lightmap || !surf->plane || !surf->firstsurfedge ||
-            surf->numsurfedges <= 0 || surf->lm_width <= 0 || surf->lm_height <= 0)
+            (surf->drawflags & vk.world.nolm_mask) ||
+            surf->numsurfedges <= 0 || surf->lm_width <= 0 ||
+            surf->lm_height <= 0 ||
+            surf->lm_width > VK_MAX_LIGHTMAP_EXTENTS ||
+            surf->lm_height > VK_MAX_LIGHTMAP_EXTENTS)
             continue;
         if (!vk_face_edges_are_valid(bsp, surf))
             continue;
 
-        int lightmap_size = surf->lm_width * surf->lm_height * 3;
-        if (!bsp->lightmap || surf->lightmap < bsp->lightmap || !surf->numstyles)
-            continue;
-        ptrdiff_t lightmap_offset = surf->lightmap - bsp->lightmap;
-        if (lightmap_offset < 0 ||
-            (uint64_t)lightmap_offset + (uint64_t)surf->numstyles * lightmap_size >
-            (uint64_t)bsp->numlightmapbytes)
+        vec3_t lightcolor;
+        if (!vk_glare_lightmap_color(bsp, surf, lightcolor))
             continue;
 
-        int sc = surf->lm_width / 2;
-        int tc = surf->lm_height / 2;
-        const byte *pixel = surf->lightmap + 3 * (tc * surf->lm_width + sc);
-        float r = pixel[0] / 255.0f;
-        float g = pixel[1] / 255.0f;
-        float b = pixel[2] / 255.0f;
-        float brightness = (r + g + b) * (1.0f / 3.0f);
+        float brightness = (lightcolor[0] + lightcolor[1] + lightcolor[2]) *
+            (1.0f / 3.0f);
 
         if (brightness < (vk_glare_threshold ? vk_glare_threshold->value : 0.3f))
             continue;
@@ -11286,7 +11306,7 @@ static void vk_build_glare_list(bsp_t *bsp)
         glare_source_t *gs = &glr.glare_sources[glr.num_glare_sources++];
         VectorMA(center, 2.0f, normal, gs->origin);
         VectorCopy(normal, gs->normal);
-        VectorSet(gs->lightcolor, r, g, b);
+        VectorCopy(lightcolor, gs->lightcolor);
         gs->brightness = brightness;
         gs->visibility = 0.0f;
         gs->visible = false;
@@ -11574,7 +11594,7 @@ bool VKR_Init(bool total)
     vk_novis = Cvar_Get("gl_novis", "0", 0);
     vk_lockpvs = Cvar_Get("gl_lockpvs", "0", CVAR_CHEAT);
     vk_lightmap = Cvar_Get("gl_lightmap", "0", CVAR_CHEAT);
-    vk_pixel_lightmaps = Cvar_Get("vk_pixel_lightmaps", "0", 0);
+    vk_pixel_lightmaps = Cvar_Get("vk_pixel_lightmaps", "2", 0);
     vk_vertexlight = Cvar_Get("gl_vertexlight", "0", 0);
     vk_nobind = Cvar_Get("gl_nobind", "0", CVAR_CHEAT);
     vk_clear = Cvar_Get("gl_clear", "0", 0);
@@ -12445,7 +12465,9 @@ int VKR_ReadPixels(screenshot_t *s)
     const byte *src = mapped;
     byte *dst = s->pixels;
     for (int y = 0; y < height; y++) {
-        const byte *src_pixel = src + y * src_rowbytes;
+        // Screenshot encoders expect OpenGL's bottom-up row order, while a
+        // Vulkan image-to-buffer copy returns the swapchain's top row first.
+        const byte *src_pixel = src + (height - 1 - y) * src_rowbytes;
         byte *dst_pixel = dst + y * dst_rowbytes;
 
         for (int x = 0; x < width; x++, src_pixel += 4, dst_pixel += 3) {
