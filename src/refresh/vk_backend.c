@@ -6639,7 +6639,7 @@ static vk_alias_lerp_t vk_alias_lerp_for_entity(const vk_model_t *model,
 {
     vk_alias_lerp_t lerp;
 
-    lerp.backlerp = Q_clip(ent->backlerp, 0.0f, 1.0f);
+    lerp.backlerp = Q_clipf(ent->backlerp, 0.0f, 1.0f);
 
     if (fd && fd->extended) {
         lerp.frame = ent->frame % model->frame_count;
@@ -11963,7 +11963,7 @@ void VKR_ClearColor(void)
 
 void VKR_SetAlpha(float alpha)
 {
-    byte a = Q_clip(alpha, 0.0f, 1.0f) * 255;
+    byte a = Q_clipf(alpha, 0.0f, 1.0f) * 255;
     if (!vk.color_set) {
         vk.color.u32 = U32_WHITE;
         vk.alt_color.u32 = U32_WHITE;
