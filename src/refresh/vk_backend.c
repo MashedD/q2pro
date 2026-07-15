@@ -615,7 +615,6 @@ typedef struct {
     vk_texture_t blur_texture;
     vk_texture_t particle_texture;
     vk_texture_t beam_texture;
-    vk_mesh_t test_triangle;
     vk_mesh_t skybox;
     vk_mesh_t sprite_quad;
     vk_buffer_t sprite_quad_line_indices;
@@ -664,8 +663,6 @@ typedef struct {
 } vk_state_t;
 
 static vk_state_t vk;
-static cvar_t *vk_show_test_triangle;
-static cvar_t *vk_gl_test;
 static cvar_t *vk_drawentities;
 static cvar_t *vk_gl_drawentities;
 static cvar_t *vk_drawsky;
@@ -786,7 +783,6 @@ static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
                           const entity_t *ent, const vec3_t axis[3]);
 static bool vk_create_swapchain(int width, int height);
 static bool vk_recreate_swapchain(void);
-static bool vk_create_test_triangle(void);
 static void vk_destroy_mesh(vk_mesh_t *mesh);
 static void vk_free_world(void);
 static void vk_build_glare_list(bsp_t *bsp);
@@ -6797,22 +6793,6 @@ static bool vk_alias_model_culled(const vk_model_t *model, const entity_t *ent,
     return false;
 }
 
-static bool vk_create_test_triangle(void)
-{
-    static const vk_vertex_t vertices[] = {
-        { { -24.0f, -16.0f, -96.0f }, { 1.0f, 0.15f, 0.10f, 1.0f }, { 0.0f, 0.0f } },
-        { {  24.0f, -16.0f, -96.0f }, { 0.1f, 0.85f, 0.25f, 1.0f }, { 1.0f, 0.0f } },
-        { {   0.0f,  24.0f, -96.0f }, { 0.1f, 0.35f, 1.00f, 1.0f }, { 0.5f, 1.0f } },
-    };
-    static const uint32_t indices[] = { 0, 1, 2 };
-
-    if (!vk_upload_mesh(&vk.test_triangle, vertices, q_countof(vertices),
-                        indices, q_countof(indices)))
-        return false;
-
-    return true;
-}
-
 static bool vk_create_skybox_mesh(void)
 {
     const float size = 2048.0f;
@@ -11424,24 +11404,6 @@ static void vk_load_world(const char *name)
     vk_clear_world_lighting_modified();
 }
 
-static void vk_draw_test_triangle(const refdef_t *fd)
-{
-    bool enabled = (vk_show_test_triangle && vk_show_test_triangle->integer) ||
-        (vk_gl_test && vk_gl_test->integer);
-
-    if (!vk.render_pass_active || !vk.color3d_pipeline ||
-        !enabled)
-        return;
-    if (fd->rdflags & RDF_NOWORLDMODEL)
-        return;
-
-    mat4_t mvp;
-    const float color[4] = { 0.1f, 0.9f, 0.55f, 1.0f };
-
-    vk_projection_matrix(mvp, fd->fov_x, fd->fov_y, fd->rdflags);
-    vk_draw_mesh(&vk.test_triangle, mvp, color);
-}
-
 static void vk_draw_polyblend(const refdef_t *fd)
 {
     if (!vk_polyblend || !vk_polyblend->integer)
@@ -11575,8 +11537,6 @@ bool VKR_Init(bool total)
     Com_Printf("------- VKR_Init -------\n");
     Com_Printf("Using video driver: %s\n", vid->name);
 
-    vk_show_test_triangle = Cvar_Get("vk_show_test_triangle", "0", 0);
-    vk_gl_test = Cvar_Get("gl_test", "0", 0);
     vk_drawentities = Cvar_Get("vk_drawentities", "1", CVAR_CHEAT);
     vk_gl_drawentities = Cvar_Get("gl_drawentities", "1", CVAR_CHEAT);
     vk_drawsky = Cvar_Get("vk_drawsky", "1", 0);
@@ -11711,8 +11671,6 @@ bool VKR_Init(bool total)
         return false;
     }
 
-    if (!vk_create_test_triangle())
-        Com_WPrintf("Couldn't create Vulkan test triangle: %s\n", Com_GetLastError());
     if (!vk_create_skybox_mesh())
         Com_WPrintf("Couldn't create Vulkan skybox mesh: %s\n", Com_GetLastError());
     if (!vk_create_sprite_quad())
@@ -11855,7 +11813,6 @@ void VKR_Shutdown(bool total)
 
     vk_free_world();
     vk_free_models(true);
-    vk_destroy_mesh(&vk.test_triangle);
     vk_destroy_mesh(&vk.skybox);
     vk_destroy_mesh(&vk.sprite_quad);
     vk_destroy_buffer(&vk.sprite_quad_line_indices);
@@ -12148,7 +12105,6 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk_draw_particles(fd);
     vk_draw_glare(fd);
     vk_draw_entities(fd, VK_ENTITY_ALPHA_FRONT);
-    vk_draw_test_triangle(fd);
 #if USE_DEBUG
     vk_draw_debug_lines(fd);
     vk_draw_debug_texts(fd);
