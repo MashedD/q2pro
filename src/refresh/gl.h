@@ -497,6 +497,11 @@ typedef struct {
     image_t **skins;
 } md5_model_t;
 
+md5_model_t *MOD_LoadMD5Replacement(const char *name, int numframes,
+                                    int numskins,
+                                    const maliasskinname_t *skinnames,
+                                    memhunk_t *hunk);
+
 #endif
 
 typedef struct {

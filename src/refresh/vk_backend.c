@@ -38,6 +38,7 @@ the Free Software Foundation; either version 2 of the License, or
 #define VK_MAX_PARTICLE_VERTICES   (MAX_PARTICLES * 6)
 #define VK_MAX_LIGHTMAP_EXTENTS    513
 #define VK_MAX_FRAMES_IN_FLIGHT    3
+#define VK_MAX_CUBEMAPS            16
 
 static const uint32_t vk_rect_vert_spv[] =
 #include "vk_rect_vert_spv.h"
@@ -234,8 +235,21 @@ typedef struct {
     vk_buffer_t alias_line_indices;
     uint32_t alias_line_index_count;
     image_t **skins;
+    maliasskinname_t *skin_names;
     int skin_count;
     uint32_t vertex_count;
+#if USE_MD5
+    vk_mesh_t md5_mesh;
+    vk_buffer_t md5_line_indices;
+    uint32_t md5_line_index_count;
+    vk_alias_frame_t *md5_frames;
+    vk_alias_batch_t *md5_batches;
+    image_t **md5_skins;
+    int md5_frame_count;
+    int md5_batch_count;
+    int md5_skin_count;
+    uint32_t md5_vertex_count;
+#endif
 } vk_model_t;
 
 typedef struct {
@@ -275,6 +289,11 @@ typedef struct {
     mat4_t mvp;
     float color[4];
 } vk_color3d_push_t;
+
+typedef struct {
+    image_t *image;
+    vk_texture_t faces[6];
+} vk_cubemap_t;
 
 typedef struct {
     mat4_t mvp;
@@ -495,7 +514,11 @@ typedef struct {
     VkRenderPass bloom_render_pass;
     VkFormat swapchain_format;
     VkFormat depth_format;
+    VkSampleCountFlagBits sample_count;
     VkExtent2D swapchain_extent;
+    VkImage multisample_image;
+    VkDeviceMemory multisample_memory;
+    VkImageView multisample_view;
     VkImage depth_image;
     VkDeviceMemory depth_memory;
     VkImageView depth_view;
@@ -557,6 +580,8 @@ typedef struct {
     void *particle_vertices_mapped;
     vk_vertex_t particle_batch[VK_MAX_PARTICLE_VERTICES];
     uint32_t sky_images[6];
+    vk_cubemap_t cubemaps[VK_MAX_CUBEMAPS];
+    int sky_cubemap;
     float sky_rotate;
     bool sky_autorotate;
     vec3_t sky_axis;
@@ -597,10 +622,17 @@ static cvar_t *vk_downsample_skins;
 static cvar_t *vk_bilerp_chars;
 static cvar_t *vk_bilerp_pics;
 static cvar_t *vk_bilerp_skies;
+static cvar_t *vk_cubemaps;
 static cvar_t *vk_saturation;
 static cvar_t *vk_invert;
 static cvar_t *vk_gamma;
 static cvar_t *vk_gamma_scale_pics;
+static cvar_t *vk_upscale_pcx;
+#if USE_MD5
+static cvar_t *vk_md5_load;
+static cvar_t *vk_md5_use;
+static cvar_t *vk_md5_distance;
+#endif
 static cvar_t *vk_partscale;
 static cvar_t *vk_partstyle;
 static cvar_t *vk_partshape;
@@ -659,6 +691,7 @@ static cvar_t *vk_cull_nodes;
 static cvar_t *vk_world_cull;
 #if USE_DEBUG
 static cvar_t *vk_debug_distfrac;
+static cvar_t *vk_debug_linewidth;
 #endif
 static byte vk_gammatable[256];
 static bool vk_pixel_lightmaps_warned;
@@ -668,6 +701,8 @@ static bool vk_pixel_lightmaps_atlas_logged;
 static bool vk_pixel_lightmaps_lmuv_logged;
 
 static bool vk_upload_texture(image_t *image, byte *pic);
+static bool vk_upload_cubemap(image_t *image, const byte *pic);
+static void vk_unload_cubemap(image_t *image);
 static void vk_destroy_texture(image_t *image);
 static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
                            uint32_t vertex_count, const uint32_t *indices,
@@ -695,6 +730,7 @@ static bool vk_recreate_swapchain(void);
 static bool vk_create_test_triangle(void);
 static void vk_destroy_mesh(vk_mesh_t *mesh);
 static void vk_free_world(void);
+static void vk_build_glare_list(bsp_t *bsp);
 static void vk_load_world(const char *name);
 static bool vk_static_light_point(const vec3_t origin, const refdef_t *fd,
                                   vec3_t light);
@@ -811,6 +847,13 @@ static void vk_gamma_changed(cvar_t *self)
 
 static void vk_upload_image(image_t *image, byte *pic)
 {
+    if (image->flags & IF_CUBEMAP) {
+        if (!vk_upload_cubemap(image, pic))
+            Com_WPrintf("Couldn't upload Vulkan cubemap %s: %s\n",
+                        image->name, Com_GetLastError());
+        return;
+    }
+
     if (!vk_upload_texture(image, pic)) {
         Com_WPrintf("Couldn't upload Vulkan texture %s: %s\n",
                     image->name, Com_GetLastError());
@@ -819,6 +862,11 @@ static void vk_upload_image(image_t *image, byte *pic)
 
 static void vk_unload_image(image_t *image)
 {
+    if (image->flags & IF_CUBEMAP) {
+        vk_unload_cubemap(image);
+        return;
+    }
+
     vk_destroy_texture(image);
 }
 
@@ -1005,6 +1053,34 @@ static VkFormat vk_choose_depth_format(bool stencil)
     }
 
     return VK_FORMAT_UNDEFINED;
+}
+
+static VkSampleCountFlagBits vk_choose_sample_count(void)
+{
+    int requested = Cvar_ClampInteger(Cvar_Get("gl_multisamples", "0", CVAR_REFRESH),
+                                      0, 32);
+    if (requested < 2)
+        return VK_SAMPLE_COUNT_1_BIT;
+
+    VkSampleCountFlags supported =
+        vk.physical_device_properties.limits.framebufferColorSampleCounts &
+        vk.physical_device_properties.limits.framebufferDepthSampleCounts;
+    static const VkSampleCountFlagBits counts[] = {
+        VK_SAMPLE_COUNT_32_BIT,
+        VK_SAMPLE_COUNT_16_BIT,
+        VK_SAMPLE_COUNT_8_BIT,
+        VK_SAMPLE_COUNT_4_BIT,
+        VK_SAMPLE_COUNT_2_BIT,
+    };
+
+    for (size_t i = 0; i < q_countof(counts); i++) {
+        if ((int)counts[i] <= requested && (supported & counts[i]))
+            return counts[i];
+    }
+
+    Com_WPrintf("Vulkan device does not support requested %dx multisampling\n",
+                requested);
+    return VK_SAMPLE_COUNT_1_BIT;
 }
 
 static bool vk_begin_immediate(VkCommandBuffer *cmd)
@@ -1226,6 +1302,20 @@ static void vk_free_model(vk_model_t *model)
         Z_Free(model->skins);
         model->skins = NULL;
     }
+    if (model->skin_names) {
+        Z_Free(model->skin_names);
+        model->skin_names = NULL;
+    }
+#if USE_MD5
+    if (model->md5_frames)
+        Z_Free(model->md5_frames);
+    if (model->md5_batches)
+        Z_Free(model->md5_batches);
+    if (model->md5_skins)
+        Z_Free(model->md5_skins);
+    vk_destroy_mesh(&model->md5_mesh);
+    vk_destroy_buffer(&model->md5_line_indices);
+#endif
     vk_destroy_mesh(&model->mesh);
     vk_destroy_buffer(&model->alias_line_indices);
     model->alias_line_index_count = 0;
@@ -1406,6 +1496,157 @@ static bool vk_check_md2_bounds(const dmd2header_t *header, size_t length)
     return true;
 }
 
+#if USE_MD5
+static bool vk_load_md5_variant(vk_model_t *model)
+{
+    memhunk_t hunk = { 0 };
+    md5_model_t *md5;
+    vk_vertex_t *vertices = NULL;
+    uint32_t *indices = NULL;
+    uint32_t *line_indices = NULL;
+    uint32_t line_index_count = 0;
+    uint32_t vertex_count = 0, index_count = 0;
+    bool ok = false;
+
+    if (!model || !vk_md5_load || !vk_md5_load->integer ||
+        !model->skin_names || !model->alias_batch_count)
+        return false;
+
+    int skin_count = model->alias_batches[0].skin_count;
+    md5 = MOD_LoadMD5Replacement(model->name, model->frame_count,
+                                 skin_count, model->skin_names, &hunk);
+    if (!md5)
+        return false;
+
+    for (int i = 0; i < md5->num_meshes; i++) {
+        const md5_mesh_t *mesh = &md5->meshes[i];
+        if (mesh->num_verts < 1 || mesh->num_indices < 3 ||
+            UINT32_MAX - vertex_count < (uint32_t)mesh->num_verts ||
+            UINT32_MAX - index_count < (uint32_t)mesh->num_indices)
+            goto out;
+        vertex_count += mesh->num_verts;
+        index_count += mesh->num_indices;
+    }
+    if (!vertex_count || !index_count || md5->num_frames < 1 ||
+        (uint64_t)vertex_count * md5->num_frames > UINT32_MAX)
+        goto out;
+
+    vertices = Z_Malloc(sizeof(*vertices) * vertex_count * md5->num_frames);
+    indices = Z_Malloc(sizeof(*indices) * index_count);
+    model->md5_frames = Z_Mallocz(sizeof(*model->md5_frames) * md5->num_frames);
+    model->md5_batches = Z_Mallocz(sizeof(*model->md5_batches) * md5->num_meshes);
+    if (md5->num_skins) {
+        model->md5_skins = Z_Malloc(sizeof(*model->md5_skins) * md5->num_skins);
+        memcpy(model->md5_skins, md5->skins,
+               sizeof(*model->md5_skins) * md5->num_skins);
+    }
+
+    uint32_t vertex_base = 0, first_index = 0;
+    for (int mesh_index = 0; mesh_index < md5->num_meshes; mesh_index++) {
+        const md5_mesh_t *mesh = &md5->meshes[mesh_index];
+        model->md5_batches[mesh_index] = (vk_alias_batch_t) {
+            .first_index = first_index,
+            .index_count = mesh->num_indices,
+            .skin_start = 0,
+            .skin_count = md5->num_skins,
+        };
+
+        for (int i = 0; i < mesh->num_indices; i++) {
+            if (mesh->indices[i] >= mesh->num_verts)
+                goto out;
+            indices[first_index + i] = vertex_base + mesh->indices[i];
+        }
+
+        for (int frame = 0; frame < md5->num_frames; frame++) {
+            const md5_joint_t *skeleton =
+                &md5->skeleton_frames[frame * md5->num_joints];
+            vk_alias_frame_t *frame_info = &model->md5_frames[frame];
+            if (mesh_index == 0)
+                ClearBounds(frame_info->bounds[0], frame_info->bounds[1]);
+
+            for (int vert_index = 0; vert_index < mesh->num_verts; vert_index++) {
+                const md5_vertex_t *vert = &mesh->vertices[vert_index];
+                vk_vertex_t *dst = &vertices[frame * vertex_count +
+                                             vertex_base + vert_index];
+                VectorClear(dst->position);
+                VectorClear(dst->normal);
+
+                for (int weight_index = 0; weight_index < vert->count; weight_index++) {
+                    int index = vert->start + weight_index;
+                    const md5_weight_t *weight = &mesh->weights[index];
+                    const md5_joint_t *joint = &skeleton[mesh->jointnums[index]];
+                    vec3_t transformed;
+
+                    VectorRotate(weight->pos, joint->axis, transformed);
+                    VectorMA(joint->pos, joint->scale, transformed, transformed);
+                    VectorMA(dst->position, weight->bias, transformed, dst->position);
+                    VectorRotate(vert->normal, joint->axis, transformed);
+                    VectorMA(dst->normal, weight->bias, transformed, dst->normal);
+                }
+
+                VectorNormalize(dst->normal);
+                Vector4Set(dst->color, 1.0f, 1.0f, 1.0f, 1.0f);
+                dst->uv[0] = mesh->tcoords[vert_index].st[0];
+                dst->uv[1] = mesh->tcoords[vert_index].st[1];
+                AddPointToBounds(dst->position, frame_info->bounds[0],
+                                 frame_info->bounds[1]);
+            }
+        }
+
+        vertex_base += mesh->num_verts;
+        first_index += mesh->num_indices;
+    }
+
+    for (int frame = 0; frame < md5->num_frames; frame++)
+        model->md5_frames[frame].radius =
+            RadiusFromBounds(model->md5_frames[frame].bounds[0],
+                             model->md5_frames[frame].bounds[1]);
+
+    if (!vk_upload_mesh(&model->md5_mesh, vertices,
+                        vertex_count * md5->num_frames, indices, index_count))
+        goto out;
+    line_indices = vk_build_line_indices(indices, index_count, &line_index_count);
+    if (!line_indices ||
+        !vk_upload_buffer(&model->md5_line_indices, line_indices,
+                          sizeof(*line_indices) * line_index_count,
+                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT))
+        goto out;
+
+    model->md5_line_index_count = line_index_count;
+    model->md5_frame_count = md5->num_frames;
+    model->md5_batch_count = md5->num_meshes;
+    model->md5_skin_count = md5->num_skins;
+    model->md5_vertex_count = vertex_count;
+    ok = true;
+
+out:
+    if (!ok) {
+        if (model->md5_frames) {
+            Z_Free(model->md5_frames);
+            model->md5_frames = NULL;
+        }
+        if (model->md5_batches) {
+            Z_Free(model->md5_batches);
+            model->md5_batches = NULL;
+        }
+        if (model->md5_skins) {
+            Z_Free(model->md5_skins);
+            model->md5_skins = NULL;
+        }
+        vk_destroy_mesh(&model->md5_mesh);
+        vk_destroy_buffer(&model->md5_line_indices);
+    }
+    if (vertices)
+        Z_Free(vertices);
+    if (indices)
+        Z_Free(indices);
+    if (line_indices)
+        Z_Free(line_indices);
+    Hunk_Free(&hunk);
+    return ok;
+}
+#endif
+
 static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t length)
 {
     dmd2header_t header;
@@ -1569,8 +1810,10 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
     };
     model->vertex_count = numverts;
     model->skin_count = header.num_skins;
-    if (model->skin_count)
+    if (model->skin_count) {
         model->skins = Z_Mallocz(sizeof(model->skins[0]) * model->skin_count);
+        model->skin_names = Z_Mallocz(sizeof(model->skin_names[0]) * model->skin_count);
+    }
 
     const char *src_skin = (const char *)rawdata + header.ofs_skins;
     for (int i = 0; i < model->skin_count; i++) {
@@ -1578,8 +1821,11 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
 
         if (!Q_memccpy(skin_name, src_skin, 0, sizeof(skin_name)))
             model->skins[i] = R_NOTEXTURE;
-        else
+        else {
+            Q_strlcpy(model->skin_names[i], skin_name,
+                      sizeof(model->skin_names[i]));
             model->skins[i] = IMG_Find(skin_name, IT_SKIN, IF_NONE);
+        }
         src_skin += MD2_MAX_SKINNAME;
     }
 
@@ -1598,6 +1844,10 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
         goto out;
     }
     model->alias_line_index_count = line_index_count;
+
+#if USE_MD5
+    vk_load_md5_variant(model);
+#endif
 
     handle = (model - vk.models) + 1;
 
@@ -1691,6 +1941,7 @@ static qhandle_t vk_load_md3_model(const char *name, const byte *rawdata, size_t
     vk_alias_frame_t *alias_frames = NULL;
     vk_alias_batch_t *batches = NULL;
     image_t **skins = NULL;
+    maliasskinname_t *skin_names = NULL;
     vk_model_t *model = NULL;
     uint32_t vertex_count = 0;
     uint32_t index_count = 0;
@@ -1766,8 +2017,10 @@ static qhandle_t vk_load_md3_model(const char *name, const byte *rawdata, size_t
     indices = Z_Malloc(sizeof(*indices) * index_count);
     alias_frames = Z_Mallocz(sizeof(*alias_frames) * header.num_frames);
     batches = Z_Mallocz(sizeof(*batches) * header.num_meshes);
-    if (skin_count)
+    if (skin_count) {
         skins = Z_Mallocz(sizeof(*skins) * skin_count);
+        skin_names = Z_Mallocz(sizeof(*skin_names) * skin_count);
+    }
 
     const dmd3frame_t *src_frame =
         (const dmd3frame_t *)(rawdata + header.ofs_frames);
@@ -1810,9 +2063,12 @@ static qhandle_t vk_load_md3_model(const char *name, const byte *rawdata, size_t
 
             if (!Q_memccpy(skin_name, src_skin[skin].name, 0, sizeof(skin_name)))
                 skins[info->skin_start + skin] = R_NOTEXTURE;
-            else
+            else {
+                Q_strlcpy(skin_names[info->skin_start + skin], skin_name,
+                          sizeof(skin_names[info->skin_start + skin]));
                 skins[info->skin_start + skin] =
                     IMG_Find(skin_name, IT_SKIN, IF_NONE);
+            }
         }
 
         for (uint32_t i = 0; i < mesh->num_tris * 3; i++) {
@@ -1874,6 +2130,8 @@ static qhandle_t vk_load_md3_model(const char *name, const byte *rawdata, size_t
     model->skin_count = skin_count;
     model->skins = skins;
     skins = NULL;
+    model->skin_names = skin_names;
+    skin_names = NULL;
 
     if (!vk_upload_mesh(&model->mesh, vertices, vertex_count * header.num_frames,
                         indices, index_count)) {
@@ -1891,6 +2149,10 @@ static qhandle_t vk_load_md3_model(const char *name, const byte *rawdata, size_t
     }
     model->alias_line_index_count = line_index_count;
 
+#if USE_MD5
+    vk_load_md5_variant(model);
+#endif
+
     handle = (model - vk.models) + 1;
 
 out:
@@ -1906,6 +2168,8 @@ out:
         Z_Free(batches);
     if (skins)
         Z_Free(skins);
+    if (skin_names)
+        Z_Free(skin_names);
 
     return handle;
 }
@@ -2177,7 +2441,10 @@ static VkSampler vk_sampler_for_image(const image_t *image)
             return vk.nearest_sampler ? vk.nearest_sampler : vk.sampler;
     }
 
-    return vk.sampler;
+    if (image->type == IT_WALL || image->type == IT_SKIN)
+        return vk.sampler;
+
+    return vk.postprocess_sampler ? vk.postprocess_sampler : vk.sampler;
 }
 
 static VkSampler vk_sampler_for_pic_flags(imageflags_t flags)
@@ -2203,8 +2470,18 @@ static void vk_update_texture_descriptors(void)
     vk_update_texture_descriptor_with_sampler(&vk.particle_texture,
         vk_sampler_for_pic_flags((vk_partshape && vk_partshape->integer == 1) ?
                                  IF_NEAREST : IF_NONE));
-    vk_update_texture_descriptor(&vk.beam_texture);
+    vk_update_texture_descriptor_with_sampler(&vk.beam_texture,
+                                              vk.postprocess_sampler);
     vk_update_texture_descriptor(&vk.world.pixel_lightmap_texture);
+    for (int i = 0; i < VK_MAX_CUBEMAPS; i++) {
+        if (!vk.cubemaps[i].image)
+            continue;
+        VkSampler sampler = (vk_bilerp_skies && !vk_bilerp_skies->integer) ?
+            vk.sky_nearest_sampler : vk.sky_sampler;
+        for (int face = 0; face < 6; face++)
+            vk_update_texture_descriptor_with_sampler(&vk.cubemaps[i].faces[face],
+                                                      sampler);
+    }
 }
 
 static uint32_t vk_mip_level_count(uint32_t width, uint32_t height)
@@ -2218,6 +2495,25 @@ static uint32_t vk_mip_level_count(uint32_t width, uint32_t height)
     }
 
     return levels;
+}
+
+static int vk_upscale_level(uint32_t width, uint32_t height,
+                            imagetype_t type, imageflags_t flags)
+{
+    if (type != IT_PIC && type != IT_FONT && type != IT_SPRITE)
+        return 0;
+    if (!(flags & (IF_PALETTED | IF_SCRAP)))
+        return 0;
+
+    int level = vk_upscale_pcx ? Cvar_ClampInteger(vk_upscale_pcx, 0, 2) : 0;
+    uint32_t max_size = min(vk.physical_device_properties.limits.maxImageDimension2D,
+                            MAX_TEXTURE_SIZE);
+
+    while (level && (width > (max_size >> level) ||
+                     height > (max_size >> level)))
+        level--;
+
+    return level;
 }
 
 static void vk_mip_map(byte *out, const byte *in, uint32_t width, uint32_t height)
@@ -2426,6 +2722,120 @@ static uint32_t vk_alloc_temp_texture_index(void)
     return 0;
 }
 
+// Packed cubemap layouts, matching the OpenGL image loader. The first two
+// bytes are atlas columns/rows, followed by six (column,row) face offsets in
+// rt, lf, up, dn, bk, ft order.
+static const byte vk_cubemap_layouts[][14] = {
+    { 4, 3, 2, 1, 0, 1, 1, 0, 1, 2, 1, 1, 3, 1 },
+    { 3, 4, 2, 1, 0, 1, 1, 0, 1, 2, 1, 1, 1, 3 },
+    { 6, 1, 0, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0 },
+    { 1, 6, 0, 0, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5 },
+    { 3, 2, 0, 0, 0, 1, 1, 0, 1, 1, 2, 0, 2, 1 },
+    { 2, 3, 0, 0, 1, 0, 0, 1, 1, 1, 0, 2, 1, 2 },
+};
+
+static vk_cubemap_t *vk_find_cubemap(const image_t *image)
+{
+    for (int i = 0; i < VK_MAX_CUBEMAPS; i++) {
+        if (vk.cubemaps[i].image == image)
+            return &vk.cubemaps[i];
+    }
+    return NULL;
+}
+
+static void vk_clear_cubemap(vk_cubemap_t *cubemap)
+{
+    if (!cubemap)
+        return;
+    for (int i = 0; i < 6; i++)
+        vk_destroy_texture_resource(&cubemap->faces[i]);
+    cubemap->image = NULL;
+}
+
+static void vk_unload_cubemap(image_t *image)
+{
+    vk_cubemap_t *cubemap = vk_find_cubemap(image);
+    if (cubemap)
+        vk_clear_cubemap(cubemap);
+    image->texnum = image->texnum2 = 0;
+}
+
+static bool vk_upload_cubemap(image_t *image, const byte *pic)
+{
+    const byte *layout = NULL;
+    vk_cubemap_t *cubemap = vk_find_cubemap(image);
+
+    if (!image || !pic || !image->upload_width || !image->upload_height)
+        return false;
+
+    for (int i = 0; i < q_countof(vk_cubemap_layouts); i++) {
+        const byte *candidate = vk_cubemap_layouts[i];
+        if ((uint32_t)image->upload_width * candidate[1] ==
+            (uint32_t)image->upload_height * candidate[0]) {
+            layout = candidate;
+            break;
+        }
+    }
+    if (!layout) {
+        Com_SetLastError("Unsupported cubemap atlas aspect ratio");
+        return false;
+    }
+
+    uint32_t size = image->upload_width / layout[0];
+    uint32_t max_size = min(vk.physical_device_properties.limits.maxImageDimension2D,
+                            MAX_TEXTURE_SIZE);
+    if (!size || size > max_size) {
+        Com_SetLastError("Cubemap face exceeds Vulkan texture size limit");
+        return false;
+    }
+
+    if (!cubemap) {
+        for (int i = 0; i < VK_MAX_CUBEMAPS; i++) {
+            if (!vk.cubemaps[i].image) {
+                cubemap = &vk.cubemaps[i];
+                break;
+            }
+        }
+    }
+    if (!cubemap) {
+        Com_SetLastError("No free Vulkan cubemap slots");
+        return false;
+    }
+
+    vk_clear_cubemap(cubemap);
+    cubemap->image = image;
+    byte *face_pixels = FS_AllocTempMem((size_t)size * size * 4);
+    layout += 2;
+
+    for (int face = 0; face < 6; face++, layout += 2) {
+        uint32_t x = layout[0] * size;
+        uint32_t y = layout[1] * size;
+        for (uint32_t row = 0; row < size; row++) {
+            memcpy(face_pixels + (size_t)row * size * 4,
+                   pic + ((size_t)(y + row) * image->upload_width + x) * 4,
+                   (size_t)size * 4);
+        }
+        vk_color_transform_texture(face_pixels, size, size,
+                                   image->type, image->flags);
+        if (!vk_upload_texture_data(&cubemap->faces[face], size, size,
+                                    face_pixels, false)) {
+            FS_FreeTempMem(face_pixels);
+            vk_clear_cubemap(cubemap);
+            image->texnum = 0;
+            return false;
+        }
+        VkSampler sampler = (vk_bilerp_skies && !vk_bilerp_skies->integer) ?
+            vk.sky_nearest_sampler : vk.sky_sampler;
+        vk_update_texture_descriptor_with_sampler(&cubemap->faces[face], sampler);
+    }
+
+    FS_FreeTempMem(face_pixels);
+    image->texnum = (cubemap - vk.cubemaps) + 1;
+    image->sl = image->tl = 0.0f;
+    image->sh = image->th = 1.0f;
+    return true;
+}
+
 static bool vk_upload_texture(image_t *image, byte *pic)
 {
     uintptr_t first = (uintptr_t)r_images;
@@ -2455,6 +2865,18 @@ static bool vk_upload_texture(image_t *image, byte *pic)
 
     vk_color_transform_texture(pic, width, height, image->type, image->flags);
 
+    int upscale_level = vk_upscale_level(width, height, image->type, image->flags);
+    if (upscale_level) {
+        scaled_width = width << upscale_level;
+        scaled_height = height << upscale_level;
+        scaled = FS_AllocTempMem((size_t)scaled_width * scaled_height * 4);
+        if (upscale_level == 2)
+            HQ4x_Render((uint32_t *)scaled, (const uint32_t *)pic, width, height);
+        else
+            HQ2x_Render((uint32_t *)scaled, (const uint32_t *)pic, width, height);
+        image->flags |= IF_UPSCALED;
+    }
+
     if (image->type == IT_WALL ||
         (image->type == IT_SKIN && (!vk_downsample_skins || vk_downsample_skins->integer))) {
         if (vk_round_down && vk_round_down->integer) {
@@ -2480,15 +2902,16 @@ static bool vk_upload_texture(image_t *image, byte *pic)
         scaled_height = max(scaled_height >> 1, 1);
     }
 
-    if (scaled_width != width || scaled_height != height) {
-        scaled = FS_AllocTempMem(scaled_width * scaled_height * 4);
+    if (!upscale_level && (scaled_width != width || scaled_height != height)) {
+        scaled = FS_AllocTempMem((size_t)scaled_width * scaled_height * 4);
         vk_resample_texture(pic, width, height, scaled, scaled_width, scaled_height);
     }
 
     image->upload_width = scaled_width;
     image->upload_height = scaled_height;
 
-    bool mipmaps = image->type == IT_WALL || image->type == IT_SKIN;
+    bool mipmaps = image->type == IT_WALL || image->type == IT_SKIN ||
+                   upscale_level != 0;
     bool ok = vk_upload_texture_data(texture, scaled_width, scaled_height, scaled,
                                      mipmaps);
     if (scaled != pic)
@@ -3078,7 +3501,7 @@ static bool vk_create_postprocess_sampler(VkSampler *sampler)
         .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
         .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
         .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .maxLod = 0.0f,
+        .maxLod = VK_LOD_CLAMP_NONE,
     };
     VkResult result = vk.CreateSampler(vk.device, &sampler_info, NULL, sampler);
     if (result != VK_SUCCESS)
@@ -3098,7 +3521,7 @@ static bool vk_create_nearest_sampler(VkSampler *sampler,
         .addressModeU = address_mode,
         .addressModeV = address_mode,
         .addressModeW = address_mode,
-        .maxLod = 0.0f,
+        .maxLod = VK_LOD_CLAMP_NONE,
     };
     VkResult result = vk.CreateSampler(vk.device, &sampler_info, NULL, sampler);
     if (result != VK_SUCCESS)
@@ -3182,6 +3605,24 @@ static void vk_drawsky_changed(cvar_t *self)
     CL_SetSky();
 }
 
+static void vk_glare_changed(cvar_t *self)
+{
+    (void)self;
+
+    for (int i = 0; i < glr.num_glare_sources; i++) {
+        glare_source_t *gs = &glr.glare_sources[i];
+        gs->visibility = 0.0f;
+        gs->visible = false;
+    }
+}
+
+static void vk_glare_threshold_changed(cvar_t *self)
+{
+    Cvar_ClampValue(self, 0.0f, 1.0f);
+    if (vk.world.cache)
+        vk_build_glare_list(vk.world.cache);
+}
+
 static bool vk_create_frame_resources(void)
 {
     VkDescriptorSetLayoutBinding sampler_binding = {
@@ -3200,7 +3641,8 @@ static bool vk_create_frame_resources(void)
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreateDescriptorSetLayout", result);
 
-    const uint32_t texture_descriptor_count = MAX_RIMAGES * 2 + 9;
+    const uint32_t texture_descriptor_count =
+        MAX_RIMAGES * 2 + VK_MAX_CUBEMAPS * 6 + 9;
     VkDescriptorPoolSize pool_size = {
         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount = texture_descriptor_count,
@@ -3543,6 +3985,21 @@ static void vk_destroy_swapchain(void)
     vk.bloom_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.blur_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
+    if (vk.multisample_view) {
+        vk.DestroyImageView(vk.device, vk.multisample_view, NULL);
+        vk.multisample_view = VK_NULL_HANDLE;
+    }
+
+    if (vk.multisample_image) {
+        vk.DestroyImage(vk.device, vk.multisample_image, NULL);
+        vk.multisample_image = VK_NULL_HANDLE;
+    }
+
+    if (vk.multisample_memory) {
+        vk.FreeMemory(vk.device, vk.multisample_memory, NULL);
+        vk.multisample_memory = VK_NULL_HANDLE;
+    }
+
     if (vk.depth_view) {
         vk.DestroyImageView(vk.device, vk.depth_view, NULL);
         vk.depth_view = VK_NULL_HANDLE;
@@ -3638,20 +4095,23 @@ static bool vk_allocate_swapchain_commands(void)
 
 static bool vk_create_render_pass(void)
 {
-    VkAttachmentDescription attachments[] = {
+    bool multisampled = vk.sample_count != VK_SAMPLE_COUNT_1_BIT;
+    VkAttachmentDescription attachments[3] = {
         {
             .format = vk.swapchain_format,
-            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .samples = vk.sample_count,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .storeOp = multisampled ? VK_ATTACHMENT_STORE_OP_DONT_CARE :
+                                      VK_ATTACHMENT_STORE_OP_STORE,
             .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .initialLayout = multisampled ? VK_IMAGE_LAYOUT_UNDEFINED :
+                                            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         },
         {
             .format = vk.depth_format,
-            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .samples = vk.sample_count,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             .stencilLoadOp = vk_shadow_stencil_enabled() ?
@@ -3659,6 +4119,16 @@ static bool vk_create_render_pass(void)
             .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
             .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        },
+        {
+            .format = vk.swapchain_format,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         },
     };
 
@@ -3670,17 +4140,22 @@ static bool vk_create_render_pass(void)
         .attachment = 1,
         .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
     };
+    VkAttachmentReference resolve_ref = {
+        .attachment = 2,
+        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    };
 
     VkSubpassDescription subpass = {
         .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
         .colorAttachmentCount = 1,
         .pColorAttachments = &color_ref,
+        .pResolveAttachments = multisampled ? &resolve_ref : NULL,
         .pDepthStencilAttachment = &depth_ref,
     };
 
     VkRenderPassCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = q_countof(attachments),
+        .attachmentCount = multisampled ? q_countof(attachments) : 2,
         .pAttachments = attachments,
         .subpassCount = 1,
         .pSubpasses = &subpass,
@@ -3719,7 +4194,7 @@ static bool vk_create_depth_resources(void)
         },
         .mipLevels = 1,
         .arrayLayers = 1,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .samples = vk.sample_count,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -3775,16 +4250,96 @@ static bool vk_create_depth_resources(void)
     return true;
 }
 
+static bool vk_create_multisample_resources(void)
+{
+    if (vk.sample_count == VK_SAMPLE_COUNT_1_BIT)
+        return true;
+
+    VkImageCreateInfo image_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = vk.swapchain_format,
+        .extent = {
+            .width = vk.swapchain_extent.width,
+            .height = vk.swapchain_extent.height,
+            .depth = 1,
+        },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = vk.sample_count,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
+                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+
+    VkResult result = vk.CreateImage(vk.device, &image_info, NULL,
+                                     &vk.multisample_image);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateImage", result);
+
+    VkMemoryRequirements req;
+    vk.GetImageMemoryRequirements(vk.device, vk.multisample_image, &req);
+    uint32_t memory_type = vk_find_memory_type(req.memoryTypeBits,
+                                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (memory_type == UINT32_MAX) {
+        Com_SetLastError("No suitable Vulkan multisample memory type");
+        return false;
+    }
+
+    VkMemoryAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = req.size,
+        .memoryTypeIndex = memory_type,
+    };
+    result = vk.AllocateMemory(vk.device, &alloc_info, NULL,
+                               &vk.multisample_memory);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkAllocateMemory", result);
+
+    result = vk.BindImageMemory(vk.device, vk.multisample_image,
+                                vk.multisample_memory, 0);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkBindImageMemory", result);
+
+    VkImageViewCreateInfo view_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = vk.multisample_image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = vk.swapchain_format,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    result = vk.CreateImageView(vk.device, &view_info, NULL,
+                                &vk.multisample_view);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateImageView", result);
+
+    return true;
+}
+
 static bool vk_create_framebuffers(void)
 {
     vk.framebuffers = Z_Mallocz(sizeof(*vk.framebuffers) * vk.swapchain_image_count);
 
     for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
-        VkImageView attachments[] = { vk.swapchain_views[i], vk.depth_view };
+        VkImageView attachments[3] = { vk.swapchain_views[i], vk.depth_view };
+        uint32_t attachment_count = 2;
+        if (vk.sample_count != VK_SAMPLE_COUNT_1_BIT) {
+            attachments[0] = vk.multisample_view;
+            attachments[2] = vk.swapchain_views[i];
+            attachment_count = 3;
+        }
         VkFramebufferCreateInfo create_info = {
             .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
             .renderPass = vk.render_pass,
-            .attachmentCount = q_countof(attachments),
+            .attachmentCount = attachment_count,
             .pAttachments = attachments,
             .width = vk.swapchain_extent.width,
             .height = vk.swapchain_extent.height,
@@ -3833,11 +4388,17 @@ static bool vk_create_scene_target(void)
         vk_update_texture_descriptor_with_sampler(targets[i].texture,
                                                   vk.postprocess_sampler);
 
-        VkImageView attachments[] = { targets[i].texture->view, vk.depth_view };
+        VkImageView attachments[3] = { targets[i].texture->view, vk.depth_view };
+        uint32_t attachment_count = 2;
+        if (vk.sample_count != VK_SAMPLE_COUNT_1_BIT) {
+            attachments[0] = vk.multisample_view;
+            attachments[2] = targets[i].texture->view;
+            attachment_count = 3;
+        }
         VkFramebufferCreateInfo create_info = {
             .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
             .renderPass = targets[i].render_pass,
-            .attachmentCount = q_countof(attachments),
+            .attachmentCount = attachment_count,
             .pAttachments = attachments,
             .width = targets[i].width,
             .height = targets[i].height,
@@ -4030,7 +4591,7 @@ static bool vk_create_rect_pipeline_ex(VkPipeline *pipeline,
     };
     VkPipelineMultisampleStateCreateInfo multisample = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .rasterizationSamples = vk.sample_count,
     };
     VkPipelineColorBlendAttachmentState color_blend_attachment = {
         .blendEnable = VK_TRUE,
@@ -4153,7 +4714,7 @@ static bool vk_create_texture_pipeline_ex(VkPipeline *pipeline,
     };
     VkPipelineMultisampleStateCreateInfo multisample = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .rasterizationSamples = vk.sample_count,
     };
     VkPipelineColorBlendAttachmentState color_blend_attachment = {
         .blendEnable = VK_TRUE,
@@ -4317,7 +4878,7 @@ static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
     };
     VkPipelineMultisampleStateCreateInfo multisample = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .rasterizationSamples = vk.sample_count,
     };
     VkPipelineColorBlendAttachmentState color_blend_attachment = {
         .blendEnable = blend,
@@ -4471,7 +5032,7 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
     };
     VkPipelineMultisampleStateCreateInfo multisample = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .rasterizationSamples = vk.sample_count,
     };
     VkPipelineColorBlendAttachmentState color_blend_attachment = {
         .blendEnable = blend,
@@ -4638,7 +5199,7 @@ static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test
     };
     VkPipelineMultisampleStateCreateInfo multisample = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .rasterizationSamples = vk.sample_count,
     };
     VkPipelineColorBlendAttachmentState color_blend_attachment = {
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
@@ -4823,7 +5384,7 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
     };
     VkPipelineMultisampleStateCreateInfo multisample = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .rasterizationSamples = vk.sample_count,
     };
     VkPipelineColorBlendAttachmentState color_blend_attachment = {
         .blendEnable = blend,
@@ -4994,14 +5555,16 @@ static bool vk_create_swapchain(int width, int height)
 
     vk.swapchain_format = surface_format.format;
     vk.present_mode = present_mode;
+    vk.sample_count = vk_choose_sample_count();
     vk.depth_format = vk_choose_depth_format(vk_shadow_stencil_requested());
     if (vk.depth_format == VK_FORMAT_UNDEFINED) {
         Com_SetLastError("No supported Vulkan depth format");
         return false;
     }
-    Com_Printf("Vulkan depth format: %s, shadow stencil %s\n",
+    Com_Printf("Vulkan depth format: %s, shadow stencil %s, multisampling %ux\n",
                vk_format_name(vk.depth_format),
-               vk_shadow_stencil_enabled() ? "enabled" : "disabled");
+               vk_shadow_stencil_enabled() ? "enabled" : "disabled",
+               (unsigned)vk.sample_count);
     vk.swapchain_extent = extent;
 
     result = vk.GetSwapchainImagesKHR(vk.device, vk.swapchain, &vk.swapchain_image_count, NULL);
@@ -5119,6 +5682,7 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_alias_pipeline(&vk.alias_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_depth_resources() ||
+        !vk_create_multisample_resources() ||
         !vk_create_framebuffers() ||
         !vk_create_scene_target())
         return false;
@@ -6354,7 +6918,12 @@ static bool vk_create_beam_texture(void)
         }
     }
 
-    return vk_upload_texture_data(&vk.beam_texture, 16, 16, pixels, false);
+    if (!vk_upload_texture_data(&vk.beam_texture, 16, 16, pixels, false))
+        return false;
+
+    vk_update_texture_descriptor_with_sampler(&vk.beam_texture,
+                                              vk.postprocess_sampler);
+    return true;
 }
 
 static void vk_partshape_changed(cvar_t *self)
@@ -6535,6 +7104,15 @@ static void vk_draw_debug_lines(const refdef_t *fd)
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.debug_lines.buffer, &offset);
     vk_push_constants(cmd, sizeof(push), &push);
 
+    float line_width = 1.0f;
+    if (vk.CmdSetLineWidth && vk.physical_device_features.wideLines &&
+        vk_debug_linewidth) {
+        line_width = Cvar_ClampValue(vk_debug_linewidth,
+            vk.physical_device_properties.limits.lineWidthRange[0],
+            vk.physical_device_properties.limits.lineWidthRange[1]);
+        vk.CmdSetLineWidth(cmd, line_width);
+    }
+
     if (build.depth_vertices) {
         vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            vk.line3d_pipeline);
@@ -6549,6 +7127,9 @@ static void vk_draw_debug_lines(const refdef_t *fd)
                    VK_MAX_DEBUG_LINE_VERTICES - build.nodepth_vertices, 0);
         vk_count_batch3d();
     }
+
+    if (line_width != 1.0f)
+        vk.CmdSetLineWidth(cmd, 1.0f);
 }
 
 typedef struct {
@@ -7543,6 +8124,18 @@ static void vk_draw_skybox(const refdef_t *fd)
     vk_push_constants(cmd, sizeof(push), &push);
 
     for (uint32_t face = 0; face < 6; face++) {
+        if (vk.sky_cubemap >= 0 && vk.sky_cubemap < VK_MAX_CUBEMAPS) {
+            const vk_cubemap_t *cubemap = &vk.cubemaps[vk.sky_cubemap];
+            const vk_texture_t *texture = &cubemap->faces[face];
+            if (cubemap->image && texture->descriptor_set) {
+                vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+                vk.CmdDrawIndexed(cmd, 6, 1, face * 6, 0, 0);
+                c.trisDrawn += 2;
+                vk_count_batch3d();
+            }
+            continue;
+        }
+
         uint32_t texture_index = vk.sky_images[face];
 
         if (!texture_index || texture_index >= MAX_RIMAGES)
@@ -8352,6 +8945,9 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
 static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 {
     vk_model_t *model = vk_model_for_handle(ent->model);
+#if USE_MD5
+    vk_model_t md5_view;
+#endif
 
     bool translucent = ent->flags & RF_TRANSLUCENT;
     bool bloom_only = ent->flags & RF_BLOOM_ONLY;
@@ -8362,6 +8958,28 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         !model->mesh.vertices.buffer || !model->mesh.indices.buffer ||
         !model->vertex_count || !model->alias_batch_count)
         return;
+
+#if USE_MD5
+    if (model->md5_mesh.vertices.buffer && model->md5_mesh.indices.buffer &&
+        model->md5_frame_count && model->md5_vertex_count &&
+        vk_md5_use && vk_md5_use->integer &&
+        ((ent->flags & RF_NO_LOD) || !vk_md5_distance ||
+         vk_md5_distance->value <= 0.0f ||
+         Distance(ent->origin, fd->vieworg) <= vk_md5_distance->value)) {
+        md5_view = *model;
+        md5_view.mesh = model->md5_mesh;
+        md5_view.alias_line_indices = model->md5_line_indices;
+        md5_view.alias_line_index_count = model->md5_line_index_count;
+        md5_view.alias_frames = model->md5_frames;
+        md5_view.alias_batches = model->md5_batches;
+        md5_view.skins = model->md5_skins;
+        md5_view.frame_count = model->md5_frame_count;
+        md5_view.alias_batch_count = model->md5_batch_count;
+        md5_view.skin_count = model->md5_skin_count;
+        md5_view.vertex_count = model->md5_vertex_count;
+        model = &md5_view;
+    }
+#endif
 
     if (vk.drawing_bloom && !bloom_only && !bloom_shell &&
         !vk_alias_model_has_glowmap(model))
@@ -10320,10 +10938,7 @@ static void vk_build_glare_list(bsp_t *bsp)
 {
     glr.num_glare_sources = 0;
 
-    if (!vk_glare || !vk_glare->integer)
-        return;
-    if (!bsp || !bsp->faces || (vk_fullbright && vk_fullbright->integer) ||
-        (vk_vertexlight && vk_vertexlight->integer))
+    if (!bsp || !bsp->faces)
         return;
 
     for (int i = 0; i < bsp->numfaces; i++) {
@@ -10588,9 +11203,16 @@ bool VKR_Init(bool total)
     vk_bilerp_pics->changed = vk_sampler_selection_changed;
     vk_bilerp_skies = Cvar_Get("gl_bilerp_skies", "1", 0);
     vk_bilerp_skies->changed = vk_sampler_selection_changed;
+    vk_cubemaps = Cvar_Get("gl_cubemaps", "0", CVAR_FILES);
     vk_saturation = Cvar_Get("gl_saturation", "1", CVAR_FILES);
     vk_invert = Cvar_Get("gl_invert", "0", CVAR_FILES);
     vk_gamma_scale_pics = Cvar_Get("gl_gamma_scale_pics", "0", CVAR_FILES);
+    vk_upscale_pcx = Cvar_Get("gl_upscale_pcx", "0", CVAR_FILES);
+#if USE_MD5
+    vk_md5_load = Cvar_Get("gl_md5_load", "1", CVAR_FILES);
+    vk_md5_use = Cvar_Get("gl_md5_use", "1", 0);
+    vk_md5_distance = Cvar_Get("gl_md5_distance", "2048", 0);
+#endif
     vk_gamma = Cvar_Get("vid_gamma", "1", CVAR_ARCHIVE);
     if (r_config.flags & QVF_GAMMARAMP) {
         vk_gamma->changed = vk_gamma_changed;
@@ -10621,8 +11243,10 @@ bool VKR_Init(bool total)
     vk_waterwarp = Cvar_Get("gl_waterwarp", "0", 0);
     vk_bloom_sigma = Cvar_Get("gl_bloom_sigma", "4", 0);
     vk_bloom_downsample = Cvar_Get("vk_bloom_downsample", "4", 0);
-    vk_glare = Cvar_Get("gl_glare", "1", CVAR_ARCHIVE);
+    vk_glare = Cvar_Get("gl_glare", "0", CVAR_ARCHIVE);
+    vk_glare->changed = vk_glare_changed;
     vk_glare_threshold = Cvar_Get("gl_glare_threshold", "0.3", 0);
+    vk_glare_threshold->changed = vk_glare_threshold_changed;
     vk_glare_size = Cvar_Get("gl_glare_size", "24", 0);
     vk_glare_intensity = Cvar_Get("gl_glare_intensity", "0.5", 0);
     vk_perf_stats = Cvar_Get("vk_perf_stats", "0", 0);
@@ -10671,6 +11295,7 @@ bool VKR_Init(bool total)
     vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
 #if USE_DEBUG
     vk_debug_distfrac = Cvar_Get("gl_debug_distfrac", "0.004", 0);
+    vk_debug_linewidth = Cvar_Get("gl_debug_linewidth", "2", 0);
 #endif
 
     if (!vid->init())
@@ -10761,6 +11386,10 @@ void VKR_Shutdown(bool total)
         vk_gamma->changed = NULL;
     if (vk_partshape)
         vk_partshape->changed = NULL;
+    if (vk_glare)
+        vk_glare->changed = NULL;
+    if (vk_glare_threshold)
+        vk_glare_threshold->changed = NULL;
     if (vk_clearcolor)
         vk_clearcolor->generator = NULL;
 
@@ -10932,6 +11561,12 @@ qhandle_t VKR_RegisterModel(const char *name)
             if (model->skins[i])
                 model->skins[i]->registration_sequence = r_registration_sequence;
         }
+#if USE_MD5
+        for (int i = 0; i < model->md5_skin_count; i++) {
+            if (model->md5_skins[i])
+                model->md5_skins[i]->registration_sequence = r_registration_sequence;
+        }
+#endif
         return (model - vk.models) + 1;
     }
 
@@ -10973,6 +11608,7 @@ void VKR_SetSky(const char *name, float rotate, bool autorotate, const vec3_t ax
     char pathname[MAX_QPATH];
 
     memset(vk.sky_images, 0, sizeof(vk.sky_images));
+    vk.sky_cubemap = -1;
     vk.sky_rotate = 0.0f;
     vk.sky_autorotate = false;
     VectorSet(vk.sky_axis, 0.0f, 0.0f, 1.0f);
@@ -10985,6 +11621,22 @@ void VKR_SetSky(const char *name, float rotate, bool autorotate, const vec3_t ax
     if (rotate && VectorNormalize2(axis, vk.sky_axis) >= 0.001f) {
         vk.sky_rotate = rotate;
         vk.sky_autorotate = autorotate;
+    }
+
+    if (vk_cubemaps && vk_cubemaps->integer) {
+        const image_t *image;
+
+        if (Q_concat(pathname, sizeof(pathname), "sky/", name, ".tga") >=
+            sizeof(pathname))
+            return;
+        image = IMG_Find(pathname, IT_SKY, IF_CUBEMAP);
+        if (image && image != R_SKYTEXTURE) {
+            vk_cubemap_t *cubemap = vk_find_cubemap(image);
+            if (cubemap) {
+                vk.sky_cubemap = cubemap - vk.cubemaps;
+                return;
+            }
+        }
     }
 
     for (uint32_t i = 0; i < 6; i++) {

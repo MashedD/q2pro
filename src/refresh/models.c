@@ -1446,6 +1446,45 @@ fail:
     Hunk_FreeToWatermark(&model->hunk, watermark);
 }
 
+md5_model_t *MOD_LoadMD5Replacement(const char *name, int numframes,
+                                    int numskins,
+                                    const maliasskinname_t *skinnames,
+                                    memhunk_t *hunk)
+{
+    model_t model = { 0 };
+    maliasmesh_t mesh = { 0 };
+    bool use_gpu_lerp = gl_static.use_gpu_lerp;
+    size_t hunk_align = gl_static.hunk_align;
+
+    if (!name || !hunk || numframes < 1 || numskins < 0 ||
+        (numskins && !skinnames))
+        return NULL;
+
+    Q_strlcpy(model.name, name, sizeof(model.name));
+    model.type = MOD_ALIAS;
+    model.numframes = numframes;
+    model.nummeshes = 1;
+    model.meshes = &mesh;
+    mesh.numskins = numskins;
+    mesh.skinnames = (maliasskinname_t *)skinnames;
+
+    Hunk_Begin(&model.hunk, MOD_MAXSIZE_CPU);
+    gl_static.use_gpu_lerp = false;
+    gl_static.hunk_align = 64;
+    MOD_LoadMD5(&model);
+    gl_static.use_gpu_lerp = use_gpu_lerp;
+    gl_static.hunk_align = hunk_align;
+
+    if (!model.skeleton) {
+        Hunk_Free(&model.hunk);
+        return NULL;
+    }
+
+    Hunk_End(&model.hunk);
+    *hunk = model.hunk;
+    return model.skeleton;
+}
+
 #endif  // USE_MD5
 
 static void MOD_Reference(model_t *model)
