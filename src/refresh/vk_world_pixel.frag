@@ -52,8 +52,7 @@ void main()
         vec4 texel = texture(tex_sampler, uv);
         vec3 lm = pc.lm_scale.x < 0.0 ? vec3(1.0) : texture(lm_sampler, v_lmuv).rgb;
         out_color = texel;
-        out_color.rgb *= clamp((lm + pc.scroll.www) * pc.color.rgb + dynamic_light(),
-                               0.0, 1.0);
+        out_color.rgb *= (lm + pc.scroll.www) * pc.color.rgb + dynamic_light();
         out_color.a *= v_color.a;
         if (pc.intensity < 0.0) {
             out_color.rgb *= (out_color.r + out_color.g + out_color.b) / 3.0;
