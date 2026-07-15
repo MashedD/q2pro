@@ -9,6 +9,7 @@ layout(push_constant) uniform Push {
     vec4 dlight_colors[3];
     vec4 fog;
     float intensity;
+    float desaturation;
 } pc;
 
 layout(set = 0, binding = 0) uniform sampler2D tex_sampler;
@@ -55,6 +56,8 @@ void main()
     out_color = texture(tex_sampler, uv);
     if (out_color.a <= 0.666)
         discard;
+    float luma = dot(out_color.rgb, vec3(0.2126, 0.7152, 0.0722));
+    out_color.rgb = mix(out_color.rgb, vec3(luma), pc.desaturation);
     out_color.rgb *= pc.intensity;
     out_color.rgb *= clamp(v_color.rgb + dynamic_light(), 0.0, 1.0);
     out_color.a *= v_color.a;

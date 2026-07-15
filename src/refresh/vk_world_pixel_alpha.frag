@@ -9,6 +9,7 @@ layout(push_constant) uniform Push {
     vec4 dlight_colors[3];
     vec4 fog;
     float intensity;
+    float desaturation;
     vec2 lm_scale;
     vec2 lm_offset;
 } pc;
@@ -53,6 +54,8 @@ void main()
         if (texel.a <= 0.666) {
             discard;
         }
+        float luma = dot(texel.rgb, vec3(0.2126, 0.7152, 0.0722));
+        texel.rgb = mix(texel.rgb, vec3(luma), pc.desaturation);
 
         vec3 lm = pc.lm_scale.x < 0.0 ? vec3(1.0) : texture(lm_sampler, v_lmuv).rgb;
         out_color = texel;

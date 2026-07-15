@@ -318,12 +318,15 @@ typedef struct {
     float dlight[4];
     float fog[4];
     float intensity;
+    float desaturation;
 } vk_world_push_t;
 
 typedef char vk_world_compact_fog_offset_check[
     offsetof(vk_world_push_t, fog) == 112 ? 1 : -1];
 typedef char vk_world_compact_intensity_offset_check[
     offsetof(vk_world_push_t, intensity) == 128 ? 1 : -1];
+typedef char vk_world_compact_desaturation_offset_check[
+    offsetof(vk_world_push_t, desaturation) == 132 ? 1 : -1];
 
 typedef struct {
     mat4_t mvp;
@@ -334,6 +337,7 @@ typedef struct {
     float dlight_colors[VK_WORLD_MAX_DLIGHTS][4];
     float fog[4];
     float intensity;
+    float desaturation;
 } vk_world_lit_push_t;
 
 typedef char vk_world_dlight_origins_offset_check[
@@ -342,6 +346,8 @@ typedef char vk_world_dlight_colors_offset_check[
     offsetof(vk_world_lit_push_t, dlight_colors) == 160 ? 1 : -1];
 typedef char vk_world_fog_offset_check[
     offsetof(vk_world_lit_push_t, fog) == 208 ? 1 : -1];
+typedef char vk_world_desaturation_offset_check[
+    offsetof(vk_world_lit_push_t, desaturation) == 228 ? 1 : -1];
 
 typedef struct {
     mat4_t mvp;
@@ -352,7 +358,7 @@ typedef struct {
     float dlight_colors[VK_WORLD_MAX_DLIGHTS][4];
     float fog[4];
     float intensity;
-    float _pad;
+    float desaturation;
     float lm_scale[2];
     float lm_offset[2];
 } vk_world_pixel_push_t;
@@ -372,6 +378,7 @@ typedef struct {
     float _pad;
     float fog[4];
     float intensity;
+    float desaturation;
 } vk_alias_push_t;
 
 typedef struct {
@@ -825,8 +832,6 @@ static void vk_resample_texture(const byte *in, int inwidth, int inheight,
 static void vk_color_transform_texture(byte *pic, int width, int height,
                                        imagetype_t type, imageflags_t flags)
 {
-    float saturation = vk_saturation ?
-        Cvar_ClampValue(vk_saturation, 0.0f, 1.0f) : 1.0f;
     bool world = type == IT_WALL && !(flags & IF_TURBULENT);
     bool invert = world && vk_invert && vk_invert->integer;
     bool software_gamma = !(r_config.flags & QVF_GAMMARAMP);
@@ -836,7 +841,7 @@ static void vk_color_transform_texture(byte *pic, int width, int height,
 
     if (!world && !scale_gamma)
         return;
-    if (world && saturation == 1.0f && !invert && !scale_gamma)
+    if (world && !invert && !scale_gamma)
         return;
 
     byte *p = pic;
@@ -845,13 +850,6 @@ static void vk_color_transform_texture(byte *pic, int width, int height,
         float r = p[0];
         float g = p[1];
         float b = p[2];
-
-        if (world) {
-            float y = LUMINANCE(r, g, b);
-            r = y + (r - y) * saturation;
-            g = y + (g - y) * saturation;
-            b = y + (b - y) * saturation;
-        }
 
         p[0] = Q_clipf(r, 0.0f, 255.0f);
         p[1] = Q_clipf(g, 0.0f, 255.0f);
@@ -7617,6 +7615,14 @@ static float vk_texture_intensity(void)
     return Cvar_ClampValue(vk_intensity, 1.0f, 5.0f);
 }
 
+static float vk_world_face_desaturation(const mface_t *face)
+{
+    if (!face || (face->drawflags & SURF_WARP))
+        return 0.0f;
+
+    return 1.0f - Cvar_ClampValue(vk_saturation, 0.0f, 1.0f);
+}
+
 static float vk_world_face_intensity(const mface_t *face)
 {
     // Match the OpenGL surface state: translucent textures are not boosted by
@@ -7917,7 +7923,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     Vector4Clear(push.dlight);
     vk_fog_params(fd, push.fog);
     push.intensity = vk_texture_intensity();
-    push._pad = 0.0f;
+    push.desaturation = 0.0f;
     push.lm_scale[0] = -1.0f;
     push.lm_scale[1] = -1.0f;
     push.lm_offset[0] = 0.0f;
@@ -8088,6 +8094,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     Vector4Clear(push.dlight);
                     push.dlight[3] = fd ? fd->time : 0.0f;
                     push.intensity = vk_texture_intensity();
+                    push.desaturation = vk_world_face_desaturation(face->face);
                     push.lm_scale[0] = -1.0f;
                     push.lm_scale[1] = -1.0f;
                     push.lm_offset[0] = 0.0f;
@@ -8135,6 +8142,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                     push.dlight_origins, push.dlight_colors);
             push.dlight[3] = fd ? fd->time : 0.0f;
             push.intensity = vk_world_face_intensity(face->face);
+            push.desaturation = vk_world_face_desaturation(face->face);
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
             if (pixel_world && face->pixel_lm_w && face->pixel_lm_h) {
                 float aw = vk.world.pixel_lightmap_texture.width ?
@@ -9260,6 +9268,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     push._pad = 0.0f;
     vk_fog_params(fd, push.fog);
     push.intensity = vk_texture_intensity();
+    push.desaturation = 0.0f;
 
     for (int i = 0; i < model->alias_batch_count; i++) {
         const vk_alias_batch_t *batch = &model->alias_batches[i];
