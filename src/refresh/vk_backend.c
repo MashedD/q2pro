@@ -457,6 +457,9 @@ typedef struct {
     PFN_vkDestroyPipelineLayout DestroyPipelineLayout;
     PFN_vkCreateGraphicsPipelines CreateGraphicsPipelines;
     PFN_vkDestroyPipeline DestroyPipeline;
+    PFN_vkCreateQueryPool CreateQueryPool;
+    PFN_vkDestroyQueryPool DestroyQueryPool;
+    PFN_vkGetQueryPoolResults GetQueryPoolResults;
     PFN_vkCreateCommandPool CreateCommandPool;
     PFN_vkDestroyCommandPool DestroyCommandPool;
     PFN_vkAllocateCommandBuffers AllocateCommandBuffers;
@@ -478,6 +481,9 @@ typedef struct {
     PFN_vkCmdPushConstants CmdPushConstants;
     PFN_vkCmdDraw CmdDraw;
     PFN_vkCmdDrawIndexed CmdDrawIndexed;
+    PFN_vkCmdBeginQuery CmdBeginQuery;
+    PFN_vkCmdEndQuery CmdEndQuery;
+    PFN_vkCmdResetQueryPool CmdResetQueryPool;
     PFN_vkCreateBuffer CreateBuffer;
     PFN_vkDestroyBuffer DestroyBuffer;
     PFN_vkGetBufferMemoryRequirements GetBufferMemoryRequirements;
@@ -545,12 +551,14 @@ typedef struct {
     VkPipeline sprite_alpha_pipeline;
     VkPipeline particle_add_pipeline;
     VkPipeline glare_pipeline;
+    VkPipeline glare_occlusion_pipeline;
     VkPipeline alias_pipeline;
     VkPipeline alias_alpha_pipeline;
     VkPipeline alias_depth_pipeline;
     VkPipeline alias_blend_pipeline;
     VkPipeline alias_shadow_pipeline;
     VkPipeline alias_line_pipeline;
+    VkQueryPool glare_query_pool;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
     VkRenderPass bloom_render_pass;
@@ -635,6 +643,8 @@ typedef struct {
     vk_texture_t textures[MAX_RIMAGES];
     float flare_fracs[MAX_EDICTS];
     uint32_t flare_times[MAX_EDICTS];
+    uint32_t glare_query_counts[VK_MAX_FRAMES_IN_FLIGHT];
+    uint32_t glare_query_time;
     float perf_stats_time;
     uint64_t frame_start_usec;
     unsigned wait_usec;
@@ -3123,6 +3133,9 @@ static bool vk_load_device(void)
     LOAD(DestroyPipelineLayout);
     LOAD(CreateGraphicsPipelines);
     LOAD(DestroyPipeline);
+    LOAD(CreateQueryPool);
+    LOAD(DestroyQueryPool);
+    LOAD(GetQueryPoolResults);
     LOAD(CreateCommandPool);
     LOAD(DestroyCommandPool);
     LOAD(AllocateCommandBuffers);
@@ -3144,6 +3157,9 @@ static bool vk_load_device(void)
     LOAD(CmdPushConstants);
     LOAD(CmdDraw);
     LOAD(CmdDrawIndexed);
+    LOAD(CmdBeginQuery);
+    LOAD(CmdEndQuery);
+    LOAD(CmdResetQueryPool);
     LOAD(CreateBuffer);
     LOAD(DestroyBuffer);
     LOAD(GetBufferMemoryRequirements);
@@ -3676,6 +3692,22 @@ static void vk_glare_threshold_changed(cvar_t *self)
         vk_build_glare_list(vk.world.cache);
 }
 
+static bool vk_create_glare_query_pool(void)
+{
+    VkQueryPoolCreateInfo info = {
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType = VK_QUERY_TYPE_OCCLUSION,
+        .queryCount = MAX_GLARE_SOURCES * VK_MAX_FRAMES_IN_FLIGHT,
+    };
+    VkResult result = vk.CreateQueryPool(vk.device, &info, NULL,
+                                         &vk.glare_query_pool);
+
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateQueryPool", result);
+    memset(vk.glare_query_counts, 0, sizeof(vk.glare_query_counts));
+    return true;
+}
+
 static bool vk_create_frame_resources(void)
 {
     VkDescriptorSetLayoutBinding sampler_binding = {
@@ -3974,6 +4006,11 @@ static void vk_destroy_swapchain(void)
     if (vk.glare_pipeline) {
         vk.DestroyPipeline(vk.device, vk.glare_pipeline, NULL);
         vk.glare_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.glare_occlusion_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.glare_occlusion_pipeline, NULL);
+        vk.glare_occlusion_pipeline = VK_NULL_HANDLE;
     }
 
     if (vk.alias_pipeline) {
@@ -4995,7 +5032,8 @@ static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
 static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
                                      bool depth_write, bool blend,
                                      bool alpha_test, bool additive,
-                                     bool glowmap, bool smooth_dlights)
+                                     bool glowmap, bool smooth_dlights,
+                                     bool color_write)
 {
     VkShaderModule vert = (smooth_dlights || glowmap) ?
         vk_create_shader_module(vk_world_lit_vert_spv,
@@ -5112,8 +5150,9 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
         .dstAlphaBlendFactor = additive ?
             VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .alphaBlendOp = VK_BLEND_OP_ADD,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        .colorWriteMask = color_write ?
+            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT : 0,
     };
     VkPipelineColorBlendStateCreateInfo color_blend = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -5726,18 +5765,19 @@ static bool vk_create_swapchain(int width, int height)
                                     VK_PRIMITIVE_TOPOLOGY_LINE_LIST) ||
         !vk_create_color3d_pipeline(&vk.beam_pipeline, VK_TRUE, VK_FALSE, VK_TRUE,
                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
-        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE) ||
-        !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE) ||
-        !vk_create_world_pipeline(&vk.world_blend_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE) ||
-        !vk_create_world_pipeline(&vk.world_glow_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.world_blend_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.world_glow_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE) ||
         !vk_create_pixel_world_pipeline(&vk.pixel_world_pipeline, VK_FALSE) ||
         !vk_create_pixel_world_pipeline(&vk.pixel_world_alpha_pipeline, VK_TRUE) ||
-        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.particle_add_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.glare_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.debug_text_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.particle_add_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.glare_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.glare_occlusion_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.debug_text_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE) ||
         !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_alpha_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
@@ -9359,21 +9399,6 @@ static bool vk_flare_occluded(const entity_t *ent, const refdef_t *fd)
     return point.surf && point.fraction < 0.995f;
 }
 
-static bool vk_point_occluded(const vec3_t origin, const refdef_t *fd)
-{
-    bsp_t *bsp = vk.world.cache;
-    lightpoint_t point;
-
-    if (!fd || !bsp || !bsp->nodes)
-        return false;
-
-    BSP_LightPoint(&point, fd->vieworg, origin, bsp->nodes,
-                   vk.world.nolm_mask | SURF_TRANS_MASK);
-    vk_trace_bmodel_light_points(fd, bsp, fd->vieworg, origin, &point);
-
-    return point.surf && point.fraction < 0.995f;
-}
-
 static bool vk_flare_visible(const entity_t *ent, const refdef_t *fd)
 {
     for (int i = 0; i < 4; i++) {
@@ -9622,33 +9647,96 @@ static void vk_draw_particles(const refdef_t *fd)
     vk.draw_scope = old_scope;
 }
 
+static void vk_read_glare_queries(uint32_t slot)
+{
+    uint32_t count = min(vk.glare_query_counts[slot],
+                         (uint32_t)glr.num_glare_sources);
+    uint64_t results[MAX_GLARE_SOURCES];
+
+    vk.glare_query_counts[slot] = 0;
+    if (!count || !vk.glare_query_pool)
+        return;
+
+    uint32_t first = slot * MAX_GLARE_SOURCES;
+    VkResult result = vk.GetQueryPoolResults(
+        vk.device, vk.glare_query_pool, first, count,
+        sizeof(*results) * count, results, sizeof(*results),
+        VK_QUERY_RESULT_64_BIT);
+    if (result != VK_SUCCESS)
+        return;
+
+    for (uint32_t i = 0; i < count; i++)
+        glr.glare_sources[i].visible = results[i] != 0;
+}
+
+static void vk_glare_quad_mvp(mat4_t mvp, const vec3_t origin, float scale,
+                              const vec3_t viewaxis[3], const refdef_t *fd)
+{
+    vec3_t xaxis, yaxis, corner;
+    mat4_t model_matrix;
+
+    VectorScale(viewaxis[1], -2.0f * scale, xaxis);
+    VectorScale(viewaxis[2],  2.0f * scale, yaxis);
+    VectorMA(origin, scale, viewaxis[1], corner);
+    VectorMA(corner, -scale, viewaxis[2], corner);
+
+    memset(model_matrix, 0, sizeof(model_matrix));
+    model_matrix[0] = xaxis[0];
+    model_matrix[1] = xaxis[1];
+    model_matrix[2] = xaxis[2];
+    model_matrix[4] = yaxis[0];
+    model_matrix[5] = yaxis[1];
+    model_matrix[6] = yaxis[2];
+    model_matrix[10] = 1.0f;
+    model_matrix[12] = corner[0];
+    model_matrix[13] = corner[1];
+    model_matrix[14] = corner[2];
+    model_matrix[15] = 1.0f;
+    vk_model_mvp(mvp, fd, model_matrix);
+}
+
 static void vk_draw_glare(const refdef_t *fd)
 {
     if (!vk_glare || !vk_glare->integer || !glr.num_glare_sources || !fd ||
+        (fd->rdflags & RDF_NOWORLDMODEL) ||
+        (vk_fullbright && vk_fullbright->integer) ||
+        (vk_vertexlight && vk_vertexlight->integer) ||
         !vk.world.cache || !vk.world.cache->nodes ||
-        !vk.glare_pipeline || !vk.particle_texture.descriptor_set ||
+        !vk.glare_pipeline || !vk.glare_occlusion_pipeline ||
+        !vk.glare_query_pool || !vk.particle_texture.descriptor_set ||
         !vk.sprite_quad.vertices.buffer || !vk.sprite_quad.indices.buffer)
         return;
 
     vec3_t viewaxis[3];
+    float distances[MAX_GLARE_SOURCES];
+    float view_angles[MAX_GLARE_SOURCES];
+    bool eligible[MAX_GLARE_SOURCES];
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
+    uint32_t query_base = vk.frame_index * MAX_GLARE_SOURCES;
+    bool issue_queries = com_eventTime - vk.glare_query_time > 33;
 
     AnglesToAxis(fd->viewangles, viewaxis);
-    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.glare_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk_bind_index_buffer(cmd, vk.sprite_quad.indices.buffer, 0,
                          VK_INDEX_TYPE_UINT32);
     vk_bind_texture_descriptor(cmd, vk.particle_texture.descriptor_set);
 
+    // Match OpenGL's small depth-tested occlusion quad and 30 Hz query rate.
+    // Results are consumed when this frame-in-flight slot is next reused.
+    if (issue_queries) {
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                         vk.glare_occlusion_pipeline);
+        vk.glare_query_time = com_eventTime;
+    }
     for (int i = 0; i < glr.num_glare_sources; i++) {
         glare_source_t *gs = &glr.glare_sources[i];
         vec3_t to_src, view_dir, to_viewer;
-        bool visible = true;
+        bool test = true;
 
         for (int j = 0; j < 4; j++) {
             if (PlaneDiff(gs->origin, &vk.world.frustum[j]) < -2.5f) {
-                visible = false;
+                test = false;
                 break;
             }
         }
@@ -9656,15 +9744,45 @@ static void vk_draw_glare(const refdef_t *fd)
         VectorSubtract(gs->origin, fd->vieworg, to_src);
         float dist = VectorNormalize2(to_src, view_dir);
         if (dist < 1.0f)
-            visible = false;
+            test = false;
         VectorNegate(view_dir, to_viewer);
         float view_angle = DotProduct(to_viewer, gs->normal);
         if (view_angle < 0.01f)
-            visible = false;
-        if (visible && vk_point_occluded(gs->origin, fd))
-            visible = false;
+            test = false;
 
-        gs->visible = visible;
+        distances[i] = dist;
+        view_angles[i] = view_angle;
+        eligible[i] = test;
+
+        if (!issue_queries)
+            continue;
+
+        vk.CmdBeginQuery(cmd, vk.glare_query_pool, query_base + i, 0);
+        if (test) {
+            mat4_t mvp;
+            vk_world_push_t push = { 0 };
+            float query_scale = 2.5f;
+
+            if (dist > 20.0f)
+                query_scale += dist * 0.004f;
+            vk_glare_quad_mvp(mvp, gs->origin, query_scale, viewaxis, fd);
+            memcpy(push.mvp, mvp, sizeof(push.mvp));
+            Vector4Set(push.color, 1.0f, 1.0f, 1.0f, 1.0f);
+            push.intensity = 1.0f;
+            vk_push_constants(cmd, sizeof(push), &push);
+            vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+            c.occlusionQueries++;
+        }
+        vk.CmdEndQuery(cmd, vk.glare_query_pool, query_base + i);
+    }
+    vk.glare_query_counts[vk.frame_index] = issue_queries ?
+        glr.num_glare_sources : 0;
+
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.glare_pipeline);
+    for (int i = 0; i < glr.num_glare_sources; i++) {
+        glare_source_t *gs = &glr.glare_sources[i];
+        bool visible = eligible[i] && gs->visible;
+
         float speed = vk_flarespeed ? vk_flarespeed->value : 8.0f;
         if (speed <= 0.0f) {
             gs->visibility = visible ? 1.0f : 0.0f;
@@ -9677,43 +9795,21 @@ static void vk_draw_glare(const refdef_t *fd)
             continue;
 
         float scale = (vk_glare_size ? vk_glare_size->value : 24.0f) * gs->brightness;
-        if (dist > 20.0f)
-            scale *= 1.0f + dist * 0.004f;
+        if (distances[i] > 20.0f)
+            scale *= 1.0f + distances[i] * 0.004f;
         scale = min(scale, 200.0f);
 
-        float alpha = view_angle * gs->brightness *
+        float alpha = view_angles[i] * gs->brightness *
             (vk_glare_intensity ? vk_glare_intensity->value : 0.5f) *
             gs->visibility;
         alpha = min(alpha, 1.0f);
         if (alpha < 0.01f || scale <= 0.0f)
             continue;
 
-        vec3_t left, right, down, up, xaxis, yaxis, origin;
-        mat4_t model_matrix, mvp;
+        mat4_t mvp;
         vk_world_push_t push = { 0 };
 
-        VectorScale(viewaxis[1], scale, left);
-        VectorScale(viewaxis[1], -scale, right);
-        VectorScale(viewaxis[2], -scale, down);
-        VectorScale(viewaxis[2], scale, up);
-        VectorSubtract(right, left, xaxis);
-        VectorSubtract(up, down, yaxis);
-        VectorAdd3(gs->origin, left, down, origin);
-
-        memset(model_matrix, 0, sizeof(model_matrix));
-        model_matrix[0] = xaxis[0];
-        model_matrix[1] = xaxis[1];
-        model_matrix[2] = xaxis[2];
-        model_matrix[4] = yaxis[0];
-        model_matrix[5] = yaxis[1];
-        model_matrix[6] = yaxis[2];
-        model_matrix[10] = 1.0f;
-        model_matrix[12] = origin[0];
-        model_matrix[13] = origin[1];
-        model_matrix[14] = origin[2];
-        model_matrix[15] = 1.0f;
-
-        vk_model_mvp(mvp, fd, model_matrix);
+        vk_glare_quad_mvp(mvp, gs->origin, scale, viewaxis, fd);
         memcpy(push.mvp, mvp, sizeof(push.mvp));
         push.color[0] = min(gs->lightcolor[0], 1.0f);
         push.color[1] = min(gs->lightcolor[1], 1.0f);
@@ -11134,6 +11230,7 @@ static void vk_mark_world_images_registered(bsp_t *bsp)
 static void vk_build_glare_list(bsp_t *bsp)
 {
     glr.num_glare_sources = 0;
+    memset(vk.glare_query_counts, 0, sizeof(vk.glare_query_counts));
 
     if (!bsp || !bsp->faces)
         return;
@@ -11503,7 +11600,8 @@ bool VKR_Init(bool total)
         !vk_create_surface() ||
         !vk_pick_physical_device() ||
         !vk_create_device() ||
-        !vk_create_frame_resources()) {
+        !vk_create_frame_resources() ||
+        !vk_create_glare_query_pool()) {
         VKR_Shutdown(true);
         return false;
     }
@@ -11612,6 +11710,11 @@ void VKR_Shutdown(bool total)
 
     if (vk.device && vk.DeviceWaitIdle)
         vk.DeviceWaitIdle(vk.device);
+
+    if (vk.glare_query_pool) {
+        vk.DestroyQueryPool(vk.device, vk.glare_query_pool, NULL);
+        vk.glare_query_pool = VK_NULL_HANDLE;
+    }
 
     for (uint32_t i = 0; i < VK_MAX_FRAMES_IN_FLIGHT; i++) {
         if (vk.frame_fence[i]) {
@@ -12570,6 +12673,7 @@ void VKR_BeginFrame(void)
         Com_EPrintf("vkWaitForFences failed: Vulkan error %d\n", result);
         return;
     }
+    vk_read_glare_queries(vk.frame_index);
 
     start = vk_time_usec();
     result = vk.AcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX,
@@ -12614,6 +12718,12 @@ void VKR_BeginFrame(void)
     if (result != VK_SUCCESS) {
         Com_EPrintf("vkBeginCommandBuffer failed: Vulkan error %d\n", result);
         return;
+    }
+
+    if (vk.glare_query_pool) {
+        uint32_t first = vk.frame_index * MAX_GLARE_SOURCES;
+        vk.CmdResetQueryPool(cmd, vk.glare_query_pool, first,
+                             MAX_GLARE_SOURCES);
     }
 
     vk_transition_image(cmd, vk.current_image,
