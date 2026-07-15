@@ -9,7 +9,6 @@ the Free Software Foundation; either version 2 of the License, or
 
 #include "shared/shared.h"
 #include "common/bsp.h"
-#include "common/cmodel.h"
 #include "common/cmd.h"
 #include "common/common.h"
 #include "common/math.h"
@@ -9334,45 +9333,10 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
                         vk.sprite_quad_line_index_count, mvp);
 }
 
-static bool vk_line_occluded(const vec3_t start, const vec3_t end,
-                             const refdef_t *fd)
-{
-    bsp_t *bsp = vk.world.cache;
-    trace_t trace;
-
-    if (!fd || !bsp || !bsp->nodes)
-        return false;
-
-    CM_BoxTrace(&trace, start, end, vec3_origin, vec3_origin, bsp->nodes,
-                MASK_OPAQUE, fd->extended);
-    if (trace.fraction < 0.995f)
-        return true;
-
-    for (int i = 0; i < fd->num_entities; i++) {
-        const entity_t *ent = &fd->entities[i];
-        const vec_t *angles = VectorEmpty(ent->angles) ? NULL : ent->angles;
-
-        if (!(ent->model & BIT(31)))
-            continue;
-
-        int index = ~ent->model;
-        if (index < 1 || index >= bsp->nummodels)
-            continue;
-
-        const mmodel_t *model = &bsp->models[index];
-        CM_TransformedBoxTrace(&trace, start, end, vec3_origin, vec3_origin,
-                               model->headnode, MASK_OPAQUE,
-                               ent->origin, angles, fd->extended);
-        if (trace.fraction < 0.995f)
-            return true;
-    }
-
-    return false;
-}
-
 static bool vk_flare_occluded(const entity_t *ent, const refdef_t *fd)
 {
     bsp_t *bsp = vk.world.cache;
+    lightpoint_t point;
     vec3_t end;
 
     if (!bsp || !bsp->nodes)
@@ -9388,12 +9352,26 @@ static bool vk_flare_occluded(const entity_t *ent, const refdef_t *fd)
             VectorMA(end, -5.0f, dir, end);
     }
 
-    return vk_line_occluded(fd->vieworg, end, fd);
+    BSP_LightPoint(&point, fd->vieworg, end, bsp->nodes,
+                   vk.world.nolm_mask | SURF_TRANS_MASK);
+    vk_trace_bmodel_light_points(fd, bsp, fd->vieworg, end, &point);
+
+    return point.surf && point.fraction < 0.995f;
 }
 
 static bool vk_point_occluded(const vec3_t origin, const refdef_t *fd)
 {
-    return vk_line_occluded(fd->vieworg, origin, fd);
+    bsp_t *bsp = vk.world.cache;
+    lightpoint_t point;
+
+    if (!fd || !bsp || !bsp->nodes)
+        return false;
+
+    BSP_LightPoint(&point, fd->vieworg, origin, bsp->nodes,
+                   vk.world.nolm_mask | SURF_TRANS_MASK);
+    vk_trace_bmodel_light_points(fd, bsp, fd->vieworg, origin, &point);
+
+    return point.surf && point.fraction < 0.995f;
 }
 
 static bool vk_flare_visible(const entity_t *ent, const refdef_t *fd)
