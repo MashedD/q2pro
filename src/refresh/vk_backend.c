@@ -12624,6 +12624,12 @@ void VKR_BeginFrame(void)
     vk.frame_bloom = vk_bloom_enabled_for_frame();
     vk.frame_waterwarp = vk_waterwarp_enabled_for_frame();
     bool postprocess = vk.frame_bloom || vk.frame_waterwarp;
+
+    // The postprocess target is selected from the previous refdef before the
+    // client submits this frame. Do not otherwise reuse that refdef: menu-only
+    // frames after a disconnect must not redraw stale bloom entities or blend.
+    vk.fd_valid = false;
+
     if (postprocess) {
         vk_transition_scene(cmd,
                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
