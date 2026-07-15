@@ -557,6 +557,7 @@ typedef struct {
     VkPipeline alias_depth_pipeline;
     VkPipeline alias_blend_pipeline;
     VkPipeline alias_shadow_pipeline;
+    VkPipeline alias_cel_pipeline;
     VkPipeline alias_line_pipeline;
     VkQueryPool glare_query_pool;
     VkSwapchainKHR swapchain;
@@ -701,6 +702,7 @@ static cvar_t *vk_fullbright;
 static cvar_t *vk_cull_models;
 static cvar_t *vk_shadows;
 static cvar_t *vk_stencilbits;
+static cvar_t *vk_celshading;
 static cvar_t *vk_dotshading;
 static cvar_t *vk_draworder;
 static cvar_t *vk_showorigins;
@@ -837,13 +839,14 @@ static void vk_color_transform_texture(byte *pic, int width, int height,
         Cvar_ClampValue(vk_saturation, 0.0f, 1.0f) : 1.0f;
     bool world = type == IT_WALL && !(flags & IF_TURBULENT);
     bool invert = world && vk_invert && vk_invert->integer;
-    bool scale_pics = !(r_config.flags & QVF_GAMMARAMP) &&
-        vk_gamma_scale_pics && vk_gamma_scale_pics->integer &&
-        type != IT_WALL && type != IT_SKIN;
+    bool software_gamma = !(r_config.flags & QVF_GAMMARAMP);
+    bool scale_gamma = software_gamma &&
+        (type == IT_WALL || type == IT_SKIN ||
+         (vk_gamma_scale_pics && vk_gamma_scale_pics->integer));
 
-    if (!world && !scale_pics)
+    if (!world && !scale_gamma)
         return;
-    if (world && saturation == 1.0f && !invert && !scale_pics)
+    if (world && saturation == 1.0f && !invert && !scale_gamma)
         return;
 
     byte *p = pic;
@@ -860,17 +863,20 @@ static void vk_color_transform_texture(byte *pic, int width, int height,
             b = y + (b - y) * saturation;
         }
 
-        p[0] = invert ? 255 - Q_clipf(r, 0.0f, 255.0f) :
-            Q_clipf(r, 0.0f, 255.0f);
-        p[1] = invert ? 255 - Q_clipf(g, 0.0f, 255.0f) :
-            Q_clipf(g, 0.0f, 255.0f);
-        p[2] = invert ? 255 - Q_clipf(b, 0.0f, 255.0f) :
-            Q_clipf(b, 0.0f, 255.0f);
+        p[0] = Q_clipf(r, 0.0f, 255.0f);
+        p[1] = Q_clipf(g, 0.0f, 255.0f);
+        p[2] = Q_clipf(b, 0.0f, 255.0f);
 
-        if (scale_pics) {
+        if (scale_gamma) {
             p[0] = vk_gammatable[p[0]];
             p[1] = vk_gammatable[p[1]];
             p[2] = vk_gammatable[p[2]];
+        }
+
+        if (invert) {
+            p[0] = 255 - p[0];
+            p[1] = 255 - p[1];
+            p[2] = 255 - p[2];
         }
     }
 }
@@ -885,7 +891,6 @@ static void vk_build_gamma_table(void)
         return;
     }
 
-    gamma = 1.0f / gamma;
     for (int i = 0; i < 256; i++) {
         float value = 255.0f * powf((i + 0.5f) / 255.5f, gamma) + 0.5f;
         vk_gammatable[i] = min(value, 255);
@@ -4043,6 +4048,11 @@ static void vk_destroy_swapchain(void)
         vk.alias_shadow_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.alias_cel_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_cel_pipeline, NULL);
+        vk.alias_cel_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.alias_line_pipeline) {
         vk.DestroyPipeline(vk.device, vk.alias_line_pipeline, NULL);
         vk.alias_line_pipeline = VK_NULL_HANDLE;
@@ -5793,6 +5803,8 @@ static bool vk_create_swapchain(int width, int height)
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_shadow_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_TRUE, -1.0f, -2.0f, &shadow_depth_stencil) ||
+        !vk_create_alias_pipeline(&vk.alias_cel_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_BACK_BIT, VK_POLYGON_MODE_FILL,
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_depth_resources() ||
@@ -8944,6 +8956,49 @@ static void vk_draw_alias_color_pass(VkCommandBuffer cmd, VkPipeline pipeline,
     }
 }
 
+static void vk_draw_alias_cel_edges(VkCommandBuffer cmd,
+                                    const VkBuffer buffers[2],
+                                    const VkDeviceSize offsets[2],
+                                    const vk_model_t *model,
+                                    const vk_alias_batch_t *batch,
+                                    const vk_alias_push_t *base_push,
+                                    const entity_t *ent,
+                                    const refdef_t *fd,
+                                    float alpha)
+{
+    if (!vk.alias_cel_pipeline || !vk.textures[1].descriptor_set)
+        return;
+
+    uint32_t first_index = batch ? batch->first_index : 0;
+    uint32_t index_count = batch ? batch->index_count : model->mesh.index_count;
+    if (!index_count)
+        return;
+
+    vk_alias_push_t push = *base_push;
+    float width = Cvar_ClampValue(vk_celshading, 0.0f, 10.0f) * alpha;
+    float distance = max(Distance(ent->origin, fd->vieworg), 1.0f);
+    float view_height = max(fd->height, 1);
+    float entity_scale = ent->scale ? fabsf(ent->scale) : 1.0f;
+    float world_per_pixel = 2.0f * distance *
+        tanf(DEG2RAD(fd->fov_y) * 0.5f) / view_height;
+
+    Vector4Set(push.color, 0.0f, 0.0f, 0.0f, alpha);
+    Vector4Clear(push.shadedir);
+    push.shellscale = width * world_per_pixel / entity_scale;
+    push.depthscale = (ent->flags & RF_DEPTHHACK) ? 0.25f : 1.0f;
+    push.intensity = 1.0f;
+
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                     vk.alias_cel_pipeline);
+    vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
+    vk_bind_index_buffer(cmd, model->mesh.indices.buffer, 0,
+                         VK_INDEX_TYPE_UINT32);
+    vk_bind_texture_descriptor(cmd, vk.textures[1].descriptor_set);
+    vk_push_constants(cmd, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
+    vk_count_batch3d();
+}
+
 static void vk_draw_alias_outlines(VkCommandBuffer cmd,
                                     const VkBuffer buffers[2],
                                     const VkDeviceSize offsets[2],
@@ -8954,7 +9009,19 @@ static void vk_draw_alias_outlines(VkCommandBuffer cmd,
                                     const entity_t *ent,
                                     const refdef_t *fd)
 {
-    if (!gl_showtris || !(gl_showtris->integer & SHOWTRIS_MESH))
+    bool showtris = gl_showtris && (gl_showtris->integer & SHOWTRIS_MESH);
+    float cel_alpha = 0.0f;
+
+    if (vk_celshading && vk_celshading->value > 0.0f && fd &&
+        !(ent->flags & (RF_TRANSLUCENT | RF_SHELL_MASK | RF_TRACKER))) {
+        cel_alpha = 1.0f - Distance(ent->origin, fd->vieworg) / 700.0f;
+        if (cel_alpha >= 0.01f) {
+            vk_draw_alias_cel_edges(cmd, buffers, offsets, model, batch,
+                                    push, ent, fd, cel_alpha);
+        }
+    }
+
+    if (!showtris)
         return;
 
     if (!vk.alias_line_pipeline || !model->alias_line_indices.buffer ||
@@ -11490,8 +11557,20 @@ static void vk_log_perf_stats(void)
 
 bool VKR_Init(bool total)
 {
-    if (!total)
+    if (!total) {
+        r_registration_sequence = 1;
+        vk_build_gamma_table();
+        IMG_Init();
+        IMG_SetUploadBackend(&vk_image_upload);
+        if (!vk_create_default_texture() || !vk_create_shell_texture()) {
+            Com_WPrintf("Couldn't recreate Vulkan default textures: %s\n",
+                        Com_GetLastError());
+            IMG_Shutdown();
+            return false;
+        }
+        IMG_GetPalette();
         return true;
+    }
 
     Com_Printf("------- VKR_Init -------\n");
     Com_Printf("Using video driver: %s\n", vid->name);
@@ -11554,6 +11633,7 @@ bool VKR_Init(bool total)
     vk_cull_models = Cvar_Get("gl_cull_models", "1", 0);
     vk_shadows = Cvar_Get("gl_shadows", "0", CVAR_ARCHIVE);
     vk_stencilbits = Cvar_Get("gl_stencilbits", "8", CVAR_REFRESH);
+    vk_celshading = Cvar_Get("gl_celshading", "0", 0);
     vk_dotshading = Cvar_Get("gl_dotshading", "1", 0);
     vk_draworder = Cvar_Get("gl_draworder", "1", 0);
     vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
@@ -11681,8 +11761,20 @@ bool VKR_Init(bool total)
 
 void VKR_Shutdown(bool total)
 {
-    if (!total)
+    if (!total) {
+        if (vk.device && vk.DeviceWaitIdle)
+            vk.DeviceWaitIdle(vk.device);
+        vk_free_world();
+        vk_free_models(true);
+#if USE_DEBUG
+        r_charset = 0;
+#endif
+        if (r_numImages) {
+            IMG_FreeAll();
+            IMG_Shutdown();
+        }
         return;
+    }
 
     if (vk_swapinterval)
         vk_swapinterval->changed = NULL;
