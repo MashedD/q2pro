@@ -9031,6 +9031,12 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
         return;
     if (ent->flags & (RF_WEAPONMODEL | RF_NOSHADOW))
         return;
+    // OpenGL obtains the shadow receiver from its normal entity-lighting
+    // query. Entities that bypass that query do not cast a projected shadow.
+    if (ent->flags & (RF_SHELL_MASK | RF_FULLBRIGHT | RF_TRACKER))
+        return;
+    if ((ent->flags & RF_IR_VISIBLE) && (fd->rdflags & RDF_IRGOGGLES))
+        return;
     if (!model->alias_frames || !vk_alias_shadow_point(ent, fd, &point))
         return;
 
