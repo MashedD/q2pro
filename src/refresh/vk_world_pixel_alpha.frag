@@ -23,6 +23,7 @@ layout(location = 2) flat in float v_mode;
 layout(location = 3) in vec2 v_lmuv;
 layout(location = 4) in vec3 v_position;
 layout(location = 0) out vec4 out_color;
+layout(location = 1) out vec4 out_bloom;
 
 vec3 dynamic_light()
 {
@@ -40,6 +41,7 @@ vec3 dynamic_light()
 
 void main()
 {
+    out_bloom = vec4(0.0);
     float mode = mod(v_mode, 4.0);
     vec2 uv = v_uv;
 
