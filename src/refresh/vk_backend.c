@@ -9134,7 +9134,9 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         md5_view.mesh = model->md5_mesh;
         md5_view.alias_line_indices = model->md5_line_indices;
         md5_view.alias_line_index_count = model->md5_line_index_count;
-        md5_view.alias_frames = model->md5_frames;
+        // Match OpenGL: replacement geometry uses the original model's frame
+        // bounds for visibility and projected-shadow sizing.
+        md5_view.alias_frames = model->alias_frames;
         md5_view.alias_batches = model->md5_batches;
         md5_view.skins = model->md5_skins;
         md5_view.frame_count = model->md5_frame_count;
