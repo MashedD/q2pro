@@ -2535,7 +2535,10 @@ static void vk_update_texture_descriptors(void)
                                  IF_NEAREST : IF_NONE));
     vk_update_texture_descriptor_with_sampler(&vk.beam_texture,
                                               vk.postprocess_sampler);
-    vk_update_texture_descriptor(&vk.world.pixel_lightmap_texture);
+    // OpenGL lightmaps always use plain bilinear filtering, independent of
+    // gl_texturemode and anisotropy. Keep the atlas on the same sampling path.
+    vk_update_texture_descriptor_with_sampler(&vk.world.pixel_lightmap_texture,
+                                              vk.postprocess_sampler);
     for (int i = 0; i < VK_MAX_CUBEMAPS; i++) {
         if (!vk.cubemaps[i].image)
             continue;
@@ -10642,6 +10645,8 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
     vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
     if (vk_upload_texture_data(&vk.world.pixel_lightmap_texture,
                                atlas_w, atlas_h, pixels, false)) {
+        vk_update_texture_descriptor_with_sampler(
+            &vk.world.pixel_lightmap_texture, vk.postprocess_sampler);
         if (log_atlas) {
             Com_DPrintf("Vulkan pixel lightmap atlas texture uploaded: %dx%d\n",
                         atlas_w, atlas_h);
