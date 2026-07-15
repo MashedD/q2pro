@@ -275,7 +275,9 @@ typedef struct {
     unsigned drawframe;
     unsigned visframe;
     float lightstyles[MAX_LIGHTSTYLES];
+    bool lightstyle_used[MAX_LIGHTSTYLES];
     bool lightstyles_valid;
+    bool has_sky;
     bool sky_visible;
 } vk_world_t;
 
@@ -603,6 +605,11 @@ typedef struct {
     VkPipeline bound_pipeline;
     VkDescriptorSet bound_texture_descriptor;
     VkDescriptorSet bound_pixel_world_descriptors[2];
+    VkBuffer bound_vertex_buffers[2];
+    VkDeviceSize bound_vertex_offsets[2];
+    VkBuffer bound_index_buffer;
+    VkDeviceSize bound_index_offset;
+    VkIndexType bound_index_type;
 } vk_state_t;
 
 static vk_state_t vk;
@@ -4655,7 +4662,8 @@ static bool vk_create_texture_pipeline_ex(VkPipeline *pipeline,
                                           bool additive,
                                           VkExtent2D extent)
 {
-    VkShaderModule vert = vk_create_shader_module(vk_tex_vert_spv, sizeof(vk_tex_vert_spv));
+    VkShaderModule vert = vk_create_shader_module(vk_tex_vert_spv,
+                                                  sizeof(vk_tex_vert_spv));
     if (!vert)
         return false;
 
@@ -5865,6 +5873,11 @@ static void vk_reset_bind_cache(void)
     vk.bound_texture_descriptor = VK_NULL_HANDLE;
     memset(vk.bound_pixel_world_descriptors, 0,
            sizeof(vk.bound_pixel_world_descriptors));
+    memset(vk.bound_vertex_buffers, 0, sizeof(vk.bound_vertex_buffers));
+    memset(vk.bound_vertex_offsets, 0, sizeof(vk.bound_vertex_offsets));
+    vk.bound_index_buffer = VK_NULL_HANDLE;
+    vk.bound_index_offset = 0;
+    vk.bound_index_type = VK_INDEX_TYPE_UINT32;
 }
 
 static uint64_t vk_time_usec(void)
@@ -5897,8 +5910,36 @@ static void vk_bind_vertex_buffers(VkCommandBuffer cmd, uint32_t first,
                                    uint32_t count, const VkBuffer *buffers,
                                    const VkDeviceSize *offsets)
 {
+    bool unchanged = first + count <= q_countof(vk.bound_vertex_buffers);
+
+    for (uint32_t i = 0; unchanged && i < count; i++) {
+        unchanged = vk.bound_vertex_buffers[first + i] == buffers[i] &&
+            vk.bound_vertex_offsets[first + i] == offsets[i];
+    }
+    if (unchanged)
+        return;
+
     vk.CmdBindVertexBuffers(cmd, first, count, buffers, offsets);
+    if (first + count <= q_countof(vk.bound_vertex_buffers)) {
+        for (uint32_t i = 0; i < count; i++) {
+            vk.bound_vertex_buffers[first + i] = buffers[i];
+            vk.bound_vertex_offsets[first + i] = offsets[i];
+        }
+    }
     c.vertexArrayBinds++;
+}
+
+static void vk_bind_index_buffer(VkCommandBuffer cmd, VkBuffer buffer,
+                                 VkDeviceSize offset, VkIndexType type)
+{
+    if (vk.bound_index_buffer == buffer && vk.bound_index_offset == offset &&
+        vk.bound_index_type == type)
+        return;
+
+    vk.CmdBindIndexBuffer(cmd, buffer, offset, type);
+    vk.bound_index_buffer = buffer;
+    vk.bound_index_offset = offset;
+    vk.bound_index_type = type;
 }
 
 static void vk_count_batch3d(void)
@@ -6990,7 +7031,7 @@ static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float co
 
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.color3d_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
-    vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk_bind_index_buffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, mesh->index_count, 1, 0, 0, 0);
     c.trisDrawn += mesh->index_count / 3;
@@ -7020,8 +7061,8 @@ static void vk_draw_null_model(const entity_t *ent, const refdef_t *fd)
 
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.line3d_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.null_model.vertices.buffer, &offset);
-    vk.CmdBindIndexBuffer(cmd, vk.null_model.indices.buffer, 0,
-                          VK_INDEX_TYPE_UINT32);
+    vk_bind_index_buffer(cmd, vk.null_model.indices.buffer, 0,
+                         VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.null_model.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.null_model.index_count / 3;
@@ -7328,8 +7369,8 @@ static void vk_draw_debug_texts(const refdef_t *fd)
     push.intensity = 1.0f;
 
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.debug_text_vertices.buffer, &offset);
-    vk.CmdBindIndexBuffer(cmd, vk.debug_text_indices.buffer, 0,
-                          VK_INDEX_TYPE_UINT32);
+    vk_bind_index_buffer(cmd, vk.debug_text_indices.buffer, 0,
+                         VK_INDEX_TYPE_UINT32);
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(push), &push);
 
@@ -7360,6 +7401,16 @@ static float vk_world_face_alpha(const mface_t *face)
     if (face->drawflags & SURF_TRANS66)
         return 0.66f;
     return 1.0f;
+}
+
+#define VK_BACKFACE_EPSILON 0.01f
+
+static bool vk_world_face_backfacing(const mface_t *face, const vec3_t vieworg)
+{
+    vec_t dot = PlaneDiffFast(vieworg, face->plane);
+
+    return (face->drawflags & DSURF_PLANEBACK) ?
+        dot > VK_BACKFACE_EPSILON : dot < -VK_BACKFACE_EPSILON;
 }
 
 static bool vk_world_face_in_pass(const mface_t *face, vk_world_pass_t pass)
@@ -7486,6 +7537,13 @@ static void vk_sky_fog_params(const refdef_t *fd, float fog[4])
 static float vk_texture_intensity(void)
 {
     return Cvar_ClampValue(vk_intensity, 1.0f, 5.0f);
+}
+
+static float vk_world_face_intensity(const mface_t *face)
+{
+    // Match the OpenGL surface state: translucent textures are not boosted by
+    // the global intensity setting.
+    return (face->drawflags & SURF_TRANS_MASK) ? 1.0f : vk_texture_intensity();
 }
 
 static float vk_glowmap_intensity(void)
@@ -7644,8 +7702,8 @@ static void vk_draw_world_outlines(const mat4_t mvp, bool marked_only,
 
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.line3d_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.world.mesh.vertices.buffer, &offset);
-    vk.CmdBindIndexBuffer(cmd, vk.world.line_indices.buffer, 0,
-                          VK_INDEX_TYPE_UINT32);
+    vk_bind_index_buffer(cmd, vk.world.line_indices.buffer, 0,
+                         VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(push), &push);
 
     for (uint32_t i = 0; i < vk.world.batch_count; i++) {
@@ -7776,7 +7834,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         vk_bind_vertex_buffers(cmd, 0, 2, pixel_buffers, pixel_offsets);
     else
         vk_bind_vertex_buffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
-    vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk_bind_index_buffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     if (pixel_world) {
         vk_bind_pixel_world_descriptor(cmd, 1,
                                        vk.world.pixel_lightmap_texture.descriptor_set);
@@ -7820,14 +7878,14 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     VkDeviceSize size = sizeof(uint32_t) * group_count; \
                     memcpy(&batch_index_mapped[batch_index_base + batch_index_cursor], vk.world.batch_index_data, size); \
                     batch_index_cursor += group_count; \
-                    vk.CmdBindIndexBuffer(cmd, vk.world.batch_indices.buffer, bind_offset, VK_INDEX_TYPE_UINT32); \
+                    vk_bind_index_buffer(cmd, vk.world.batch_indices.buffer, bind_offset, VK_INDEX_TYPE_UINT32); \
                 } \
                 vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline); \
                 vk_bind_texture_descriptor(cmd, texture->descriptor_set); \
                 vk_push_constants(cmd, sizeof(vk_world_push_t), &push); \
                 if (draw_group) \
                     vk.CmdDrawIndexed(cmd, group_count, 1, 0, 0, 0); \
-                vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32); \
+                vk_bind_index_buffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32); \
                 c.facesDrawn += group_faces; \
                 c.facesTris += group_tris; \
                 c.trisDrawn += group_count / 3; \
@@ -7847,6 +7905,12 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             }
             if (use_marked && face->face->drawframe != vk.world.drawframe) {
                 VK_FLUSH_WORLD_GROUP();
+                continue;
+            }
+            if (!ent && fd &&
+                vk_world_face_backfacing(face->face, fd->vieworg)) {
+                VK_FLUSH_WORLD_GROUP();
+                c.facesCulled++;
                 continue;
             }
             if (!vk_world_face_in_pass(face->face, pass)) {
@@ -7964,7 +8028,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             vk_world_light_params(face->face, push.color, push.scroll);
             vk_world_dynamic_light(face, fd, ent, axis, push.dlight);
             push.dlight[3] = fd ? fd->time : 0.0f;
-            push.intensity = vk_texture_intensity();
+            push.intensity = vk_world_face_intensity(face->face);
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
             if (pixel_world && face->pixel_lm_w && face->pixel_lm_h) {
                 float aw = vk.world.pixel_lightmap_texture.width ?
@@ -8049,7 +8113,7 @@ static void vk_draw_fx_outlines(const vk_mesh_t *mesh, const vk_buffer_t *indice
 
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.line3d_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
-    vk.CmdBindIndexBuffer(cmd, indices->buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk_bind_index_buffer(cmd, indices->buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, index_count, 1, 0, 0, 0);
     vk_count_batch3d();
@@ -8120,7 +8184,7 @@ static void vk_draw_skybox(const refdef_t *fd)
 
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sky_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.skybox.vertices.buffer, &offset);
-    vk.CmdBindIndexBuffer(cmd, vk.skybox.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk_bind_index_buffer(cmd, vk.skybox.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(push), &push);
 
     for (uint32_t face = 0; face < 6; face++) {
@@ -8357,7 +8421,10 @@ static void vk_mark_world_faces(const refdef_t *fd)
         return;
 
     vk.world.drawframe++;
-    vk.world.sky_visible = false;
+    // The skybox is also the background for translucent portals. A sky face
+    // behind one can be outside the visible-leaf walk, so keep the map sky
+    // available and let opaque geometry mask it.
+    vk.world.sky_visible = vk.world.has_sky;
     vk_update_world_view(fd);
     if (!vk_lockpvs || !vk_lockpvs->integer) {
         vk.world.visframe++;
@@ -8370,8 +8437,6 @@ static void vk_mark_world_faces(const refdef_t *fd)
         VK_NODE_CLIPPED : VK_NODE_UNCLIPPED;
     vk_mark_world_node_faces(bsp->nodes, fd, clipflags);
 }
-
-#define VK_BACKFACE_EPSILON 0.01f
 
 static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
                                  const refdef_t *fd, const vec3_t axis[3],
@@ -8389,7 +8454,6 @@ static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
 
     for (int i = 0; i < model->numfaces; i++) {
         mface_t *face = model->firstface + i;
-        vec_t dot;
 
         if (!face->texinfo || !face->plane)
             continue;
@@ -8401,9 +8465,7 @@ static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
             face->texinfo->image->texnum >= MAX_RIMAGES)
             continue;
 
-        dot = PlaneDiffFast(transformed, face->plane);
-        if ((face->drawflags & DSURF_PLANEBACK) ?
-            (dot > VK_BACKFACE_EPSILON) : (dot < -VK_BACKFACE_EPSILON)) {
+        if (vk_world_face_backfacing(face, transformed)) {
             c.facesCulled++;
             continue;
         }
@@ -8473,6 +8535,7 @@ static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd,
     mmodel_t *model;
     vec3_t axis[3];
     mat4_t mvp;
+    unsigned world_drawframe;
 
     if (!bsp || index < 1 || index >= bsp->nummodels)
         return;
@@ -8488,6 +8551,10 @@ static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd,
 
     vk_entity_mvp(mvp, fd, ent, axis);
 
+    // Brush models share the BSP face array with the static world, but their
+    // visibility marks are consumed immediately.  Preserve the static-world
+    // generation so its PVS/frustum result remains valid for the alpha pass.
+    world_drawframe = vk.world.drawframe;
     vk.world.drawframe++;
     bool translucent = (ent->flags & RF_TRANSLUCENT) || translucent_faces;
     vk_world_pass_t world_pass = translucent_faces ? VK_WORLD_ALPHA :
@@ -8499,6 +8566,12 @@ static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd,
                        (ent->flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f,
                        fd, ent, axis);
     vk_draw_world_outlines(mvp, true, world_pass, fd, ent);
+    for (int i = 0; i < model->numfaces; i++) {
+        mface_t *face = model->firstface + i;
+        if (face->drawframe == vk.world.drawframe)
+            face->drawframe = 0;
+    }
+    vk.world.drawframe = world_drawframe;
 }
 
 static vk_model_t *vk_model_for_handle(qhandle_t handle)
@@ -8701,7 +8774,7 @@ static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
 
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
-    vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk_bind_index_buffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(*push), push);
     vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
@@ -8718,7 +8791,7 @@ static void vk_draw_alias_color_pass(VkCommandBuffer cmd, VkPipeline pipeline,
 {
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
-    vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk_bind_index_buffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(*push), push);
     vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0, 0, 0);
     if (count_stats) {
@@ -8760,8 +8833,8 @@ static void vk_draw_alias_outlines(VkCommandBuffer cmd,
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                        vk.alias_line_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
-    vk.CmdBindIndexBuffer(cmd, model->alias_line_indices.buffer, 0,
-                          VK_INDEX_TYPE_UINT32);
+    vk_bind_index_buffer(cmd, model->alias_line_indices.buffer, 0,
+                         VK_INDEX_TYPE_UINT32);
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(outline), &outline);
     vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
@@ -9143,7 +9216,7 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
 
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
-    vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk_bind_index_buffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
@@ -9330,7 +9403,7 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
 
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
-    vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk_bind_index_buffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
@@ -9457,8 +9530,8 @@ static void vk_draw_glare(const refdef_t *fd)
     AnglesToAxis(fd->viewangles, viewaxis);
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.glare_pipeline);
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
-    vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0,
-                          VK_INDEX_TYPE_UINT32);
+    vk_bind_index_buffer(cmd, vk.sprite_quad.indices.buffer, 0,
+                         VK_INDEX_TYPE_UINT32);
     vk_bind_texture_descriptor(cmd, vk.particle_texture.descriptor_set);
 
     for (int i = 0; i < glr.num_glare_sources; i++) {
@@ -9595,7 +9668,7 @@ static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
     push.intensity = 1.0f;
 
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
-    vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk_bind_index_buffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.sprite_quad.index_count / 3;
@@ -9605,8 +9678,8 @@ static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
     if (gl_showtris && (gl_showtris->integer & SHOWTRIS_FX)) {
         vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sprite_pipeline);
         vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
-        vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0,
-                              VK_INDEX_TYPE_UINT32);
+        vk_bind_index_buffer(cmd, vk.sprite_quad.indices.buffer, 0,
+                             VK_INDEX_TYPE_UINT32);
         vk_bind_texture_descriptor(cmd, vk.beam_texture.descriptor_set);
     }
 }
@@ -9653,8 +9726,8 @@ static void vk_draw_poly_beam_segment(const vec3_t start, const vec3_t end,
     memcpy(push.color, color, sizeof(push.color));
 
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.beam_cylinder.vertices.buffer, &offset);
-    vk.CmdBindIndexBuffer(cmd, vk.beam_cylinder.indices.buffer, 0,
-                          VK_INDEX_TYPE_UINT32);
+    vk_bind_index_buffer(cmd, vk.beam_cylinder.indices.buffer, 0,
+                         VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.beam_cylinder.index_count, 1, 0, 0, 0);
     c.trisDrawn += vk.beam_cylinder.index_count / 3;
@@ -10098,13 +10171,11 @@ static void vk_surface_color(const mface_t *face, float color[4])
     float intensity = vk_texture_intensity();
 
     if (face->drawflags & SURF_TRANS33) {
-        Vector4Set(color, 1.0f / intensity, 1.0f / intensity,
-                   1.0f / intensity, 0.33f);
+        Vector4Set(color, 1.0f, 1.0f, 1.0f, 1.0f);
         return;
     }
     if (face->drawflags & SURF_TRANS66) {
-        Vector4Set(color, 1.0f / intensity, 1.0f / intensity,
-                   1.0f / intensity, 0.66f);
+        Vector4Set(color, 1.0f, 1.0f, 1.0f, 1.0f);
         return;
     }
     if (face->drawflags & SURF_WARP) {
@@ -10761,7 +10832,8 @@ static bool vk_world_lightstyles_modified(const refdef_t *fd)
         return true;
 
     for (int i = 0; i < MAX_LIGHTSTYLES; i++) {
-        if (vk.world.lightstyles[i] != fd->lightstyles[i].white)
+        if (vk.world.lightstyle_used[i] &&
+            vk.world.lightstyles[i] != fd->lightstyles[i].white)
             return true;
     }
 
@@ -10895,10 +10967,14 @@ static void vk_prepare_face_lightmap(const bsp_t *bsp, mface_t *face)
 
 static void vk_prepare_world_surfaces(bsp_t *bsp)
 {
+    vk.world.has_sky = false;
+
     if (!bsp || !bsp->faces)
         return;
 
     int n64surfs = 0;
+
+    memset(vk.world.lightstyle_used, 0, sizeof(vk.world.lightstyle_used));
 
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *face = &bsp->faces[i];
@@ -10907,6 +10983,15 @@ static void vk_prepare_world_surfaces(bsp_t *bsp)
             continue;
 
         face->drawflags |= face->texinfo->c.flags & ~DSURF_PLANEBACK;
+
+        if (face->drawflags & SURF_SKY)
+            vk.world.has_sky = true;
+
+        for (int j = 0; j < face->numstyles; j++) {
+            unsigned style = face->styles[j];
+            if (style < MAX_LIGHTSTYLES)
+                vk.world.lightstyle_used[style] = true;
+        }
 
         if ((face->drawflags & SURF_NODRAW) && !bsp->has_bspx)
             face->drawflags &= ~SURF_NODRAW;
@@ -11723,8 +11808,6 @@ void VKR_RenderFrame(const refdef_t *fd)
         mat4_t mvp;
 
         vk_world_mvp(mvp, fd);
-        if (vk_world_vis && vk_world_vis->integer)
-            vk_mark_world_faces(fd);
         vk_draw_world_mesh(mvp, false, vk.sprite_pipeline, VK_WORLD_ALPHA,
                            1.0f, fd, NULL, NULL);
         vk_draw_world_outlines(mvp, false, VK_WORLD_ALPHA, fd, NULL);
