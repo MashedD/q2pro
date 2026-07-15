@@ -269,6 +269,14 @@ typedef struct {
     vk_mesh_t mesh;
     vk_buffer_t pixel_lmuv_buffer;
     vk_texture_t pixel_lightmap_texture;
+    vk_buffer_t *pixel_lightmap_staging;
+    void **pixel_lightmap_staging_mapped;
+    uint32_t pixel_lightmap_staging_count;
+    VkDeviceSize pixel_lightmap_staging_size;
+    VkBufferImageCopy *pixel_lightmap_copies;
+    uint32_t pixel_lightmap_copy_count;
+    uint32_t pixel_lightmap_copy_capacity;
+    bool pixel_lightmap_update_pending;
     vk_buffer_t line_indices;
     vk_buffer_t batch_indices;
     void *batch_index_mapped;
@@ -775,6 +783,7 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, const void *pixels,
                                    bool mipmaps);
 static void vk_destroy_texture_resource(vk_texture_t *texture);
+static void vk_destroy_pixel_lightmap_staging(void);
 static bool vk_create_particle_texture(void);
 static bool vk_create_beam_texture(void);
 static uint32_t vk_frames_in_flight_value(void);
@@ -1301,6 +1310,7 @@ static void vk_free_world(void)
     vk_destroy_mesh(&vk.world.mesh);
     vk_destroy_buffer(&vk.world.pixel_lmuv_buffer);
     vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
+    vk_destroy_pixel_lightmap_staging();
     vk_pixel_lightmaps_atlas_logged = false;
     vk_pixel_lightmaps_lmuv_logged = false;
     vk_destroy_buffer(&vk.world.line_indices);
@@ -10562,6 +10572,100 @@ static uint32_t vk_pixel_lightmap_texel(const mface_t *face, const refdef_t *fd,
                      Q_clipf(rgb[2], 0.0f, 255.0f), 255);
 }
 
+static void vk_fill_pixel_lightmap_atlas(uint32_t *pixels, uint32_t atlas_w,
+                                         uint32_t atlas_h,
+                                         const vk_world_face_t *faces,
+                                         uint32_t face_count,
+                                         const refdef_t *fd)
+{
+    size_t pixel_count = (size_t)atlas_w * atlas_h;
+    for (size_t i = 0; i < pixel_count; i++)
+        pixels[i] = MakeColor(255, 255, 255, 255);
+
+    for (uint32_t i = 0; i < face_count; i++) {
+        const vk_world_face_t *draw = &faces[i];
+        const mface_t *face = draw->face;
+        if (!face || !draw->pixel_lm_w || !draw->pixel_lm_h)
+            continue;
+
+        for (int t = -1; t <= face->lm_height; t++) {
+            int src_t = Q_clipf(t, 0, face->lm_height - 1);
+            for (int s = -1; s <= face->lm_width; s++) {
+                int src_s = Q_clipf(s, 0, face->lm_width - 1);
+                pixels[(draw->pixel_lm_y + t) * atlas_w +
+                       draw->pixel_lm_x + s] =
+                    vk_pixel_lightmap_texel(face, fd, src_s, src_t);
+            }
+        }
+    }
+}
+
+static void vk_destroy_pixel_lightmap_staging(void)
+{
+    if (vk.world.pixel_lightmap_staging) {
+        for (uint32_t i = 0; i < vk.world.pixel_lightmap_staging_count; i++) {
+            if (vk.world.pixel_lightmap_staging_mapped &&
+                vk.world.pixel_lightmap_staging_mapped[i])
+                vk.UnmapMemory(vk.device,
+                    vk.world.pixel_lightmap_staging[i].memory);
+            vk_destroy_buffer(&vk.world.pixel_lightmap_staging[i]);
+        }
+        Z_Free(vk.world.pixel_lightmap_staging);
+        vk.world.pixel_lightmap_staging = NULL;
+    }
+    vk.world.pixel_lightmap_staging_count = 0;
+    if (vk.world.pixel_lightmap_staging_mapped) {
+        Z_Free(vk.world.pixel_lightmap_staging_mapped);
+        vk.world.pixel_lightmap_staging_mapped = NULL;
+    }
+    vk.world.pixel_lightmap_staging_size = 0;
+    if (vk.world.pixel_lightmap_copies) {
+        Z_Free(vk.world.pixel_lightmap_copies);
+        vk.world.pixel_lightmap_copies = NULL;
+    }
+    vk.world.pixel_lightmap_copy_count = 0;
+    vk.world.pixel_lightmap_copy_capacity = 0;
+    vk.world.pixel_lightmap_update_pending = false;
+}
+
+static bool vk_create_pixel_lightmap_staging(void)
+{
+    VkDeviceSize size = (VkDeviceSize)vk.world.pixel_lightmap_texture.width *
+        vk.world.pixel_lightmap_texture.height * sizeof(uint32_t);
+
+    vk_destroy_pixel_lightmap_staging();
+    if (!size || !vk.swapchain_image_count)
+        return false;
+
+    vk.world.pixel_lightmap_staging = Z_Mallocz(
+        sizeof(*vk.world.pixel_lightmap_staging) * vk.swapchain_image_count);
+    vk.world.pixel_lightmap_staging_mapped = Z_Mallocz(
+        sizeof(*vk.world.pixel_lightmap_staging_mapped) * vk.swapchain_image_count);
+    vk.world.pixel_lightmap_staging_count = vk.swapchain_image_count;
+
+    for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
+        vk_buffer_t *buffer = &vk.world.pixel_lightmap_staging[i];
+        if (!vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                              &buffer->buffer, &buffer->memory)) {
+            vk_destroy_pixel_lightmap_staging();
+            return false;
+        }
+        buffer->size = size;
+        VkResult result = vk.MapMemory(vk.device, buffer->memory, 0, size, 0,
+                                       &vk.world.pixel_lightmap_staging_mapped[i]);
+        if (result != VK_SUCCESS) {
+            vk_fail_result("vkMapMemory(pixel lightmap staging)", result);
+            vk_destroy_pixel_lightmap_staging();
+            return false;
+        }
+    }
+
+    vk.world.pixel_lightmap_staging_size = size;
+    return true;
+}
+
 static void vk_pixel_lightmap_plan(const bsp_t *bsp,
                                    vk_world_face_t *faces,
                                    uint32_t face_count,
@@ -10644,22 +10748,8 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
 
     size_t pixel_count = (size_t)atlas_w * atlas_h;
     uint32_t *pixels = Z_Malloc(sizeof(*pixels) * pixel_count);
-    for (size_t i = 0; i < pixel_count; i++)
-        pixels[i] = MakeColor(255, 255, 255, 255);
-
-    for (uint32_t i = 0; i < face_count; i++) {
-        const mface_t *face = plan[i].face;
-        if (!face)
-            continue;
-        for (int t = -1; t <= face->lm_height; t++) {
-            int src_t = Q_clipf(t, 0, face->lm_height - 1);
-            for (int s = -1; s <= face->lm_width; s++) {
-                int src_s = Q_clipf(s, 0, face->lm_width - 1);
-                pixels[(plan[i].y + t) * atlas_w + plan[i].x + s] =
-                    vk_pixel_lightmap_texel(face, fd, src_s, src_t);
-            }
-        }
-    }
+    vk_fill_pixel_lightmap_atlas(pixels, atlas_w, atlas_h,
+                                 faces, face_count, fd);
 
     bool log_atlas = !vk_pixel_lightmaps_atlas_logged;
     if (log_atlas) {
@@ -10670,6 +10760,8 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
                                atlas_w, atlas_h, pixels, false)) {
         vk_update_texture_descriptor_with_sampler(
             &vk.world.pixel_lightmap_texture, vk.postprocess_sampler);
+        if (!vk_create_pixel_lightmap_staging())
+            Com_WPrintf("Couldn't create Vulkan pixel lightmap staging buffers\n");
         if (log_atlas) {
             Com_DPrintf("Vulkan pixel lightmap atlas texture uploaded: %dx%d\n",
                         atlas_w, atlas_h);
@@ -11095,6 +11187,88 @@ static void vk_save_world_lightstyles(const refdef_t *fd)
     vk.world.lightstyles_valid = true;
 }
 
+static bool vk_queue_pixel_lightmap_update(const refdef_t *fd)
+{
+    if (!fd || !vk.world.faces || !vk.world.face_count ||
+        !vk.world.pixel_lightmap_texture.image ||
+        !vk.world.pixel_lightmap_staging_mapped ||
+        vk.current_image >= vk.world.pixel_lightmap_staging_count ||
+        !vk.world.pixel_lightmap_staging_mapped[vk.current_image])
+        return false;
+
+    if (vk.world.pixel_lightmap_copy_capacity < vk.world.face_count) {
+        if (vk.world.pixel_lightmap_copies)
+            Z_Free(vk.world.pixel_lightmap_copies);
+        vk.world.pixel_lightmap_copies = Z_Malloc(
+            sizeof(*vk.world.pixel_lightmap_copies) * vk.world.face_count);
+        vk.world.pixel_lightmap_copy_capacity = vk.world.face_count;
+    }
+
+    uint32_t *dst =
+        vk.world.pixel_lightmap_staging_mapped[vk.current_image];
+    VkDeviceSize offset = 0;
+    uint32_t copy_count = 0;
+
+    for (uint32_t i = 0; i < vk.world.face_count; i++) {
+        const vk_world_face_t *draw = &vk.world.faces[i];
+        const mface_t *face = draw->face;
+        if (!face || !draw->pixel_lm_w || !draw->pixel_lm_h)
+            continue;
+
+        bool dirty = false;
+        for (int j = 0; j < face->numstyles; j++) {
+            unsigned style = face->styles[j];
+            if (style < MAX_LIGHTSTYLES &&
+                vk.world.lightstyles[style] != fd->lightstyles[style].white) {
+                dirty = true;
+                break;
+            }
+        }
+        if (!dirty)
+            continue;
+
+        uint32_t copy_w = face->lm_width + 2;
+        uint32_t copy_h = face->lm_height + 2;
+        VkDeviceSize copy_size =
+            (VkDeviceSize)copy_w * copy_h * sizeof(uint32_t);
+        if (offset + copy_size > vk.world.pixel_lightmap_staging_size)
+            return false;
+
+        uint32_t *face_dst = (uint32_t *)((byte *)dst + offset);
+        for (int t = -1; t <= face->lm_height; t++) {
+            int src_t = Q_clipf(t, 0, face->lm_height - 1);
+            for (int s = -1; s <= face->lm_width; s++) {
+                int src_s = Q_clipf(s, 0, face->lm_width - 1);
+                *face_dst++ =
+                    vk_pixel_lightmap_texel(face, fd, src_s, src_t);
+            }
+        }
+
+        vk.world.pixel_lightmap_copies[copy_count++] = (VkBufferImageCopy) {
+            .bufferOffset = offset,
+            .bufferRowLength = copy_w,
+            .bufferImageHeight = copy_h,
+            .imageSubresource = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .imageOffset = {
+                draw->pixel_lm_x - 1,
+                draw->pixel_lm_y - 1,
+                0,
+            },
+            .imageExtent = { copy_w, copy_h, 1 },
+        };
+        offset += copy_size;
+    }
+
+    vk.world.pixel_lightmap_copy_count = copy_count;
+    vk.world.pixel_lightmap_update_pending = copy_count != 0;
+    return true;
+}
+
 static void vk_clear_world_lighting_modified(void)
 {
     if (vk_modulate)
@@ -11128,9 +11302,20 @@ static void vk_clear_world_lighting_modified(void)
 static void vk_rebuild_world_lighting(void)
 {
     bool styles_modified = vk_world_lightstyles_modified(vk.fd_valid ? &vk.fd : NULL);
+    bool lighting_modified = vk_world_lighting_modified();
 
-    if (!vk.world.cache || (!vk_world_lighting_modified() && !styles_modified))
+    if (!vk.world.cache || (!lighting_modified && !styles_modified))
         return;
+
+    // Pixel-lightmap mode keeps geometry and atlas placement static. Animated
+    // lightstyles only change atlas texels, so queue an in-place GPU update
+    // instead of rebuilding every world buffer and waiting for the queue idle.
+    if (!lighting_modified && styles_modified &&
+        vk_pixel_lightmap_mode() >= 2 && vk.fd_valid &&
+        vk_queue_pixel_lightmap_update(&vk.fd)) {
+        vk_save_world_lightstyles(&vk.fd);
+        return;
+    }
 
     if (!vk_build_world_mesh(vk.world.cache, vk.fd_valid ? &vk.fd : NULL))
         Com_WPrintf("Couldn't rebuild Vulkan world mesh: %s\n", Com_GetLastError());
@@ -12831,6 +13016,46 @@ void VKR_BeginFrame(void)
     vk.frame_active = true;
 }
 
+static void vk_record_pixel_lightmap_update(VkCommandBuffer cmd)
+{
+    if (!vk.world.pixel_lightmap_update_pending ||
+        !vk.world.pixel_lightmap_texture.image ||
+        !vk.world.pixel_lightmap_staging ||
+        !vk.world.pixel_lightmap_copies ||
+        !vk.world.pixel_lightmap_copy_count ||
+        vk.current_image >= vk.world.pixel_lightmap_staging_count)
+        return;
+
+    vk_buffer_t *staging =
+        &vk.world.pixel_lightmap_staging[vk.current_image];
+    if (!staging->buffer)
+        return;
+
+    vk_texture_barrier(cmd, vk.world.pixel_lightmap_texture.image,
+                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       VK_ACCESS_SHADER_READ_BIT,
+                       VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+    vk.CmdCopyBufferToImage(cmd, staging->buffer,
+                            vk.world.pixel_lightmap_texture.image,
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                            vk.world.pixel_lightmap_copy_count,
+                            vk.world.pixel_lightmap_copies);
+
+    vk_texture_barrier(cmd, vk.world.pixel_lightmap_texture.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                       VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_ACCESS_SHADER_READ_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    vk.world.pixel_lightmap_update_pending = false;
+    vk.world.pixel_lightmap_copy_count = 0;
+}
+
 void VKR_EndFrame(void)
 {
     if (!vk.frame_active)
@@ -12986,6 +13211,8 @@ void VKR_EndFrame(void)
         vk.CmdEndRenderPass(cmd);
         vk.render_pass_active = false;
     }
+
+    vk_record_pixel_lightmap_update(cmd);
 
     vk_transition_image(cmd, vk.current_image,
                         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,

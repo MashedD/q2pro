@@ -26,7 +26,7 @@ vec3 dynamic_light()
     for (int i = 0; i < 3; i++) {
         float range = pc.dlight_origins[i].w;
         if (range <= 0.0)
-            continue;
+            break;
         float falloff = max(1.0 - distance(v_position, pc.dlight_origins[i].xyz) / range,
                             0.0);
         light += pc.dlight_colors[i].rgb * (pc.dlight_colors[i].w * falloff / 255.0);
@@ -56,8 +56,10 @@ void main()
     out_color = texture(tex_sampler, uv);
     if (out_color.a <= 0.666)
         discard;
-    float luma = dot(out_color.rgb, vec3(0.2126, 0.7152, 0.0722));
-    out_color.rgb = mix(out_color.rgb, vec3(luma), pc.desaturation);
+    if (pc.desaturation > 0.0) {
+        float luma = dot(out_color.rgb, vec3(0.2126, 0.7152, 0.0722));
+        out_color.rgb = mix(out_color.rgb, vec3(luma), pc.desaturation);
+    }
     out_color.rgb *= pc.intensity;
     out_color.rgb *= clamp(v_color.rgb + dynamic_light(), 0.0, 1.0);
     out_color.a *= v_color.a;

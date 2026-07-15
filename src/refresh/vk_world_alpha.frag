@@ -43,8 +43,10 @@ void main()
         discard;
     }
     out_color = texel;
-    float luma = dot(out_color.rgb, vec3(0.2126, 0.7152, 0.0722));
-    out_color.rgb = mix(out_color.rgb, vec3(luma), pc.desaturation);
+    if (pc.desaturation > 0.0) {
+        float luma = dot(out_color.rgb, vec3(0.2126, 0.7152, 0.0722));
+        out_color.rgb = mix(out_color.rgb, vec3(luma), pc.desaturation);
+    }
     if (pc.intensity < 0.0) {
         out_color.rgb *= (out_color.r + out_color.g + out_color.b) / 3.0;
         out_color.rgb *= v_color.a;
