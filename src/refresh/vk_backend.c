@@ -7885,8 +7885,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         vk.pixel_world_pipeline_layout && vk.world.pixel_lmuv_buffer.buffer &&
         vk.world.pixel_lightmap_texture.descriptor_set;
     bool pixel_world = pixel_requested && pixel_ready;
-    bool world_batching = pass == VK_WORLD_OPAQUE && !ent && !vk.drawing_bloom &&
-        !pixel_world;
+    bool world_batching = pass == VK_WORLD_OPAQUE && !ent && !vk.drawing_bloom;
 
     if (!vk.render_pass_active || !pipeline ||
         !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count ||
@@ -7992,9 +7991,17 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     batch_index_cursor += group_count; \
                     vk_bind_index_buffer(cmd, vk.world.batch_indices.buffer, bind_offset, VK_INDEX_TYPE_UINT32); \
                 } \
-                vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline); \
-                vk_bind_texture_descriptor(cmd, texture->descriptor_set); \
-                vk_push_constants(cmd, sizeof(vk_world_lit_push_t), &push); \
+                vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, \
+                                 pixel_world ? vk.pixel_world_pipeline : pipeline); \
+                if (pixel_world) { \
+                    vk_bind_pixel_world_descriptor(cmd, 0, texture->descriptor_set); \
+                    vk_bind_pixel_world_descriptor(cmd, 1, \
+                        vk.world.pixel_lightmap_texture.descriptor_set); \
+                    vk_push_pixel_world_constants(cmd, sizeof(push), &push); \
+                } else { \
+                    vk_bind_texture_descriptor(cmd, texture->descriptor_set); \
+                    vk_push_constants(cmd, sizeof(vk_world_lit_push_t), &push); \
+                } \
                 if (draw_group) \
                     vk.CmdDrawIndexed(cmd, group_count, 1, 0, 0, 0); \
                 vk_bind_index_buffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32); \
@@ -8069,6 +8076,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                            SURF_N64_SCROLL_X | SURF_N64_SCROLL_Y |
                                            SURF_WARP | SURF_TRANS33 | SURF_TRANS66)) &&
                 !(face->face->drawflags & vk.world.nolm_mask) &&
+                (!pixel_world || (face->pixel_lm_w && face->pixel_lm_h)) &&
                 !vk_world_face_glowmap_enabled(face->face, image);
 
             if (can_group && fd && fd->num_dlights > 0 && vk_dynamic_lights_enabled()) {
@@ -8095,8 +8103,8 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     push.dlight[3] = fd ? fd->time : 0.0f;
                     push.intensity = vk_texture_intensity();
                     push.desaturation = vk_world_face_desaturation(face->face);
-                    push.lm_scale[0] = -1.0f;
-                    push.lm_scale[1] = -1.0f;
+                    push.lm_scale[0] = pixel_world ? 1.0f : -1.0f;
+                    push.lm_scale[1] = pixel_world ? 1.0f : -1.0f;
                     push.lm_offset[0] = 0.0f;
                     push.lm_offset[1] = 0.0f;
                 }
@@ -8145,14 +8153,10 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             push.desaturation = vk_world_face_desaturation(face->face);
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
             if (pixel_world && face->pixel_lm_w && face->pixel_lm_h) {
-                float aw = vk.world.pixel_lightmap_texture.width ?
-                    (float)vk.world.pixel_lightmap_texture.width : 1.0f;
-                float ah = vk.world.pixel_lightmap_texture.height ?
-                    (float)vk.world.pixel_lightmap_texture.height : 1.0f;
-                push.lm_scale[0] = max(face->pixel_lm_w - 1, 0) / aw;
-                push.lm_scale[1] = max(face->pixel_lm_h - 1, 0) / ah;
-                push.lm_offset[0] = (face->pixel_lm_x + 0.5f) / aw;
-                push.lm_offset[1] = (face->pixel_lm_y + 0.5f) / ah;
+                push.lm_scale[0] = 1.0f;
+                push.lm_scale[1] = 1.0f;
+                push.lm_offset[0] = 0.0f;
+                push.lm_offset[1] = 0.0f;
             } else {
                 push.lm_scale[0] = -1.0f;
                 push.lm_scale[1] = -1.0f;
@@ -10911,6 +10915,36 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
     }
 
     vk_pixel_lightmap_plan(bsp, draw_faces, draw_face_count, fd);
+
+    // Store final atlas coordinates per vertex.  Keeping the per-face atlas
+    // transform in push constants forced mode 2 to submit every face as a
+    // separate draw, even when all other surface state matched.  Atlas-space
+    // coordinates make that transform vertex data and allow the ordinary
+    // opaque-world batching path to be used by the pixel-lightmap pipeline.
+    if (lmuv_data && vk.world.pixel_lightmap_texture.width &&
+        vk.world.pixel_lightmap_texture.height) {
+        float inv_aw = 1.0f / vk.world.pixel_lightmap_texture.width;
+        float inv_ah = 1.0f / vk.world.pixel_lightmap_texture.height;
+
+        for (uint32_t i = 0; i < draw_face_count; i++) {
+            const vk_world_face_t *face = &draw_faces[i];
+            if (!face->pixel_lm_w || !face->pixel_lm_h)
+                continue;
+
+            float scale_s = max(face->pixel_lm_w - 1, 0) * inv_aw;
+            float scale_t = max(face->pixel_lm_h - 1, 0) * inv_ah;
+            float offset_s = (face->pixel_lm_x + 0.5f) * inv_aw;
+            float offset_t = (face->pixel_lm_y + 0.5f) * inv_ah;
+
+            for (uint32_t j = 0; j < face->edge_count; j++) {
+                uint32_t vertex = face->first_vertex + j;
+                lmuv_data[vertex * 2 + 0] =
+                    lmuv_data[vertex * 2 + 0] * scale_s + offset_s;
+                lmuv_data[vertex * 2 + 1] =
+                    lmuv_data[vertex * 2 + 1] * scale_t + offset_t;
+            }
+        }
+    }
 
     line_indices = vk_build_line_indices(indices, idx, &line_index_count);
 
