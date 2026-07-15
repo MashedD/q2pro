@@ -2074,22 +2074,9 @@ static qhandle_t vk_load_md3_model(const char *name, const byte *rawdata, size_t
 
     const dmd3frame_t *src_frame =
         (const dmd3frame_t *)(rawdata + header.ofs_frames);
-    for (uint32_t frame = 0; frame < header.num_frames; frame++) {
-        vec3_t mins, maxs, translate;
-
-        LittleVector(src_frame[frame].mins, mins);
-        LittleVector(src_frame[frame].maxs, maxs);
-        LittleVector(src_frame[frame].translate, translate);
-        VectorScale(mins, MD3_XYZ_SCALE, alias_frames[frame].bounds[0]);
-        VectorScale(maxs, MD3_XYZ_SCALE, alias_frames[frame].bounds[1]);
-        alias_frames[frame].radius =
-            RadiusFromBounds(alias_frames[frame].bounds[0],
-                             alias_frames[frame].bounds[1]);
-        VectorAdd(alias_frames[frame].bounds[0], translate,
-                  alias_frames[frame].bounds[0]);
-        VectorAdd(alias_frames[frame].bounds[1], translate,
-                  alias_frames[frame].bounds[1]);
-    }
+    for (uint32_t frame = 0; frame < header.num_frames; frame++)
+        ClearBounds(alias_frames[frame].bounds[0],
+                    alias_frames[frame].bounds[1]);
 
     for (uint32_t mesh_index = 0; mesh_index < header.num_meshes; mesh_index++) {
         const vk_md3_mesh_info_t *info = &mesh_info[mesh_index];
@@ -2141,16 +2128,17 @@ static qhandle_t vk_load_md3_model(const char *name, const byte *rawdata, size_t
             for (uint32_t vert = 0; vert < mesh->num_verts; vert++) {
                 vk_vertex_t *dst =
                     &vertices[frame * vertex_count + info->vertex_base + vert];
+                vec3_t local;
 
-                dst->position[0] =
-                    (int16_t)LittleShort(src_vert[vert].point[0]) * MD3_XYZ_SCALE +
-                    translate[0];
-                dst->position[1] =
-                    (int16_t)LittleShort(src_vert[vert].point[1]) * MD3_XYZ_SCALE +
-                    translate[1];
-                dst->position[2] =
-                    (int16_t)LittleShort(src_vert[vert].point[2]) * MD3_XYZ_SCALE +
-                    translate[2];
+                local[0] =
+                    (int16_t)LittleShort(src_vert[vert].point[0]) * MD3_XYZ_SCALE;
+                local[1] =
+                    (int16_t)LittleShort(src_vert[vert].point[1]) * MD3_XYZ_SCALE;
+                local[2] =
+                    (int16_t)LittleShort(src_vert[vert].point[2]) * MD3_XYZ_SCALE;
+                VectorAdd(local, translate, dst->position);
+                AddPointToBounds(local, alias_frames[frame].bounds[0],
+                                 alias_frames[frame].bounds[1]);
                 dst->color[0] = 1.0f;
                 dst->color[1] = 1.0f;
                 dst->color[2] = 1.0f;
@@ -2161,6 +2149,21 @@ static qhandle_t vk_load_md3_model(const char *name, const byte *rawdata, size_t
                               dst->normal);
             }
         }
+    }
+
+    // Match OpenGL by deriving bounds from decoded mesh vertices. MD3 frame
+    // header bounds are exporter metadata and are not necessarily reliable.
+    for (uint32_t frame = 0; frame < header.num_frames; frame++) {
+        vec3_t translate;
+
+        alias_frames[frame].radius =
+            RadiusFromBounds(alias_frames[frame].bounds[0],
+                             alias_frames[frame].bounds[1]);
+        LittleVector(src_frame[frame].translate, translate);
+        VectorAdd(alias_frames[frame].bounds[0], translate,
+                  alias_frames[frame].bounds[0]);
+        VectorAdd(alias_frames[frame].bounds[1], translate,
+                  alias_frames[frame].bounds[1]);
     }
 
     model = vk_alloc_model();
