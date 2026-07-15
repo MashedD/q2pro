@@ -9968,6 +9968,7 @@ static void vk_sample_lightpoint(const lightpoint_t *point, const refdef_t *fd,
     int t = point->t;
     int smax = surf->lm_width;
     int tmax = surf->lm_height;
+    int s1, t1;
     int size = smax * tmax * 3;
     float fracu = point->s - s;
     float fracv = point->t - t;
@@ -9978,14 +9979,18 @@ static void vk_sample_lightpoint(const lightpoint_t *point, const refdef_t *fd,
 
     VectorClear(color);
 
-    if (!lightmap || s < 0 || t < 0 || s + 1 >= smax || t + 1 >= tmax)
+    if (!lightmap || smax < 1 || tmax < 1 || s < 0 || t < 0 ||
+        s >= smax || t >= tmax)
         return;
+
+    s1 = min(s + 1, smax - 1);
+    t1 = min(t + 1, tmax - 1);
 
     for (int i = 0; i < surf->numstyles; i++) {
         const byte *b1 = &lightmap[3 * ((t + 0) * smax + (s + 0))];
-        const byte *b2 = &lightmap[3 * ((t + 0) * smax + (s + 1))];
-        const byte *b3 = &lightmap[3 * ((t + 1) * smax + (s + 1))];
-        const byte *b4 = &lightmap[3 * ((t + 1) * smax + (s + 0))];
+        const byte *b2 = &lightmap[3 * ((t + 0) * smax + s1)];
+        const byte *b3 = &lightmap[3 * (t1 * smax + s1)];
+        const byte *b4 = &lightmap[3 * (t1 * smax + (s + 0))];
 
         float style = vk_lightstyle_value(fd, surf->styles[i]);
 
