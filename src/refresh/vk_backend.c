@@ -664,9 +664,7 @@ typedef struct {
 
 static vk_state_t vk;
 static cvar_t *vk_drawentities;
-static cvar_t *vk_gl_drawentities;
 static cvar_t *vk_drawsky;
-static cvar_t *vk_gl_drawsky;
 static cvar_t *vk_swapinterval;
 static cvar_t *vk_finish;
 static cvar_t *vk_texturemode;
@@ -694,7 +692,6 @@ static cvar_t *vk_partshape;
 static cvar_t *vk_beamstyle;
 static cvar_t *vk_flarespeed;
 static cvar_t *vk_lightgrid;
-static cvar_t *vk_gl_lightgrid;
 static cvar_t *vk_fullbright;
 static cvar_t *vk_cull_models;
 static cvar_t *vk_shadows;
@@ -741,10 +738,7 @@ static cvar_t *vk_clear;
 static cvar_t *vk_clearcolor;
 static cvar_t *vk_polyblend;
 static cvar_t *vk_damageblend_frac;
-static cvar_t *vk_world_textures;
-static cvar_t *vk_world_vis;
 static cvar_t *vk_cull_nodes;
-static cvar_t *vk_world_cull;
 #if USE_DEBUG
 static cvar_t *vk_debug_distfrac;
 static cvar_t *vk_debug_linewidth;
@@ -7122,28 +7116,6 @@ static bool vk_create_shell_texture(void)
     return true;
 }
 
-static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float color[4])
-{
-    if (!vk.render_pass_active || !vk.color3d_pipeline ||
-        !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count)
-        return;
-
-    vk_color3d_push_t push;
-    memcpy(push.mvp, mvp, sizeof(push.mvp));
-    memcpy(push.color, color, sizeof(push.color));
-
-    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
-    VkDeviceSize offset = sizeof(vk.particle_batch) * vk.current_image;
-
-    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.color3d_pipeline);
-    vk_bind_vertex_buffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
-    vk_bind_index_buffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk_push_constants(cmd, sizeof(push), &push);
-    vk.CmdDrawIndexed(cmd, mesh->index_count, 1, 0, 0, 0);
-    c.trisDrawn += mesh->index_count / 3;
-    vk_count_batch3d();
-}
-
 static void vk_draw_null_model(const entity_t *ent, const refdef_t *fd)
 {
     if ((ent->flags & RF_WEAPONMODEL) || !vk.render_pass_active ||
@@ -7827,8 +7799,7 @@ static void vk_draw_world_outlines(const mat4_t mvp, bool marked_only,
         !vk.world.batches || !vk.world.faces)
         return;
 
-    bool use_marked = marked_only ||
-        (vk_world_vis && vk_world_vis->integer && vk.world.face_count);
+    bool use_marked = marked_only || vk.world.face_count;
     vk_color3d_push_t push;
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     Vector4Set(push.color, 1.0f, 0.0f, 0.0f, 1.0f);
@@ -7896,8 +7867,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                const entity_t *ent, const vec3_t axis[3])
 {
     const vk_mesh_t *mesh = &vk.world.mesh;
-    bool use_marked = marked_only ||
-        (vk_world_vis && vk_world_vis->integer && vk.world.face_count);
+    bool use_marked = marked_only || vk.world.face_count;
     bool special_light_mode = (vk_lightmap && vk_lightmap->integer) ||
         (vk_fullbright && vk_fullbright->integer) ||
         (vk_vertexlight && vk_vertexlight->integer);
@@ -8293,8 +8263,7 @@ static void vk_sky_mvp(mat4_t out, const refdef_t *fd)
 
 static void vk_draw_skybox(const refdef_t *fd)
 {
-    if ((vk_drawsky && !vk_drawsky->integer) ||
-        (vk_gl_drawsky && !vk_gl_drawsky->integer))
+    if (vk_drawsky && !vk_drawsky->integer)
         return;
     if (!vk.world.sky_visible)
         return;
@@ -8568,8 +8537,7 @@ static void vk_mark_world_faces(const refdef_t *fd)
     }
     vk_setup_world_frustum(fd);
 
-    clipflags = (!vk_cull_nodes || vk_cull_nodes->integer) &&
-        (!vk_world_cull || vk_world_cull->integer) ?
+    clipflags = (!vk_cull_nodes || vk_cull_nodes->integer) ?
         VK_NODE_CLIPPED : VK_NODE_UNCLIPPED;
     vk_mark_world_node_faces(bsp->nodes, fd, clipflags);
 }
@@ -8674,8 +8642,6 @@ static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd,
     unsigned world_drawframe;
 
     if (!bsp || index < 1 || index >= bsp->nummodels)
-        return;
-    if (!vk_world_textures || !vk_world_textures->integer)
         return;
     model = &bsp->models[index];
     if (!model->numfaces)
@@ -10168,9 +10134,7 @@ static bool vk_lightgrid_point(const lightgrid_t *grid, const vec3_t start,
     int mask = 0;
     int numsamples = 0;
 
-    if (!grid->numleafs ||
-        (vk_lightgrid && !vk_lightgrid->integer) ||
-        (vk_gl_lightgrid && !vk_gl_lightgrid->integer))
+    if (!grid->numleafs || (vk_lightgrid && !vk_lightgrid->integer))
         return false;
 
     point[0] = (start[0] - grid->mins[0]) * grid->scale[0];
@@ -10366,8 +10330,7 @@ static void vk_draw_entity(const entity_t *ent, const refdef_t *fd,
 
 static void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass)
 {
-    if ((vk_drawentities && !vk_drawentities->integer) ||
-        (vk_gl_drawentities && !vk_gl_drawentities->integer))
+    if (vk_drawentities && !vk_drawentities->integer)
         return;
     if (fd->num_entities <= 0 || !fd->entities)
         return;
@@ -11537,12 +11500,9 @@ bool VKR_Init(bool total)
     Com_Printf("------- VKR_Init -------\n");
     Com_Printf("Using video driver: %s\n", vid->name);
 
-    vk_drawentities = Cvar_Get("vk_drawentities", "1", CVAR_CHEAT);
-    vk_gl_drawentities = Cvar_Get("gl_drawentities", "1", CVAR_CHEAT);
-    vk_drawsky = Cvar_Get("vk_drawsky", "1", 0);
+    vk_drawentities = Cvar_Get("gl_drawentities", "1", CVAR_CHEAT);
+    vk_drawsky = Cvar_Get("gl_drawsky", "1", 0);
     vk_drawsky->changed = vk_drawsky_changed;
-    vk_gl_drawsky = Cvar_Get("gl_drawsky", "1", 0);
-    vk_gl_drawsky->changed = vk_drawsky_changed;
     vk_swapinterval = Cvar_Get("gl_swapinterval", "1", CVAR_ARCHIVE);
     vk_swapinterval->changed = vk_swapinterval_changed;
     vk_finish = Cvar_Get("gl_finish", "0", 0);
@@ -11587,8 +11547,7 @@ bool VKR_Init(bool total)
     vk_partshape->changed = vk_partshape_changed;
     vk_beamstyle = Cvar_Get("gl_beamstyle", "0", 0);
     vk_flarespeed = Cvar_Get("gl_flarespeed", "8", 0);
-    vk_lightgrid = Cvar_Get("vk_lightgrid", "1", 0);
-    vk_gl_lightgrid = Cvar_Get("gl_lightgrid", "1", 0);
+    vk_lightgrid = Cvar_Get("gl_lightgrid", "1", 0);
     vk_fullbright = Cvar_Get("r_fullbright", "0", CVAR_CHEAT);
     vk_cull_models = Cvar_Get("gl_cull_models", "1", 0);
     vk_shadows = Cvar_Get("gl_shadows", "0", CVAR_ARCHIVE);
@@ -11648,10 +11607,7 @@ bool VKR_Init(bool total)
     vk_polyblend = Cvar_Get("gl_polyblend", "1", 0);
     vk_damageblend_frac = Cvar_Get("gl_damageblend_frac", "0.2", 0);
     gl_bloom = Cvar_Get("gl_bloom", "0", 0);
-    vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
-    vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_cull_nodes = Cvar_Get("gl_cull_nodes", "1", 0);
-    vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
 #if USE_DEBUG
     vk_debug_distfrac = Cvar_Get("gl_debug_distfrac", "0.004", 0);
     vk_debug_linewidth = Cvar_Get("gl_debug_linewidth", "2", 0);
@@ -11742,8 +11698,6 @@ void VKR_Shutdown(bool total)
         vk_texturemode->generator = NULL;
     if (vk_drawsky)
         vk_drawsky->changed = NULL;
-    if (vk_gl_drawsky)
-        vk_gl_drawsky->changed = NULL;
     if (vk_anisotropy)
         vk_anisotropy->changed = NULL;
     if (vk_bilerp_chars)
@@ -11987,9 +11941,7 @@ void VKR_SetSky(const char *name, float rotate, bool autorotate, const vec3_t ax
     vk.sky_autorotate = false;
     VectorSet(vk.sky_axis, 0.0f, 0.0f, 1.0f);
 
-    if (!name || !*name ||
-        (vk_drawsky && !vk_drawsky->integer) ||
-        (vk_gl_drawsky && !vk_gl_drawsky->integer))
+    if (!name || !*name || (vk_drawsky && !vk_drawsky->integer))
         return;
 
     if (rotate && VectorNormalize2(axis, vk.sky_axis) >= 0.001f) {
@@ -12058,14 +12010,10 @@ void VKR_RenderFrame(const refdef_t *fd)
 
     bool drawworld = !(fd->rdflags & RDF_NOWORLDMODEL) &&
         (!vk_drawworld || vk_drawworld->integer);
-    bool world_marked = false;
-
-    if (drawworld && vk_world_textures && vk_world_textures->integer &&
-        vk_world_vis && vk_world_vis->integer) {
+    if (drawworld) {
         vk_mark_world_faces(fd);
-        world_marked = true;
     } else {
-        vk.world.sky_visible = drawworld;
+        vk.world.sky_visible = false;
     }
 
     if (drawworld)
@@ -12075,25 +12023,16 @@ void VKR_RenderFrame(const refdef_t *fd)
         mat4_t mvp;
 
         vk_world_mvp(mvp, fd);
-        if (vk_world_textures && vk_world_textures->integer) {
-            if (vk_world_vis && vk_world_vis->integer && !world_marked)
-                vk_mark_world_faces(fd);
-            vk_draw_world_mesh(mvp, false, vk.world_pipeline, VK_WORLD_OPAQUE,
-                               1.0f, fd, NULL, NULL);
-            vk_draw_world_outlines(mvp, false, VK_WORLD_OPAQUE, fd, NULL);
-        } else {
-            const float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-            vk_draw_mesh(&vk.world.mesh, mvp, color);
-            vk_draw_world_outlines(mvp, false, VK_WORLD_ENTITY_ALPHA, fd, NULL);
-        }
+        vk_draw_world_mesh(mvp, false, vk.world_pipeline, VK_WORLD_OPAQUE,
+                           1.0f, fd, NULL, NULL);
+        vk_draw_world_outlines(mvp, false, VK_WORLD_OPAQUE, fd, NULL);
     }
 
     vk_draw_entities(fd, VK_ENTITY_BMODEL);
     vk_draw_entities(fd, VK_ENTITY_OPAQUE);
     vk_draw_entities(fd, VK_ENTITY_ALPHA_BACK);
     vk_draw_entities(fd, VK_ENTITY_BMODEL_ALPHA);
-    if (drawworld && vk.world.mesh.index_count &&
-        vk_world_textures && vk_world_textures->integer) {
+    if (drawworld && vk.world.mesh.index_count) {
         mat4_t mvp;
 
         vk_world_mvp(mvp, fd);
