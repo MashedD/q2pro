@@ -1803,10 +1803,11 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
     for (uint32_t frame = 0; frame < header.num_frames; frame++) {
         const dmd2frame_t *src_frame =
             (const dmd2frame_t *)(rawdata + header.ofs_frames + frame * header.framesize);
-        vec3_t scale, translate;
+        vec3_t scale, translate, radius_mins, radius_maxs;
 
         LittleVector(src_frame->scale, scale);
         LittleVector(src_frame->translate, translate);
+        ClearBounds(radius_mins, radius_maxs);
         ClearBounds(alias_frames[frame].bounds[0], alias_frames[frame].bounds[1]);
 
         for (uint32_t i = 0; i < numindices; i++) {
@@ -1815,10 +1816,13 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
 
             const dmd2trivertx_t *src_vert = &src_frame->verts[vert_indices[i]];
             vk_vertex_t *dst = &vertices[frame * numverts + final_indices[i]];
+            vec3_t relative;
 
-            dst->position[0] = src_vert->v[0] * scale[0] + translate[0];
-            dst->position[1] = src_vert->v[1] * scale[1] + translate[1];
-            dst->position[2] = src_vert->v[2] * scale[2] + translate[2];
+            relative[0] = src_vert->v[0] * scale[0];
+            relative[1] = src_vert->v[1] * scale[1];
+            relative[2] = src_vert->v[2] * scale[2];
+            VectorAdd(relative, translate, dst->position);
+            AddPointToBounds(relative, radius_mins, radius_maxs);
             AddPointToBounds(dst->position, alias_frames[frame].bounds[0],
                              alias_frames[frame].bounds[1]);
             dst->color[0] = 1.0f;
@@ -1833,8 +1837,7 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
                 VectorSet(dst->normal, 0.0f, 0.0f, 1.0f);
         }
 
-        alias_frames[frame].radius = RadiusFromBounds(alias_frames[frame].bounds[0],
-                                                      alias_frames[frame].bounds[1]);
+        alias_frames[frame].radius = RadiusFromBounds(radius_mins, radius_maxs);
     }
 
     model = vk_alloc_model();
@@ -2079,13 +2082,13 @@ static qhandle_t vk_load_md3_model(const char *name, const byte *rawdata, size_t
         LittleVector(src_frame[frame].translate, translate);
         VectorScale(mins, MD3_XYZ_SCALE, alias_frames[frame].bounds[0]);
         VectorScale(maxs, MD3_XYZ_SCALE, alias_frames[frame].bounds[1]);
+        alias_frames[frame].radius =
+            RadiusFromBounds(alias_frames[frame].bounds[0],
+                             alias_frames[frame].bounds[1]);
         VectorAdd(alias_frames[frame].bounds[0], translate,
                   alias_frames[frame].bounds[0]);
         VectorAdd(alias_frames[frame].bounds[1], translate,
                   alias_frames[frame].bounds[1]);
-        alias_frames[frame].radius =
-            RadiusFromBounds(alias_frames[frame].bounds[0],
-                             alias_frames[frame].bounds[1]);
     }
 
     for (uint32_t mesh_index = 0; mesh_index < header.num_meshes; mesh_index++) {
@@ -6687,14 +6690,22 @@ static bool vk_alias_model_culled(const vk_model_t *model, const entity_t *ent,
     if (!VectorEmpty(ent->angles) || (ent->scale && ent->scale != 1.0f)) {
         float radius = max(model->alias_frames[frame].radius,
                            model->alias_frames[oldframe].radius);
+        bool clipped = false;
         radius *= ent->scale ? ent->scale : 1.0f;
 
         for (int i = 0; i < 4; i++) {
-            if (PlaneDiffFast(ent->origin, &vk.world.frustum[i]) < -radius) {
+            float dist = PlaneDiffFast(ent->origin, &vk.world.frustum[i]);
+
+            if (dist < -radius) {
                 c.spheresCulled++;
                 return true;
             }
+            if (dist <= radius)
+                clipped = true;
         }
+
+        if (!clipped)
+            return false;
     }
 
     for (int i = 0; i < 8; i++) {
