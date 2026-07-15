@@ -5,6 +5,8 @@ layout(push_constant) uniform Push {
     vec4 color;
     vec4 scroll;
     vec4 dlight;
+    vec4 dlight_origins[3];
+    vec4 dlight_colors[3];
     vec4 fog;
     float intensity;
     vec2 lm_scale;
@@ -18,7 +20,22 @@ layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_uv;
 layout(location = 2) flat in float v_mode;
 layout(location = 3) in vec2 v_lmuv;
+layout(location = 4) in vec3 v_position;
 layout(location = 0) out vec4 out_color;
+
+vec3 dynamic_light()
+{
+    vec3 light = vec3(0.0);
+    for (int i = 0; i < 3; i++) {
+        float range = pc.dlight_origins[i].w;
+        if (range <= 0.0)
+            continue;
+        float falloff = max(1.0 - distance(v_position, pc.dlight_origins[i].xyz) / range,
+                            0.0);
+        light += pc.dlight_colors[i].rgb * (pc.dlight_colors[i].w * falloff / 255.0);
+    }
+    return light;
+}
 
 void main()
 {
@@ -35,7 +52,8 @@ void main()
         vec4 texel = texture(tex_sampler, uv);
         vec3 lm = pc.lm_scale.x < 0.0 ? vec3(1.0) : texture(lm_sampler, v_lmuv).rgb;
         out_color = texel;
-        out_color.rgb *= (lm + pc.scroll.www) * pc.color.rgb + pc.dlight.rgb;
+        out_color.rgb *= clamp((lm + pc.scroll.www) * pc.color.rgb + dynamic_light(),
+                               0.0, 1.0);
         out_color.a *= v_color.a;
         if (pc.intensity < 0.0) {
             out_color.rgb *= (out_color.r + out_color.g + out_color.b) / 3.0;

@@ -84,12 +84,24 @@ static const uint32_t vk_world_vert_spv[] =
 #include "vk_world_vert_spv.h"
 ;
 
+static const uint32_t vk_world_lit_vert_spv[] =
+#include "vk_world_lit_vert_spv.h"
+;
+
 static const uint32_t vk_world_frag_spv[] =
 #include "vk_world_frag_spv.h"
 ;
 
+static const uint32_t vk_world_lit_frag_spv[] =
+#include "vk_world_lit_frag_spv.h"
+;
+
 static const uint32_t vk_world_alpha_frag_spv[] =
 #include "vk_world_alpha_frag_spv.h"
+;
+
+static const uint32_t vk_world_lit_alpha_frag_spv[] =
+#include "vk_world_lit_alpha_frag_spv.h"
 ;
 
 static const uint32_t vk_world_pixel_vert_spv[] =
@@ -297,6 +309,8 @@ typedef struct {
     vk_texture_t faces[6];
 } vk_cubemap_t;
 
+#define VK_WORLD_MAX_DLIGHTS 3
+
 typedef struct {
     mat4_t mvp;
     float color[4];
@@ -306,11 +320,36 @@ typedef struct {
     float intensity;
 } vk_world_push_t;
 
+typedef char vk_world_compact_fog_offset_check[
+    offsetof(vk_world_push_t, fog) == 112 ? 1 : -1];
+typedef char vk_world_compact_intensity_offset_check[
+    offsetof(vk_world_push_t, intensity) == 128 ? 1 : -1];
+
 typedef struct {
     mat4_t mvp;
     float color[4];
     float scroll[4];
     float dlight[4];
+    float dlight_origins[VK_WORLD_MAX_DLIGHTS][4];
+    float dlight_colors[VK_WORLD_MAX_DLIGHTS][4];
+    float fog[4];
+    float intensity;
+} vk_world_lit_push_t;
+
+typedef char vk_world_dlight_origins_offset_check[
+    offsetof(vk_world_lit_push_t, dlight_origins) == 112 ? 1 : -1];
+typedef char vk_world_dlight_colors_offset_check[
+    offsetof(vk_world_lit_push_t, dlight_colors) == 160 ? 1 : -1];
+typedef char vk_world_fog_offset_check[
+    offsetof(vk_world_lit_push_t, fog) == 208 ? 1 : -1];
+
+typedef struct {
+    mat4_t mvp;
+    float color[4];
+    float scroll[4];
+    float dlight[4];
+    float dlight_origins[VK_WORLD_MAX_DLIGHTS][4];
+    float dlight_colors[VK_WORLD_MAX_DLIGHTS][4];
     float fog[4];
     float intensity;
     float _pad;
@@ -319,9 +358,9 @@ typedef struct {
 } vk_world_pixel_push_t;
 
 typedef char vk_world_pixel_lm_scale_offset_check[
-    offsetof(vk_world_pixel_push_t, lm_scale) == 136 ? 1 : -1];
+    offsetof(vk_world_pixel_push_t, lm_scale) == 232 ? 1 : -1];
 typedef char vk_world_pixel_lm_offset_offset_check[
-    offsetof(vk_world_pixel_push_t, lm_offset) == 144 ? 1 : -1];
+    offsetof(vk_world_pixel_push_t, lm_offset) == 240 ? 1 : -1];
 
 typedef struct {
     mat4_t mvp;
@@ -497,6 +536,7 @@ typedef struct {
     VkPipeline beam_pipeline;
     VkPipeline world_pipeline;
     VkPipeline world_alpha_pipeline;
+    VkPipeline world_blend_pipeline;
     VkPipeline world_glow_pipeline;
     VkPipeline pixel_world_pipeline;
     VkPipeline pixel_world_alpha_pipeline;
@@ -3682,8 +3722,9 @@ static bool vk_create_frame_resources(void)
     VkPushConstantRange push_range = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
-        .size = max(max(max(max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
-                            sizeof(vk_world_push_t)), sizeof(vk_alias_push_t)),
+        .size = max(max(max(max(max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
+                                sizeof(vk_world_push_t)), sizeof(vk_world_lit_push_t)),
+                            sizeof(vk_alias_push_t)),
                     sizeof(vk_alias_shadow_push_t)),
     };
     VkPipelineLayoutCreateInfo layout_info = {
@@ -3877,6 +3918,11 @@ static void vk_destroy_swapchain(void)
     if (vk.world_alpha_pipeline) {
         vk.DestroyPipeline(vk.device, vk.world_alpha_pipeline, NULL);
         vk.world_alpha_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.world_blend_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.world_blend_pipeline, NULL);
+        vk.world_blend_pipeline = VK_NULL_HANDLE;
     }
 
     if (vk.world_glow_pipeline) {
@@ -4943,14 +4989,22 @@ static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
 static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
                                      bool depth_write, bool blend,
                                      bool alpha_test, bool additive,
-                                     bool glowmap)
+                                     bool glowmap, bool smooth_dlights)
 {
-    VkShaderModule vert = vk_create_shader_module(vk_world_vert_spv,
-                                                  sizeof(vk_world_vert_spv));
+    VkShaderModule vert = (smooth_dlights || glowmap) ?
+        vk_create_shader_module(vk_world_lit_vert_spv,
+                                sizeof(vk_world_lit_vert_spv)) :
+        vk_create_shader_module(vk_world_vert_spv,
+                                sizeof(vk_world_vert_spv));
     if (!vert)
         return false;
 
-    VkShaderModule frag = glowmap ?
+    VkShaderModule frag = smooth_dlights && alpha_test ?
+        vk_create_shader_module(vk_world_lit_alpha_frag_spv,
+                                sizeof(vk_world_lit_alpha_frag_spv)) :
+        smooth_dlights ?
+        vk_create_shader_module(vk_world_lit_frag_spv,
+                                sizeof(vk_world_lit_frag_spv)) : glowmap ?
         vk_create_shader_module(vk_world_glow_frag_spv,
                                 sizeof(vk_world_glow_frag_spv)) : alpha_test ?
         vk_create_shader_module(vk_world_alpha_frag_spv,
@@ -5666,17 +5720,18 @@ static bool vk_create_swapchain(int width, int height)
                                     VK_PRIMITIVE_TOPOLOGY_LINE_LIST) ||
         !vk_create_color3d_pipeline(&vk.beam_pipeline, VK_TRUE, VK_FALSE, VK_TRUE,
                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
-        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.world_glow_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.world_blend_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE) ||
+        !vk_create_world_pipeline(&vk.world_glow_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE) ||
         !vk_create_pixel_world_pipeline(&vk.pixel_world_pipeline, VK_FALSE) ||
         !vk_create_pixel_world_pipeline(&vk.pixel_world_alpha_pipeline, VK_TRUE) ||
-        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.particle_add_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.glare_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.debug_text_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.particle_add_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.glare_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.debug_text_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
         !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_alpha_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
@@ -7356,7 +7411,7 @@ static void vk_draw_debug_texts(const refdef_t *fd)
         return;
 
     mat4_t mvp;
-    vk_world_push_t push;
+    vk_world_push_t push = { 0 };
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
 
@@ -7630,17 +7685,25 @@ static float vk_world_dynamic_light_fraction(const dlight_t *light,
     return rad - dist * scale;
 }
 
-static void vk_world_dynamic_light(const vk_world_face_t *face,
+static int vk_world_dynamic_lights(const vk_world_face_t *face,
                                    const refdef_t *fd, const entity_t *ent,
-                                   const vec3_t axis[3], float dlight[4])
+                                   const vec3_t axis[3],
+                                   float origins[VK_WORLD_MAX_DLIGHTS][4],
+                                   float colors[VK_WORLD_MAX_DLIGHTS][4])
 {
-    Vector4Clear(dlight);
+    float scores[VK_WORLD_MAX_DLIGHTS] = { 0.0f };
+    int count = 0;
+
+    if (origins)
+        memset(origins, 0, sizeof(float) * VK_WORLD_MAX_DLIGHTS * 4);
+    if (colors)
+        memset(colors, 0, sizeof(float) * VK_WORLD_MAX_DLIGHTS * 4);
 
     if (!face || !face->face || !face->face->plane ||
         !fd || fd->num_dlights <= 0 || !fd->dlights ||
         !vk_dynamic_lights_enabled() ||
         (face->face->drawflags & vk.world.nolm_mask))
-        return;
+        return 0;
 
     for (int i = 0; i < fd->num_dlights; i++) {
         const dlight_t *light = &fd->dlights[i];
@@ -7654,13 +7717,35 @@ static void vk_world_dynamic_light(const vk_world_face_t *face,
         if (f <= 0.0f)
             continue;
 
-        f *= 1.0f / 255.0f;
-        VectorMA(dlight, f, light->color, dlight);
+        int slot = min(count, VK_WORLD_MAX_DLIGHTS - 1);
+        while (slot > 0 && f > scores[slot - 1]) {
+            if (origins)
+                memcpy(origins[slot], origins[slot - 1], sizeof(origins[slot]));
+            if (colors)
+                memcpy(colors[slot], colors[slot - 1], sizeof(colors[slot]));
+            scores[slot] = scores[slot - 1];
+            slot--;
+        }
+        if (slot >= VK_WORLD_MAX_DLIGHTS ||
+            (count >= VK_WORLD_MAX_DLIGHTS && f <= scores[slot]))
+            continue;
+
+        scores[slot] = f;
+        if (origins) {
+            VectorCopy(light_origin, origins[slot]);
+            origins[slot][3] = max(light->intensity - DLIGHT_CUTOFF *
+                ((vk_dlight_falloff && vk_dlight_falloff->integer) ? 0.8f : 1.0f),
+                0.0f);
+        }
+        if (colors) {
+            VectorCopy(light->color, colors[slot]);
+            colors[slot][3] = light->intensity;
+        }
+        if (count < VK_WORLD_MAX_DLIGHTS)
+            count++;
     }
 
-    dlight[0] = Q_clipf(dlight[0], 0.0f, 1.0f);
-    dlight[1] = Q_clipf(dlight[1], 0.0f, 1.0f);
-    dlight[2] = Q_clipf(dlight[2], 0.0f, 1.0f);
+    return count;
 }
 
 static const image_t *vk_world_face_image(const mface_t *face,
@@ -7801,7 +7886,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         vk_pixel_lightmaps_draw_logged = true;
     }
 
-    vk_world_pixel_push_t push;
+    vk_world_pixel_push_t push = { 0 };
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     push.color[0] = 1.0f;
     push.color[1] = 1.0f;
@@ -7840,7 +7925,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                        vk.world.pixel_lightmap_texture.descriptor_set);
         vk_push_pixel_world_constants(cmd, sizeof(push), &push);
     } else {
-        vk_push_constants(cmd, sizeof(vk_world_push_t), &push);
+        vk_push_constants(cmd, sizeof(vk_world_lit_push_t), &push);
     }
 
     for (uint32_t i = 0; i < vk.world.batch_count; i++) {
@@ -7882,7 +7967,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 } \
                 vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline); \
                 vk_bind_texture_descriptor(cmd, texture->descriptor_set); \
-                vk_push_constants(cmd, sizeof(vk_world_push_t), &push); \
+                vk_push_constants(cmd, sizeof(vk_world_lit_push_t), &push); \
                 if (draw_group) \
                     vk.CmdDrawIndexed(cmd, group_count, 1, 0, 0, 0); \
                 vk_bind_index_buffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32); \
@@ -7942,14 +8027,13 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
                 Vector4Clear(push.dlight);
                 vk_world_face_scroll(face->face, fd ? fd->time : 0.0f, push.scroll);
-                vk_push_constants(cmd, sizeof(vk_world_push_t), &push);
+                vk_push_constants(cmd, sizeof(vk_world_lit_push_t), &push);
                 vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
                 c.trisDrawn += face->index_count / 3;
                 vk_count_batch3d();
                 continue;
             }
 
-            vec4_t group_dlight;
             bool can_group = world_batching &&
                 batch_index_mapped && vk.world.batch_indices.buffer &&
                 vk.world.batch_index_data &&
@@ -7961,9 +8045,8 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 !vk_world_face_glowmap_enabled(face->face, image);
 
             if (can_group && fd && fd->num_dlights > 0 && vk_dynamic_lights_enabled()) {
-                vk_world_dynamic_light(face, fd, ent, axis, group_dlight);
-                can_group = group_dlight[0] == 0.0f && group_dlight[1] == 0.0f &&
-                    group_dlight[2] == 0.0f;
+                can_group = !vk_world_dynamic_lights(face, fd, ent, axis,
+                                                     NULL, NULL);
             }
             if (can_group) {
                 uint32_t used_indices = batch_index_cursor + group_count;
@@ -8026,7 +8109,9 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
             vk_world_face_scroll(face->face, fd ? fd->time : 0.0f, push.scroll);
             vk_world_light_params(face->face, push.color, push.scroll);
-            vk_world_dynamic_light(face, fd, ent, axis, push.dlight);
+            Vector4Clear(push.dlight);
+            vk_world_dynamic_lights(face, fd, ent, axis,
+                                    push.dlight_origins, push.dlight_colors);
             push.dlight[3] = fd ? fd->time : 0.0f;
             push.intensity = vk_world_face_intensity(face->face);
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
@@ -8048,7 +8133,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             if (pixel_world)
                 vk_push_pixel_world_constants(cmd, sizeof(push), &push);
             else
-                vk_push_constants(cmd, sizeof(vk_world_push_t), &push);
+                vk_push_constants(cmd, sizeof(vk_world_lit_push_t), &push);
             vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
             c.facesDrawn++;
             c.facesTris += face->index_count / 3;
@@ -8070,7 +8155,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     push.color[1] = 1.0f;
                     push.color[2] = 1.0f;
                     push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
-                    vk_push_constants(cmd, sizeof(vk_world_push_t), &push);
+                    vk_push_constants(cmd, sizeof(vk_world_lit_push_t), &push);
                     vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
                     c.trisDrawn += face->index_count / 3;
                     vk_count_batch3d();
@@ -8167,7 +8252,7 @@ static void vk_draw_skybox(const refdef_t *fd)
         return;
 
     mat4_t mvp;
-    vk_world_push_t push;
+    vk_world_push_t push = { 0 };
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
 
@@ -8561,7 +8646,7 @@ static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd,
         (translucent ? VK_WORLD_ENTITY_ALPHA : VK_WORLD_OPAQUE);
     vk_mark_bmodel_faces(model, ent, fd, axis, translucent);
     vk_draw_world_mesh(mvp, true,
-                        translucent ? vk.sprite_pipeline : vk.world_pipeline,
+                        translucent ? vk.world_blend_pipeline : vk.world_pipeline,
                        world_pass,
                        (ent->flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f,
                        fd, ent, axis);
@@ -9177,7 +9262,7 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     vec3_t viewaxis[3], left, right, down, up, xaxis, yaxis, origin;
     float scale = ent->scale ? ent->scale : 1.0f;
     mat4_t model_matrix, mvp;
-    vk_world_push_t push;
+    vk_world_push_t push = { 0 };
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
 
@@ -9332,7 +9417,7 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
 
     vec3_t viewaxis[3], left, right, down, up, xaxis, yaxis, origin;
     mat4_t model_matrix, mvp;
-    vk_world_push_t push;
+    vk_world_push_t push = { 0 };
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
     color_t color;
@@ -9433,7 +9518,7 @@ static void vk_draw_particles(const refdef_t *fd)
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
     mat4_t proj, view, mvp;
-    vk_world_push_t push;
+    vk_world_push_t push = { 0 };
     uint32_t vertex_count = 0;
 
     AnglesToAxis(fd->viewangles, viewaxis);
@@ -9583,7 +9668,7 @@ static void vk_draw_glare(const refdef_t *fd)
 
         vec3_t left, right, down, up, xaxis, yaxis, origin;
         mat4_t model_matrix, mvp;
-        vk_world_push_t push;
+        vk_world_push_t push = { 0 };
 
         VectorScale(viewaxis[1], scale, left);
         VectorScale(viewaxis[1], -scale, right);
@@ -9630,7 +9715,7 @@ static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
 {
     vec3_t dir, to_view, normal, xaxis, yaxis, origin;
     mat4_t model_matrix, mvp;
-    vk_world_push_t push;
+    vk_world_push_t push = { 0 };
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
 
@@ -11808,7 +11893,7 @@ void VKR_RenderFrame(const refdef_t *fd)
         mat4_t mvp;
 
         vk_world_mvp(mvp, fd);
-        vk_draw_world_mesh(mvp, false, vk.sprite_pipeline, VK_WORLD_ALPHA,
+        vk_draw_world_mesh(mvp, false, vk.world_blend_pipeline, VK_WORLD_ALPHA,
                            1.0f, fd, NULL, NULL);
         vk_draw_world_outlines(mvp, false, VK_WORLD_ALPHA, fd, NULL);
     }
