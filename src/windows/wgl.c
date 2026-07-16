@@ -288,6 +288,13 @@ static bool wgl_init(void)
     r_opengl_config_t cfg;
     int ret;
 
+#if USE_VULKAN
+    if (R_GetVideoAPI() == REF_VIDEO_VULKAN) {
+        Win_Init();
+        return true;
+    }
+#endif
+
     gl_allow_software = Cvar_Get("gl_allow_software", "0", 0);
 
     wgl.handle = GetModuleHandle("opengl32");
@@ -411,6 +418,11 @@ const vid_driver_t vid_win32wgl = {
     .get_proc_addr = wgl_get_proc_addr,
     .swap_buffers = wgl_swap_buffers,
     .swap_interval = wgl_swap_interval,
+
+#if USE_VULKAN
+    .get_vk_instance_extensions = Win_GetVkInstanceExtensions,
+    .create_vk_surface = Win_CreateVkSurface,
+#endif
 
     .get_clipboard_data = Win_GetClipboardData,
     .set_clipboard_data = Win_SetClipboardData,

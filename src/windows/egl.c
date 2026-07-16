@@ -194,6 +194,11 @@ const vid_driver_t vid_win32egl = {
     .swap_buffers = egl_swap_buffers,
     .swap_interval = egl_swap_interval,
 
+#if USE_VULKAN
+    .get_vk_instance_extensions = Win_GetVkInstanceExtensions,
+    .create_vk_surface = Win_CreateVkSurface,
+#endif
+
     .get_clipboard_data = Win_GetClipboardData,
     .set_clipboard_data = Win_SetClipboardData,
 

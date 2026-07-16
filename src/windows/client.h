@@ -27,6 +27,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "common/cvar.h"
 #include "common/files.h"
 #if USE_CLIENT
+#if USE_VULKAN
+#define VK_USE_PLATFORM_WIN32_KHR
+#endif
 #include "client/client.h"
 #include "client/input.h"
 #include "client/keys.h"
@@ -127,6 +130,11 @@ int Win_GetDpiScale(void);
 void Win_SetMode(void);
 void Win_UpdateGamma(const byte *table);
 void Win_PumpEvents(void);
+#if USE_VULKAN
+bool Win_GetVkInstanceExtensions(uint32_t *count, const char **names,
+                                 uint32_t max_names);
+bool Win_CreateVkSurface(VkInstance instance, VkSurfaceKHR *surface);
+#endif
 char *Win_GetClipboardData(void);
 void Win_SetClipboardData(const char *data);
 bool Win_InitMouse(void);

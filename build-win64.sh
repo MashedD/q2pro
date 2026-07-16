@@ -8,7 +8,8 @@ meson setup build-win64 \
     -Dc_link_args="-static -static-libgcc" \
     --force-fallback-for=zlib,libjpeg,libpng \
     -Dqal-hard-linked=true \
-    -Danticheat-server=true
+    -Danticheat-server=true \
+    -Dvulkan=enabled
 meson compile -C build-win64 -j"$(nproc)"
 chmod -x build-win64/gamex86_64.dll
 x86_64-w64-mingw32-strip build-win64/gamex86_64.dll

@@ -8,7 +8,8 @@ meson setup build-win32 \
     -Dc_link_args='-static -static-libgcc -D_WIN32_WINNT=0x0501 -DNTDDI_VERSION=0x05010200' \
     --force-fallback-for=libcurl,zlib,libjpeg,libpng \
     -Dqal-hard-linked=true \
-    -Danticheat-server=true
+    -Danticheat-server=true \
+    -Dvulkan=enabled
 meson compile -C build-win32
 chmod -x build-win32/gamex86.dll
 i686-w64-mingw32-strip build-win32/gamex86.dll
