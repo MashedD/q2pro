@@ -115,6 +115,12 @@ static const uint32_t vk_world_pixel_frag_spv[] =
 static const uint32_t vk_world_pixel_alpha_frag_spv[] =
 #include "vk_world_pixel_alpha_frag_spv.h"
 ;
+static const uint32_t vk_world_pixel_glow_frag_spv[] =
+#include "vk_world_pixel_glow_frag_spv.h"
+;
+static const uint32_t vk_world_pixel_glow_alpha_frag_spv[] =
+#include "vk_world_pixel_glow_alpha_frag_spv.h"
+;
 
 static const uint32_t vk_world_glow_frag_spv[] =
 #include "vk_world_glow_frag_spv.h"
@@ -499,6 +505,7 @@ typedef struct {
     PFN_vkCmdBeginQuery CmdBeginQuery;
     PFN_vkCmdEndQuery CmdEndQuery;
     PFN_vkCmdResetQueryPool CmdResetQueryPool;
+    PFN_vkCmdWriteTimestamp CmdWriteTimestamp;
     PFN_vkCreateBuffer CreateBuffer;
     PFN_vkDestroyBuffer DestroyBuffer;
     PFN_vkGetBufferMemoryRequirements GetBufferMemoryRequirements;
@@ -562,6 +569,8 @@ typedef struct {
     VkPipeline world_glow_pipeline;
     VkPipeline pixel_world_pipeline;
     VkPipeline pixel_world_alpha_pipeline;
+    VkPipeline pixel_world_glow_pipeline;
+    VkPipeline pixel_world_glow_alpha_pipeline;
     VkPipeline sky_pipeline;
     VkPipeline sprite_pipeline;
     VkPipeline sprite_alpha_pipeline;
@@ -578,6 +587,7 @@ typedef struct {
     VkPipeline alias_cel_pipeline;
     VkPipeline alias_line_pipeline;
     VkQueryPool glare_query_pool;
+    VkQueryPool timestamp_query_pool;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
     VkRenderPass bloom_render_pass;
@@ -673,9 +683,11 @@ typedef struct {
     unsigned record_usec;
     unsigned submit_usec;
     unsigned present_usec;
+    unsigned gpu_frame_usec;
+    bool timestamp_valid[VK_MAX_FRAMES_IN_FLIGHT];
     VkPipeline bound_pipeline;
     VkDescriptorSet bound_texture_descriptor;
-    VkDescriptorSet bound_pixel_world_descriptors[2];
+    VkDescriptorSet bound_pixel_world_descriptors[3];
     VkBuffer bound_vertex_buffers[2];
     VkDeviceSize bound_vertex_offsets[2];
     VkBuffer bound_index_buffer;
@@ -732,6 +744,7 @@ static cvar_t *vk_glare_size;
 static cvar_t *vk_glare_intensity;
 static cvar_t *vk_perf_stats;
 static cvar_t *vk_frames_in_flight;
+static cvar_t *vk_device;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
 #endif
@@ -799,6 +812,7 @@ static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
                           const entity_t *ent, const vec3_t axis[3]);
 static bool vk_create_swapchain(int width, int height);
 static bool vk_recreate_swapchain(void);
+static const char *vk_device_type_string(VkPhysicalDeviceType type);
 static void vk_destroy_mesh(vk_mesh_t *mesh);
 static void vk_free_world(void);
 static void vk_build_glare_list(bsp_t *bsp);
@@ -3172,6 +3186,7 @@ static bool vk_load_device(void)
     LOAD(CmdBeginQuery);
     LOAD(CmdEndQuery);
     LOAD(CmdResetQueryPool);
+    LOAD(CmdWriteTimestamp);
     LOAD(CreateBuffer);
     LOAD(DestroyBuffer);
     LOAD(GetBufferMemoryRequirements);
@@ -3330,19 +3345,62 @@ static bool vk_pick_physical_device(void)
         return vk_fail_result("vkEnumeratePhysicalDevices", result);
     }
 
+    const char *selector = vk_device ? vk_device->string : "";
+    bool numeric_selector = selector[0] != '\0';
+    for (const char *p = selector; numeric_selector && *p; p++)
+        numeric_selector = *p >= '0' && *p <= '9';
+    int selected_index = numeric_selector ? Q_atoi(selector) : -1;
+    int best_score = INT_MIN;
+
     for (uint32_t i = 0; i < count; i++) {
+        VkPhysicalDeviceProperties props;
+        vk.GetPhysicalDeviceProperties(devices[i], &props);
         vk_queue_families_t queues = vk_find_queues(devices[i]);
-        if (queues.has_graphics && queues.has_present && vk_has_swapchain_extension(devices[i])) {
+        bool suitable = queues.has_graphics && queues.has_present &&
+            vk_has_swapchain_extension(devices[i]);
+        Com_Printf("Vulkan device %u: %s (%s), vendor/device 0x%04x/0x%04x%s\n",
+                   i, props.deviceName, vk_device_type_string(props.deviceType),
+                   props.vendorID, props.deviceID, suitable ? "" : " [unsuitable]");
+        if (!suitable)
+            continue;
+
+        bool requested = selector[0] &&
+            ((numeric_selector && selected_index == (int)i) ||
+             (!numeric_selector && Q_stristr(props.deviceName, selector)));
+        if (selector[0] && !requested)
+            continue;
+
+        int score = 0;
+        switch (props.deviceType) {
+        // On hybrid systems the integrated GPU normally owns the display.
+        // Rendering on a discrete device that merely supports presentation
+        // forces every uncapped frame through a PRIME copy.  OpenGL defaults
+        // to the display GPU, so prefer the integrated present-capable device
+        // as well; vk_device remains available for an explicit override.
+        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: score = 400; break;
+        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: score = 300; break;
+        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: score = 200; break;
+        case VK_PHYSICAL_DEVICE_TYPE_CPU: score = 100; break;
+        default: score = 0; break;
+        }
+        score += min((int)(props.limits.maxImageDimension2D / 1024), 99);
+        if (requested || score > best_score) {
             vk.physical_device = devices[i];
             vk.queues = queues;
-            break;
+            best_score = score;
+            if (requested)
+                break;
         }
     }
 
     Z_Free(devices);
 
     if (!vk.physical_device) {
-        Com_SetLastError("No suitable Vulkan physical device found");
+        if (selector[0])
+            Com_SetLastError(va("Requested Vulkan device '%s' is not available",
+                                selector));
+        else
+            Com_SetLastError("No suitable Vulkan physical device found");
         return false;
     }
 
@@ -3722,6 +3780,21 @@ static bool vk_create_glare_query_pool(void)
     return true;
 }
 
+static bool vk_create_timestamp_query_pool(void)
+{
+    VkQueryPoolCreateInfo info = {
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType = VK_QUERY_TYPE_TIMESTAMP,
+        .queryCount = VK_MAX_FRAMES_IN_FLIGHT * 2,
+    };
+    VkResult result = vk.CreateQueryPool(vk.device, &info, NULL,
+                                         &vk.timestamp_query_pool);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateQueryPool(timestamp)", result);
+    memset(vk.timestamp_valid, 0, sizeof(vk.timestamp_valid));
+    return true;
+}
+
 static bool vk_create_frame_resources(void)
 {
     VkDescriptorSetLayoutBinding sampler_binding = {
@@ -3995,6 +4068,16 @@ static void vk_destroy_swapchain(void)
     if (vk.pixel_world_alpha_pipeline) {
         vk.DestroyPipeline(vk.device, vk.pixel_world_alpha_pipeline, NULL);
         vk.pixel_world_alpha_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.pixel_world_glow_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.pixel_world_glow_pipeline, NULL);
+        vk.pixel_world_glow_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.pixel_world_glow_alpha_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.pixel_world_glow_alpha_pipeline, NULL);
+        vk.pixel_world_glow_alpha_pipeline = VK_NULL_HANDLE;
     }
 
     if (vk.pixel_world_pipeline_layout) {
@@ -4717,7 +4800,12 @@ static bool vk_validate_pixel_lightmap_shaders(void)
                                                   sizeof(vk_world_pixel_frag_spv));
     VkShaderModule alpha = vk_create_shader_module(vk_world_pixel_alpha_frag_spv,
                                                    sizeof(vk_world_pixel_alpha_frag_spv));
-    bool ok = vert && frag && alpha;
+    VkShaderModule glow = vk_create_shader_module(vk_world_pixel_glow_frag_spv,
+                                                  sizeof(vk_world_pixel_glow_frag_spv));
+    VkShaderModule glow_alpha = vk_create_shader_module(
+        vk_world_pixel_glow_alpha_frag_spv,
+        sizeof(vk_world_pixel_glow_alpha_frag_spv));
+    bool ok = vert && frag && alpha && glow && glow_alpha;
 
     if (vert)
         vk.DestroyShaderModule(vk.device, vert, NULL);
@@ -4725,6 +4813,10 @@ static bool vk_validate_pixel_lightmap_shaders(void)
         vk.DestroyShaderModule(vk.device, frag, NULL);
     if (alpha)
         vk.DestroyShaderModule(vk.device, alpha, NULL);
+    if (glow)
+        vk.DestroyShaderModule(vk.device, glow, NULL);
+    if (glow_alpha)
+        vk.DestroyShaderModule(vk.device, glow_alpha, NULL);
 
     if (ok)
         Com_DPrintf("Vulkan pixel lightmap shader modules validated\n");
@@ -4743,6 +4835,7 @@ static bool vk_create_pixel_world_pipeline_layout(void)
     }
 
     VkDescriptorSetLayout set_layouts[] = {
+        vk.texture_set_layout,
         vk.texture_set_layout,
         vk.texture_set_layout,
     };
@@ -5380,7 +5473,8 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
     return true;
 }
 
-static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test)
+static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test,
+                                           bool glowmap)
 {
     if (vk_pixel_lightmap_mode() < 2)
         return true;
@@ -5394,11 +5488,19 @@ static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test
     if (!vert)
         return false;
 
-    VkShaderModule frag = alpha_test ?
-        vk_create_shader_module(vk_world_pixel_alpha_frag_spv,
-                                sizeof(vk_world_pixel_alpha_frag_spv)) :
-        vk_create_shader_module(vk_world_pixel_frag_spv,
-                                sizeof(vk_world_pixel_frag_spv));
+    VkShaderModule frag;
+    if (glowmap && alpha_test)
+        frag = vk_create_shader_module(vk_world_pixel_glow_alpha_frag_spv,
+                                       sizeof(vk_world_pixel_glow_alpha_frag_spv));
+    else if (glowmap)
+        frag = vk_create_shader_module(vk_world_pixel_glow_frag_spv,
+                                       sizeof(vk_world_pixel_glow_frag_spv));
+    else if (alpha_test)
+        frag = vk_create_shader_module(vk_world_pixel_alpha_frag_spv,
+                                       sizeof(vk_world_pixel_alpha_frag_spv));
+    else
+        frag = vk_create_shader_module(vk_world_pixel_frag_spv,
+                                       sizeof(vk_world_pixel_frag_spv));
     if (!frag) {
         vk.DestroyShaderModule(vk.device, vert, NULL);
         return false;
@@ -5498,7 +5600,9 @@ static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test
                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
     } };
     if (pipeline == &vk.pixel_world_pipeline ||
-        pipeline == &vk.pixel_world_alpha_pipeline) {
+        pipeline == &vk.pixel_world_alpha_pipeline ||
+        pipeline == &vk.pixel_world_glow_pipeline ||
+        pipeline == &vk.pixel_world_glow_alpha_pipeline) {
         color_blend_attachment[1].colorWriteMask =
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -5537,8 +5641,8 @@ static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreateGraphicsPipelines(pixel_world)", result);
 
-    Com_DPrintf("Vulkan pixel lightmap %s pipeline created\n",
-                alpha_test ? "alpha" : "opaque");
+    Com_DPrintf("Vulkan pixel lightmap %s%s pipeline created\n",
+                glowmap ? "glow " : "", alpha_test ? "alpha" : "opaque");
     return true;
 }
 
@@ -5986,8 +6090,10 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.world_blend_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.world_glow_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE) ||
-        !vk_create_pixel_world_pipeline(&vk.pixel_world_pipeline, VK_FALSE) ||
-        !vk_create_pixel_world_pipeline(&vk.pixel_world_alpha_pipeline, VK_TRUE) ||
+        !vk_create_pixel_world_pipeline(&vk.pixel_world_pipeline, VK_FALSE, VK_FALSE) ||
+        !vk_create_pixel_world_pipeline(&vk.pixel_world_alpha_pipeline, VK_TRUE, VK_FALSE) ||
+        !vk_create_pixel_world_pipeline(&vk.pixel_world_glow_pipeline, VK_FALSE, VK_TRUE) ||
+        !vk_create_pixel_world_pipeline(&vk.pixel_world_glow_alpha_pipeline, VK_TRUE, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE) ||
@@ -8112,6 +8218,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         pass == VK_WORLD_OPAQUE && !vk.drawing_bloom && !ent &&
         !special_light_mode;
     bool pixel_ready = vk.pixel_world_pipeline && vk.pixel_world_alpha_pipeline &&
+        vk.pixel_world_glow_pipeline && vk.pixel_world_glow_alpha_pipeline &&
         vk.pixel_world_pipeline_layout && vk.world.pixel_lmuv_buffer.buffer &&
         vk.world.pixel_lightmap_texture.descriptor_set;
     bool pixel_world = pixel_requested && pixel_ready;
@@ -8207,6 +8314,9 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         uint32_t group_faces = 0;
         uint32_t group_tris = 0;
         bool group_active = false;
+        bool group_glow = false;
+        VkPipeline group_pipeline = pixel_world ? vk.pixel_world_pipeline : pipeline;
+        const vk_texture_t *group_glow_texture = NULL;
 
 #define VK_FLUSH_WORLD_GROUP() do { \
             if (group_active) { \
@@ -8221,12 +8331,14 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     batch_index_cursor += group_count; \
                     vk_bind_index_buffer(cmd, vk.world.batch_indices.buffer, bind_offset, VK_INDEX_TYPE_UINT32); \
                 } \
-                vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, \
-                                 pixel_world ? vk.pixel_world_pipeline : pipeline); \
+                vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, group_pipeline); \
                 if (pixel_world) { \
                     vk_bind_pixel_world_descriptor(cmd, 0, texture->descriptor_set); \
                     vk_bind_pixel_world_descriptor(cmd, 1, \
                         vk.world.pixel_lightmap_texture.descriptor_set); \
+                    if (group_glow && group_glow_texture) \
+                        vk_bind_pixel_world_descriptor(cmd, 2, \
+                            group_glow_texture->descriptor_set); \
                     vk_push_pixel_world_constants(cmd, sizeof(push), &push); \
                 } else { \
                     vk_bind_texture_descriptor(cmd, texture->descriptor_set); \
@@ -8307,7 +8419,8 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                            SURF_WARP | SURF_TRANS33 | SURF_TRANS66)) &&
                 !(face->face->drawflags & vk.world.nolm_mask) &&
                 (!pixel_world || (face->pixel_lm_w && face->pixel_lm_h)) &&
-                !vk_world_face_glowmap_enabled(face->face, image);
+                (pixel_world ||
+                 !vk_world_face_glowmap_enabled(face->face, image));
 
             if (can_group && fd && fd->num_dlights > 0 && vk_dynamic_lights_enabled()) {
                 can_group = !vk_world_dynamic_lights(face, fd, ent, axis,
@@ -8333,6 +8446,14 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     push.dlight[3] = fd ? fd->time : 0.0f;
                     push.intensity = vk_texture_intensity();
                     push.desaturation = vk_world_face_desaturation(face->face);
+                    group_glow = pixel_world &&
+                        vk_world_face_glowmap_enabled(face->face, image);
+                    group_glow_texture = group_glow ?
+                        vk_texture_for_index(image->texnum2, false) : NULL;
+                    group_glow = group_glow_texture != NULL;
+                    group_pipeline = group_glow ?
+                        vk.pixel_world_glow_pipeline :
+                        (pixel_world ? vk.pixel_world_pipeline : pipeline);
                     push.lm_scale[0] = pixel_world ? 1.0f : -1.0f;
                     push.lm_scale[1] = pixel_world ? 1.0f : -1.0f;
                     push.lm_offset[0] = 0.0f;
@@ -8361,9 +8482,26 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 bound_texture_index = image->texnum;
             }
 
+            bool combined_glow = pixel_world &&
+                vk_world_face_glowmap_enabled(face->face, image);
+            const vk_texture_t *combined_glow_texture = NULL;
+            if (combined_glow) {
+                combined_glow_texture =
+                    vk_texture_for_index(image->texnum2, false);
+                combined_glow = combined_glow_texture != NULL;
+            }
+
             if (pixel_world) {
-                face_pipeline = (face->face->drawflags & SURF_ALPHATEST) ?
-                    vk.pixel_world_alpha_pipeline : vk.pixel_world_pipeline;
+                if (combined_glow) {
+                    face_pipeline = (face->face->drawflags & SURF_ALPHATEST) ?
+                        vk.pixel_world_glow_alpha_pipeline :
+                        vk.pixel_world_glow_pipeline;
+                    vk_bind_pixel_world_descriptor(cmd, 2,
+                                                   combined_glow_texture->descriptor_set);
+                } else {
+                    face_pipeline = (face->face->drawflags & SURF_ALPHATEST) ?
+                        vk.pixel_world_alpha_pipeline : vk.pixel_world_pipeline;
+                }
                 vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                    face_pipeline);
             } else {
@@ -8403,7 +8541,8 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             c.trisDrawn += face->index_count / 3;
             vk_count_batch3d();
 
-            if ((pass == VK_WORLD_OPAQUE ||
+            if (!combined_glow &&
+                (pass == VK_WORLD_OPAQUE ||
                  (pass == VK_WORLD_ENTITY_ALPHA &&
                   !(face->face->drawflags & SURF_TRANS_MASK))) &&
                 vk_world_face_glowmap_enabled(face->face, image)) {
@@ -11900,7 +12039,7 @@ static void vk_log_perf_stats(void)
         return;
 
     vk.perf_stats_time = vk.fd.time;
-    Com_Printf("VK perf: mode=%s imgs=%u fif=%u draws=%i 3d=%i world=%i ent=%i part=%i bloom=%i other=%i 2d=%i chars=%i pics=%i rects=%i pipe=%i desc=%i push=%i vb=%i tris=%i faces=%i ents=%i parts=%i wait=%uus acq=%uus rec=%uus sub=%uus pres=%uus\n",
+    Com_Printf("VK perf: mode=%s imgs=%u fif=%u draws=%i 3d=%i world=%i ent=%i part=%i bloom=%i other=%i 2d=%i chars=%i pics=%i rects=%i pipe=%i desc=%i push=%i vb=%i tris=%i faces=%i ents=%i parts=%i gpu=%uus wait=%uus acq=%uus rec=%uus sub=%uus pres=%uus\n",
                vk_present_mode_name(vk.present_mode),
                vk.swapchain_image_count, vk_frames_in_flight_value(),
                c.batchesDrawn + c.batchesDrawn2D,
@@ -11911,6 +12050,7 @@ static void vk_log_perf_stats(void)
                c.pipelineBinds, c.texSwitches, c.uniformUploads,
                c.vertexArrayBinds, c.trisDrawn, c.facesDrawn,
                glr.fd.num_entities, glr.fd.num_particles,
+               vk.gpu_frame_usec,
                vk.wait_usec, vk.acquire_usec, vk.record_usec,
                vk.submit_usec, vk.present_usec);
 }
@@ -12004,6 +12144,7 @@ bool VKR_Init(bool total)
     vk_glare_intensity = Cvar_Get("gl_glare_intensity", "0.5", 0);
     vk_perf_stats = Cvar_Get("vk_perf_stats", "0", 0);
     vk_frames_in_flight = Cvar_Get("vk_frames_in_flight", "2", CVAR_ARCHIVE);
+    vk_device = Cvar_Get("vk_device", "", CVAR_ARCHIVE | CVAR_REFRESH);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
 #endif
@@ -12061,7 +12202,8 @@ bool VKR_Init(bool total)
         !vk_pick_physical_device() ||
         !vk_create_device() ||
         !vk_create_frame_resources() ||
-        !vk_create_glare_query_pool()) {
+        !vk_create_glare_query_pool() ||
+        !vk_create_timestamp_query_pool()) {
         VKR_Shutdown(true);
         return false;
     }
@@ -12182,6 +12324,10 @@ void VKR_Shutdown(bool total)
     if (vk.glare_query_pool) {
         vk.DestroyQueryPool(vk.device, vk.glare_query_pool, NULL);
         vk.glare_query_pool = VK_NULL_HANDLE;
+    }
+    if (vk.timestamp_query_pool) {
+        vk.DestroyQueryPool(vk.device, vk.timestamp_query_pool, NULL);
+        vk.timestamp_query_pool = VK_NULL_HANDLE;
     }
 
     for (uint32_t i = 0; i < VK_MAX_FRAMES_IN_FLIGHT; i++) {
@@ -13157,6 +13303,20 @@ void VKR_BeginFrame(void)
         Com_EPrintf("vkWaitForFences failed: Vulkan error %d\n", result);
         return;
     }
+    if (vk.timestamp_query_pool && vk.timestamp_valid[vk.frame_index]) {
+        uint64_t ticks[2];
+        uint32_t first = vk.frame_index * 2;
+        result = vk.GetQueryPoolResults(vk.device, vk.timestamp_query_pool,
+                                        first, 2, sizeof(ticks), ticks,
+                                        sizeof(ticks[0]),
+                                        VK_QUERY_RESULT_64_BIT);
+        if (result == VK_SUCCESS && ticks[1] >= ticks[0]) {
+            double usec = (double)(ticks[1] - ticks[0]) *
+                vk.physical_device_properties.limits.timestampPeriod / 1000.0;
+            vk.gpu_frame_usec = min(usec, (double)UINT_MAX);
+        }
+        vk.timestamp_valid[vk.frame_index] = false;
+    }
     vk_read_glare_queries(vk.frame_index);
 
     start = vk_time_usec();
@@ -13208,6 +13368,12 @@ void VKR_BeginFrame(void)
         uint32_t first = vk.frame_index * MAX_GLARE_SOURCES;
         vk.CmdResetQueryPool(cmd, vk.glare_query_pool, first,
                              MAX_GLARE_SOURCES);
+    }
+    if (vk.timestamp_query_pool) {
+        uint32_t first = vk.frame_index * 2;
+        vk.CmdResetQueryPool(cmd, vk.timestamp_query_pool, first, 2);
+        vk.CmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             vk.timestamp_query_pool, first);
     }
 
     vk_transition_image(cmd, vk.current_image,
@@ -13451,6 +13617,11 @@ void VKR_EndFrame(void)
 
     vk_record_pixel_lightmap_update(cmd);
 
+    if (vk.timestamp_query_pool) {
+        vk.CmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                             vk.timestamp_query_pool, vk.frame_index * 2 + 1);
+    }
+
     vk_transition_image(cmd, vk.current_image,
                         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                         0,
@@ -13498,6 +13669,8 @@ void VKR_EndFrame(void)
         return;
     }
     vk.image_fences[vk.current_image] = frame_fence;
+    if (vk.timestamp_query_pool)
+        vk.timestamp_valid[vk.frame_index] = true;
 
     VkPresentInfoKHR present_info = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,

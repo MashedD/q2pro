@@ -368,6 +368,8 @@ if vulkan.found()
                     'vk_world_lit_alpha.frag',
                     'vk_world_pixel.vert', 'vk_world_pixel.frag',
                     'vk_world_pixel_alpha.frag',
+                    'vk_world_pixel_glow.frag',
+                    'vk_world_pixel_glow_alpha.frag',
                     'vk_world_glow.frag',
                     'vk_alias.vert', 'vk_alias_shadow.vert',
                     'vk_alias_shadow.frag']
