@@ -25,8 +25,12 @@ layout(location = 4) in vec3 v_position;
 layout(location = 0) out vec4 out_color;
 layout(location = 1) out vec4 out_bloom;
 
+layout(constant_id = 0) const bool fast_path = false;
+
 vec3 dynamic_light()
 {
+    if (fast_path)
+        return vec3(0.0);
     vec3 light = vec3(0.0);
     for (int i = 0; i < 3; i++) {
         float range = pc.dlight_origins[i].w;
@@ -42,10 +46,10 @@ vec3 dynamic_light()
 void main()
 {
     out_bloom = vec4(0.0);
-    float mode = mod(v_mode, 4.0);
+    float mode = fast_path ? 0.0 : mod(v_mode, 4.0);
     vec2 uv = v_uv;
 
-    if (v_mode >= 4.0) {
+    if (!fast_path && v_mode >= 4.0) {
         uv += vec2(0.0625) * sin(uv.ts * vec2(4.0) + vec2(pc.dlight.a));
     }
 

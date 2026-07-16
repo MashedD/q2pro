@@ -569,8 +569,10 @@ typedef struct {
     VkPipeline world_glow_pipeline;
     VkPipeline pixel_world_pipeline;
     VkPipeline pixel_world_alpha_pipeline;
+    VkPipeline pixel_world_fast_pipeline;
     VkPipeline pixel_world_glow_pipeline;
     VkPipeline pixel_world_glow_alpha_pipeline;
+    VkPipeline pixel_world_glow_fast_pipeline;
     VkPipeline sky_pipeline;
     VkPipeline sprite_pipeline;
     VkPipeline sprite_alpha_pipeline;
@@ -3346,6 +3348,16 @@ static bool vk_pick_physical_device(void)
     }
 
     const char *selector = vk_device ? vk_device->string : "";
+    const char *mesa_selector = getenv("MESA_VK_DEVICE_SELECT");
+    const char *dri_prime = getenv("DRI_PRIME");
+    unsigned mesa_vendor = 0, mesa_device = 0;
+    bool mesa_match = false;
+    if (!selector[0] && mesa_selector && mesa_selector[0]) {
+        mesa_match = sscanf(mesa_selector, "%x:%x",
+                            &mesa_vendor, &mesa_device) == 2;
+        if (!mesa_match)
+            selector = mesa_selector;
+    }
     bool numeric_selector = selector[0] != '\0';
     for (const char *p = selector; numeric_selector && *p; p++)
         numeric_selector = *p >= '0' && *p <= '9';
@@ -3367,7 +3379,15 @@ static bool vk_pick_physical_device(void)
         bool requested = selector[0] &&
             ((numeric_selector && selected_index == (int)i) ||
              (!numeric_selector && Q_stristr(props.deviceName, selector)));
-        if (selector[0] && !requested)
+        if (!selector[0] && mesa_match)
+            requested = props.vendorID == mesa_vendor &&
+                props.deviceID == mesa_device;
+        if (!selector[0] && !mesa_match && dri_prime && dri_prime[0] &&
+            strcmp(dri_prime, "0"))
+            requested = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        if ((selector[0] || mesa_match ||
+             (dri_prime && dri_prime[0] && strcmp(dri_prime, "0"))) &&
+            !requested)
             continue;
 
         int score = 0;
@@ -3396,7 +3416,10 @@ static bool vk_pick_physical_device(void)
     Z_Free(devices);
 
     if (!vk.physical_device) {
-        if (selector[0])
+        if (mesa_match)
+            Com_SetLastError(va("MESA_VK_DEVICE_SELECT device %04x:%04x is not available",
+                                mesa_vendor, mesa_device));
+        else if (selector[0])
             Com_SetLastError(va("Requested Vulkan device '%s' is not available",
                                 selector));
         else
@@ -3460,17 +3483,35 @@ static void vk_strings_f(void)
 
 static bool vk_create_device(void)
 {
-    float priority = 1.0f;
+    float priorities[2] = { 1.0f, 1.0f };
     VkDeviceQueueCreateInfo queue_infos[2];
     uint32_t queue_info_count = 0;
+    uint32_t present_queue_index = 0;
     const char *extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
     VkPhysicalDeviceFeatures features = { 0 };
+
+    uint32_t family_count = 0;
+    vk.GetPhysicalDeviceQueueFamilyProperties(vk.physical_device,
+                                               &family_count, NULL);
+    VkQueueFamilyProperties *families = family_count ?
+        Z_Malloc(sizeof(*families) * family_count) : NULL;
+    if (families)
+        vk.GetPhysicalDeviceQueueFamilyProperties(vk.physical_device,
+                                                   &family_count, families);
+    bool separate_shared_present_queue =
+        vk.queues.present_family == vk.queues.graphics_family && families &&
+        vk.queues.graphics_family < family_count &&
+        families[vk.queues.graphics_family].queueCount > 1;
+    if (families)
+        Z_Free(families);
+    if (separate_shared_present_queue)
+        present_queue_index = 1;
 
     queue_infos[queue_info_count++] = (VkDeviceQueueCreateInfo) {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
         .queueFamilyIndex = vk.queues.graphics_family,
-        .queueCount = 1,
-        .pQueuePriorities = &priority,
+        .queueCount = separate_shared_present_queue ? 2 : 1,
+        .pQueuePriorities = priorities,
     };
 
     if (vk.queues.present_family != vk.queues.graphics_family) {
@@ -3478,7 +3519,7 @@ static bool vk_create_device(void)
             .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
             .queueFamilyIndex = vk.queues.present_family,
             .queueCount = 1,
-            .pQueuePriorities = &priority,
+            .pQueuePriorities = priorities,
         };
     }
 
@@ -3507,7 +3548,11 @@ static bool vk_create_device(void)
         return false;
 
     vk.GetDeviceQueue(vk.device, vk.queues.graphics_family, 0, &vk.graphics_queue);
-    vk.GetDeviceQueue(vk.device, vk.queues.present_family, 0, &vk.present_queue);
+    vk.GetDeviceQueue(vk.device, vk.queues.present_family,
+                      present_queue_index, &vk.present_queue);
+    Com_Printf("Vulkan queues: graphics %u:0, present %u:%u\n",
+               vk.queues.graphics_family, vk.queues.present_family,
+               present_queue_index);
     return true;
 }
 
@@ -4069,6 +4114,10 @@ static void vk_destroy_swapchain(void)
         vk.DestroyPipeline(vk.device, vk.pixel_world_alpha_pipeline, NULL);
         vk.pixel_world_alpha_pipeline = VK_NULL_HANDLE;
     }
+    if (vk.pixel_world_fast_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.pixel_world_fast_pipeline, NULL);
+        vk.pixel_world_fast_pipeline = VK_NULL_HANDLE;
+    }
 
     if (vk.pixel_world_glow_pipeline) {
         vk.DestroyPipeline(vk.device, vk.pixel_world_glow_pipeline, NULL);
@@ -4078,6 +4127,10 @@ static void vk_destroy_swapchain(void)
     if (vk.pixel_world_glow_alpha_pipeline) {
         vk.DestroyPipeline(vk.device, vk.pixel_world_glow_alpha_pipeline, NULL);
         vk.pixel_world_glow_alpha_pipeline = VK_NULL_HANDLE;
+    }
+    if (vk.pixel_world_glow_fast_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.pixel_world_glow_fast_pipeline, NULL);
+        vk.pixel_world_glow_fast_pipeline = VK_NULL_HANDLE;
     }
 
     if (vk.pixel_world_pipeline_layout) {
@@ -5474,7 +5527,7 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
 }
 
 static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test,
-                                           bool glowmap)
+                                           bool glowmap, bool fast_path)
 {
     if (vk_pixel_lightmap_mode() < 2)
         return true;
@@ -5520,6 +5573,19 @@ static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test
             .pName = "main",
         },
     };
+    VkBool32 fast_value = fast_path ? VK_TRUE : VK_FALSE;
+    VkSpecializationMapEntry fast_entry = {
+        .constantID = 0,
+        .offset = 0,
+        .size = sizeof(fast_value),
+    };
+    VkSpecializationInfo fast_info = {
+        .mapEntryCount = 1,
+        .pMapEntries = &fast_entry,
+        .dataSize = sizeof(fast_value),
+        .pData = &fast_value,
+    };
+    stages[1].pSpecializationInfo = &fast_info;
     VkVertexInputBindingDescription bindings[] = {
         {
             .binding = 0,
@@ -5601,8 +5667,10 @@ static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test
     } };
     if (pipeline == &vk.pixel_world_pipeline ||
         pipeline == &vk.pixel_world_alpha_pipeline ||
+        pipeline == &vk.pixel_world_fast_pipeline ||
         pipeline == &vk.pixel_world_glow_pipeline ||
-        pipeline == &vk.pixel_world_glow_alpha_pipeline) {
+        pipeline == &vk.pixel_world_glow_alpha_pipeline ||
+        pipeline == &vk.pixel_world_glow_fast_pipeline) {
         color_blend_attachment[1].colorWriteMask =
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -5641,8 +5709,9 @@ static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreateGraphicsPipelines(pixel_world)", result);
 
-    Com_DPrintf("Vulkan pixel lightmap %s%s pipeline created\n",
-                glowmap ? "glow " : "", alpha_test ? "alpha" : "opaque");
+    Com_DPrintf("Vulkan pixel lightmap %s%s%s pipeline created\n",
+                glowmap ? "glow " : "", fast_path ? "fast " : "",
+                alpha_test ? "alpha" : "opaque");
     return true;
 }
 
@@ -6090,10 +6159,12 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.world_blend_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.world_glow_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE) ||
-        !vk_create_pixel_world_pipeline(&vk.pixel_world_pipeline, VK_FALSE, VK_FALSE) ||
-        !vk_create_pixel_world_pipeline(&vk.pixel_world_alpha_pipeline, VK_TRUE, VK_FALSE) ||
-        !vk_create_pixel_world_pipeline(&vk.pixel_world_glow_pipeline, VK_FALSE, VK_TRUE) ||
-        !vk_create_pixel_world_pipeline(&vk.pixel_world_glow_alpha_pipeline, VK_TRUE, VK_TRUE) ||
+        !vk_create_pixel_world_pipeline(&vk.pixel_world_pipeline, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_pixel_world_pipeline(&vk.pixel_world_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE) ||
+        !vk_create_pixel_world_pipeline(&vk.pixel_world_fast_pipeline, VK_FALSE, VK_FALSE, VK_TRUE) ||
+        !vk_create_pixel_world_pipeline(&vk.pixel_world_glow_pipeline, VK_FALSE, VK_TRUE, VK_FALSE) ||
+        !vk_create_pixel_world_pipeline(&vk.pixel_world_glow_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE) ||
+        !vk_create_pixel_world_pipeline(&vk.pixel_world_glow_fast_pipeline, VK_FALSE, VK_TRUE, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE) ||
@@ -8218,7 +8289,9 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         pass == VK_WORLD_OPAQUE && !vk.drawing_bloom && !ent &&
         !special_light_mode;
     bool pixel_ready = vk.pixel_world_pipeline && vk.pixel_world_alpha_pipeline &&
+        vk.pixel_world_fast_pipeline &&
         vk.pixel_world_glow_pipeline && vk.pixel_world_glow_alpha_pipeline &&
+        vk.pixel_world_glow_fast_pipeline &&
         vk.pixel_world_pipeline_layout && vk.world.pixel_lmuv_buffer.buffer &&
         vk.world.pixel_lightmap_texture.descriptor_set;
     bool pixel_world = pixel_requested && pixel_ready;
@@ -8452,8 +8525,8 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                         vk_texture_for_index(image->texnum2, false) : NULL;
                     group_glow = group_glow_texture != NULL;
                     group_pipeline = group_glow ?
-                        vk.pixel_world_glow_pipeline :
-                        (pixel_world ? vk.pixel_world_pipeline : pipeline);
+                        vk.pixel_world_glow_fast_pipeline :
+                        (pixel_world ? vk.pixel_world_fast_pipeline : pipeline);
                     push.lm_scale[0] = pixel_world ? 1.0f : -1.0f;
                     push.lm_scale[1] = pixel_world ? 1.0f : -1.0f;
                     push.lm_offset[0] = 0.0f;
