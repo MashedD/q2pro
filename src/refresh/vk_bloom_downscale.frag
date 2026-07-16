@@ -15,7 +15,7 @@ layout(location = 0) out vec4 out_color;
 
 void main()
 {
-    vec2 step_uv = pc.color.xy * 0.25;
+    vec2 step_uv = pc.color.xy;
     vec3 color = texture(tex_sampler, v_uv + vec2(-step_uv.x, -step_uv.y)).rgb;
     color += texture(tex_sampler, v_uv + vec2(-step_uv.x,  step_uv.y)).rgb;
     color += texture(tex_sampler, v_uv + vec2( step_uv.x, -step_uv.y)).rgb;

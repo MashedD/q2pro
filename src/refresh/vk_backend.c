@@ -5045,7 +5045,7 @@ static bool vk_create_texture_pipeline(void)
 
 static uint32_t vk_bloom_downsample_value(void)
 {
-    int value = vk_bloom_downsample ? Cvar_ClampInteger(vk_bloom_downsample, 2, 16) : 4;
+    int value = vk_bloom_downsample ? Cvar_ClampInteger(vk_bloom_downsample, 1, 16) : 4;
 
     return max(value, 1);
 }
@@ -7225,33 +7225,45 @@ static bool vk_create_debug_text_buffers(void)
 
 static bool vk_create_particle_texture(void)
 {
-    uint32_t pixels[16 * 16];
     int shape = vk_partshape ? Cvar_ClampInteger(vk_partshape, 0, 2) : 0;
+    // The same mask is used for particles and for glare billboards.  A 16x16
+    // radial mask is adequate for particles, but Vulkan magnifies it for large
+    // glares and the individual alpha texels become visible.  Keep the legacy
+    // hard-edged shape at its native size and generate smooth shapes at a
+    // resolution suitable for billboard magnification.
+    const int size = shape == 1 ? 16 : 128;
+    uint32_t *pixels = Z_Malloc(sizeof(*pixels) * size * size);
 
     if (shape == 1) {
-        memset(pixels, 0, sizeof(pixels));
+        memset(pixels, 0, sizeof(*pixels) * size * size);
         for (int y = 3; y <= 12; y++) {
             for (int x = 3; x <= 12; x++) {
-                pixels[y * 16 + x] = MakeColor(255, 255, 255, 255 * 0.6f);
+                pixels[y * size + x] = MakeColor(255, 255, 255, 255 * 0.6f);
             }
         }
     } else {
-        for (int y = 0; y < 16; y++) {
-            for (int x = 0; x < 16; x++) {
-                float fx = x - 16 / 2 + 0.5f;
-                float fy = y - 16 / 2 + 0.5f;
+        for (int y = 0; y < size; y++) {
+            for (int x = 0; x < size; x++) {
+                float fx = x - size / 2 + 0.5f;
+                float fy = y - size / 2 + 0.5f;
                 float f = sqrtf(fx * fx + fy * fy);
                 byte alpha;
 
-                f = 1.0f - f / ((16 - shape) / 2.0f - 0.5f);
+                // Preserve the legacy 16x16 mask's normalized radius.  Shape
+                // 2 has a slightly tighter support than shape 0.
+                float radius = (size - shape * (size / 16.0f)) * 0.5f - 0.5f;
+                f = 1.0f - f / radius;
                 f *= 1 << shape;
                 alpha = 255 * Q_clipf(f, 0.0f, 1.0f - shape * 0.2f);
-                pixels[y * 16 + x] = MakeColor(255, 255, 255, alpha);
+                pixels[y * size + x] = MakeColor(255, 255, 255, alpha);
             }
         }
     }
 
-    if (!vk_upload_texture_data(&vk.particle_texture, 16, 16, pixels, false))
+    bool uploaded = vk_upload_texture_data(&vk.particle_texture, size, size,
+                                           pixels, false);
+    Z_Free(pixels);
+    if (!uploaded)
         return false;
 
     vk_update_texture_descriptor_with_sampler(&vk.particle_texture,
@@ -12962,14 +12974,19 @@ static void vk_finish_postprocess_scene(void)
         uint32_t bloom_w = max(vk.bloom_texture.width, 1);
         uint32_t bloom_h = max(vk.bloom_texture.height, 1);
         vec4_t downscale_step = {
-            1.0f / (float)bloom_w,
-            1.0f / (float)bloom_h,
+            1.0f / (float)max(vk.bloom_source_texture.width, 1),
+            1.0f / (float)max(vk.bloom_source_texture.height, 1),
             0.0f,
             1.0f,
         };
         float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
         sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
-        sigma = max(sigma, 1.0f) / 4.0f;
+        // The fixed 9-tap kernel is normalized around sigma ~= 2 texels.
+        // OpenGL applies its requested sigma in the quarter-resolution
+        // target. Scale the offsets so the screen-space radius stays equal
+        // when vk_bloom_downsample changes.
+        sigma = max(sigma, 1.0f) * 2.0f /
+            (float)vk_bloom_downsample_value();
         vec4_t blur_x = {
             sigma / (float)bloom_w,
             0.0f,
@@ -13108,6 +13125,11 @@ void VKR_BeginFrame(void)
         bool enable_mrt = gl_bloom->integer > 0;
         gl_bloom->modified = false;
         if (enable_mrt != vk.mrt_bloom && !vk_recreate_swapchain())
+            return;
+    }
+    if (vk_bloom_downsample && vk_bloom_downsample->modified) {
+        vk_bloom_downsample->modified = false;
+        if (vk.mrt_bloom && !vk_recreate_swapchain())
             return;
     }
 
@@ -13288,14 +13310,15 @@ void VKR_EndFrame(void)
         uint32_t bloom_w = max(vk.bloom_texture.width, 1);
         uint32_t bloom_h = max(vk.bloom_texture.height, 1);
         vec4_t downscale_step = {
-            1.0f / (float)bloom_w,
-            1.0f / (float)bloom_h,
+            1.0f / (float)max(vk.bloom_source_texture.width, 1),
+            1.0f / (float)max(vk.bloom_source_texture.height, 1),
             0.0f,
             1.0f,
         };
         float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
         sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
-        sigma = max(sigma, 1.0f) / 4.0f;
+        sigma = max(sigma, 1.0f) * 2.0f /
+            (float)vk_bloom_downsample_value();
         vec4_t blur_x = {
             sigma / (float)bloom_w,
             0.0f,
