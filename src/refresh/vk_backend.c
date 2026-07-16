@@ -12028,6 +12028,10 @@ bool VKR_Init(bool total)
     gl_modulate_world = vk_modulate_world;
     gl_modulate_entities = vk_modulate_entities;
     gl_brightness = vk_brightness;
+    // Console and screen line layout use the renderer-neutral gl_fontshadow
+    // pointer.  The OpenGL backend initializes it directly; expose Vulkan's
+    // handle as well so shadow modes 1 and 2 add the matching vertical space.
+    gl_fontshadow = vk_fontshadow;
     vk_znear = Cvar_Get("gl_znear", "2", CVAR_CHEAT);
     vk_drawworld = Cvar_Get("gl_drawworld", "1", CVAR_CHEAT);
     vk_novis = Cvar_Get("gl_novis", "0", 0);
@@ -12587,14 +12591,20 @@ void VKR_SetScale(float scale)
     vk.scale = scale;
 }
 
+static int vk_font_shadow(void)
+{
+    return vk_fontshadow ? Q_clip(vk_fontshadow->integer, 0, 2) : 0;
+}
+
 void VKR_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
 {
     int old_2d = c.batchesDrawn2D;
+    int shadow = vk_font_shadow();
 
     if ((ch & 127) == 32)
         return;
 
-    if (vk_fontshadow && vk_fontshadow->integer > 0)
+    if (shadow > 0)
         flags |= UI_DROPSHADOW;
 
     if (flags & UI_ALTCOLOR)
@@ -12616,7 +12626,7 @@ void VKR_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
         vk.color_set = true;
         vk_draw_texture_rect(x + 1, y + 1, CONCHAR_WIDTH, CONCHAR_HEIGHT,
                              s, t, s + 0.0625f, t + 0.0625f, font);
-        if (vk_fontshadow && vk_fontshadow->integer > 1) {
+        if (shadow > 1) {
             vk_draw_texture_rect(x + 2, y + 2, CONCHAR_WIDTH, CONCHAR_HEIGHT,
                                  s, t, s + 0.0625f, t + 0.0625f, font);
         }
