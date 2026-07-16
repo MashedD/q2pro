@@ -7454,7 +7454,10 @@ static bool vk_create_beam_texture(void)
 
     for (int y = 0; y < 16; y++) {
         for (int x = 0; x < 16; x++) {
-            float f = abs(x - 16 / 2) - 0.5f;
+            /* The shared sprite quad maps U along the beam and V across it.
+             * Keep the alpha profile across the width, as GL_DrawSimpleBeam
+             * does, instead of fading the beam from start to end. */
+            float f = abs(y - 16 / 2) - 0.5f;
             byte alpha;
 
             f = 1.0f - f / (16 / 2 - 2.5f);
@@ -10473,13 +10476,6 @@ static void vk_draw_lightning_beam(const vec3_t start, const vec3_t end,
         for (int i = 0; i < num_segments; i++)
             vk_draw_poly_beam_segment(segments[i], segments[i + 1], fd, color, width);
     } else {
-        float glow[4];
-
-        memcpy(glow, color, sizeof(glow));
-        glow[3] *= 0.35f;
-
-        for (int i = 0; i < num_segments; i++)
-            vk_draw_beam_segment(segments[i], segments[i + 1], fd, glow, width * 2.5f);
         for (int i = 0; i < num_segments; i++)
             vk_draw_beam_segment(segments[i], segments[i + 1], fd, color, width);
     }
