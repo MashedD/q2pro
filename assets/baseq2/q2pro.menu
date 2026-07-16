@@ -68,6 +68,7 @@ begin video
     //title "Video Setup"
     banner m_banner_video
     pairs "renderer" vid_ref "OpenGL" gl "Vulkan" vk
+    pairs "Vulkan device" vk_device $$vk_devicelist
     values "video mode" vid_fullscreen windowed $$vid_modelist
     values "fov scaling" cl_adjustfov vert- hor+
     field --numeric --width 4 "field of view" fov

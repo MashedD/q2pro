@@ -747,6 +747,7 @@ static cvar_t *vk_glare_intensity;
 static cvar_t *vk_perf_stats;
 static cvar_t *vk_frames_in_flight;
 static cvar_t *vk_device;
+static cvar_t *vk_devicelist;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
 #endif
@@ -3347,6 +3348,15 @@ static bool vk_pick_physical_device(void)
         return vk_fail_result("vkEnumeratePhysicalDevices", result);
     }
 
+    size_t list_size = strlen("\"automatic\" \"\"") + 1;
+    for (uint32_t i = 0; i < count; i++) {
+        VkPhysicalDeviceProperties props;
+        vk.GetPhysicalDeviceProperties(devices[i], &props);
+        list_size += strlen(props.deviceName) + 32;
+    }
+    char *device_list = Z_Malloc(list_size);
+    Q_strlcpy(device_list, "\"automatic\" \"\"", list_size);
+
     const char *selector = vk_device ? vk_device->string : "";
     const char *mesa_selector = getenv("MESA_VK_DEVICE_SELECT");
     const char *dri_prime = getenv("DRI_PRIME");
@@ -3375,6 +3385,13 @@ static bool vk_pick_physical_device(void)
                    props.vendorID, props.deviceID, suitable ? "" : " [unsuitable]");
         if (!suitable)
             continue;
+
+        for (char *p = props.deviceName; *p; p++) {
+            if (*p == '"')
+                *p = '\'';
+        }
+        Q_strlcat(device_list, va(" \"%s\" \"%u\"", props.deviceName, i),
+                  list_size);
 
         bool requested = selector[0] &&
             ((numeric_selector && selected_index == (int)i) ||
@@ -3413,6 +3430,8 @@ static bool vk_pick_physical_device(void)
         }
     }
 
+    Cvar_SetByVar(vk_devicelist, device_list, FROM_CODE);
+    Z_Free(device_list);
     Z_Free(devices);
 
     if (!vk.physical_device) {
@@ -12214,6 +12233,7 @@ bool VKR_Init(bool total)
     vk_perf_stats = Cvar_Get("vk_perf_stats", "0", 0);
     vk_frames_in_flight = Cvar_Get("vk_frames_in_flight", "2", CVAR_ARCHIVE);
     vk_device = Cvar_Get("vk_device", "", CVAR_ARCHIVE | CVAR_REFRESH);
+    vk_devicelist = Cvar_Get("vk_devicelist", "\"automatic\" \"\"", CVAR_ROM);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
 #endif
