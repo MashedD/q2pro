@@ -782,10 +782,6 @@ static cvar_t *vk_debug_linewidth;
 #endif
 static byte vk_gammatable[256];
 static bool vk_pixel_lightmaps_warned;
-static bool vk_pixel_lightmaps_draw_logged;
-static bool vk_pixel_lightmaps_scope_logged;
-static bool vk_pixel_lightmaps_atlas_logged;
-static bool vk_pixel_lightmaps_lmuv_logged;
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static bool vk_upload_cubemap(image_t *image, const byte *pic);
@@ -1334,8 +1330,6 @@ static void vk_free_world(void)
     vk_destroy_buffer(&vk.world.pixel_lmuv_buffer);
     vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
     vk_destroy_pixel_lightmap_staging();
-    vk_pixel_lightmaps_atlas_logged = false;
-    vk_pixel_lightmaps_lmuv_logged = false;
     vk_destroy_buffer(&vk.world.line_indices);
     vk_unmap_world_batch_indices();
     vk_destroy_buffer(&vk.world.batch_indices);
@@ -4890,8 +4884,6 @@ static bool vk_validate_pixel_lightmap_shaders(void)
     if (glow_alpha)
         vk.DestroyShaderModule(vk.device, glow_alpha, NULL);
 
-    if (ok)
-        Com_DPrintf("Vulkan pixel lightmap shader modules validated\n");
     return ok;
 }
 
@@ -4928,21 +4920,7 @@ static bool vk_create_pixel_world_pipeline_layout(void)
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreatePipelineLayout(pixel_world)", result);
 
-    Com_DPrintf("Vulkan pixel lightmap pipeline layout created\n");
     return true;
-}
-
-static void vk_print_pixel_lightmap_mode(void)
-{
-    int mode = vk_pixel_lightmap_mode();
-
-    if (mode <= 0) {
-        Com_DPrintf("Vulkan pixel lightmaps: disabled\n");
-    } else if (mode == 1) {
-        Com_DPrintf("Vulkan pixel lightmaps: upload-only validation mode\n");
-    } else {
-        Com_DPrintf("Vulkan pixel lightmaps: draw mode requested\n");
-    }
 }
 
 static const VkDynamicState vk_3d_dynamic_states[] = {
@@ -5728,9 +5706,6 @@ static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreateGraphicsPipelines(pixel_world)", result);
 
-    Com_DPrintf("Vulkan pixel lightmap %s%s%s pipeline created\n",
-                glowmap ? "glow " : "", fast_path ? "fast " : "",
-                alpha_test ? "alpha" : "opaque");
     return true;
 }
 
@@ -6128,7 +6103,6 @@ static bool vk_create_swapchain(int width, int height)
     };
     vk.mrt_bloom = gl_bloom && gl_bloom->integer > 0;
 
-    vk_print_pixel_lightmap_mode();
     VkPipelineDepthStencilStateCreateInfo shadow_depth_stencil =
         vk_shadow_depth_stencil_state();
 
@@ -8306,7 +8280,6 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     bool special_light_mode = (vk_lightmap && vk_lightmap->integer) ||
         (vk_fullbright && vk_fullbright->integer) ||
         (vk_vertexlight && vk_vertexlight->integer);
-    bool pixel_mode = vk_pixel_lightmap_mode() >= 2;
     bool pixel_requested = vk_pixel_lightmap_mode() >= 2 &&
         pass == VK_WORLD_OPAQUE && !vk.drawing_bloom && !ent &&
         !special_light_mode;
@@ -8327,11 +8300,6 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     vk_draw_scope_t old_scope = vk.draw_scope;
     vk.draw_scope = VK_DRAW_WORLD;
 
-    if (pixel_mode && !pixel_requested && !vk_pixel_lightmaps_scope_logged) {
-        Com_DPrintf("Vulkan pixel lightmaps mode 2 applies only to opaque world surfaces\n");
-        vk_pixel_lightmaps_scope_logged = true;
-    }
-
     if (pixel_requested && !pixel_ready) {
         if (!vk_pixel_lightmaps_warned) {
             Com_WPrintf("Vulkan pixel lightmaps mode 2 needs vk_pixel_lightmaps 2 before video init; using mode 1\n");
@@ -8339,11 +8307,6 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         }
         Cvar_Set("vk_pixel_lightmaps", "1");
     }
-    if (pixel_world && !vk_pixel_lightmaps_draw_logged) {
-        Com_DPrintf("Vulkan pixel lightmaps: drawing opaque world with pixel pipeline\n");
-        vk_pixel_lightmaps_draw_logged = true;
-    }
-
     vk_world_pixel_push_t push = { 0 };
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     push.color[0] = 1.0f;
@@ -11135,7 +11098,6 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
     atlas_w = min(atlas_w, 4096);
 
     if (!valid) {
-        Com_DPrintf("Vulkan pixel lightmap CPU atlas: no valid lightmaps\n");
         vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
         return;
     }
@@ -11185,10 +11147,6 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
     vk_fill_pixel_lightmap_atlas(pixels, atlas_w, atlas_h,
                                  faces, face_count, fd);
 
-    bool log_atlas = !vk_pixel_lightmaps_atlas_logged;
-    if (log_atlas) {
-        vk_pixel_lightmaps_atlas_logged = true;
-    }
     vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
     if (vk_upload_texture_data(&vk.world.pixel_lightmap_texture,
                                atlas_w, atlas_h, pixels, false)) {
@@ -11196,10 +11154,6 @@ static void vk_pixel_lightmap_plan(const bsp_t *bsp,
             &vk.world.pixel_lightmap_texture, vk.postprocess_sampler);
         if (!vk_create_pixel_lightmap_staging())
             Com_WPrintf("Couldn't create Vulkan pixel lightmap staging buffers\n");
-        if (log_atlas) {
-            Com_DPrintf("Vulkan pixel lightmap atlas texture uploaded: %dx%d\n",
-                        atlas_w, atlas_h);
-        }
     } else {
         Com_WPrintf("Couldn't upload Vulkan pixel lightmap atlas texture: %s\n",
                     Com_GetLastError());
@@ -11479,14 +11433,8 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
         vk_destroy_buffer(&vk.world.pixel_lmuv_buffer);
         if (lmuv_data) {
             size_t lmuv_size = sizeof(*lmuv_data) * 2 * v;
-            if (vk_upload_buffer(&vk.world.pixel_lmuv_buffer, lmuv_data, lmuv_size,
-                                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
-                if (!vk_pixel_lightmaps_lmuv_logged) {
-                    Com_DPrintf("Vulkan pixel lightmap lmuv buffer uploaded: %zu bytes\n",
-                                lmuv_size);
-                    vk_pixel_lightmaps_lmuv_logged = true;
-                }
-            } else {
+            if (!vk_upload_buffer(&vk.world.pixel_lmuv_buffer, lmuv_data, lmuv_size,
+                                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
                 Com_WPrintf("Couldn't upload Vulkan pixel lightmap lmuv buffer\n");
             }
         }
@@ -11722,8 +11670,6 @@ static void vk_clear_world_lighting_modified(void)
     if (vk_pixel_lightmaps) {
         if (vk_pixel_lightmap_mode() < 2) {
             vk_pixel_lightmaps_warned = false;
-            vk_pixel_lightmaps_draw_logged = false;
-            vk_pixel_lightmaps_scope_logged = false;
         }
         vk_pixel_lightmaps->modified = false;
     }
@@ -12000,7 +11946,6 @@ static void vk_load_world(const char *name)
         return;
 
     Q_concat(buffer, sizeof(buffer), "maps/", name, ".bsp");
-    Com_Printf("Vulkan world: loading %s\n", buffer);
     ret = BSP_Load(buffer, &bsp);
     if (!bsp)
         Com_Error(ERR_DROP, "%s: couldn't load %s: %s",
@@ -12022,9 +11967,6 @@ static void vk_load_world(const char *name)
 
     if (!vk_build_world_mesh(bsp, NULL))
         Com_WPrintf("Couldn't build Vulkan world mesh: %s\n", Com_GetLastError());
-    else
-        Com_Printf("Vulkan world mesh: %u indices, %u faces, %u batches\n",
-                   vk.world.mesh.index_count, vk.world.face_count, vk.world.batch_count);
     vk_build_glare_list(bsp);
     vk_clear_world_lighting_modified();
 }
@@ -12526,7 +12468,6 @@ void VKR_Shutdown(bool total)
 
 void VKR_BeginRegistration(const char *map)
 {
-    Com_Printf("Vulkan registration: %s\n", map && *map ? map : "<none>");
     r_registration_sequence++;
     memset(vk.flare_fracs, 0, sizeof(vk.flare_fracs));
     memset(vk.flare_times, 0, sizeof(vk.flare_times));
@@ -12595,8 +12536,6 @@ qhandle_t VKR_RegisterModel(const char *name)
     FS_FreeFile(rawdata);
     if (!handle && supported)
         Com_WPrintf("Couldn't load Vulkan model %s\n", normalized);
-    else if (!handle)
-        Com_DPrintf("Vulkan renderer skipped unsupported model %s\n", normalized);
     return handle;
 }
 
