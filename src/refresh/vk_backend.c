@@ -3367,6 +3367,7 @@ static bool vk_pick_physical_device(void)
         numeric_selector = *p >= '0' && *p <= '9';
     int selected_index = numeric_selector ? Q_atoi(selector) : -1;
     int best_score = INT_MIN;
+    bool requested_selected = false;
 
     for (uint32_t i = 0; i < count; i++) {
         VkPhysicalDeviceProperties props;
@@ -3415,12 +3416,13 @@ static bool vk_pick_physical_device(void)
         default: score = 0; break;
         }
         score += min((int)(props.limits.maxImageDimension2D / 1024), 99);
-        if (requested || score > best_score) {
+        if ((!requested || !requested_selected) &&
+            (requested || score > best_score)) {
             vk.physical_device = devices[i];
             vk.queues = queues;
             best_score = score;
             if (requested)
-                break;
+                requested_selected = true;
         }
     }
 
