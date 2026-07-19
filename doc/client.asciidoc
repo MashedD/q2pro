@@ -726,6 +726,34 @@ sys_exitonerror::
     command line only.
 
 
+Vulkan Renderer
+~~~~~~~~~~~~~~~
+
+vk_raytracing::
+    Enables the optional Vulkan ray-query path. The renderer uses ray queries
+    for hard dynamic-light shadows and a single deterministic reflection ray
+    on opaque world surfaces. A renderer restart is required. If the selected
+    device lacks Vulkan 1.2, acceleration structures, ray queries, buffer
+    device addresses, or the required descriptor features, Q2PRO reports the
+    reason and continues with the raster path. Default value is 0.
+
+The ray-query path reads the Q2RTX material properties ‘texture_base’,
+‘roughness_override’, and ‘specular_scale’ from ‘materials/*.mat’ and the
+map-specific ‘<mapname>.mat’. Unknown properties are ignored. Material names
+may be comma-separated and ‘*’ in ‘texture_base’ expands to the material's
+base name. For example:
+
+--------------------
+textures/e1u1/metal1:
+    roughness_override 0.3
+    specular_scale 0.8
+    texture_base textures/e1u1/*_replacement
+--------------------
+
+Only opaque static BSP world geometry currently participates in ray queries;
+other geometry continues to use the normal raster path.
+
+
 OpenGL Renderer
 ~~~~~~~~~~~~~~~
 

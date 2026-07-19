@@ -64,6 +64,13 @@ meson configure builddir
 Q2PRO specific options are listed in `Project options` section. They are
 defined in `meson_options.txt` file.
 
+Vulkan ray-query support is detected automatically when Vulkan headers expose
+the required extensions. It can be required or disabled explicitly with
+`-Dvulkan-raytracing=enabled` or `-Dvulkan-raytracing=disabled`. Enabling the
+build option does not require ray-query capable hardware at runtime; the Vulkan
+renderer falls back to its raster path when the device lacks the necessary
+extensions and features.
+
 E.g. to install to different prefix:
 
 ```bash

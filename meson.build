@@ -371,6 +371,16 @@ if get_option('vulkan').enabled() and not vulkan.found()
 endif
 if vulkan.found()
   glslc = find_program('glslc', required: get_option('vulkan'))
+  vulkan_rt_headers = cc.has_header_symbol(
+    'vulkan/vulkan.h',
+    'VK_KHR_RAY_QUERY_EXTENSION_NAME',
+    dependencies: vulkan,
+  )
+  if get_option('vulkan-raytracing').enabled() and not vulkan_rt_headers
+    error('Vulkan ray tracing was enabled, but the Vulkan headers are too old')
+  endif
+  config.set10('USE_VULKAN_RAYTRACING',
+    vulkan_rt_headers and not get_option('vulkan-raytracing').disabled())
   vk_shader_headers = []
   foreach shader : ['vk_rect.vert', 'vk_rect.frag', 'vk_vignette.vert',
                     'vk_tex.vert', 'vk_tex.frag',
@@ -393,8 +403,18 @@ if vulkan.found()
       command: [glslc, '-mfmt=c', '@INPUT@', '-o', '@OUTPUT@'],
     )
   endforeach
+  if config.get('USE_VULKAN_RAYTRACING', 0) != 0
+    shader = 'vk_world_lit_rt.frag'
+    vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
+      input: 'src/refresh' / shader,
+      output: shader.underscorify() + '_spv.h',
+      command: [glslc, '--target-env=vulkan1.2', '-mfmt=c',
+                '@INPUT@', '-o', '@OUTPUT@'],
+    )
+  endif
   common_deps += vulkan.partial_dependency(compile_args: true, includes: true)
-  refresh_src += ['src/refresh/vk_backend.c', vk_shader_headers]
+  refresh_src += ['src/refresh/vk_backend.c', 'src/refresh/vk_materials.c',
+                  vk_shader_headers]
   config.set10('USE_VULKAN', true)
 endif
 
@@ -765,6 +785,7 @@ summary({
   'tga'                : config.get('USE_TGA', 0) != 0,
   'variable-fps'       : config.get('USE_FPS', 0) != 0,
   'vulkan'             : config.get('USE_VULKAN', 0) != 0,
+  'vulkan ray tracing' : config.get('USE_VULKAN_RAYTRACING', 0) != 0,
   'wayland'            : config.get('USE_WAYLAND', 0) != 0,
   'windows-crash-dumps': config.get('USE_DBGHELP', 0) != 0,
   'windows-egl'        : config.get('USE_WIN32EGL', 0) != 0,

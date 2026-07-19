@@ -166,6 +166,11 @@ option('vulkan',
   value: 'auto',
   description: 'Vulkan renderer support')
 
+option('vulkan-raytracing',
+  type: 'feature',
+  value: 'auto',
+  description: 'Optional Vulkan ray-query support')
+
 option('wayland',
   type: 'feature',
   value: 'auto',
