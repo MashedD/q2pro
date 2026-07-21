@@ -730,24 +730,34 @@ Vulkan Renderer
 ~~~~~~~~~~~~~~~
 
 vk_raytracing::
-    Enables the optional Vulkan ray-query path. The renderer uses ray queries
-    for hard dynamic-light shadows and a single deterministic reflection ray
-    on opaque world surfaces. A renderer restart is required. If the selected
+    Enables the optional Vulkan ray-query path. The renderer preserves Vulkan
+    pixel lightmaps, glow maps, and bloom while using ray queries for hard
+    dynamic-light shadows on opaque world surfaces. A renderer restart is
+    required. If the selected
     device lacks Vulkan 1.2, acceleration structures, ray queries, buffer
     device addresses, or the required descriptor features, Q2PRO reports the
     reason and continues with the raster path. Default value is 0.
 
+vk_rt_emissive::
+    Adds restrained, ray-shadowed direct lighting from opaque BSP surfaces
+    marked as Q2RTX material lights or Quake II ‘SURF_LIGHT’ surfaces. This is
+    additive to baked lightmaps. A renderer restart is required. Default value
+    is 0.35; 0 disables surface-light contribution.
+
 The ray-query path reads the Q2RTX material properties ‘texture_base’,
-‘roughness_override’, and ‘specular_scale’ from ‘materials/*.mat’ and the
-map-specific ‘<mapname>.mat’. Unknown properties are ignored. Material names
-may be comma-separated and ‘*’ in ‘texture_base’ expands to the material's
-base name. For example:
+‘texture_emissive’, ‘roughness_override’, ‘specular_scale’, ‘emissive_factor’,
+and ‘is_light’ from ‘materials/*.mat’ and the map-specific ‘<mapname>.mat’.
+Unknown properties are ignored. Material names may be comma-separated and ‘*’
+in texture paths expands to the material's base name. For example:
 
 --------------------
 textures/e1u1/metal1:
     roughness_override 0.3
     specular_scale 0.8
     texture_base textures/e1u1/*_replacement
+    texture_emissive textures/e1u1/*_light
+    emissive_factor 0.5
+    is_light 1
 --------------------
 
 Only opaque static BSP world geometry currently participates in ray queries;

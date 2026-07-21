@@ -71,6 +71,7 @@ static vk_material_def_t *vk_mat_add(const char *name)
     memset(material, 0, sizeof(*material));
     Q_strlcpy(material->name, normalized, sizeof(material->name));
     material->params.roughness = 1.0f;
+    material->params.emissive_factor = 1.0f;
     return material;
 }
 
@@ -104,8 +105,24 @@ static void vk_mat_apply(vk_material_def_t **active, uint32_t active_count,
         return;
     }
 
+    if (!Q_stricmp(key, "texture_emissive")) {
+        for (uint32_t i = 0; i < active_count; i++)
+            vk_mat_expand_star(active[i]->params.texture_emissive,
+                               sizeof(active[i]->params.texture_emissive),
+                               value, active[i]->name);
+        return;
+    }
+
+    if (!Q_stricmp(key, "is_light")) {
+        int enabled = Q_atoi(value);
+        for (uint32_t i = 0; i < active_count; i++)
+            active[i]->params.is_light = enabled != 0;
+        return;
+    }
+
     if (!Q_stricmp(key, "roughness_override") ||
-        !Q_stricmp(key, "specular_scale")) {
+        !Q_stricmp(key, "specular_scale") ||
+        !Q_stricmp(key, "emissive_factor")) {
         char *end;
         float parsed = strtof(value, &end);
         if (end == value || *vk_mat_trim(end)) {
@@ -116,8 +133,10 @@ static void vk_mat_apply(vk_material_def_t **active, uint32_t active_count,
         for (uint32_t i = 0; i < active_count; i++) {
             if (!Q_stricmp(key, "roughness_override"))
                 active[i]->params.roughness = parsed;
-            else
+            else if (!Q_stricmp(key, "specular_scale"))
                 active[i]->params.specular = parsed;
+            else
+                active[i]->params.emissive_factor = parsed;
         }
     }
 }

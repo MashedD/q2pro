@@ -1873,6 +1873,29 @@ static int load_image_data(image_t *image, imageformat_t fmt, bool need_dimensio
     return ret;
 }
 
+byte *IMG_LoadPixels(const char *name, int *width, int *height)
+{
+    image_t image = { .type = IT_WALL };
+    byte *pic = NULL;
+    size_t len = FS_NormalizePathBuffer(image.name, name, sizeof(image.name));
+    image.baselen = COM_FileExtension(image.name) - image.name;
+    if (!len || image.baselen < 1 || image.name[image.baselen] != '.')
+        return NULL;
+
+    imageformat_t fmt;
+    for (fmt = 0; fmt < IM_MAX; fmt++)
+        if (!Q_stricmp(image.name + image.baselen + 1, img_loaders[fmt].ext))
+            break;
+    if (fmt == IM_MAX || load_image_data(&image, fmt, false, &pic) < 0)
+        return NULL;
+
+    if (width)
+        *width = image.upload_width;
+    if (height)
+        *height = image.upload_height;
+    return pic;
+}
+
 static void check_for_glow_map(image_t *image)
 {
     extern cvar_t *gl_shaders;

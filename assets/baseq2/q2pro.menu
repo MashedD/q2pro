@@ -70,6 +70,7 @@ begin video
     pairs "renderer" vid_ref "OpenGL" gl "Vulkan" vk
     pairs "Vulkan device" vk_device $$vk_devicelist
     toggle "Vulkan ray tracing" vk_raytracing
+    range "RT emissive lighting" vk_rt_emissive 0 2 0.05
     values "video mode" vid_fullscreen windowed $$vid_modelist
     values "fov scaling" cl_adjustfov vert- hor+
     field --numeric --width 4 "field of view" fov

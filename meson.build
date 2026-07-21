@@ -411,6 +411,20 @@ if vulkan.found()
       command: [glslc, '--target-env=vulkan1.2', '-mfmt=c',
                 '@INPUT@', '-o', '@OUTPUT@'],
     )
+    foreach rt_shader : [
+      ['vk_world_pixel_rt_frag_spv.h', []],
+      ['vk_world_pixel_rt_alpha_frag_spv.h', ['-DRT_ALPHA_TEST=1']],
+      ['vk_world_pixel_rt_glow_frag_spv.h', ['-DRT_GLOWMAP=1']],
+      ['vk_world_pixel_rt_glow_alpha_frag_spv.h',
+       ['-DRT_GLOWMAP=1', '-DRT_ALPHA_TEST=1']],
+    ]
+      vk_shader_headers += custom_target(rt_shader[0].underscorify(),
+        input: 'src/refresh/vk_world_pixel_rt.frag',
+        output: rt_shader[0],
+        command: [glslc, '--target-env=vulkan1.2', '-mfmt=c'] +
+                 rt_shader[1] + ['@INPUT@', '-o', '@OUTPUT@'],
+      )
+    endforeach
   endif
   common_deps += vulkan.partial_dependency(compile_args: true, includes: true)
   refresh_src += ['src/refresh/vk_backend.c', 'src/refresh/vk_materials.c',
