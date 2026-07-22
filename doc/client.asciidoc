@@ -753,7 +753,7 @@ vk_raytracing::
 
 vk_rt_emissive::
     Adds restrained, ray-shadowed direct lighting from opaque BSP surfaces
-    marked as Q2RTX material lights or Quake II ‘SURF_LIGHT’ surfaces. This is
+    marked with the Quake II ‘SURF_LIGHT’ flag. This is
     additive to baked lightmaps and attenuated by both the emitting and receiving
     surface angles. Conservative face bounds retain every light that could
     influence any part of a world face; the shader chooses the strongest two at
@@ -763,25 +763,9 @@ vk_rt_emissive::
     approximate area-light softness, and weak secondary shadows skip traversal
     while retaining their direct light. Influence lists remain in the world mesh
     so ordinary face batching stays available.
-    The control uses a perceptual response suited to Q2RTX's small emissive factors.
+    The control uses a perceptual response that keeps low values visible.
     A renderer restart is required. Default value is 0.35; 0 disables surface-light
     contribution.
-
-The ray-query path reads the Q2RTX material properties ‘texture_base’,
-‘texture_emissive’, ‘roughness_override’, ‘specular_scale’, ‘emissive_factor’,
-and ‘is_light’ from ‘materials/*.mat’ and the map-specific ‘<mapname>.mat’.
-Unknown properties are ignored. Material names may be comma-separated and ‘*’
-in texture paths expands to the material's base name. For example:
-
---------------------
-textures/e1u1/metal1:
-    roughness_override 0.3
-    specular_scale 0.8
-    texture_base textures/e1u1/*_replacement
-    texture_emissive textures/e1u1/*_light
-    emissive_factor 0.5
-    is_light 1
---------------------
 
 Only opaque static BSP world geometry currently participates in ray queries;
 other geometry continues to use the normal raster path. The acceleration

@@ -11,8 +11,7 @@ layout(push_constant) uniform Push {
     vec4 fog;
     float intensity;
     float desaturation;
-    float rt_roughness;
-    float rt_specular;
+    vec2 rt_padding;
     float rt_enabled;
     float _pad;
 } pc;

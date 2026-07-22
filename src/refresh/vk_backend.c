@@ -27,7 +27,6 @@ the Free Software Foundation; either version 2 of the License, or
 #include "refresh/refresh.h"
 #include "system/system.h"
 #include "vk_backend.h"
-#include "vk_materials.h"
 
 #if USE_VULKAN
 
@@ -186,8 +185,6 @@ typedef struct {
     uint32_t width;
     uint32_t height;
     uint32_t mip_levels;
-    float rt_roughness;
-    float rt_specular;
 } vk_texture_t;
 
 typedef struct {
@@ -442,8 +439,7 @@ typedef struct {
     float fog[4];
     float intensity;
     float desaturation;
-    float rt_roughness;
-    float rt_specular;
+    float _rt_padding[2];
     float rt_enabled;
     float _rt_pad;
 } vk_world_lit_push_t;
@@ -3394,8 +3390,6 @@ static bool vk_upload_texture(image_t *image, byte *pic)
     }
 
     vk_texture_t *texture = &vk.textures[index];
-    texture->rt_roughness = 1.0f;
-    texture->rt_specular = 0.0f;
 
     uint32_t width = image->upload_width;
     uint32_t height = image->upload_height;
@@ -3472,13 +3466,6 @@ static bool vk_upload_texture(image_t *image, byte *pic)
     image->tl = 0;
     image->th = 1;
     vk_update_texture_descriptor_with_sampler(texture, vk_sampler_for_image(image));
-
-    vk_material_params_t material;
-    if ((image->type == IT_WALL || image->type == IT_SKIN) &&
-        VK_MaterialForImage(image->name, &material)) {
-        texture->rt_roughness = material.roughness;
-        texture->rt_specular = material.specular;
-    }
 
     return true;
 }
@@ -9417,8 +9404,8 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                         group_pipeline = group_glow ?
                             vk.pixel_world_glow_fast_pipeline :
                             (pixel_world ? vk.pixel_world_fast_pipeline : pipeline);
-                    push.lm_scale[0] = pixel_world ? 1.0f : texture->rt_roughness;
-                    push.lm_scale[1] = pixel_world ? 1.0f : texture->rt_specular;
+                    push.lm_scale[0] = 1.0f;
+                    push.lm_scale[1] = pixel_world ? 1.0f : 0.0f;
                     push.lm_offset[0] =
 #if USE_VULKAN_RAYTRACING
                         !pixel_world && vk.raytracing_active && !ent ? 1.0f : 0.0f;
@@ -9506,8 +9493,8 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 push.lm_offset[0] = 0.0f;
                 push.lm_offset[1] = 0.0f;
             } else {
-                push.lm_scale[0] = texture->rt_roughness;
-                push.lm_scale[1] = texture->rt_specular;
+                push.lm_scale[0] = 1.0f;
+                push.lm_scale[1] = 0.0f;
                 push.lm_offset[0] =
 #if USE_VULKAN_RAYTRACING
                     vk.raytracing_active && !ent ? 1.0f : 0.0f;
@@ -12155,56 +12142,6 @@ static bool vk_face_edges_are_valid(const bsp_t *bsp, const mface_t *face)
 }
 
 #if USE_VULKAN_RAYTRACING
-static void vk_emissive_average(const char *path, const char *base_path,
-                                vec3_t color)
-{
-    VectorSet(color, 1.0f, 1.0f, 1.0f);
-    if (!path || !*path)
-        return;
-
-    int width = 0, height = 0;
-    byte *pixels = IMG_LoadPixels(path, &width, &height);
-    if (!pixels || width <= 0 || height <= 0)
-        return;
-
-    int base_width = 0, base_height = 0;
-    byte *base_pixels = IMG_LoadPixels(base_path, &base_width, &base_height);
-
-    double sum[3] = { 0.0, 0.0, 0.0 };
-    double weight_sum = 0.0;
-    size_t count = (size_t)width * height;
-    for (size_t i = 0; i < count; i++) {
-        const byte *p = pixels + i * 4;
-        float luma = (0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2]) /
-            255.0f;
-        if (p[3] < 8 || luma < 0.02f)
-            continue;
-        const byte *tint = p;
-        if (base_pixels && base_width > 0 && base_height > 0) {
-            int x = (i % width) * base_width / width;
-            int y = (i / width) * base_height / height;
-            tint = base_pixels + ((size_t)y * base_width + x) * 4;
-        }
-        float weight = luma * (p[3] / 255.0f);
-        sum[0] += powf(tint[0] / 255.0f, 2.2f) * weight;
-        sum[1] += powf(tint[1] / 255.0f, 2.2f) * weight;
-        sum[2] += powf(tint[2] / 255.0f, 2.2f) * weight;
-        weight_sum += weight;
-    }
-    IMG_FreePixels(pixels);
-    if (base_pixels)
-        IMG_FreePixels(base_pixels);
-    if (weight_sum <= 0.0)
-        return;
-
-    color[0] = sum[0] / weight_sum;
-    color[1] = sum[1] / weight_sum;
-    color[2] = sum[2] / weight_sum;
-    float peak = max(color[0], max(color[1], color[2]));
-    if (peak > 0.0f)
-        VectorScale(color, 1.0f / peak, color);
-}
-
 static float vk_polygon_area(const vk_vertex_t *vertices,
                              const vk_world_face_t *face)
 {
@@ -12304,12 +12241,7 @@ static void vk_build_surface_lights(const bsp_t *bsp,
             (face->texinfo->c.flags & (SURF_SKY | SURF_NODRAW)))
             continue;
 
-        char name[MAX_QPATH];
-        Q_concat(name, sizeof(name), "textures/", face->texinfo->name, ".wal");
-        vk_material_params_t material = { .emissive_factor = 1.0f };
-        bool defined = VK_MaterialForImage(name, &material);
-        if (!(face->texinfo->c.flags & SURF_LIGHT) &&
-            !(defined && material.is_light))
+        if (!(face->texinfo->c.flags & SURF_LIGHT))
             continue;
 
         float area = vk_polygon_area(vertices, &faces[i]);
@@ -12322,17 +12254,15 @@ static void vk_build_surface_lights(const bsp_t *bsp,
         if (face->drawflags & DSURF_PLANEBACK)
             VectorNegate(light->normal, light->normal);
         VectorMA(light->origin, 1.0f, light->normal, light->origin);
-        vk_emissive_average(material.texture_emissive, name, light->color);
+        VectorSet(light->color, 1.0f, 1.0f, 1.0f);
         float base = face->texinfo->c.value > 0 ?
             face->texinfo->c.value : 200.0f;
         float area_scale = Q_clipf(sqrtf(area) / 16.0f, 0.5f, 4.0f);
-        float factor = max(material.emissive_factor, 0.05f) *
-            Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f);
+        float factor = Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f);
         light->range = Q_clipf(base * 0.5f * area_scale, 64.0f, 512.0f);
         light->radius = Q_clipf(sqrtf(area * 0.318309886f), 1.0f, 64.0f);
-        // Range and radiance remain independent. A square-root response makes
-        // the small factors used by Q2RTX materials visible while the cap keeps
-        // bright definitions from clipping entire receiving surfaces to white.
+        // Range and radiance remain independent. A square-root response keeps
+        // low control values visible while the cap prevents surface clipping.
         light->strength = Q_clipf(256.0f * sqrtf(factor), 0.0f, 192.0f);
     }
 
@@ -13014,17 +12944,10 @@ static void vk_register_world_images(bsp_t *bsp)
 
         imageflags_t flags = (info->c.flags & SURF_WARP) ? IF_TURBULENT : IF_NONE;
         Q_concat(buffer, sizeof(buffer), "textures/", info->name, ".wal");
-        image_t *original = IMG_Find(buffer, IT_WALL, flags);
-        if (original != R_NOTEXTURE) {
-            vk.world.texinfo_widths[i] = original->width;
-            vk.world.texinfo_heights[i] = original->height;
-        }
-        vk_material_params_t material;
-        if (VK_MaterialForImage(buffer, &material) && material.texture_base[0]) {
-            image_t *replacement = IMG_Find(material.texture_base, IT_WALL, flags);
-            info->image = replacement != R_NOTEXTURE ? replacement : original;
-        } else {
-            info->image = original;
+        info->image = IMG_Find(buffer, IT_WALL, flags);
+        if (info->image != R_NOTEXTURE) {
+            vk.world.texinfo_widths[i] = info->image->width;
+            vk.world.texinfo_heights[i] = info->image->height;
         }
     }
 }
@@ -13787,7 +13710,6 @@ void VKR_Shutdown(bool total)
     if (vid)
         vid->shutdown();
 
-    VK_MaterialsShutdown();
     memset(&vk, 0, sizeof(vk));
 }
 
@@ -13796,7 +13718,6 @@ void VKR_BeginRegistration(const char *map)
     r_registration_sequence++;
     memset(vk.flare_fracs, 0, sizeof(vk.flare_fracs));
     memset(vk.flare_times, 0, sizeof(vk.flare_times));
-    VK_MaterialsLoad(map);
     vk_load_world(map);
 }
 
