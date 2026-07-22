@@ -424,6 +424,9 @@ if vulkan.found()
       ['vk_world_pixel_rt_glow_frag_spv.h', ['-DRT_GLOWMAP=1']],
       ['vk_world_pixel_rt_glow_alpha_frag_spv.h',
        ['-DRT_GLOWMAP=1', '-DRT_ALPHA_TEST=1']],
+      ['vk_world_pixel_rt_quad_frag_spv.h', ['-DRT_QUAD_SHARING=1']],
+      ['vk_world_pixel_rt_quad_glow_frag_spv.h',
+       ['-DRT_QUAD_SHARING=1', '-DRT_GLOWMAP=1']],
     ]
       vk_shader_headers += custom_target(rt_shader[0].underscorify(),
         input: 'src/refresh/vk_world_pixel_rt.frag',

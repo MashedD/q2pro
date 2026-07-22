@@ -18,13 +18,13 @@ layout(location = 0) in vec3 in_position;
 layout(location = 1) in vec4 in_color;
 layout(location = 2) in vec2 in_uv;
 layout(location = 3) in vec2 in_lmuv;
-layout(location = 4) in uvec4 in_rt_lights;
+layout(location = 4) in uvec2 in_rt_data;
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_uv;
 layout(location = 2) flat out float v_mode;
 layout(location = 3) out vec2 v_lmuv;
 layout(location = 4) out vec3 v_position;
-layout(location = 5) flat out uvec4 v_rt_lights;
+layout(location = 5) flat out uvec2 v_rt_data;
 
 void main()
 {
@@ -37,5 +37,5 @@ void main()
     v_mode = pc.scroll.z;
     v_lmuv = in_lmuv * pc.lm_scale + pc.lm_offset;
     v_position = in_position;
-    v_rt_lights = in_rt_lights;
+    v_rt_data = in_rt_data;
 }

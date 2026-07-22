@@ -120,6 +120,12 @@ static const uint32_t vk_world_pixel_rt_glow_frag_spv[] =
 static const uint32_t vk_world_pixel_rt_glow_alpha_frag_spv[] =
 #include "vk_world_pixel_rt_glow_alpha_frag_spv.h"
 ;
+static const uint32_t vk_world_pixel_rt_quad_frag_spv[] =
+#include "vk_world_pixel_rt_quad_frag_spv.h"
+;
+static const uint32_t vk_world_pixel_rt_quad_glow_frag_spv[] =
+#include "vk_world_pixel_rt_quad_glow_frag_spv.h"
+;
 #endif
 
 static const uint32_t vk_world_alpha_frag_spv[] =
@@ -253,8 +259,8 @@ typedef struct {
     uint16_t pixel_lm_x, pixel_lm_y;
     uint16_t pixel_lm_w, pixel_lm_h;
 #if USE_VULKAN_RAYTRACING
+    uint32_t rt_light_offset;
     uint8_t rt_light_count;
-    uint8_t rt_lights[2];
 #endif
 } vk_world_face_t;
 
@@ -320,6 +326,7 @@ typedef struct {
     vec3_t color;
     float range;
     float strength;
+    float radius;
 } vk_surface_light_t;
 
 typedef struct {
@@ -327,6 +334,18 @@ typedef struct {
     float color_strength[4];
     float normal[4];
 } vk_gpu_surface_light_t;
+
+typedef struct {
+    uint32_t light_count;
+    uint32_t index_count;
+    uint32_t reserved[2];
+    vk_gpu_surface_light_t lights[VK_MAX_SURFACE_LIGHTS];
+} vk_gpu_surface_light_header_t;
+
+typedef struct {
+    uint32_t offset;
+    uint32_t packed;
+} vk_gpu_face_light_t;
 #endif
 
 typedef struct {
@@ -364,6 +383,8 @@ typedef struct {
     vk_acceleration_structure_t rt_blas;
     vk_surface_light_t surface_lights[VK_MAX_SURFACE_LIGHTS];
     uint32_t surface_light_count;
+    uint32_t *surface_light_indices;
+    uint32_t surface_light_index_count;
 #endif
     cplane_t frustum[4];
     vec3_t vieworg;
@@ -626,6 +647,7 @@ typedef struct {
     bool raytracing_supported;
     bool raytracing_active;
     bool raytracing_pixel_ready;
+    bool raytracing_quad_sharing;
     char raytracing_reason[160];
 #endif
     VkDevice device;
@@ -1455,7 +1477,12 @@ static void vk_free_world(void)
     vk.world.rt_index_count = 0;
     vk_destroy_buffer(&vk.world.rt_light_buffer);
     vk_destroy_buffer(&vk.world.rt_light_indices);
+    if (vk.world.surface_light_indices) {
+        Z_Free(vk.world.surface_light_indices);
+        vk.world.surface_light_indices = NULL;
+    }
     vk.world.surface_light_count = 0;
+    vk.world.surface_light_index_count = 0;
     vk.world.surface_lights_ready = false;
 #endif
     vk_destroy_mesh(&vk.world.mesh);
@@ -4020,6 +4047,7 @@ static void vk_probe_raytracing(void)
 {
     vk.raytracing_supported = false;
     vk.raytracing_active = false;
+    vk.raytracing_quad_sharing = false;
     vk.raytracing_reason[0] = '\0';
 
     if (vk.instance_api_version < VK_API_VERSION_1_2 ||
@@ -4064,11 +4092,20 @@ static void vk_probe_raytracing(void)
     VkPhysicalDeviceDescriptorIndexingProperties descriptor_props = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES,
     };
+    VkPhysicalDeviceSubgroupProperties subgroup_props = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
+    };
+    descriptor_props.pNext = &subgroup_props;
     VkPhysicalDeviceProperties2 properties = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
         .pNext = &descriptor_props,
     };
     vk.GetPhysicalDeviceProperties2(vk.physical_device, &properties);
+
+    vk.raytracing_quad_sharing =
+        (subgroup_props.supportedStages & VK_SHADER_STAGE_FRAGMENT_BIT) &&
+        (subgroup_props.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) &&
+        (subgroup_props.supportedOperations & VK_SUBGROUP_FEATURE_QUAD_BIT);
 
     if (!ray_query.rayQuery || !acceleration.accelerationStructure ||
         !buffer_address.bufferDeviceAddress ||
@@ -6306,12 +6343,18 @@ static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test
     if (ray_query && glowmap && alpha_test)
         frag = vk_create_shader_module(vk_world_pixel_rt_glow_alpha_frag_spv,
                                        sizeof(vk_world_pixel_rt_glow_alpha_frag_spv));
+    else if (ray_query && glowmap && vk.raytracing_quad_sharing)
+        frag = vk_create_shader_module(vk_world_pixel_rt_quad_glow_frag_spv,
+                                       sizeof(vk_world_pixel_rt_quad_glow_frag_spv));
     else if (ray_query && glowmap)
         frag = vk_create_shader_module(vk_world_pixel_rt_glow_frag_spv,
                                        sizeof(vk_world_pixel_rt_glow_frag_spv));
     else if (ray_query && alpha_test)
         frag = vk_create_shader_module(vk_world_pixel_rt_alpha_frag_spv,
                                        sizeof(vk_world_pixel_rt_alpha_frag_spv));
+    else if (ray_query && vk.raytracing_quad_sharing)
+        frag = vk_create_shader_module(vk_world_pixel_rt_quad_frag_spv,
+                                       sizeof(vk_world_pixel_rt_quad_frag_spv));
     else if (ray_query)
         frag = vk_create_shader_module(vk_world_pixel_rt_frag_spv,
                                        sizeof(vk_world_pixel_rt_frag_spv));
@@ -6376,7 +6419,7 @@ static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test
         },
         {
             .binding = 2,
-            .stride = 4,
+            .stride = 8,
             .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
         },
     };
@@ -6408,7 +6451,7 @@ static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test
         {
             .location = 4,
             .binding = 2,
-            .format = VK_FORMAT_R8G8B8A8_UINT,
+            .format = VK_FORMAT_R32G32_UINT,
             .offset = 0,
         },
     };
@@ -6993,6 +7036,10 @@ static bool vk_create_swapchain(int width, int height)
                                            VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE);
         if (rt_ok) {
             vk.raytracing_pixel_ready = true;
+            Com_Printf("Vulkan RT fragment sharing: %s\n",
+                       vk.raytracing_quad_sharing ?
+                       "adaptive 2x2 beyond 384 units" :
+                       "unsupported (per-pixel fallback)");
         } else {
             Com_WPrintf("Couldn't create Vulkan RT pixel-lightmap pipelines: %s; using raster pixel lighting\n",
                         Com_GetLastError());
@@ -12177,11 +12224,77 @@ static float vk_polygon_area(const vk_vertex_t *vertices,
     return area;
 }
 
+static byte vk_face_ao_phase(const mface_t *face)
+{
+    if (!face || !face->plane)
+        return 0;
+
+    vec3_t normal;
+    VectorCopy(face->plane->normal, normal);
+    float distance = face->plane->dist;
+
+    // Canonicalize the plane equation so opposite-facing references to the
+    // same geometric plane receive the same AO direction.
+    int sign = 1;
+    for (int i = 0; i < 3; i++) {
+        if (fabsf(normal[i]) <= 0.0001f)
+            continue;
+        if (normal[i] < 0.0f)
+            sign = -1;
+        break;
+    }
+    if (sign < 0) {
+        VectorNegate(normal, normal);
+        distance = -distance;
+    }
+
+    int32_t quantized[4] = {
+        lrintf(normal[0] * 4096.0f),
+        lrintf(normal[1] * 4096.0f),
+        lrintf(normal[2] * 4096.0f),
+        lrintf(distance * 8.0f),
+    };
+    uint32_t hash = 2166136261u;
+    for (int i = 0; i < 4; i++) {
+        hash ^= (uint32_t)quantized[i];
+        hash *= 16777619u;
+    }
+    hash ^= hash >> 16;
+    return hash & 255u;
+}
+
+static bool vk_surface_light_may_affect_face(const vk_surface_light_t *light,
+                                             const vec3_t center, float radius)
+{
+    vec3_t delta;
+    VectorSubtract(center, light->origin, delta);
+    float distance_sq = DotProduct(delta, delta);
+    float maximum_distance = light->range + radius;
+    if (distance_sq >= maximum_distance * maximum_distance)
+        return false;
+
+    // The face lies entirely inside this sphere. If the sphere intersects the
+    // emitter's forward half-space, some point on the face may receive light.
+    // Do not cull by the receiver normal here: the fragment shader intentionally
+    // treats BSP receivers as two-sided because derivative normals can flip with
+    // triangle winding.
+    return DotProduct(light->normal, delta) + radius > 0.0f;
+}
+
 static void vk_build_surface_lights(const bsp_t *bsp,
                                     vk_world_face_t *faces, uint32_t face_count,
                                     const vk_vertex_t *vertices)
 {
+    if (vk.world.surface_light_indices) {
+        Z_Free(vk.world.surface_light_indices);
+        vk.world.surface_light_indices = NULL;
+    }
     vk.world.surface_light_count = 0;
+    vk.world.surface_light_index_count = 0;
+    for (uint32_t i = 0; i < face_count; i++) {
+        faces[i].rt_light_offset = 0;
+        faces[i].rt_light_count = 0;
+    }
     if (!vk.raytracing_active || !vk.raytracing_pixel_ready ||
         !vk_rt_emissive ||
         vk_rt_emissive->value <= 0.0f)
@@ -12220,86 +12333,89 @@ static void vk_build_surface_lights(const bsp_t *bsp,
         float factor = max(material.emissive_factor, 0.05f) *
             Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f);
         light->range = Q_clipf(base * 0.5f * area_scale, 64.0f, 512.0f);
-        // Range and radiance must remain independent. BSP light values can be
-        // in the thousands and using them as the color multiplier clips entire
-        // receiving surfaces to white.
-        light->strength = Q_clipf(96.0f * factor, 0.0f, 96.0f);
+        light->radius = Q_clipf(sqrtf(area * 0.318309886f), 1.0f, 64.0f);
+        // Range and radiance remain independent. A square-root response makes
+        // the small factors used by Q2RTX materials visible while the cap keeps
+        // bright definitions from clipping entire receiving surfaces to white.
+        light->strength = Q_clipf(256.0f * sqrtf(factor), 0.0f, 192.0f);
     }
 
+    size_t capacity = (size_t)face_count * vk.world.surface_light_count;
+    uint32_t *indices = capacity ? Z_Malloc(capacity * sizeof(*indices)) : NULL;
+    uint32_t candidate_max = 0;
     for (uint32_t i = 0; i < face_count; i++) {
-        float scores[2] = { 0.0f };
-        faces[i].rt_light_count = 0;
+        float radius_sq = 0.0f;
+        for (uint32_t k = 0; k < faces[i].edge_count; k++) {
+            vec3_t delta;
+            VectorSubtract(vertices[faces[i].first_vertex + k].position,
+                           faces[i].center, delta);
+            radius_sq = max(radius_sq, DotProduct(delta, delta));
+        }
+        float radius = sqrtf(radius_sq);
+        faces[i].rt_light_offset = vk.world.surface_light_index_count;
         for (uint32_t j = 0; j < vk.world.surface_light_count; j++) {
             const vk_surface_light_t *light = &vk.world.surface_lights[j];
-            vec3_t delta, direction, receiver_normal;
-            VectorSubtract(faces[i].center, light->origin, delta);
-            float distance_sq = DotProduct(delta, delta);
-            float distance = sqrtf(distance_sq);
-            if (distance_sq < 1.0f || distance >= light->range)
+            if (!vk_surface_light_may_affect_face(light, faces[i].center,
+                                                  radius))
                 continue;
-            VectorScale(delta, 1.0f / distance, direction);
-            float source_cosine = DotProduct(light->normal, direction);
-            VectorCopy(faces[i].face->plane->normal, receiver_normal);
-            if (faces[i].face->drawflags & DSURF_PLANEBACK)
-                VectorNegate(receiver_normal, receiver_normal);
-            float receiver_cosine = -DotProduct(receiver_normal, direction);
-            if (source_cosine <= 0.0f || receiver_cosine <= 0.0f)
-                continue;
-            float angular = source_cosine * (0.25f + 0.75f * receiver_cosine);
-            float score = light->strength * light->range * angular / distance_sq;
-            int slot = min((int)faces[i].rt_light_count, 1);
-            while (slot > 0 && score > scores[slot - 1]) {
-                scores[slot] = scores[slot - 1];
-                faces[i].rt_lights[slot] = faces[i].rt_lights[slot - 1];
-                slot--;
-            }
-            if (faces[i].rt_light_count >= 2 &&
-                score <= scores[slot])
-                continue;
-            scores[slot] = score;
-            faces[i].rt_lights[slot] = j;
-            if (faces[i].rt_light_count < 2)
-                faces[i].rt_light_count++;
+            indices[vk.world.surface_light_index_count++] = j;
+            faces[i].rt_light_count++;
         }
+        candidate_max = max(candidate_max, (uint32_t)faces[i].rt_light_count);
     }
-    Com_DPrintf("Vulkan RT surface lights: %u\n", vk.world.surface_light_count);
+    vk.world.surface_light_indices = indices;
+    Com_DPrintf("Vulkan RT surface lights: %u, face influences avg %.1f max %u\n",
+                vk.world.surface_light_count,
+                face_count ?
+                    (double)vk.world.surface_light_index_count / face_count : 0.0,
+                candidate_max);
 }
 
 static bool vk_upload_surface_light_data(const vk_world_face_t *faces,
                                          uint32_t face_count,
                                          uint32_t vertex_count)
 {
-    vk_gpu_surface_light_t gpu_lights[VK_MAX_SURFACE_LIGHTS] = { 0 };
-    uint32_t light_count = max(vk.world.surface_light_count, 1u);
+    size_t light_data_size = sizeof(vk_gpu_surface_light_header_t) +
+        (size_t)vk.world.surface_light_index_count * sizeof(uint32_t);
+    vk_gpu_surface_light_header_t *light_data = Z_Mallocz(light_data_size);
+    light_data->light_count = vk.world.surface_light_count;
+    light_data->index_count = vk.world.surface_light_index_count;
     for (uint32_t i = 0; i < vk.world.surface_light_count; i++) {
         const vk_surface_light_t *src = &vk.world.surface_lights[i];
-        VectorCopy(src->origin, gpu_lights[i].origin_range);
-        gpu_lights[i].origin_range[3] = src->range;
-        VectorCopy(src->color, gpu_lights[i].color_strength);
-        gpu_lights[i].color_strength[3] = src->strength;
-        VectorCopy(src->normal, gpu_lights[i].normal);
+        vk_gpu_surface_light_t *dst = &light_data->lights[i];
+        VectorCopy(src->origin, dst->origin_range);
+        dst->origin_range[3] = src->range;
+        VectorCopy(src->color, dst->color_strength);
+        dst->color_strength[3] = src->strength;
+        VectorCopy(src->normal, dst->normal);
+        dst->normal[3] = src->radius;
     }
+    if (vk.world.surface_light_index_count)
+        memcpy(light_data + 1, vk.world.surface_light_indices,
+               (size_t)vk.world.surface_light_index_count * sizeof(uint32_t));
 
-    byte *indices = Z_Mallocz((size_t)vertex_count * 4);
+    vk_gpu_face_light_t *face_lights =
+        Z_Mallocz((size_t)vertex_count * sizeof(*face_lights));
     for (uint32_t i = 0; i < face_count; i++) {
         for (uint32_t j = 0; j < faces[i].edge_count; j++) {
-            byte *dst = indices + (size_t)(faces[i].first_vertex + j) * 4;
-            dst[0] = faces[i].rt_light_count;
-            dst[1] = faces[i].rt_light_count > 0 ? faces[i].rt_lights[0] : 0;
-            dst[2] = faces[i].rt_light_count > 1 ? faces[i].rt_lights[1] : 0;
-            // One phase shared by all vertices of a face avoids the visible
-            // high-frequency noise produced by position-randomized AO rays.
-            dst[3] = (byte)(((i * 73u) ^ (i >> 3) ^ 0x5bu) & 255u);
+            vk_gpu_face_light_t *dst =
+                &face_lights[faces[i].first_vertex + j];
+            dst->offset = faces[i].rt_light_offset;
+            dst->packed = (uint32_t)faces[i].rt_light_count |
+                (vk_face_ao_phase(faces[i].face) << 8);
+            // All faces on the same geometric plane share a phase, avoiding
+            // brightness seams introduced by BSP face splits and triangulation.
         }
     }
 
-    bool ok = vk_upload_buffer(&vk.world.rt_light_buffer, gpu_lights,
-                               sizeof(*gpu_lights) * light_count,
+    bool ok = vk_upload_buffer(&vk.world.rt_light_buffer, light_data,
+                               light_data_size,
                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) &&
-        vk_upload_buffer(&vk.world.rt_light_indices, indices,
-                         (size_t)vertex_count * 4,
+        vk_upload_buffer(&vk.world.rt_light_indices, face_lights,
+                         (size_t)vertex_count * sizeof(*face_lights),
                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-    Z_Free(indices);
+    Z_Free(light_data);
+    Z_Free(face_lights);
     if (!ok)
         return false;
 
@@ -13217,7 +13333,7 @@ static void vk_draw_stats(void)
 {
     int x = 10, y = 10;
 #if USE_VULKAN_RAYTRACING
-    const int stat_lines = 28;
+    const int stat_lines = 29;
 #else
     const int stat_lines = 26;
 #endif
@@ -13256,6 +13372,8 @@ static void vk_draw_stats(void)
                         vk.raytracing_active ? "yes" : "no"); y += 10;
     vk_draw_stat_string(x, y, "RT surf lights : %u",
                         vk.world.surface_light_count); y += 10;
+    vk_draw_stat_string(x, y, "RT query mode  : %s",
+                        vk.raytracing_quad_sharing ? "adaptive" : "pixel"); y += 10;
 #endif
 
     VKR_SetScale(1.0f);

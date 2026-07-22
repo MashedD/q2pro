@@ -733,8 +733,13 @@ vk_raytracing::
     Enables the optional Vulkan ray-query path. The renderer preserves Vulkan
     pixel lightmaps, glow maps, and bloom while using ray queries for hard
     dynamic-light shadows and stable, single-sample ambient occlusion on opaque
-    world surfaces. The ambient occlusion affects baked lighting but preserves
-    emissive glow. A renderer restart is required. If the selected
+    world surfaces. Coplanar BSP faces share an AO direction, and occlusion
+    strength falls smoothly with hit distance to avoid triangulation patches.
+    On supported devices, dynamic shadows and lighting within
+    384 world units remain per-pixel while distant static lighting and ambient
+    occlusion share results in 2x2 quads. Ambient occlusion fades out between
+    384 and 640 world units. It affects baked lighting but preserves emissive
+    glow. A renderer restart is required. If the selected
     device lacks Vulkan 1.2, acceleration structures, ray queries, buffer
     device addresses, or the required descriptor features, Q2PRO reports the
     reason and continues with the raster path. Default value is 0.
@@ -743,10 +748,16 @@ vk_rt_emissive::
     Adds restrained, ray-shadowed direct lighting from opaque BSP surfaces
     marked as Q2RTX material lights or Quake II ‘SURF_LIGHT’ surfaces. This is
     additive to baked lightmaps and attenuated by both the emitting and receiving
-    surface angles. At most two nearby surface lights are evaluated per world
-    face, with indices stored in the world mesh so ordinary face batching remains
-    available. A renderer restart is required. Default value is 0.35; 0 disables
-    surface-light contribution.
+    surface angles. Conservative face bounds retain every light that could
+    influence any part of a world face; the shader chooses the strongest two at
+    the fragment position, uses smooth range attenuation, and traces only
+    significant contributions. Faint tails remain continuous without requiring
+    additional rays. Emissive shadow contrast is reduced for large nearby source
+    faces to approximate area-light softness without extra visibility samples.
+    Influence lists remain in the world mesh so ordinary face batching stays available.
+    The control uses a perceptual response suited to Q2RTX's small emissive factors.
+    A renderer restart is required. Default value is 0.35; 0 disables surface-light
+    contribution.
 
 The ray-query path reads the Q2RTX material properties ‘texture_base’,
 ‘texture_emissive’, ‘roughness_override’, ‘specular_scale’, ‘emissive_factor’,
