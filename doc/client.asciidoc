@@ -751,21 +751,32 @@ vk_raytracing::
     device addresses, or the required descriptor features, Q2PRO reports the
     reason and continues with the raster path. Default value is 0.
 
+vk_rt_ao::
+    Controls ray-traced ambient-occlusion strength on opaque BSP world
+    surfaces, clamped between 0 and 0.5. Nearby contacts receive most of the
+    effect, while already-dark lightmap texels and glowmapped pixels are
+    protected from excessive darkening. Value 0 skips ambient-occlusion rays.
+    Changes apply immediately. Default value is 0.24.
+
 vk_rt_emissive::
     Adds restrained, ray-shadowed direct lighting from opaque BSP surfaces
     marked with the Quake II ‘SURF_LIGHT’ flag. This is
     additive to baked lightmaps and attenuated by both the emitting and receiving
-    surface angles. Conservative face bounds retain every light that could
-    influence any part of a world face; the shader chooses the strongest two at
-    the fragment position, uses smooth range attenuation, and traces only
-    significant contributions. Faint tails remain continuous without requiring
-    additional rays. Emissive shadows fade out for large nearby source faces to
-    approximate area-light softness, and weak secondary shadows skip traversal
-    while retaining their direct light. Influence lists remain in the world mesh
-    so ordinary face batching stays available.
+    surface angles. Light color is derived from each surface's glow mask or
+    brightest base-texture pixels when no glow mask exists. Each face retains
+    its strongest 12 possible sources; the shader chooses the strongest two at
+    the fragment position and traces only significant contributions. Emissive
+    shadows fade out for large nearby source faces to approximate area-light
+    softness, and weak secondary shadows skip traversal while retaining their
+    direct light. Influence lists remain in the world mesh so ordinary face
+    batching stays available.
     The control uses a perceptual response that keeps low values visible.
-    A renderer restart is required. Default value is 0.35; 0 disables surface-light
-    contribution.
+    Changes apply immediately. Default value is 0.35; 0 skips surface-light
+    evaluation and shadow rays.
+
+Ray tracing preserves glowmap bloom when ‘gl_bloom’ is enabled. For a restrained
+performance-friendly effect, use ‘gl_bloom 1’ with ‘vk_bloom_downsample 4’.
+Bloom remains disabled by default and adds no work while ‘gl_bloom’ is 0.
 
 Only opaque static BSP world geometry currently participates in ray queries;
 other geometry continues to use the normal raster path. The acceleration

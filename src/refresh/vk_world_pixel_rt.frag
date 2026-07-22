@@ -16,7 +16,7 @@ layout(push_constant) uniform Push {
     float intensity;
     float desaturation;
     vec2 lm_scale;
-    vec2 lm_offset;
+    vec2 rt_params;
 } pc;
 
 layout(set = 0, binding = 0) uniform sampler2D tex_sampler;
@@ -87,7 +87,8 @@ vec3 dynamic_light(vec3 normal)
 
 float surface_light_sample(uint light_index, vec3 normal,
                            out vec3 color, out vec3 direction,
-                           out vec3 oriented_normal, out float distance_to_light)
+                           out vec3 oriented_normal, out float distance_to_light,
+                           float strength_scale)
 {
     SurfaceLight source = lights[light_index];
     vec3 delta = source.origin_range.xyz - v_position;
@@ -104,11 +105,16 @@ float surface_light_sample(uint light_index, vec3 normal,
     float receiver_cosine = abs(dot(normal, direction));
     float angular = source_cosine * (0.25 + 0.75 * receiver_cosine);
     color = source.color_strength.rgb;
-    return source.color_strength.w * falloff * angular / 255.0;
+    float strength = min(source.color_strength.w * strength_scale, 192.0);
+    return strength * falloff * angular / 255.0;
 }
 
 vec3 surface_light(vec3 normal)
 {
+    float emissive = clamp(pc.rt_params.x, 0.0, 2.0);
+    if (emissive <= 0.0)
+        return vec3(0.0);
+    float strength_scale = sqrt(emissive);
     uint best_indices[2] = uint[2](0u, 0u);
     float best_contributions[2] = float[2](0.0, 0.0);
     uint list_offset = v_rt_data.x;
@@ -123,7 +129,8 @@ vec3 surface_light(vec3 normal)
         vec3 color, direction, oriented_normal;
         float distance_to_light;
         float contribution = surface_light_sample(light_index, normal,
-            color, direction, oriented_normal, distance_to_light);
+            color, direction, oriented_normal, distance_to_light,
+            strength_scale);
         if (contribution > best_contributions[0]) {
             best_contributions[1] = best_contributions[0];
             best_indices[1] = best_indices[0];
@@ -142,7 +149,8 @@ vec3 surface_light(vec3 normal)
         vec3 color, direction, oriented_normal;
         float distance_to_light;
         float contribution = surface_light_sample(best_indices[i], normal,
-            color, direction, oriented_normal, distance_to_light);
+            color, direction, oriented_normal, distance_to_light,
+            strength_scale);
         float visibility = 1.0;
         float source_radius = lights[best_indices[i]].normal.w;
         float apparent_size = source_radius / max(distance_to_light, 1.0);
@@ -168,9 +176,10 @@ vec3 surface_light(vec3 normal)
     return light;
 }
 
-float ambient_visibility(vec3 normal)
+float ambient_visibility(vec3 normal, float lightmap_weight)
 {
-    if (pc.lm_scale.x < 0.0)
+    float strength = clamp(pc.rt_params.y, 0.0, 0.5) * lightmap_weight;
+    if (pc.lm_scale.x < 0.0 || strength < 0.005)
         return 1.0;
 
     float view_distance = distance(v_position, pc.dlight.xyz);
@@ -190,9 +199,11 @@ float ambient_visibility(vec3 normal)
         bitangent * (sin(phi) * radius) + normal * sqrt(1.0 - radius * radius));
     float hit_distance = trace_hit_distance(v_position + normal * 0.05,
                                             direction, 48.0);
-    float proximity = hit_distance < 0.0 ? 0.0 :
+    float contact = hit_distance < 0.0 ? 0.0 :
+        1.0 - smoothstep(2.0, 12.0, hit_distance);
+    float broad = hit_distance < 0.0 ? 0.0 :
         1.0 - smoothstep(2.0, 48.0, hit_distance);
-    float visibility = 1.0 - 0.18 * proximity;
+    float visibility = 1.0 - strength * (0.7 * contact + 0.3 * broad);
     return mix(visibility, 1.0, smoothstep(384.0, 640.0, view_distance));
 }
 
@@ -213,14 +224,15 @@ vec3 adaptive_surface_light(vec3 normal, bool full_resolution)
     return subgroupQuadBroadcast(light, 0);
 }
 
-float adaptive_ambient_visibility(vec3 normal, bool full_resolution)
+float adaptive_ambient_visibility(vec3 normal, bool full_resolution,
+                                  float lightmap_weight)
 {
     if (full_resolution)
-        return ambient_visibility(normal);
+        return ambient_visibility(normal, lightmap_weight);
 
     float visibility = 1.0;
     if ((gl_SubgroupInvocationID & 3u) == 0u)
-        visibility = ambient_visibility(normal);
+        visibility = ambient_visibility(normal, lightmap_weight);
     return subgroupQuadBroadcast(visibility, 0);
 }
 #endif
@@ -233,11 +245,22 @@ void main()
         uv += vec2(0.0625) * sin(uv.ts * vec2(4.0) + vec2(pc.dlight.a));
 
     vec3 normal = normalize(cross(dFdx(v_position), dFdy(v_position)));
+    vec3 lm = pc.lm_scale.x < 0.0 ? vec3(1.0) :
+        texture(lm_sampler, v_lmuv).rgb;
+#ifdef RT_GLOWMAP
+    vec4 glow = texture(glow_sampler, uv);
+#endif
+    float lm_luma = dot(lm, vec3(0.2126, 0.7152, 0.0722));
+    float ao_weight = smoothstep(0.08, 0.30, lm_luma);
+#ifdef RT_GLOWMAP
+    ao_weight *= 1.0 - glow.a;
+#endif
 #ifdef RT_QUAD_SHARING
     // Execute subgroup operations before per-surface branches so all lanes in
     // a fragment quad participate, including lanes crossing a primitive edge.
     bool full_resolution = quad_anchor_distance() <= 384.0;
-    float quad_ao = adaptive_ambient_visibility(normal, full_resolution);
+    float quad_ao = adaptive_ambient_visibility(normal, full_resolution,
+                                                ao_weight);
     vec3 quad_surface_light = adaptive_surface_light(normal, full_resolution);
 #endif
 
@@ -254,8 +277,6 @@ void main()
             float luma = dot(texel.rgb, vec3(0.2126, 0.7152, 0.0722));
             texel.rgb = mix(texel.rgb, vec3(luma), pc.desaturation);
         }
-        vec3 lm = pc.lm_scale.x < 0.0 ? vec3(1.0) :
-            texture(lm_sampler, v_lmuv).rgb;
         float ao = 1.0;
         vec3 lighting;
 #ifdef RT_QUAD_SHARING
@@ -263,11 +284,10 @@ void main()
         lighting = dynamic_light(normal) + quad_surface_light;
 #else
         if (pc.lm_scale.x >= 0.0)
-            ao = ambient_visibility(normal);
+            ao = ambient_visibility(normal, ao_weight);
         lighting = dynamic_light(normal) + surface_light(normal);
 #endif
 #ifdef RT_GLOWMAP
-        vec4 glow = texture(glow_sampler, uv);
         lm = mix(lm, vec3(1.0), glow.a);
         ao = mix(ao, 1.0, glow.a);
 #endif

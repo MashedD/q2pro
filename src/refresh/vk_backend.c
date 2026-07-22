@@ -317,6 +317,7 @@ typedef struct {
 
 #if USE_VULKAN_RAYTRACING
 #define VK_MAX_SURFACE_LIGHTS 64
+#define VK_MAX_FACE_SURFACE_LIGHTS 12
 typedef struct {
     vec3_t origin;
     vec3_t normal;
@@ -464,13 +465,13 @@ typedef struct {
     float intensity;
     float desaturation;
     float lm_scale[2];
-    float lm_offset[2];
+    float rt_params[2];
 } vk_world_pixel_push_t;
 
 typedef char vk_world_pixel_lm_scale_offset_check[
     offsetof(vk_world_pixel_push_t, lm_scale) == 232 ? 1 : -1];
-typedef char vk_world_pixel_lm_offset_offset_check[
-    offsetof(vk_world_pixel_push_t, lm_offset) == 240 ? 1 : -1];
+typedef char vk_world_pixel_rt_params_offset_check[
+    offsetof(vk_world_pixel_push_t, rt_params) == 240 ? 1 : -1];
 
 typedef struct {
     mat4_t mvp;
@@ -870,6 +871,7 @@ static cvar_t *vk_device;
 static cvar_t *vk_devicelist;
 static cvar_t *vk_raytracing;
 static cvar_t *vk_rt_emissive;
+static cvar_t *vk_rt_ao;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
 #endif
@@ -6485,12 +6487,7 @@ static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
     } };
-    if (pipeline == &vk.pixel_world_pipeline ||
-        pipeline == &vk.pixel_world_alpha_pipeline ||
-        pipeline == &vk.pixel_world_fast_pipeline ||
-        pipeline == &vk.pixel_world_glow_pipeline ||
-        pipeline == &vk.pixel_world_glow_alpha_pipeline ||
-        pipeline == &vk.pixel_world_glow_fast_pipeline) {
+    if (vk.mrt_bloom) {
         color_blend_attachment[1].colorWriteMask =
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -9137,6 +9134,27 @@ static bool vk_world_face_glowmap_enabled(const mface_t *face,
     return true;
 }
 
+static void vk_world_rt_params(float params[2], bool pixel_world,
+                               bool world_entity)
+{
+    params[0] = 0.0f;
+    params[1] = 0.0f;
+#if USE_VULKAN_RAYTRACING
+    if (pixel_world) {
+        params[0] = vk_rt_emissive ?
+            Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f) : 0.0f;
+        params[1] = vk_rt_ao ?
+            Cvar_ClampValue(vk_rt_ao, 0.0f, 0.5f) : 0.0f;
+    } else if (vk.raytracing_active && world_entity) {
+        // This position aliases rt_enabled in vk_world_lit_push_t.
+        params[0] = 1.0f;
+    }
+#else
+    (void)pixel_world;
+    (void)world_entity;
+#endif
+}
+
 
 static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                VkPipeline pipeline, vk_world_pass_t pass,
@@ -9198,8 +9216,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     push.desaturation = 0.0f;
     push.lm_scale[0] = -1.0f;
     push.lm_scale[1] = -1.0f;
-    push.lm_offset[0] = 0.0f;
-    push.lm_offset[1] = 0.0f;
+    vk_world_rt_params(push.rt_params, pixel_world, !ent);
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
@@ -9406,13 +9423,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                             (pixel_world ? vk.pixel_world_fast_pipeline : pipeline);
                     push.lm_scale[0] = 1.0f;
                     push.lm_scale[1] = pixel_world ? 1.0f : 0.0f;
-                    push.lm_offset[0] =
-#if USE_VULKAN_RAYTRACING
-                        !pixel_world && vk.raytracing_active && !ent ? 1.0f : 0.0f;
-#else
-                        0.0f;
-#endif
-                    push.lm_offset[1] = 0.0f;
+                    vk_world_rt_params(push.rt_params, pixel_world, !ent);
                 }
                 for (uint32_t k = 0; k < face->edge_count - 2; k++) {
                     vk.world.batch_index_data[group_count++] = face->first_vertex;
@@ -9490,19 +9501,11 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             if (pixel_world && face->pixel_lm_w && face->pixel_lm_h) {
                 push.lm_scale[0] = 1.0f;
                 push.lm_scale[1] = 1.0f;
-                push.lm_offset[0] = 0.0f;
-                push.lm_offset[1] = 0.0f;
             } else {
                 push.lm_scale[0] = 1.0f;
                 push.lm_scale[1] = 0.0f;
-                push.lm_offset[0] =
-#if USE_VULKAN_RAYTRACING
-                    vk.raytracing_active && !ent ? 1.0f : 0.0f;
-#else
-                    0.0f;
-#endif
-                push.lm_offset[1] = 0.0f;
             }
+            vk_world_rt_params(push.rt_params, pixel_world, !ent);
             if (pixel_world)
                 vk_push_pixel_world_constants(cmd, sizeof(push), &push);
             else
@@ -12157,6 +12160,96 @@ static float vk_polygon_area(const vk_vertex_t *vertices,
     return area;
 }
 
+typedef struct {
+    char name[MAX_QPATH];
+    vec3_t color;
+} vk_surface_light_color_t;
+
+static void vk_surface_light_texture_color(const char *path, bool has_glow,
+                                           vec3_t color)
+{
+    VectorSet(color, 1.0f, 1.0f, 1.0f);
+
+    int width = 0, height = 0;
+    byte *pixels = IMG_LoadPixels(path, &width, &height);
+    if (!pixels)
+        return;
+    if (width <= 0 || height <= 0) {
+        IMG_FreePixels(pixels);
+        return;
+    }
+
+    int glow_width = 0, glow_height = 0;
+    byte *glow_pixels = NULL;
+    if (has_glow) {
+        char glow_path[MAX_QPATH];
+        COM_StripExtension(glow_path, path, sizeof(glow_path));
+        if (Q_strlcat(glow_path, "_glow.pcx", sizeof(glow_path)) <
+            sizeof(glow_path)) {
+            glow_pixels = IMG_LoadPixels(glow_path, &glow_width, &glow_height);
+        }
+    }
+
+    double sum[3] = { 0.0, 0.0, 0.0 };
+    double weight_sum = 0.0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            const byte *pixel = pixels + ((size_t)y * width + x) * 4;
+            float alpha = pixel[3] / 255.0f;
+            float luma = LUMINANCE(pixel[0], pixel[1], pixel[2]) / 255.0f;
+            float weight;
+            if (glow_pixels && glow_width > 0 && glow_height > 0) {
+                int gx = x * glow_width / width;
+                int gy = y * glow_height / height;
+                const byte *glow = glow_pixels +
+                    ((size_t)gy * glow_width + gx) * 4;
+                weight = alpha * (glow[3] / 255.0f);
+            } else {
+                float luma2 = luma * luma;
+                weight = alpha * luma2 * luma2;
+            }
+            if (weight <= 0.001f)
+                continue;
+            sum[0] += (pixel[0] / 255.0f) * weight;
+            sum[1] += (pixel[1] / 255.0f) * weight;
+            sum[2] += (pixel[2] / 255.0f) * weight;
+            weight_sum += weight;
+        }
+    }
+
+    IMG_FreePixels(pixels);
+    if (glow_pixels)
+        IMG_FreePixels(glow_pixels);
+    if (weight_sum <= 0.0)
+        return;
+
+    color[0] = sum[0] / weight_sum;
+    color[1] = sum[1] / weight_sum;
+    color[2] = sum[2] / weight_sum;
+    float peak = max(color[0], max(color[1], color[2]));
+    if (peak <= 0.001f) {
+        VectorSet(color, 1.0f, 1.0f, 1.0f);
+        return;
+    }
+    VectorScale(color, 1.0f / peak, color);
+    for (int i = 0; i < 3; i++)
+        color[i] = color[i] * 0.8f + 0.2f;
+}
+
+static float vk_surface_light_face_score(const vk_surface_light_t *light,
+                                         const vec3_t center, float radius)
+{
+    vec3_t delta;
+    VectorSubtract(center, light->origin, delta);
+    float distance = VectorLength(delta);
+    float nearest = max(distance - radius, 0.0f);
+    float falloff = Q_clipf(1.0f - nearest / light->range, 0.0f, 1.0f);
+    falloff = falloff * falloff * (3.0f - 2.0f * falloff);
+    float source = Q_clipf((DotProduct(light->normal, delta) + radius) /
+                           max(distance + radius, 0.001f), 0.0f, 1.0f);
+    return light->strength * falloff * (0.25f + 0.75f * source);
+}
+
 static byte vk_face_ao_phase(const mface_t *face)
 {
     if (!face || !face->plane)
@@ -12228,11 +12321,11 @@ static void vk_build_surface_lights(const bsp_t *bsp,
         faces[i].rt_light_offset = 0;
         faces[i].rt_light_count = 0;
     }
-    if (!vk.raytracing_active || !vk.raytracing_pixel_ready ||
-        !vk_rt_emissive ||
-        vk_rt_emissive->value <= 0.0f)
+    if (!vk.raytracing_active || !vk.raytracing_pixel_ready)
         return;
 
+    vk_surface_light_color_t color_cache[VK_MAX_SURFACE_LIGHTS];
+    uint32_t color_count = 0;
     for (uint32_t i = 0; i < face_count &&
          vk.world.surface_light_count < VK_MAX_SURFACE_LIGHTS; i++) {
         mface_t *face = faces[i].face;
@@ -12254,21 +12347,37 @@ static void vk_build_surface_lights(const bsp_t *bsp,
         if (face->drawflags & DSURF_PLANEBACK)
             VectorNegate(light->normal, light->normal);
         VectorMA(light->origin, 1.0f, light->normal, light->origin);
-        VectorSet(light->color, 1.0f, 1.0f, 1.0f);
+        char name[MAX_QPATH];
+        Q_concat(name, sizeof(name), "textures/", face->texinfo->name, ".wal");
+        uint32_t color_index;
+        for (color_index = 0; color_index < color_count; color_index++) {
+            if (!Q_stricmp(color_cache[color_index].name, name))
+                break;
+        }
+        if (color_index == color_count) {
+            Q_strlcpy(color_cache[color_index].name, name,
+                      sizeof(color_cache[color_index].name));
+            bool has_glow = face->texinfo->image &&
+                face->texinfo->image->texnum2 > 0 &&
+                face->texinfo->image->texnum2 < MAX_RIMAGES;
+            vk_surface_light_texture_color(name, has_glow,
+                                           color_cache[color_index].color);
+            color_count++;
+        }
+        VectorCopy(color_cache[color_index].color, light->color);
         float base = face->texinfo->c.value > 0 ?
             face->texinfo->c.value : 200.0f;
         float area_scale = Q_clipf(sqrtf(area) / 16.0f, 0.5f, 4.0f);
-        float factor = Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f);
         light->range = Q_clipf(base * 0.5f * area_scale, 64.0f, 512.0f);
         light->radius = Q_clipf(sqrtf(area * 0.318309886f), 1.0f, 64.0f);
-        // Range and radiance remain independent. A square-root response keeps
-        // low control values visible while the cap prevents surface clipping.
-        light->strength = Q_clipf(256.0f * sqrtf(factor), 0.0f, 192.0f);
+        // The live emissive control applies its perceptual response in the
+        // shader. Keeping the map data unscaled avoids rebuilding the world.
+        light->strength = 256.0f;
     }
 
-    size_t capacity = (size_t)face_count * vk.world.surface_light_count;
+    size_t capacity = (size_t)face_count * VK_MAX_FACE_SURFACE_LIGHTS;
     uint32_t *indices = capacity ? Z_Malloc(capacity * sizeof(*indices)) : NULL;
-    uint32_t candidate_max = 0;
+    uint32_t candidate_max = 0, selected_max = 0;
     for (uint32_t i = 0; i < face_count; i++) {
         float radius_sq = 0.0f;
         for (uint32_t k = 0; k < faces[i].edge_count; k++) {
@@ -12279,22 +12388,48 @@ static void vk_build_surface_lights(const bsp_t *bsp,
         }
         float radius = sqrtf(radius_sq);
         faces[i].rt_light_offset = vk.world.surface_light_index_count;
+        uint32_t selected_indices[VK_MAX_FACE_SURFACE_LIGHTS];
+        float selected_scores[VK_MAX_FACE_SURFACE_LIGHTS];
+        uint32_t selected_count = 0;
+        uint32_t candidate_count = 0;
         for (uint32_t j = 0; j < vk.world.surface_light_count; j++) {
             const vk_surface_light_t *light = &vk.world.surface_lights[j];
             if (!vk_surface_light_may_affect_face(light, faces[i].center,
                                                   radius))
                 continue;
-            indices[vk.world.surface_light_index_count++] = j;
-            faces[i].rt_light_count++;
+            candidate_count++;
+            float score = vk_surface_light_face_score(light, faces[i].center,
+                                                      radius);
+            uint32_t position = selected_count;
+            if (selected_count < VK_MAX_FACE_SURFACE_LIGHTS) {
+                selected_count++;
+            } else if (score <= selected_scores[selected_count - 1]) {
+                continue;
+            } else {
+                position--;
+            }
+            while (position > 0 && score > selected_scores[position - 1]) {
+                if (position < VK_MAX_FACE_SURFACE_LIGHTS) {
+                    selected_scores[position] = selected_scores[position - 1];
+                    selected_indices[position] = selected_indices[position - 1];
+                }
+                position--;
+            }
+            selected_scores[position] = score;
+            selected_indices[position] = j;
         }
-        candidate_max = max(candidate_max, (uint32_t)faces[i].rt_light_count);
+        for (uint32_t j = 0; j < selected_count; j++)
+            indices[vk.world.surface_light_index_count++] = selected_indices[j];
+        faces[i].rt_light_count = selected_count;
+        candidate_max = max(candidate_max, candidate_count);
+        selected_max = max(selected_max, selected_count);
     }
     vk.world.surface_light_indices = indices;
-    Com_DPrintf("Vulkan RT surface lights: %u, face influences avg %.1f max %u\n",
+    Com_DPrintf("Vulkan RT surface lights: %u, face influences avg %.1f max %u selected %u\n",
                 vk.world.surface_light_count,
                 face_count ?
                     (double)vk.world.surface_light_index_count / face_count : 0.0,
-                candidate_max);
+                candidate_max, selected_max);
 }
 
 static bool vk_upload_surface_light_data(const vk_world_face_t *faces,
@@ -13415,8 +13550,8 @@ bool VKR_Init(bool total)
     vk_device = Cvar_Get("vk_device", "", CVAR_ARCHIVE | CVAR_REFRESH);
     vk_devicelist = Cvar_Get("vk_devicelist", "\"automatic\" \"\"", CVAR_ROM);
     vk_raytracing = Cvar_Get("vk_raytracing", "0", CVAR_ARCHIVE | CVAR_REFRESH);
-    vk_rt_emissive = Cvar_Get("vk_rt_emissive", "0.35",
-                              CVAR_ARCHIVE | CVAR_REFRESH);
+    vk_rt_emissive = Cvar_Get("vk_rt_emissive", "0.35", CVAR_ARCHIVE);
+    vk_rt_ao = Cvar_Get("vk_rt_ao", "0.24", CVAR_ARCHIVE);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
 #endif

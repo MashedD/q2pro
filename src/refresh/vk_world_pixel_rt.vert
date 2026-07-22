@@ -11,7 +11,7 @@ layout(push_constant) uniform Push {
     float intensity;
     float desaturation;
     vec2 lm_scale;
-    vec2 lm_offset;
+    vec2 rt_params;
 } pc;
 
 layout(location = 0) in vec3 in_position;
@@ -35,7 +35,7 @@ void main()
     v_color = vec4(color, in_color.a * pc.color.a);
     v_uv = in_uv + pc.scroll.xy;
     v_mode = pc.scroll.z;
-    v_lmuv = in_lmuv * pc.lm_scale + pc.lm_offset;
+    v_lmuv = in_lmuv * pc.lm_scale;
     v_position = in_position;
     v_rt_data = in_rt_data;
 }
