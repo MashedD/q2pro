@@ -82,9 +82,15 @@ cl_async::
 TIP: When using non-zero ‘gl_swapinterval’, ‘cl_async’ can be set to 2 to avoid
 blocking on buffer swaps, reducing input lag.
 
+With the Vulkan renderer, mode 2 also polls mailbox image readiness when
+‘gl_swapinterval’ is 0, preventing a render frame from blocking inside image
+acquisition.
+
 r_maxfps::
     Specifies maximum rendering frame rate if ‘cl_async’ is set to 1, otherwise
-    ignored.  Default value is 0, which means no particular limit.
+    ignored. Fractional frame intervals are accumulated so rates that do not
+    evenly divide 1000, such as 288, remain exact on average. Default value is
+    0, which means no particular limit.
 
 cl_maxfps::
     Specifies client physics frame rate if ‘cl_async’ 1 or 2 is used.
@@ -143,8 +149,9 @@ cl_updaterate::
     update rate available (that is, native server frame rate).
 
 cl_warn_on_fps_rounding::
-    Print a warning if value specified for ‘cl_maxfps’ or ‘r_maxfps’ is inexact
-    due to rounding. Default value is 1 (enabled).
+    Print a warning if the value specified for ‘cl_maxfps’ is inexact due to
+    rounding. Asynchronous ‘r_maxfps’ scheduling does not require rounding.
+    Default value is 1 (enabled).
 
 Network
 ~~~~~~~
@@ -752,9 +759,10 @@ vk_rt_emissive::
     influence any part of a world face; the shader chooses the strongest two at
     the fragment position, uses smooth range attenuation, and traces only
     significant contributions. Faint tails remain continuous without requiring
-    additional rays. Emissive shadow contrast is reduced for large nearby source
-    faces to approximate area-light softness without extra visibility samples.
-    Influence lists remain in the world mesh so ordinary face batching stays available.
+    additional rays. Emissive shadows fade out for large nearby source faces to
+    approximate area-light softness, and weak secondary shadows skip traversal
+    while retaining their direct light. Influence lists remain in the world mesh
+    so ordinary face batching stays available.
     The control uses a perceptual response suited to Q2RTX's small emissive factors.
     A renderer restart is required. Default value is 0.35; 0 disables surface-light
     contribution.

@@ -3151,6 +3151,8 @@ static const char *const sync_names[] = {
 
 static int ref_msec, phys_msec, main_msec;
 static int ref_extra, phys_extra, main_extra;
+static int ref_rate;
+static unsigned ref_accum;
 static sync_mode_t sync_mode;
 
 #define MIN_PHYS_HZ 10
@@ -3204,6 +3206,17 @@ static int fps_to_clamped_msec(cvar_t *cvar, int min, int max)
     return msec;
 }
 
+static int fps_to_clamped_rate(cvar_t *cvar, int min, int max)
+{
+    int rate = cvar->integer ? Cvar_ClampInteger(cvar, min, max) : max;
+
+    // Unlike physics ticks, asynchronous rendering uses a fractional
+    // accumulator and does not need to round the requested rate to a whole
+    // number of milliseconds.
+    cvar->modified = false;
+    return rate;
+}
+
 /*
 ==================
 CL_UpdateFrameTimes
@@ -3219,6 +3232,8 @@ void CL_UpdateFrameTimes(void)
 
     phys_msec = ref_msec = main_msec = 0;
     ref_extra = phys_extra = main_extra = 0;
+    ref_rate = 0;
+    ref_accum = 0;
     cls.frametime = 0.0f;
 
     if (com_timedemo->integer) {
@@ -3238,7 +3253,7 @@ void CL_UpdateFrameTimes(void)
         if (cl_async->integer > 1 && r_config.flags & QVF_VIDEOSYNC) {
             sync_mode = ASYNC_VIDEO;
         } else {
-            ref_msec = fps_to_clamped_msec(r_maxfps, MIN_REF_HZ, MAX_REF_HZ);
+            ref_rate = fps_to_clamped_rate(r_maxfps, MIN_REF_HZ, MAX_REF_HZ);
             sync_mode = ASYNC_FULL;
         }
     } else {
@@ -3247,8 +3262,8 @@ void CL_UpdateFrameTimes(void)
         sync_mode = SYNC_MAXFPS;
     }
 
-    Com_DDPrintf("%s: mode=%s main_msec=%d ref_msec=%d, phys_msec=%d\n",
-                 __func__, sync_names[sync_mode], main_msec, ref_msec, phys_msec);
+    Com_DDPrintf("%s: mode=%s main_msec=%d ref_rate=%d, phys_msec=%d\n",
+                 __func__, sync_names[sync_mode], main_msec, ref_rate, phys_msec);
 }
 
 /*
@@ -3300,11 +3315,15 @@ unsigned CL_Frame(unsigned msec)
         if (sync_mode == ASYNC_VIDEO) {
             ref_frame = R_VideoSync();
         } else {
-            ref_extra += main_extra;
-            if (ref_extra < ref_msec) {
+            // Accumulate thousandths of a frame. This represents arbitrary
+            // rates exactly on average using the existing millisecond main
+            // clock, for example alternating 3/4 ms at 288 fps instead of
+            // silently rounding the interval to 3 ms (333 fps).
+            ref_accum += main_extra * ref_rate;
+            if (ref_accum < 1000) {
                 ref_frame = false;
-            } else if (ref_extra > ref_msec * 4) {
-                ref_extra = ref_msec;
+            } else if (ref_accum > 4000) {
+                ref_accum = 1000;
             }
         }
         break;
@@ -3392,7 +3411,10 @@ unsigned CL_Frame(unsigned msec)
 
         cls.frametime = 0.0f;
 
-        ref_extra -= ref_msec;
+        if (sync_mode == ASYNC_FULL)
+            ref_accum -= 1000;
+        else
+            ref_extra -= ref_msec;
         R_FRAMES++;
 
         // update audio after the 3D view was drawn

@@ -144,21 +144,23 @@ vec3 surface_light(vec3 normal)
         float contribution = surface_light_sample(best_indices[i], normal,
             color, direction, oriented_normal, distance_to_light);
         float visibility = 1.0;
-        // Weak tails remain continuous without spending a ray query. Fade in
-        // occlusion as the light becomes significant instead of introducing a
-        // second hard contour at the query threshold.
-        if (contribution >= 0.01 &&
+        float source_radius = lights[best_indices[i]].normal.w;
+        float apparent_size = source_radius / max(distance_to_light, 1.0);
+        // A single center ray cannot reproduce an area light's penumbra.
+        // Fade its shadow away as the emitter grows on screen; this also avoids
+        // paying for a visibility query whose result would be imperceptible.
+        float shadow_opacity = 0.35 *
+            (1.0 - smoothstep(0.025, 0.20, apparent_size));
+        // Keep all direct illumination, but reserve traversal for shadows that
+        // can make a visible difference. The weaker second source is queried
+        // only when it contributes at least half as much as the strongest one.
+        bool significant_shadow = contribution >= 0.02 &&
+            shadow_opacity >= 0.01 &&
+            (i == 0u || contribution >= best_contributions[0] * 0.5);
+        if (significant_shadow &&
             occluded(v_position + oriented_normal * 0.05,
                      direction, distance_to_light)) {
-            float source_radius = lights[best_indices[i]].normal.w;
-            float apparent_size = source_radius /
-                max(distance_to_light, 1.0);
-            // A single center ray cannot reproduce an area light's penumbra.
-            // Limit its contrast according to the emitter's apparent size so
-            // broad fluorescent faces do not project giant solid polygons.
-            float shadow_opacity = mix(0.35, 0.12,
-                smoothstep(0.025, 0.20, apparent_size));
-            visibility -= smoothstep(0.01, 0.03, contribution) *
+            visibility -= smoothstep(0.02, 0.05, contribution) *
                 shadow_opacity;
         }
         light += color * contribution * visibility;

@@ -751,6 +751,7 @@ typedef struct {
     VkFence frame_fence[VK_MAX_FRAMES_IN_FLIGHT];
     uint32_t frame_index;
     uint32_t current_image;
+    bool image_acquired;
     bool frame_active;
     bool render_pass_active;
     bool mrt_bloom;
@@ -4786,6 +4787,7 @@ static void vk_destroy_swapchain(void)
 
     vk.render_pass_active = false;
     vk.frame_active = false;
+    vk.image_acquired = false;
 
     if (vk.command_buffers) {
         vk.FreeCommandBuffers(vk.device, vk.command_pool,
@@ -9321,30 +9323,24 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             const vk_world_face_t *face = &vk.world.faces[batch->first_face + j];
             VkPipeline face_pipeline;
 
-            if (!face->face || !face->face->texinfo || !face->face->plane) {
-                VK_FLUSH_WORLD_GROUP();
+            // Skipped faces do not change any GPU state. Keep an active group
+            // open across BSP visibility gaps so all compatible visible faces
+            // in this texture batch remain in one indexed draw.
+            if (!face->face || !face->face->texinfo || !face->face->plane)
                 continue;
-            }
-            if (use_marked && face->face->drawframe != vk.world.drawframe) {
-                VK_FLUSH_WORLD_GROUP();
+            if (use_marked && face->face->drawframe != vk.world.drawframe)
                 continue;
-            }
             if (!ent && fd &&
                 vk_world_face_backfacing(face->face, fd->vieworg)) {
-                VK_FLUSH_WORLD_GROUP();
                 c.facesCulled++;
                 continue;
             }
-            if (!vk_world_face_in_pass(face->face, pass)) {
-                VK_FLUSH_WORLD_GROUP();
+            if (!vk_world_face_in_pass(face->face, pass))
                 continue;
-            }
 
             const image_t *image = vk_world_face_image(face->face, fd, ent);
-            if (!image || image->texnum >= MAX_RIMAGES) {
-                VK_FLUSH_WORLD_GROUP();
+            if (!image || image->texnum >= MAX_RIMAGES)
                 continue;
-            }
 
             if (vk.drawing_bloom) {
                 if (!vk_world_face_glowmap_enabled(face->face, image))
@@ -14677,19 +14673,23 @@ void VKR_BeginFrame(void)
     }
     vk_read_glare_queries(vk.frame_index);
 
-    start = vk_time_usec();
-    result = vk.AcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX,
-                                     image_available, VK_NULL_HANDLE,
-                                     &vk.current_image);
-    vk.acquire_usec = vk_time_usec() - start;
-    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-        vk_recreate_swapchain();
-        return;
+    if (!vk.image_acquired) {
+        start = vk_time_usec();
+        result = vk.AcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX,
+                                        image_available, VK_NULL_HANDLE,
+                                        &vk.current_image);
+        vk.acquire_usec = vk_time_usec() - start;
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+            vk_recreate_swapchain();
+            return;
+        }
+        if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+            Com_EPrintf("vkAcquireNextImageKHR failed: Vulkan error %d\n", result);
+            return;
+        }
     }
-    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-        Com_EPrintf("vkAcquireNextImageKHR failed: Vulkan error %d\n", result);
-        return;
-    }
+    // The acquired image and its semaphore now belong to this active frame.
+    vk.image_acquired = false;
 
     if (vk.image_fences[vk.current_image]) {
         start = vk_time_usec();
@@ -15072,11 +15072,53 @@ void VKR_ModeChanged(int width, int height, int flags)
 bool VKR_VideoSync(void)
 {
     VkFence frame_fence = vk.frame_fence[vk.frame_index];
+    VkSemaphore image_available = vk.image_available[vk.frame_index];
 
-    if (!frame_fence)
+    if (!vk.swapchain || !frame_fence || !image_available || vk.frame_active)
         return true;
 
-    return vk.WaitForFences(vk.device, 1, &frame_fence, VK_TRUE, 0) == VK_SUCCESS;
+    // In GPU-synchronized mode, do not commit the client to a render frame
+    // until both its frame slot and a presentable swapchain image are ready.
+    // Mailbox can otherwise block vkAcquireNextImageKHR for several
+    // milliseconds after simulation and input have already advanced.
+    VkResult result = vk.WaitForFences(vk.device, 1, &frame_fence,
+                                       VK_TRUE, 0);
+    if (result == VK_TIMEOUT)
+        return false;
+    if (result != VK_SUCCESS) {
+        Com_EPrintf("vkWaitForFences failed: Vulkan error %d\n", result);
+        return false;
+    }
+
+    if (!vk.image_acquired) {
+        result = vk.AcquireNextImageKHR(vk.device, vk.swapchain, 0,
+                                        image_available, VK_NULL_HANDLE,
+                                        &vk.current_image);
+        if (result == VK_NOT_READY || result == VK_TIMEOUT)
+            return false;
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+            vk_recreate_swapchain();
+            return false;
+        }
+        if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+            Com_EPrintf("vkAcquireNextImageKHR failed: Vulkan error %d\n",
+                        result);
+            return false;
+        }
+        vk.image_acquired = true;
+    }
+
+    VkFence image_fence = vk.image_fences[vk.current_image];
+    if (!image_fence)
+        return true;
+    result = vk.WaitForFences(vk.device, 1, &image_fence, VK_TRUE, 0);
+    if (result == VK_TIMEOUT)
+        return false;
+    if (result != VK_SUCCESS) {
+        Com_EPrintf("vkWaitForFences failed: Vulkan error %d\n", result);
+        return false;
+    }
+    return true;
 }
 
 r_opengl_config_t VKR_GetGLConfig(void)
