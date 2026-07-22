@@ -738,15 +738,18 @@ Vulkan Renderer
 
 vk_raytracing::
     Enables the optional Vulkan ray-query path. The renderer preserves Vulkan
-    pixel lightmaps, glow maps, and bloom while using ray queries for hard
-    dynamic-light shadows and stable, single-sample ambient occlusion on opaque
-    world surfaces. Coplanar BSP faces share an AO direction, and occlusion
-    strength falls smoothly with hit distance to avoid triangulation patches.
-    On supported devices, dynamic shadows and lighting within
-    384 world units remain per-pixel while distant static lighting and ambient
-    occlusion share results in 2x2 quads. Ambient occlusion fades out between
-    384 and 640 world units. It affects baked lighting but preserves emissive
-    glow. A renderer restart is required. If the selected
+    pixel lightmaps, glow maps, and bloom while using ray queries for
+    dynamic-light shadows and ambient occlusion on opaque world surfaces.
+    Stable world AO is baked once when a map loads into an atlas capped at
+    2048x2048. Its adaptive one-to-four samples are bounded to approximately
+    four million rays per map, so successful bakes add no per-frame AO rays.
+    If the bake is unavailable, the renderer falls back to the previous
+    distance-limited single-ray AO path. Dynamic and emissive shadow opacity
+    uses blocker distance, keeping contact shadows distinct while softening
+    distant blockers without extra rays. On supported devices, dynamic shadows
+    and lighting within 384 world units remain per-pixel while distant emissive
+    lighting shares results in 2x2 quads. AO affects baked lighting but
+    preserves emissive glow. A renderer restart is required. If the selected
     device lacks Vulkan 1.2, acceleration structures, ray queries, buffer
     device addresses, or the required descriptor features, Q2PRO reports the
     reason and continues with the raster path. Default value is 0.
@@ -755,8 +758,9 @@ vk_rt_ao::
     Controls ray-traced ambient-occlusion strength on opaque BSP world
     surfaces, clamped between 0 and 0.5. Nearby contacts receive most of the
     effect, while already-dark lightmap texels and glowmapped pixels are
-    protected from excessive darkening. Value 0 skips ambient-occlusion rays.
-    Changes apply immediately. Default value is 0.24.
+    protected from excessive darkening. The baked atlas is reused when this
+    value changes, so changes apply immediately without rebuilding the map.
+    Value 0 disables the effect. Default value is 0.24.
 
 vk_rt_emissive::
     Adds restrained, ray-shadowed direct lighting from opaque BSP surfaces

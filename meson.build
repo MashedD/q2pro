@@ -404,6 +404,14 @@ if vulkan.found()
     )
   endforeach
   if config.get('USE_VULKAN_RAYTRACING', 0) != 0
+    foreach shader : ['vk_rt_ao_bake.vert', 'vk_rt_ao_bake.frag']
+      vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
+        input: 'src/refresh' / shader,
+        output: shader.underscorify() + '_spv.h',
+        command: [glslc, '--target-env=vulkan1.2', '-mfmt=c',
+                  '@INPUT@', '-o', '@OUTPUT@'],
+      )
+    endforeach
     shader = 'vk_world_pixel_rt.vert'
     vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
       input: 'src/refresh' / shader,

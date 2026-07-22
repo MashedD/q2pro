@@ -35,6 +35,7 @@ layout(std430, set = 3, binding = 1) readonly buffer SurfaceLights {
     SurfaceLight lights[64];
     uint light_indices[];
 };
+layout(set = 3, binding = 2) uniform sampler2D rt_ao_sampler;
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_uv;
@@ -58,11 +59,6 @@ float trace_hit_distance(vec3 origin, vec3 direction, float max_distance)
     return rayQueryGetIntersectionTEXT(query, true);
 }
 
-bool occluded(vec3 origin, vec3 direction, float distance_to_light)
-{
-    return trace_hit_distance(origin, direction, distance_to_light) >= 0.0;
-}
-
 vec3 dynamic_light(vec3 normal)
 {
     vec3 light = vec3(0.0);
@@ -74,13 +70,20 @@ vec3 dynamic_light(vec3 normal)
         float distance_to_light = length(delta);
         float falloff = max(1.0 - distance_to_light / range, 0.0);
         vec3 oriented_normal = dot(normal, delta) >= 0.0 ? normal : -normal;
-        if (falloff > 0.0 &&
-            !occluded(v_position + oriented_normal * 0.05,
-                      delta / max(distance_to_light, 0.001),
-                      distance_to_light)) {
-            light += pc.dlight_colors[i].rgb *
-                (pc.dlight_colors[i].w * falloff / 255.0);
+        if (falloff <= 0.0)
+            continue;
+        float hit_distance = trace_hit_distance(
+            v_position + oriented_normal * 0.05,
+            delta / max(distance_to_light, 0.001), distance_to_light);
+        float visibility = 1.0;
+        if (hit_distance >= 0.0) {
+            float blocker_ratio = hit_distance / max(distance_to_light, 0.001);
+            float shadow_opacity = mix(0.92, 0.68,
+                smoothstep(0.15, 0.85, blocker_ratio));
+            visibility -= shadow_opacity;
         }
+        light += pc.dlight_colors[i].rgb *
+            (pc.dlight_colors[i].w * falloff * visibility / 255.0);
     }
     return light;
 }
@@ -157,7 +160,7 @@ vec3 surface_light(vec3 normal)
         // A single center ray cannot reproduce an area light's penumbra.
         // Fade its shadow away as the emitter grows on screen; this also avoids
         // paying for a visibility query whose result would be imperceptible.
-        float shadow_opacity = 0.35 *
+        float shadow_opacity = 0.55 *
             (1.0 - smoothstep(0.025, 0.20, apparent_size));
         // Keep all direct illumination, but reserve traversal for shadows that
         // can make a visible difference. The weaker second source is queried
@@ -165,11 +168,18 @@ vec3 surface_light(vec3 normal)
         bool significant_shadow = contribution >= 0.02 &&
             shadow_opacity >= 0.01 &&
             (i == 0u || contribution >= best_contributions[0] * 0.5);
-        if (significant_shadow &&
-            occluded(v_position + oriented_normal * 0.05,
-                     direction, distance_to_light)) {
-            visibility -= smoothstep(0.02, 0.05, contribution) *
-                shadow_opacity;
+        if (significant_shadow) {
+            float hit_distance = trace_hit_distance(
+                v_position + oriented_normal * 0.05,
+                direction, distance_to_light);
+            if (hit_distance >= 0.0) {
+                float blocker_ratio = hit_distance /
+                    max(distance_to_light, 0.001);
+                float blocker_softness = mix(1.0, 0.55,
+                    smoothstep(0.15, 0.85, blocker_ratio));
+                visibility -= smoothstep(0.02, 0.05, contribution) *
+                    shadow_opacity * blocker_softness;
+            }
         }
         light += color * contribution * visibility;
     }
@@ -181,6 +191,11 @@ float ambient_visibility(vec3 normal, float lightmap_weight)
     float strength = clamp(pc.rt_params.y, 0.0, 0.5) * lightmap_weight;
     if (pc.lm_scale.x < 0.0 || strength < 0.005)
         return 1.0;
+
+    if (surface_info.z != 0u) {
+        float occlusion = texture(rt_ao_sampler, v_lmuv).r;
+        return 1.0 - strength * occlusion;
+    }
 
     float view_distance = distance(v_position, pc.dlight.xyz);
     if (view_distance >= 640.0)
@@ -287,6 +302,12 @@ void main()
             ao = ambient_visibility(normal, ao_weight);
         lighting = dynamic_light(normal) + surface_light(normal);
 #endif
+        float lighting_peak = max(lighting.r, max(lighting.g, lighting.b));
+        if (lighting_peak > 0.8) {
+            float excess = lighting_peak - 0.8;
+            float compressed_peak = 0.8 + excess / (1.0 + excess / 0.55);
+            lighting *= compressed_peak / lighting_peak;
+        }
 #ifdef RT_GLOWMAP
         lm = mix(lm, vec3(1.0), glow.a);
         ao = mix(ao, 1.0, glow.a);

@@ -101,6 +101,12 @@ static const uint32_t vk_world_lit_frag_spv[] =
 ;
 
 #if USE_VULKAN_RAYTRACING
+static const uint32_t vk_rt_ao_bake_vert_spv[] =
+#include "vk_rt_ao_bake_vert_spv.h"
+;
+static const uint32_t vk_rt_ao_bake_frag_spv[] =
+#include "vk_rt_ao_bake_frag_spv.h"
+;
 static const uint32_t vk_world_lit_rt_frag_spv[] =
 #include "vk_world_lit_rt_frag_spv.h"
 ;
@@ -379,6 +385,10 @@ typedef struct {
     vk_buffer_t rt_indices;
     uint32_t rt_index_count;
     vk_acceleration_structure_t rt_blas;
+    vk_texture_t rt_ao_texture;
+    VkFramebuffer rt_ao_framebuffer;
+    uint32_t rt_ao_samples;
+    bool rt_ao_ready;
     vk_surface_light_t surface_lights[VK_MAX_SURFACE_LIGHTS];
     uint32_t surface_light_count;
     uint32_t *surface_light_indices;
@@ -655,6 +665,9 @@ typedef struct {
 #if USE_VULKAN_RAYTRACING
     VkDescriptorSetLayout rt_set_layout;
     VkDescriptorSet rt_descriptor_set;
+    VkPipelineLayout rt_ao_pipeline_layout;
+    VkRenderPass rt_ao_render_pass;
+    VkPipeline rt_ao_pipeline;
     vk_acceleration_structure_t rt_tlas;
     vk_buffer_t rt_instance_buffer;
 #endif
@@ -925,6 +938,8 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, const void *pixels,
                                    bool mipmaps);
 static void vk_destroy_texture_resource(vk_texture_t *texture);
+static VkShaderModule vk_create_shader_module(const uint32_t *code,
+                                              size_t code_size);
 static void vk_destroy_pixel_lightmap_staging(void);
 static bool vk_create_particle_texture(void);
 static bool vk_create_beam_texture(void);
@@ -945,6 +960,12 @@ static bool vk_build_mesh_blas(vk_acceleration_structure_t *as,
                                const vk_buffer_t *indices,
                                uint32_t index_count);
 static bool vk_build_world_tlas(void);
+static bool vk_bake_world_rt_ao(const bsp_t *bsp,
+                                const vk_world_face_t *faces,
+                                uint32_t face_count,
+                                const vk_vertex_t *vertices,
+                                const uint32_t *indices,
+                                const float *lmuv_data);
 #endif
 static void vk_free_world(void);
 static void vk_build_glare_list(bsp_t *bsp);
@@ -1474,6 +1495,13 @@ static void vk_free_world(void)
     vk_destroy_acceleration_structure(&vk.world.rt_blas);
     vk_destroy_buffer(&vk.world.rt_indices);
     vk.world.rt_index_count = 0;
+    if (vk.world.rt_ao_framebuffer) {
+        vk.DestroyFramebuffer(vk.device, vk.world.rt_ao_framebuffer, NULL);
+        vk.world.rt_ao_framebuffer = VK_NULL_HANDLE;
+    }
+    vk_destroy_texture_resource(&vk.world.rt_ao_texture);
+    vk.world.rt_ao_samples = 0;
+    vk.world.rt_ao_ready = false;
     vk_destroy_buffer(&vk.world.rt_light_buffer);
     vk_destroy_buffer(&vk.world.rt_light_indices);
     if (vk.world.surface_light_indices) {
@@ -2948,6 +2976,460 @@ fail:
     vk_destroy_texture_resource(&target);
     return false;
 }
+
+#if USE_VULKAN_RAYTRACING
+typedef struct {
+    uint32_t samples;
+    uint32_t atlas_width;
+    uint32_t atlas_height;
+    uint32_t seed;
+} vk_rt_ao_push_t;
+
+static bool vk_create_rt_ao_pipeline(void)
+{
+    if (vk.rt_ao_pipeline && vk.rt_ao_render_pass &&
+        vk.rt_ao_pipeline_layout)
+        return true;
+    if (vk.rt_ao_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.rt_ao_pipeline, NULL);
+        vk.rt_ao_pipeline = VK_NULL_HANDLE;
+    }
+    if (vk.rt_ao_pipeline_layout) {
+        vk.DestroyPipelineLayout(vk.device, vk.rt_ao_pipeline_layout, NULL);
+        vk.rt_ao_pipeline_layout = VK_NULL_HANDLE;
+    }
+    if (vk.rt_ao_render_pass) {
+        vk.DestroyRenderPass(vk.device, vk.rt_ao_render_pass, NULL);
+        vk.rt_ao_render_pass = VK_NULL_HANDLE;
+    }
+
+    VkAttachmentDescription attachment = {
+        .format = VK_FORMAT_R8_UNORM,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    VkAttachmentReference color_ref = {
+        .attachment = 0,
+        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    };
+    VkSubpassDescription subpass = {
+        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &color_ref,
+    };
+    VkSubpassDependency dependencies[] = {
+        {
+            .srcSubpass = VK_SUBPASS_EXTERNAL,
+            .dstSubpass = 0,
+            .srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        },
+        {
+            .srcSubpass = 0,
+            .dstSubpass = VK_SUBPASS_EXTERNAL,
+            .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        },
+    };
+    VkRenderPassCreateInfo render_pass_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &attachment,
+        .subpassCount = 1,
+        .pSubpasses = &subpass,
+        .dependencyCount = q_countof(dependencies),
+        .pDependencies = dependencies,
+    };
+    VkResult result = vk.CreateRenderPass(vk.device, &render_pass_info, NULL,
+                                          &vk.rt_ao_render_pass);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateRenderPass(rt_ao)", result);
+
+    VkPushConstantRange push_range = {
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .size = sizeof(vk_rt_ao_push_t),
+    };
+    VkPipelineLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts = &vk.rt_set_layout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &push_range,
+    };
+    result = vk.CreatePipelineLayout(vk.device, &layout_info, NULL,
+                                     &vk.rt_ao_pipeline_layout);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreatePipelineLayout(rt_ao)", result);
+
+    VkShaderModule vert = vk_create_shader_module(vk_rt_ao_bake_vert_spv,
+                                                  sizeof(vk_rt_ao_bake_vert_spv));
+    VkShaderModule frag = vk_create_shader_module(vk_rt_ao_bake_frag_spv,
+                                                  sizeof(vk_rt_ao_bake_frag_spv));
+    if (!vert || !frag) {
+        if (vert)
+            vk.DestroyShaderModule(vk.device, vert, NULL);
+        if (frag)
+            vk.DestroyShaderModule(vk.device, frag, NULL);
+        return false;
+    }
+    VkPipelineShaderStageCreateInfo stages[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vert,
+            .pName = "main",
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = frag,
+            .pName = "main",
+        },
+    };
+    VkVertexInputBindingDescription binding = {
+        .binding = 0,
+        .stride = sizeof(vk_vertex_t),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+    VkVertexInputAttributeDescription attributes[] = {
+        {
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, position),
+        },
+        {
+            .location = 1,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, normal),
+        },
+        {
+            .location = 2,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, uv),
+        },
+    };
+    VkPipelineVertexInputStateCreateInfo vertex_input = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding,
+        .vertexAttributeDescriptionCount = q_countof(attributes),
+        .pVertexAttributeDescriptions = attributes,
+    };
+    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    VkPipelineViewportStateCreateInfo viewport_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .scissorCount = 1,
+    };
+    VkPipelineRasterizationStateCreateInfo raster = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth = 1.0f,
+    };
+    VkPipelineMultisampleStateCreateInfo multisample = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    VkPipelineColorBlendAttachmentState blend_attachment = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT,
+    };
+    VkPipelineColorBlendStateCreateInfo blend = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &blend_attachment,
+    };
+    VkDynamicState dynamic_states[] = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+    };
+    VkPipelineDynamicStateCreateInfo dynamic = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = q_countof(dynamic_states),
+        .pDynamicStates = dynamic_states,
+    };
+    VkGraphicsPipelineCreateInfo pipeline_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = q_countof(stages),
+        .pStages = stages,
+        .pVertexInputState = &vertex_input,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &raster,
+        .pMultisampleState = &multisample,
+        .pColorBlendState = &blend,
+        .pDynamicState = &dynamic,
+        .layout = vk.rt_ao_pipeline_layout,
+        .renderPass = vk.rt_ao_render_pass,
+    };
+    result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
+                                        &pipeline_info, NULL,
+                                        &vk.rt_ao_pipeline);
+    vk.DestroyShaderModule(vk.device, frag, NULL);
+    vk.DestroyShaderModule(vk.device, vert, NULL);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateGraphicsPipelines(rt_ao)", result);
+    return true;
+}
+
+static bool vk_world_face_is_inline(const bsp_t *bsp, const mface_t *face)
+{
+    for (int i = 1; i < bsp->nummodels; i++) {
+        const mmodel_t *model = &bsp->models[i];
+        if (face >= model->firstface && face < model->firstface + model->numfaces)
+            return true;
+    }
+    return false;
+}
+
+static void vk_update_rt_ao_descriptor(void)
+{
+    VkImageView view = vk.world.rt_ao_ready ? vk.world.rt_ao_texture.view :
+        vk.world.pixel_lightmap_texture.view;
+    if (!vk.rt_descriptor_set || !view || !vk.postprocess_sampler)
+        return;
+
+    VkDescriptorImageInfo image_info = {
+        .sampler = vk.postprocess_sampler,
+        .imageView = view,
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    VkWriteDescriptorSet write = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = vk.rt_descriptor_set,
+        .dstBinding = 2,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo = &image_info,
+    };
+    vk.UpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
+}
+
+static bool vk_bake_world_rt_ao(const bsp_t *bsp,
+                                const vk_world_face_t *faces,
+                                uint32_t face_count,
+                                const vk_vertex_t *vertices,
+                                const uint32_t *indices,
+                                const float *lmuv_data)
+{
+    vk.world.rt_ao_ready = false;
+    vk.world.rt_ao_samples = 0;
+    if (!vk.raytracing_active || !vk.rt_tlas.handle || !bsp || !faces ||
+        !face_count || !vertices || !indices || !lmuv_data ||
+        !vk.world.pixel_lightmap_texture.width ||
+        !vk.world.pixel_lightmap_texture.height) {
+        Com_SetLastError("Pixel-lightmap data is unavailable for RT AO");
+        return false;
+    }
+
+    VkFormatProperties properties;
+    vk.GetPhysicalDeviceFormatProperties(vk.physical_device,
+                                         VK_FORMAT_R8_UNORM, &properties);
+    VkFormatFeatureFlags required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    if ((properties.optimalTilingFeatures & required) != required) {
+        Com_SetLastError("R8 AO atlas is not supported as a sampled color target");
+        return false;
+    }
+
+    uint32_t atlas_width = min(vk.world.pixel_lightmap_texture.width, 2048u);
+    uint32_t atlas_height = min(vk.world.pixel_lightmap_texture.height, 2048u);
+    uint32_t bake_vertex_count = 0;
+    uint32_t bake_index_count = 0;
+    uint64_t valid_texels = 0;
+    double area_scale = ((double)atlas_width /
+                         vk.world.pixel_lightmap_texture.width) *
+                        ((double)atlas_height /
+                         vk.world.pixel_lightmap_texture.height);
+    for (uint32_t i = 0; i < face_count; i++) {
+        const vk_world_face_t *face = &faces[i];
+        if (!face->face || !face->pixel_lm_w || !face->pixel_lm_h ||
+            (face->face->drawflags & SURF_TRANS_MASK) ||
+            vk_world_face_is_inline(bsp, face->face))
+            continue;
+        bake_vertex_count += face->edge_count;
+        bake_index_count += face->index_count;
+        valid_texels += max((uint64_t)((double)face->pixel_lm_w *
+                                      face->pixel_lm_h * area_scale), 1u);
+    }
+    if (!bake_vertex_count || !bake_index_count || !valid_texels) {
+        Com_SetLastError("No lightmapped opaque world triangles for RT AO");
+        return false;
+    }
+
+    uint32_t samples = (uint32_t)(4194304ull / valid_texels);
+    samples = Q_clip(samples, 1u, 4u);
+    vk_vertex_t *bake_vertices =
+        Z_Mallocz((size_t)bake_vertex_count * sizeof(*bake_vertices));
+    uint32_t *bake_indices =
+        Z_Malloc((size_t)bake_index_count * sizeof(*bake_indices));
+    uint32_t dst_vertex = 0;
+    uint32_t dst_index = 0;
+
+    for (uint32_t i = 0; i < face_count; i++) {
+        const vk_world_face_t *face = &faces[i];
+        if (!face->face || !face->pixel_lm_w || !face->pixel_lm_h ||
+            (face->face->drawflags & SURF_TRANS_MASK) ||
+            vk_world_face_is_inline(bsp, face->face))
+            continue;
+
+        vec3_t normal;
+        VectorCopy(face->face->plane->normal, normal);
+        if (face->face->drawflags & DSURF_PLANEBACK)
+            VectorNegate(normal, normal);
+        VectorNormalize(normal);
+        float center_uv[2] = { 0.0f, 0.0f };
+        for (uint32_t j = 0; j < face->edge_count; j++) {
+            uint32_t source = face->first_vertex + j;
+            center_uv[0] += lmuv_data[source * 2 + 0];
+            center_uv[1] += lmuv_data[source * 2 + 1];
+        }
+        center_uv[0] /= face->edge_count;
+        center_uv[1] /= face->edge_count;
+        float min_radius = 1.0e30f;
+        for (uint32_t j = 0; j < face->edge_count; j++) {
+            uint32_t source = face->first_vertex + j;
+            float dx = (lmuv_data[source * 2 + 0] - center_uv[0]) * atlas_width;
+            float dy = (lmuv_data[source * 2 + 1] - center_uv[1]) * atlas_height;
+            min_radius = min(min_radius, sqrtf(dx * dx + dy * dy));
+        }
+        float expansion = 1.0f + 1.0f / max(min_radius, 4.0f);
+        expansion = min(expansion, 1.25f);
+        uint32_t base_vertex = dst_vertex;
+        for (uint32_t j = 0; j < face->edge_count; j++) {
+            uint32_t source = face->first_vertex + j;
+            vk_vertex_t *dst = &bake_vertices[dst_vertex++];
+            for (int axis = 0; axis < 3; axis++) {
+                dst->position[axis] = face->center[axis] +
+                    (vertices[source].position[axis] - face->center[axis]) *
+                    expansion;
+                dst->normal[axis] = normal[axis];
+            }
+            dst->uv[0] = center_uv[0] +
+                (lmuv_data[source * 2 + 0] - center_uv[0]) * expansion;
+            dst->uv[1] = center_uv[1] +
+                (lmuv_data[source * 2 + 1] - center_uv[1]) * expansion;
+        }
+        for (uint32_t j = 0; j < face->index_count; j++) {
+            uint32_t source = indices[face->first_index + j];
+            if (source < face->first_vertex ||
+                source >= face->first_vertex + face->edge_count)
+                continue;
+            bake_indices[dst_index++] = base_vertex +
+                source - face->first_vertex;
+        }
+    }
+
+    vk_mesh_t bake_mesh = { 0 };
+    bool ok = dst_vertex && dst_index &&
+        vk_upload_mesh(&bake_mesh, bake_vertices, dst_vertex,
+                       bake_indices, dst_index);
+    Z_Free(bake_indices);
+    Z_Free(bake_vertices);
+    if (!ok)
+        goto fail;
+
+    if (!vk_create_rt_ao_pipeline() ||
+        !vk_create_color_target(&vk.world.rt_ao_texture, atlas_width,
+                                atlas_height, VK_FORMAT_R8_UNORM))
+        goto fail;
+
+    VkFramebufferCreateInfo framebuffer_info = {
+        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+        .renderPass = vk.rt_ao_render_pass,
+        .attachmentCount = 1,
+        .pAttachments = &vk.world.rt_ao_texture.view,
+        .width = atlas_width,
+        .height = atlas_height,
+        .layers = 1,
+    };
+    VkResult result = vk.CreateFramebuffer(vk.device, &framebuffer_info, NULL,
+                                           &vk.world.rt_ao_framebuffer);
+    if (result != VK_SUCCESS) {
+        vk_fail_result("vkCreateFramebuffer(rt_ao)", result);
+        goto fail;
+    }
+
+    VkCommandBuffer cmd;
+    if (!vk_begin_immediate(&cmd))
+        goto fail;
+    VkClearValue clear = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 0.0f } } };
+    VkRenderPassBeginInfo begin = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .renderPass = vk.rt_ao_render_pass,
+        .framebuffer = vk.world.rt_ao_framebuffer,
+        .renderArea.extent = { atlas_width, atlas_height },
+        .clearValueCount = 1,
+        .pClearValues = &clear,
+    };
+    VkViewport viewport = {
+        .width = atlas_width,
+        .height = atlas_height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    VkRect2D scissor = { .extent = { atlas_width, atlas_height } };
+    VkDeviceSize offset = 0;
+    vk.CmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
+    vk.CmdSetViewport(cmd, 0, 1, &viewport);
+    vk.CmdSetScissor(cmd, 0, 1, &scissor);
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.rt_ao_pipeline);
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.rt_ao_pipeline_layout, 0, 1,
+                             &vk.rt_descriptor_set, 0, NULL);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &bake_mesh.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, bake_mesh.indices.buffer, 0,
+                          VK_INDEX_TYPE_UINT32);
+    vk_rt_ao_push_t push = {
+        .samples = samples,
+        .atlas_width = atlas_width,
+        .atlas_height = atlas_height,
+        .seed = 0x51f15e5du,
+    };
+    vk.CmdPushConstants(cmd, vk.rt_ao_pipeline_layout,
+                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, dst_index, 1, 0, 0, 0);
+    vk.CmdEndRenderPass(cmd);
+    if (!vk_end_immediate(cmd))
+        goto fail;
+
+    vk_destroy_mesh(&bake_mesh);
+    vk.world.rt_ao_samples = samples;
+    vk.world.rt_ao_ready = true;
+    vk_update_rt_ao_descriptor();
+    Com_Printf("Vulkan RT AO: baked %ux%u atlas, %u samples/texel, "
+               "%u triangles\n", atlas_width, atlas_height, samples,
+               dst_index / 3);
+    return true;
+
+fail:
+    vk_destroy_mesh(&bake_mesh);
+    if (vk.world.rt_ao_framebuffer) {
+        vk.DestroyFramebuffer(vk.device, vk.world.rt_ao_framebuffer, NULL);
+        vk.world.rt_ao_framebuffer = VK_NULL_HANDLE;
+    }
+    vk_destroy_texture_resource(&vk.world.rt_ao_texture);
+    vk.world.rt_ao_samples = 0;
+    vk.world.rt_ao_ready = false;
+    vk_update_rt_ao_descriptor();
+    return false;
+}
+#endif
 
 static VkSampler vk_sampler_for_image(const image_t *image)
 {
@@ -4563,6 +5045,12 @@ static bool vk_create_frame_resources(void)
                 .descriptorCount = 1,
                 .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
             },
+            {
+                .binding = 2,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            },
         };
         VkDescriptorSetLayoutCreateInfo rt_layout_info = {
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -4581,7 +5069,7 @@ static bool vk_create_frame_resources(void)
 #endif
 
     const uint32_t texture_descriptor_count =
-        MAX_RIMAGES * 2 + VK_MAX_CUBEMAPS * 6 + 9;
+        MAX_RIMAGES * 2 + VK_MAX_CUBEMAPS * 6 + 11;
     VkDescriptorPoolSize pool_sizes[3] = { {
         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount = texture_descriptor_count,
@@ -4597,6 +5085,7 @@ static bool vk_create_frame_resources(void)
             .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             .descriptorCount = 1,
         };
+        pool_sizes[0].descriptorCount++;
     }
 #endif
     VkDescriptorPoolCreateInfo pool_info_desc = {
@@ -12441,6 +12930,7 @@ static bool vk_upload_surface_light_data(const vk_world_face_t *faces,
     vk_gpu_surface_light_header_t *light_data = Z_Mallocz(light_data_size);
     light_data->light_count = vk.world.surface_light_count;
     light_data->index_count = vk.world.surface_light_index_count;
+    light_data->reserved[0] = vk.world.rt_ao_ready ? 1u : 0u;
     for (uint32_t i = 0; i < vk.world.surface_light_count; i++) {
         const vk_surface_light_t *src = &vk.world.surface_lights[i];
         vk_gpu_surface_light_t *dst = &light_data->lights[i];
@@ -12581,8 +13071,13 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
             scale_t *= 0.5f;
         }
         vec3_t center;
+        vec3_t face_normal;
 
         VectorClear(center);
+        VectorCopy(face->plane->normal, face_normal);
+        if (face->drawflags & DSURF_PLANEBACK)
+            VectorNegate(face_normal, face_normal);
+        VectorNormalize(face_normal);
 
         for (int j = 0; j < face->numsurfedges; j++) {
             const msurfedge_t *surfedge = face->firstsurfedge + j;
@@ -12598,6 +13093,7 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                                  face->texinfo->offset[0]) * scale_s;
             vertices[v].uv[1] = (DotProduct(src->point, face->texinfo->axis[1]) +
                                  face->texinfo->offset[1]) * scale_t;
+            VectorCopy(face_normal, vertices[v].normal);
             if (pixel_lm_debug) {
                 float lms = 0.0f;
                 float lmt = 0.0f;
@@ -12677,9 +13173,7 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
 
 #if USE_VULKAN_RAYTRACING
     vk_build_surface_lights(bsp, draw_faces, draw_face_count, vertices);
-    vk.world.surface_lights_ready = vk.raytracing_active &&
-        vk.raytracing_pixel_ready &&
-        vk_upload_surface_light_data(draw_faces, draw_face_count, v);
+    vk.world.surface_lights_ready = false;
 #endif
     vk_pixel_lightmap_plan(bsp, draw_faces, draw_face_count, fd);
 
@@ -12720,19 +13214,11 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
         uint32_t rt_index_count = 0;
         for (uint32_t i = 0; i < draw_face_count; i++) {
             const vk_world_face_t *face = &draw_faces[i];
-            bool inline_face = false;
             // BSP model 0 deliberately has no face range in Q2PRO.  Inline
             // models 1..n do, so static world faces are the complement of
             // those ranges.
-            for (int j = 1; j < bsp->nummodels; j++) {
-                const mmodel_t *model = &bsp->models[j];
-                if (face->face >= model->firstface &&
-                    face->face < model->firstface + model->numfaces) {
-                    inline_face = true;
-                    break;
-                }
-            }
-            if (inline_face || (face->face->drawflags & SURF_TRANS_MASK))
+            if (vk_world_face_is_inline(bsp, face->face) ||
+                (face->face->drawflags & SURF_TRANS_MASK))
                 continue;
             memcpy(rt_indices + rt_index_count, indices + face->first_index,
                    sizeof(*rt_indices) * face->index_count);
@@ -12762,6 +13248,11 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
         } else {
             vk.world.rt_index_count = rt_index_count;
             rt_ok = true;
+            if (!vk_bake_world_rt_ao(bsp, draw_faces, draw_face_count,
+                                     vertices, indices, lmuv_data)) {
+                Com_WPrintf("Couldn't bake Vulkan RT ambient occlusion: %s; "
+                            "using runtime AO fallback\n", Com_GetLastError());
+            }
         }
         Z_Free(rt_indices);
         if (!rt_ok) {
@@ -12775,6 +13266,11 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                       "world acceleration-structure build failed",
                       sizeof(vk.raytracing_reason));
         }
+    }
+    if (vk.raytracing_active && vk.raytracing_pixel_ready) {
+        vk_update_rt_ao_descriptor();
+        vk.world.surface_lights_ready =
+            vk_upload_surface_light_data(draw_faces, draw_face_count, v);
     }
 #endif
     line_indices = vk_build_line_indices(indices, idx, &line_index_count);
@@ -13775,6 +14271,21 @@ void VKR_Shutdown(bool total)
     vk_destroy_buffer(&vk.debug_lines);
     vk_destroy_buffer(&vk.debug_text_vertices);
     vk_destroy_buffer(&vk.debug_text_indices);
+
+#if USE_VULKAN_RAYTRACING
+    if (vk.rt_ao_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.rt_ao_pipeline, NULL);
+        vk.rt_ao_pipeline = VK_NULL_HANDLE;
+    }
+    if (vk.rt_ao_pipeline_layout) {
+        vk.DestroyPipelineLayout(vk.device, vk.rt_ao_pipeline_layout, NULL);
+        vk.rt_ao_pipeline_layout = VK_NULL_HANDLE;
+    }
+    if (vk.rt_ao_render_pass) {
+        vk.DestroyRenderPass(vk.device, vk.rt_ao_render_pass, NULL);
+        vk.rt_ao_render_pass = VK_NULL_HANDLE;
+    }
+#endif
 
     if (vk.sampler) {
         vk.DestroySampler(vk.device, vk.sampler, NULL);
