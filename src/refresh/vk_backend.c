@@ -969,6 +969,7 @@ static cvar_t *vk_rt_emissive;
 static cvar_t *vk_rt_ao;
 static cvar_t *vk_rt_reflections;
 static cvar_t *vk_rt_specular;
+static cvar_t *vk_rt_liquids;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -10373,6 +10374,19 @@ static float vk_world_pack_material(float reflect, float roughness)
     return (float)((reflect_q << 4) | roughness_q) / 255.0f;
 }
 
+static int vk_world_liquid_kind(const mface_t *face)
+{
+    if (!face || !(face->drawflags & SURF_WARP) || !face->texinfo)
+        return 0;
+
+    const char *name = face->texinfo->name;
+    if (Q_strcasestr(name, "lava"))
+        return r_lava_glowmaps && !r_lava_glowmaps->integer ? 4 : 3;
+    if (Q_strcasestr(name, "slime"))
+        return 2;
+    return 1;
+}
+
 static void vk_world_rt_params(float *params, bool pixel_world,
                                bool world_entity, const mface_t *face)
 {
@@ -10408,6 +10422,19 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         if (requested_debug == 8)
             params[1] = -8.0f;
         params[2] = packed_material;
+    }
+
+    int liquid_kind = vk.raytracing_active && world_entity ?
+        vk_world_liquid_kind(face) : 0;
+    if (liquid_kind) {
+        // Warp faces never enter SSR. Reuse their material channel for the
+        // liquid class and retain the ordinary specular control in its
+        // fractional part so strength zero reproduces the previous shader.
+        float specular = vk_rt_specular ?
+            Cvar_ClampValue(vk_rt_specular, 0.0f, 1.0f) : 0.0f;
+        params[2] = -((float)liquid_kind + specular * 0.99f);
+        params[3] = vk_rt_liquids ?
+            Cvar_ClampValue(vk_rt_liquids, 0.0f, 1.0f) : 0.65f;
     }
 #else
     (void)pixel_world;
@@ -15145,6 +15172,7 @@ bool VKR_Init(bool total)
     vk_rt_ao = Cvar_Get("vk_rt_ao", "0.24", CVAR_ARCHIVE);
     vk_rt_reflections = Cvar_Get("vk_rt_reflections", "0.35", CVAR_ARCHIVE);
     vk_rt_specular = Cvar_Get("vk_rt_specular", "0.45", CVAR_ARCHIVE);
+    vk_rt_liquids = Cvar_Get("vk_rt_liquids", "0.65", CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);

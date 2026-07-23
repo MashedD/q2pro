@@ -827,6 +827,18 @@ vk_rt_specular::
     immediately. Default value is 0.45; value 0 disables the highlights
     without disabling screen-space reflections.
 
+vk_rt_liquids::
+    Controls enhanced liquid shading while Vulkan ray tracing is active,
+    clamped between 0 and 1. Water, slime, and lava receive two-frequency
+    animated ripples, a view-dependent colored Fresnel sheen, and highlights
+    from the existing dynamic-light visibility calculations. The effect adds
+    no texture samples, render passes, or ray queries. Bright highlights feed
+    bloom when ‘gl_bloom’ is enabled; lava also supplies a restrained
+    texture-shaped bloom contribution when ‘r_lava_glowmaps’ is enabled.
+    Existing liquid translucency, fog, and underwater warp are preserved.
+    Changes apply immediately. Default value is 0.65; value 0 restores the
+    previous liquid shading.
+
 materials/rt_reflections.mat::
     Optional exact-name material overrides used by the Vulkan SSR and specular
     paths. Entries use a Q2RTX-style block with independent `reflect` and
