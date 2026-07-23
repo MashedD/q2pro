@@ -814,8 +814,11 @@ vk_rt_specular::
     small base-texture luminance modulation preserves visible material detail
     without extra texture samples. Smooth, reflective materials also tint
     their direct highlights toward the base-texture color, producing a mild
-    metallic sheen while rough surfaces remain nearly neutral. Nearby
-    emissive candidates are
+    metallic sheen while rough surfaces remain nearly neutral. Filtered
+    base-texture luminance also supplies a derivative-based micro-bump normal
+    for direct material lighting. Its slope is capped, fades on rough or weakly
+    reflective surfaces, and requires no normal map or extra texture sample.
+    Nearby emissive candidates are
     shared across geometry-connected coplanar surface islands, including BSP
     T-junctions, so highlights remain continuous across polygon boundaries.
     Changes apply

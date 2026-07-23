@@ -69,6 +69,30 @@ vec3 material_specular_tint(vec3 albedo, float reflectivity, float roughness)
     return mix(vec3(1.0), chroma, metallic);
 }
 
+vec3 material_bump_normal(vec3 position, vec3 normal, vec3 albedo,
+                          float reflectivity, float roughness, float mask)
+{
+    vec3 dpdx = dFdx(position);
+    vec3 dpdy = dFdy(position);
+    float height = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
+    float dhdx = dFdx(height);
+    float dhdy = dFdy(height);
+    vec3 first = cross(dpdy, normal);
+    vec3 second = cross(normal, dpdx);
+    float determinant = dot(dpdx, first);
+    float valid = step(0.000001, abs(determinant));
+    float safe_determinant = determinant < 0.0 ?
+        min(determinant, -0.000001) : max(determinant, 0.000001);
+    vec3 gradient = (first * dhdx + second * dhdy) / safe_determinant;
+    float gloss = 1.0 - roughness;
+    float strength = 3.0 * pc.rt_params.w * mask *
+        mix(0.35, 1.0, reflectivity) * mix(0.30, 1.0, gloss);
+    gradient *= strength * valid;
+    float slope = length(gradient);
+    gradient *= min(1.0, 0.45 / max(slope, 0.000001));
+    return normalize(normal - gradient);
+}
+
 vec3 dynamic_light(vec3 normal, float reflectivity, float roughness,
                    out vec3 specular)
 {
@@ -124,6 +148,10 @@ void main()
     vec2 material = material_params(pc.rt_params.z);
     float material_reflect = material.x;
     float material_roughness = material.y;
+    vec4 material_texel = texture(tex_sampler, uv);
+    float bump_mask = 1.0 - step(1.5, mode);
+    vec3 shading_normal = material_bump_normal(v_position, normal,
+        material_texel.rgb, material_reflect, material_roughness, bump_mask);
     if (rt_debug >= 1 && rt_debug <= 3) {
         out_color = rt_debug == 1 ? vec4(1.0) : vec4(0.0, 0.0, 0.0, 1.0);
         return;
@@ -132,7 +160,7 @@ void main()
     if (mode > 1.5) {
         out_color = v_color;
     } else {
-        out_color = texture(tex_sampler, uv);
+        out_color = material_texel;
         vec3 material_albedo = out_color.rgb;
         out_color.a *= v_color.a;
         if (pc.desaturation > 0.0) {
@@ -141,7 +169,7 @@ void main()
         }
         out_color.rgb *= pc.intensity;
         vec3 dynamic_specular;
-        vec3 dynamic = dynamic_light(normal, material_reflect,
+        vec3 dynamic = dynamic_light(shading_normal, material_reflect,
                                      material_roughness, dynamic_specular);
         if (rt_debug == 8) {
             out_color = vec4(clamp(dynamic_specular *
