@@ -1347,7 +1347,7 @@ static void GL_Register(void)
     gl_damageblend_frac = Cvar_Get("gl_damageblend_frac", "0.2", 0);
     gl_waterwarp = Cvar_Get("gl_waterwarp", "0", 0);
     gl_fog = Cvar_Get("gl_fog", "1", 0);
-    gl_bloom = Cvar_Get("gl_bloom", "0", 0);
+    gl_bloom = Cvar_Get("gl_bloom", "0", CVAR_ARCHIVE);
     gl_glare = Cvar_Get("gl_glare", "0", CVAR_ARCHIVE);
     gl_glare->changed = gl_glare_changed;
     gl_glare_threshold = Cvar_Get("gl_glare_threshold", "0.3", 0);

@@ -740,45 +740,63 @@ vk_raytracing::
     Enables the optional Vulkan ray-query path. The renderer preserves Vulkan
     pixel lightmaps, glow maps, and bloom while using ray queries for
     dynamic-light shadows and ambient occlusion on opaque world surfaces.
-    Stable world AO is baked once when a map loads into an atlas capped at
-    2048x2048. Its adaptive one-to-four samples are bounded to approximately
-    four million rays per map, so successful bakes add no per-frame AO rays.
+    Stable world AO and visibility-weighted color from ‘SURF_LIGHT’ emitters
+    are baked once when a map loads into an RGBA atlas capped at 2048x2048.
+    Existing lightmaps remain the authoritative diffuse lighting: baked RT
+    emitter data supplies only a luminance-neutral tint and a tightly gated
+    bloom source. AO and emitter visibility each receive a budget of
+    approximately four million rays. The renderer validates atlas coverage and
+    reports AO/emissive statistics after the bake. Successful bakes therefore
+    add no per-frame AO or static-light rays.
     If the bake is unavailable, the renderer falls back to the previous
-    distance-limited single-ray AO path. Dynamic and emissive shadow opacity
-    uses blocker distance, keeping contact shadows distinct while softening
-    distant blockers without extra rays. On supported devices, dynamic shadows
-    and lighting within 384 world units remain per-pixel while distant emissive
-    lighting shares results in 2x2 quads. AO affects baked lighting but
-    preserves emissive glow. A renderer restart is required. If the selected
+    distance-limited single-ray AO and two-source emissive paths. Dynamic and
+    emissive shadow opacity use blocker distance, keeping contact shadows
+    distinct while softening distant blockers without extra rays. Dynamic
+    shadows remain per-pixel
+    within 512 world units and share results in 2x2 quads beyond that distance.
+    AO affects baked lightmaps but preserves emissive glow. A renderer restart
+    is required. If the selected
     device lacks Vulkan 1.2, acceleration structures, ray queries, buffer
     device addresses, or the required descriptor features, Q2PRO reports the
     reason and continues with the raster path. Default value is 0.
 
 vk_rt_ao::
     Controls ray-traced ambient-occlusion strength on opaque BSP world
-    surfaces, clamped between 0 and 0.5. Nearby contacts receive most of the
-    effect, while already-dark lightmap texels and glowmapped pixels are
-    protected from excessive darkening. The baked atlas is reused when this
-    value changes, so changes apply immediately without rebuilding the map.
-    Value 0 disables the effect. Default value is 0.24.
+    surfaces, clamped between 0 and 0.5. A contact-focused sampling cone keeps
+    corners and undersides distinct, including on moderately dark lightmap
+    texels, while limiting overall scene darkening. Glowmapped pixels remain
+    protected. The baked atlas is reused when this value changes, so changes
+    apply immediately without rebuilding the map. Value 0 disables the effect.
+    Default value is 0.24.
 
 vk_rt_emissive::
-    Adds restrained, ray-shadowed direct lighting from opaque BSP surfaces
-    marked with the Quake II ‘SURF_LIGHT’ flag. This is
-    additive to baked lightmaps and attenuated by both the emitting and receiving
-    surface angles. Light color is derived from each surface's glow mask or
+    Controls restrained, ray-shadowed color from opaque BSP surfaces marked
+    with the Quake II ‘SURF_LIGHT’ flag. Original lightmap luminance is never
+    replaced or supplemented by this data. Visible emitters may instead add a
+    subtle luminance-neutral tint and, when bloom is enabled, a localized bloom
+    source. Light color is derived from each surface's glow mask or
     brightest base-texture pixels when no glow mask exists. Each face retains
-    its strongest 12 possible sources; the shader chooses the strongest two at
-    the fragment position and traces only significant contributions. Emissive
-    shadows fade out for large nearby source faces to approximate area-light
-    softness, and weak secondary shadows skip traversal while retaining their
-    direct light. Influence lists remain in the world mesh so ordinary face
-    batching stays available.
-    The control uses a perceptual response that keeps low values visible.
-    Changes apply immediately. Default value is 0.35; 0 skips surface-light
-    evaluation and shadow rays.
+    its strongest 12 possible sources. The map-load bake chooses the strongest
+    two at each atlas texel and samples across the emitting surface to create
+    soft, stable visibility. Tint is capped at two percent of local luminance
+    and 0.01 absolute intensity. Static bloom requires strong emitter radiance
+    and is capped independently, preventing broad exposure changes. If baking
+    fails, the per-frame two-source implementation supplies the same tint and
+    bloom inputs. Influence lists remain in the world mesh so ordinary face
+    batching stays available. Changes apply immediately without rebaking.
+    Default value is 0.35; 0 removes tint and static RT bloom while the shared
+    atlas remains available for ambient occlusion.
 
-Ray tracing preserves glowmap bloom when ‘gl_bloom’ is enabled. For a restrained
+vk_rt_debug::
+    Visualizes the static ray-tracing atlas on BSP world surfaces. Value 1
+    shows atlas coverage, 2 shows decoded ambient occlusion, and 3 shows
+    amplified visibility-weighted emitter radiance. Value 0 restores normal
+    rendering. This
+    diagnostic is applied immediately, does not rebake the map, and adds no
+    work while disabled. Default value is 0.
+
+Ray tracing preserves glowmap bloom and contributes bright dynamic and baked
+RT lighting to bloom when ‘gl_bloom’ is enabled. For a restrained
 performance-friendly effect, use ‘gl_bloom 1’ with ‘vk_bloom_downsample 4’.
 Bloom remains disabled by default and adds no work while ‘gl_bloom’ is 0.
 
@@ -851,8 +869,8 @@ gl_fog::
 
 gl_bloom::
     Enable re-release bloom effect. Only effective when using GLSL backend.
-    Default value is 0 (disabled). Higher values specify number of blurring
-    filter iterations (typical value is 1).
+    The setting is archived. Default value is 0 (disabled). Higher values
+    specify number of blurring filter iterations (typical value is 1).
 
 gl_bloom_sigma::
     Specifies strength parameter of gaussian blur filter used for the bloom
