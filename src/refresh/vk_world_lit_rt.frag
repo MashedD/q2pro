@@ -41,6 +41,24 @@ vec2 material_params(float packed)
     return vec2(floor(bits / 16.0), mod(bits, 16.0)) / 15.0;
 }
 
+float material_specular_lobe(float ndoth, float ndotv, float gloss,
+                             float exponent)
+{
+    float primary = pow(ndoth, exponent);
+    float clearcoat = primary * primary * mix(0.12, 0.38, gloss);
+    float edge = 1.0 - clamp(ndotv, 0.0, 1.0);
+    float edge2 = edge * edge;
+    float fresnel = edge2 * edge2 * edge;
+    return (primary + clearcoat) * mix(0.65, 1.35, fresnel);
+}
+
+float material_detail_factor(vec3 albedo, float roughness)
+{
+    float luma = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
+    float detail = mix(0.82, 1.18, smoothstep(0.10, 0.70, luma));
+    return mix(1.0, detail, 0.55 * (1.0 - roughness));
+}
+
 vec3 dynamic_light(vec3 normal, float reflectivity, float roughness,
                    out vec3 specular)
 {
@@ -48,7 +66,7 @@ vec3 dynamic_light(vec3 normal, float reflectivity, float roughness,
     specular = vec3(0.0);
     vec3 view_dir = normalize(pc.dlight.xyz - v_position);
     float gloss = 1.0 - roughness;
-    float exponent = mix(4.0, 60.0, pow(gloss, 1.1));
+    float exponent = mix(10.0, 96.0, pow(gloss, 0.9));
     float lobe_normalization = mix(0.80, 1.85, gloss);
     float specular_scale = reflectivity * pc.rt_params.w *
         mix(1.30, 0.68, roughness) * lobe_normalization;
@@ -69,11 +87,10 @@ vec3 dynamic_light(vec3 normal, float reflectivity, float roughness,
                 vec3 half_dir = normalize(light_dir + view_dir);
                 float ndoth = max(dot(normal, half_dir), 0.0);
                 float ndotl = max(dot(normal, light_dir), 0.0);
-                float grazing = 0.12 + 0.88 * pow(1.0 -
-                    max(dot(normal, view_dir), 0.0), 3.0);
-                specular += radiance * pow(ndoth, exponent) *
-                    smoothstep(0.0, 0.20, ndotl) * specular_scale *
-                    (0.65 + 0.35 * grazing);
+                float lobe = material_specular_lobe(ndoth,
+                    max(dot(normal, view_dir), 0.0), gloss, exponent);
+                specular += radiance * lobe *
+                    smoothstep(0.0, 0.20, ndotl) * specular_scale;
             }
         }
     }
@@ -106,6 +123,7 @@ void main()
         out_color = v_color;
     } else {
         out_color = texture(tex_sampler, uv);
+        vec3 material_albedo = out_color.rgb;
         out_color.a *= v_color.a;
         if (pc.desaturation > 0.0) {
             float luma = dot(out_color.rgb, vec3(0.2126, 0.7152, 0.0722));
@@ -126,7 +144,8 @@ void main()
         if (material_reflect > 0.001 && pc.rt_params.w > 0.001) {
             const vec3 luma_weights = vec3(0.2126, 0.7152, 0.0722);
             float surface_luma = dot(raster_surface, luma_weights);
-            vec3 highlight = dynamic_specular;
+            vec3 highlight = dynamic_specular *
+                material_detail_factor(material_albedo, material_roughness);
             float highlight_luma = dot(highlight, luma_weights);
             float cap = min(max(surface_luma * 0.22, 0.035), 0.14);
             highlight *= min(1.0, cap / max(highlight_luma, 0.000001));

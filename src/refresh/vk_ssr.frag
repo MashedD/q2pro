@@ -80,7 +80,10 @@ void main()
         out_color = debug_mode == 6 ? vec4(0.0, 0.75, 0.0, 1.0) : vec4(0.0);
         return;
     }
-    float fresnel = 0.18 + 0.82 * pow(1.0 - max(dot(n, view_dir), 0.0), 3.0);
+    float fresnel_edge = 1.0 - max(dot(n, view_dir), 0.0);
+    float fresnel_edge2 = fresnel_edge * fresnel_edge;
+    float fresnel = 0.16 + 0.84 *
+        (fresnel_edge2 * fresnel_edge2 * fresnel_edge);
 
     vec3 ray_origin = p + n * max(0.75, -p.z * 0.0025);
     vec3 ray_dir = normalize(reflect(-view_dir, n));

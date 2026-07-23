@@ -808,8 +808,11 @@ vk_rt_specular::
     not add an environment term, so surfaces without a suitable light remain
     unchanged even at value 1. Reflection strength and roughness come from
     `materials/rt_reflections.mat`; a 10-to-96 roughness-shaped,
-    energy-normalized lobe gives smooth materials focused glints and rough
-    materials broader visible highlights. Nearby emissive candidates are
+    energy-normalized primary lobe and a derived clearcoat lobe give smooth
+    materials focused glints and rough materials broader visible highlights.
+    A fifth-power Fresnel response strengthens grazing highlights, while a
+    small base-texture luminance modulation preserves visible material detail
+    without extra texture samples. Nearby emissive candidates are
     shared across geometry-connected coplanar surface islands, including BSP
     T-junctions, so highlights remain continuous across polygon boundaries.
     Changes apply
