@@ -956,6 +956,7 @@ static cvar_t *vk_waterwarp;
 static cvar_t *vk_bloom_sigma;
 static cvar_t *vk_bloom_downsample;
 static cvar_t *vk_bloom_streaks;
+static cvar_t *vk_bloom_ghosts;
 static cvar_t *vk_glare;
 static cvar_t *vk_glare_threshold;
 static cvar_t *vk_glare_size;
@@ -15157,6 +15158,7 @@ bool VKR_Init(bool total)
     vk_bloom_sigma = Cvar_Get("gl_bloom_sigma", "4", 0);
     vk_bloom_downsample = Cvar_Get("vk_bloom_downsample", "4", 0);
     vk_bloom_streaks = Cvar_Get("vk_bloom_streaks", "0.45", CVAR_ARCHIVE);
+    vk_bloom_ghosts = Cvar_Get("vk_bloom_ghosts", "0.5", CVAR_ARCHIVE);
     vk_glare = Cvar_Get("gl_glare", "0", CVAR_ARCHIVE);
     vk_glare->changed = vk_glare_changed;
     vk_glare_threshold = Cvar_Get("gl_glare_threshold", "0.3", 0);
@@ -16289,7 +16291,8 @@ static void vk_finish_postprocess_scene(void)
         vec4_t downscale_step = {
             1.0f / (float)max(vk.bloom_source_texture.width, 1),
             1.0f / (float)max(vk.bloom_source_texture.height, 1),
-            0.0f,
+            vk_bloom_ghosts ?
+                Cvar_ClampValue(vk_bloom_ghosts, 0.0f, 1.0f) : 0.5f,
             1.0f,
         };
         float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
@@ -16670,7 +16673,8 @@ void VKR_EndFrame(void)
         vec4_t downscale_step = {
             1.0f / (float)max(vk.bloom_source_texture.width, 1),
             1.0f / (float)max(vk.bloom_source_texture.height, 1),
-            0.0f,
+            vk_bloom_ghosts ?
+                Cvar_ClampValue(vk_bloom_ghosts, 0.0f, 1.0f) : 0.5f,
             1.0f,
         };
         float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;

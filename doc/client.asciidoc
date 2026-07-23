@@ -954,8 +954,20 @@ vk_bloom_streaks::
     normalized bloom energy. Value 0 restores ordinary Gaussian bloom. Default
     value is 0.45 (2.35x); the setting has no effect while ‘gl_bloom’ is 0.
 
-NOTE: Bloom only works with glowmaps. Enabling it with non-remastered content
-(or glowmaps disabled) is a waste of resources.
+vk_bloom_ghosts::
+    Controls Vulkan bloom lens ghosts and their soft halo, clamped between 0
+    and 1. Three brightness-gated images of bloom sources are distributed
+    across the screen center; the strongest has mild red/blue edge separation.
+    Source energy and screen edges are capped so bright lamps do not wash out
+    the frame or form clamped bars. The effect runs in the existing
+    low-resolution bloom downscale and adds no images, descriptors, draws, or
+    passes. It works with raster and ray-traced bloom sources. Default value is
+    0.5; value 0 restores the previous bloom exactly. The setting has no effect
+    while ‘gl_bloom’ is 0.
+
+NOTE: Bloom requires glowmaps or another renderer-generated bloom source, such
+as RT lighting, specular highlights, enhanced liquids, beams, or particles.
+Enabling it when a scene has no contributing source is a waste of resources.
 
 gl_glare::
     Enables lens glare sprites on bright glowmapped world surfaces. Visibility
