@@ -132,8 +132,7 @@ void main()
         }
         // Preserve scene alpha for normal translucency. Material eligibility
         // is carried separately in the secondary MRT alpha.
-        out_bloom.a = (v_color.a > 0.99 && v_mode < 4.0) ?
-            pc.rt_params.z : 0.0;
+        out_bloom.a = v_mode < 4.0 ? pc.rt_params.z : 0.0;
     }
 
     if (pc.fog.a < 0.0) {

@@ -32,14 +32,19 @@ vec2 project_uv(vec3 p)
 
 void main()
 {
+    int debug_mode = int(pc.control.y + 0.5);
     float depth = texture(depth_sampler, v_uv).r;
     if (depth >= 0.9999 || depth <= 0.00001) {
-        out_color = vec4(0.0);
+        out_color = debug_mode == 6 ? vec4(1.0, 0.0, 1.0, 1.0) : vec4(0.0);
         return;
     }
     float material_reflect = texture(material_sampler, v_uv).a;
+    if (debug_mode == 4) {
+        out_color = vec4(vec3(material_reflect), 1.0);
+        return;
+    }
     if (material_reflect <= 0.001) {
-        out_color = vec4(0.0);
+        out_color = debug_mode == 6 ? vec4(0.85, 0.0, 0.0, 1.0) : vec4(0.0);
         return;
     }
     float material_roughness = clamp(texture(material_sampler, v_uv).a, 0.0, 1.0);
@@ -54,7 +59,7 @@ void main()
     // Keep the finite difference local to a continuous surface.
     if (abs(px.z - p.z) > max(10.0, abs(p.z) * 0.12) ||
         abs(py.z - p.z) > max(10.0, abs(p.z) * 0.12)) {
-        out_color = vec4(0.0);
+        out_color = debug_mode == 6 ? vec4(1.0, 0.85, 0.0, 1.0) : vec4(0.0);
         return;
     }
     vec3 n = normalize(cross(px - p, py - p));
@@ -66,7 +71,7 @@ void main()
     float floor_mask = smoothstep(0.62, 0.88, upness);
     float surface_mask = floor_mask;
     if (surface_mask < 0.01) {
-        out_color = vec4(0.0);
+        out_color = debug_mode == 6 ? vec4(0.0, 0.75, 0.0, 1.0) : vec4(0.0);
         return;
     }
     float fresnel = 0.18 + 0.82 * pow(1.0 - max(dot(n, view_dir), 0.0), 3.0);
@@ -78,11 +83,11 @@ void main()
     float hit = 0.0;
     float hit_fade = 0.0;
     vec2 hit_uv = v_uv;
-    float previous_delta = 0.0;
+    float previous_delta = 1.0;
     float previous_t = 0.0;
 
-    for (int i = 1; i <= 8; ++i) {
-        float t = max_distance * (float(i) / 8.0);
+    for (int i = 1; i <= 12; ++i) {
+        float t = max_distance * (float(i) / 12.0);
         vec3 sample_pos = ray_origin + ray_dir * t;
         if (sample_pos.z > -1.0)
             break;
@@ -94,14 +99,32 @@ void main()
             continue;
         vec3 depth_pos = view_position(uv, sample_depth);
         float delta = sample_pos.z - depth_pos.z;
-        float thickness = 2.0 + t * 0.018;
-        if (delta <= 0.0 && delta > -thickness &&
-            (i == 1 || previous_delta > 0.0)) {
-            // Interpolate between the previous and current samples. This
-            // removes the large eight-step bands from the half-resolution pass.
-            float denom = previous_delta - delta;
-            float refine = denom > 0.001 ? clamp(previous_delta / denom, 0.0, 1.0) : 0.0;
-            float refined_t = mix(previous_t, t, refine);
+        float thickness = clamp(2.5 + t * 0.022, 2.5, 14.0);
+        bool crossing = previous_delta > 0.0 && delta <= 0.0;
+        bool close_hit = abs(delta) <= thickness;
+        if ((crossing || close_hit) && delta > -thickness) {
+            float low_t = previous_t;
+            float high_t = t;
+            // Refine actual front-to-back crossings. Near-surface hits that
+            // do not straddle depth retain the current sample.
+            if (crossing) {
+                for (int refine_step = 0; refine_step < 3; ++refine_step) {
+                    float mid_t = (low_t + high_t) * 0.5;
+                    vec3 mid_pos = ray_origin + ray_dir * mid_t;
+                    vec2 mid_uv = project_uv(mid_pos);
+                    float mid_depth = texture(depth_sampler, mid_uv).r;
+                    if (mid_depth >= 0.9999)
+                        break;
+                    float mid_delta = mid_pos.z -
+                        view_position(mid_uv, mid_depth).z;
+                    if (mid_delta > 0.0) {
+                        low_t = mid_t;
+                    } else {
+                        high_t = mid_t;
+                    }
+                }
+            }
+            float refined_t = crossing ? (low_t + high_t) * 0.5 : t;
             vec3 refined_pos = ray_origin + ray_dir * refined_t;
             vec2 refined_uv = project_uv(refined_pos);
             if (any(lessThan(refined_uv, vec2(0.02))) ||
@@ -113,7 +136,7 @@ void main()
             hit_uv = refined_uv;
             hit_color = texture(scene_sampler, refined_uv).rgb;
             hit = 1.0;
-            hit_fade = (1.0 - float(i - 1) / 8.0) *
+            hit_fade = (1.0 - float(i - 1) / 12.0) *
                        smoothstep(0.0, 0.35, surface_mask);
             break;
         }
@@ -132,10 +155,7 @@ void main()
     float luminance = dot(hit_color, vec3(0.2126, 0.7152, 0.0722));
     hit_color *= min(1.0, 1.15 / max(luminance, 0.001));
 
-    int debug_mode = int(pc.control.y + 0.5);
-    if (debug_mode == 4)
-        out_color = vec4(vec3(pc.control.x), 1.0);
-    else if (debug_mode == 5)
+    if (debug_mode == 5)
         out_color = vec4(mix(vec3(0.12, 0.03, 0.01), vec3(0.05, 0.9, 0.15), floor_mask), 1.0);
     else if (debug_mode == 6)
         out_color = vec4(hit > 0.5 ? vec3(0.1, 0.35, 1.0) : vec3(0.35, 0.12, 0.02), 1.0);

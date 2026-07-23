@@ -498,5 +498,5 @@ void main()
         bloom *= 1.0 - fog;
     }
     out_bloom = vec4(bloom,
-        (v_color.a > 0.99 && v_mode < 4.0) ? pc.rt_params.z : 0.0);
+        v_mode < 4.0 ? pc.rt_params.z : 0.0);
 }

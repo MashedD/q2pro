@@ -6547,7 +6547,7 @@ static bool vk_create_scene_target(void)
                 .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             },
         };
-        VkWriteDescriptorSet writes[2];
+        VkWriteDescriptorSet writes[3];
         memset(writes, 0, sizeof(writes));
         for (uint32_t i = 0; i < q_countof(writes); i++) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -7296,6 +7296,9 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
     if (pipeline == &vk.world_glow_pipeline ||
         pipeline == &vk.sprite_bloom_pipeline) {
         color_blend_attachment[1] = color_blend_attachment[0];
+        color_blend_attachment[1].colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT;
         color_blend_attachment[0].colorWriteMask = 0;
     } else if (pipeline == &vk.world_pipeline ||
                pipeline == &vk.world_alpha_pipeline) {
@@ -8071,7 +8074,7 @@ static bool vk_create_swapchain(int width, int height)
         vk.ssr_descriptor_set && vk.depth_sample_view && vk.ssr_framebuffer) {
         if (vk_create_ssr_pipeline()) {
             vk.ssr_ready = true;
-            Com_Printf("Vulkan SSR: half resolution, 8 steps\n");
+            Com_Printf("Vulkan SSR: half resolution, 12 steps\n");
         } else {
             Com_WPrintf("Couldn't create Vulkan SSR pipeline: %s; reflections disabled\n",
                         Com_GetLastError());
@@ -10274,8 +10277,16 @@ static void vk_world_material(const mface_t *face, float *reflect,
         return;
     const vk_rt_material_rule_t *rule = face && face->texinfo ?
         vk_rt_material_rule(face->texinfo->name) : NULL;
-    *reflect = rule ? rule->reflect : 0.0f;
-    *roughness = rule ? rule->roughness : 1.0f;
+    if (rule) {
+        *reflect = rule->reflect;
+        *roughness = rule->roughness;
+    } else {
+        // Keep SSR useful on maps whose floor textures are not present in
+        // the optional allowlist.  The shader's normal mask rejects walls;
+        // liquids and other translucent faces are excluded separately.
+        *reflect = 0.514f;
+        *roughness = 0.70f;
+    }
 }
 
 static void vk_world_rt_params(float *params, bool pixel_world,
@@ -10284,10 +10295,14 @@ static void vk_world_rt_params(float *params, bool pixel_world,
     params[0] = 0.0f;
     params[1] = 0.0f;
     params[2] = 0.0f;
-    params[3] = vk_rt_debug ? Cvar_ClampInteger(vk_rt_debug, 0, 3) : 0;
+    int requested_debug = vk_rt_debug ? vk_rt_debug->integer : 0;
+    params[3] = requested_debug >= 1 && requested_debug <= 3 ?
+        (float)requested_debug : 0.0f;
 #if USE_VULKAN_RAYTRACING
     float material_reflect, material_roughness;
     vk_world_material(face, &material_reflect, &material_roughness);
+    if (face && (face->drawflags & (SURF_TRANS_MASK | SURF_WARP)))
+        material_reflect = 0.0f;
     if (vk.world.rt_material_file_loaded)
         material_reflect *= 1.0f - 0.65f * material_roughness;
     if (pixel_world) {
@@ -15740,7 +15755,7 @@ static void vk_begin_render_pass_sized(VkRenderPass render_pass,
 {
     VkClearValue clear[3] = {
         { .color = color },
-        { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } },
+        { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 0.0f } } },
         { .depthStencil = { .depth = 1.0f, .stencil = 0 } },
     };
     uint32_t clear_count;
@@ -16017,8 +16032,18 @@ void VKR_BeginFrame(void)
     vk.frame_start_usec = 0;
 
     if (gl_bloom && gl_bloom->modified) {
-        bool enable_mrt = gl_bloom->integer > 0;
+        bool enable_mrt = gl_bloom->integer > 0 ||
+            (vk_raytracing && vk_raytracing->integer && vk_rt_reflections &&
+             vk_rt_reflections->value > 0.001f);
         gl_bloom->modified = false;
+        if (enable_mrt != vk.mrt_bloom && !vk_recreate_swapchain())
+            return;
+    }
+    if (vk_rt_reflections && vk_rt_reflections->modified) {
+        bool enable_mrt = (gl_bloom && gl_bloom->integer > 0) ||
+            (vk_raytracing && vk_raytracing->integer &&
+             vk_rt_reflections->value > 0.001f);
+        vk_rt_reflections->modified = false;
         if (enable_mrt != vk.mrt_bloom && !vk_recreate_swapchain())
             return;
     }
@@ -16154,7 +16179,7 @@ void VKR_BeginFrame(void)
 
     VkClearValue clear[3] = {
         { .color = vk_frame_clear_color() },
-        { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } },
+        { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 0.0f } } },
         { .depthStencil = { .depth = 1.0f, .stencil = 0 } },
     };
     uint32_t clear_count = vk.mrt_bloom ? 3 : 2;
