@@ -751,8 +751,10 @@ vk_raytracing::
     If the bake is unavailable, the renderer falls back to the previous
     distance-limited single-ray AO and two-source emissive paths. Dynamic and
     emissive shadow opacity use blocker distance, keeping contact shadows
-    distinct while softening distant blockers without extra rays. Dynamic
-    shadows remain per-pixel
+    distinct while softening distant blockers. The strongest dynamic light
+    uses two symmetric area samples when its contribution is visible and the
+    receiver is within 320 world units; weaker or distant lights retain a
+    single center sample. Dynamic shadows remain per-pixel
     within 512 world units and share results in 2x2 quads beyond that distance.
     AO affects baked lightmaps but preserves emissive glow. A renderer restart
     is required. If the selected

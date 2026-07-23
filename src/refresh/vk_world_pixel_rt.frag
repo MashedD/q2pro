@@ -59,6 +59,43 @@ float trace_hit_distance(vec3 origin, vec3 direction, float max_distance)
     return rayQueryGetIntersectionTEXT(query, true);
 }
 
+float dynamic_shadow_visibility(float hit_distance, float ray_distance)
+{
+    if (hit_distance < 0.0)
+        return 1.0;
+    float blocker_ratio = hit_distance / max(ray_distance, 0.001);
+    float shadow_opacity = mix(0.96, 0.72,
+        smoothstep(0.15, 0.85, blocker_ratio));
+    return 1.0 - shadow_opacity;
+}
+
+float dynamic_light_visibility(vec3 origin, vec3 delta, float range,
+                               float contribution, int light_index)
+{
+    float center_distance = length(delta);
+    vec3 center_direction = delta / max(center_distance, 0.001);
+    if (light_index != 0 || contribution < 0.06 || center_distance > 320.0) {
+        float hit = trace_hit_distance(origin, center_direction,
+                                       center_distance);
+        return dynamic_shadow_visibility(hit, center_distance);
+    }
+
+    vec3 reference = abs(center_direction.z) < 0.90 ?
+        vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+    vec3 tangent = normalize(cross(reference, center_direction));
+    float source_radius = clamp(range * 0.018, 1.5, 6.0);
+    vec3 first_delta = delta + tangent * source_radius;
+    vec3 second_delta = delta - tangent * source_radius;
+    float first_distance = length(first_delta);
+    float second_distance = length(second_delta);
+    float first_hit = trace_hit_distance(origin,
+        first_delta / max(first_distance, 0.001), first_distance);
+    float second_hit = trace_hit_distance(origin,
+        second_delta / max(second_distance, 0.001), second_distance);
+    return 0.5 * (dynamic_shadow_visibility(first_hit, first_distance) +
+                  dynamic_shadow_visibility(second_hit, second_distance));
+}
+
 vec2 material_params(float packed)
 {
     float bits = floor(clamp(packed, 0.0, 1.0) * 255.0 + 0.5);
@@ -144,15 +181,11 @@ vec3 dynamic_light(vec3 normal, float reflectivity, float roughness,
             energy < 0.01)
             continue;
         vec3 light_dir = delta / max(distance_to_light, 0.001);
-        float hit_distance = trace_hit_distance(v_position + oriented_normal * 0.05,
-                                                light_dir, distance_to_light);
-        float visibility = 1.0;
-        if (hit_distance >= 0.0) {
-            float blocker_ratio = hit_distance / max(distance_to_light, 0.001);
-            float shadow_opacity = mix(0.96, 0.72,
-                smoothstep(0.15, 0.85, blocker_ratio));
-            visibility -= shadow_opacity;
-        }
+        float contribution = max(pc.dlight_colors[i].r,
+            max(pc.dlight_colors[i].g, pc.dlight_colors[i].b)) * energy;
+        float visibility = dynamic_light_visibility(
+            v_position + oriented_normal * 0.05, delta, range,
+            contribution, i);
         vec3 radiance = pc.dlight_colors[i].rgb * energy * visibility;
         light += radiance;
         if (specular_scale > 0.001) {
