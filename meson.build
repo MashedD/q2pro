@@ -386,6 +386,8 @@ if vulkan.found()
                     'vk_tex.vert', 'vk_tex.frag',
                     'vk_waterwarp.frag',
                     'vk_bloom_downscale.frag', 'vk_bloom_blur.frag',
+                    'vk_ssr.vert', 'vk_ssr.frag',
+                    'vk_scene.frag',
                     'vk_color3d.vert', 'vk_color3d.frag',
                     'vk_world.vert', 'vk_world.frag', 'vk_world_alpha.frag',
                     'vk_world_lit.vert', 'vk_world_lit.frag',

@@ -16,7 +16,7 @@ layout(push_constant) uniform Push {
     float intensity;
     float desaturation;
     vec2 lm_scale;
-    vec2 rt_params;
+    vec4 rt_params;
 } pc;
 
 layout(set = 0, binding = 0) uniform sampler2D tex_sampler;
@@ -295,6 +295,34 @@ void main()
         uv += vec2(0.0625) * sin(uv.ts * vec2(4.0) + vec2(pc.dlight.a));
 
     vec3 normal = normalize(cross(dFdx(v_position), dFdy(v_position)));
+    if (dot(normal, pc.dlight.xyz - v_position) < 0.0)
+        normal = -normal;
+    int reflection_debug = int(clamp(floor(pc.rt_params.w + 0.5), 0.0, 7.0));
+    vec3 reflection_view = normalize(pc.dlight.xyz - v_position);
+    float reflection_ndotv = max(dot(normal, reflection_view), 0.0);
+    float reflection_fresnel = pow(1.0 - reflection_ndotv, 1.5);
+    vec3 reflected_view = normalize(reflect(-reflection_view, normal));
+    float reflection_key = pow(max(dot(reflected_view,
+        normalize(vec3(0.45, 0.30, 0.84))), 0.0), 6.0);
+    float reflection_fill = pow(max(dot(reflected_view,
+        normalize(vec3(-0.55, -0.12, 0.83))), 0.0), 5.0);
+    float reflection_response = 0.05 + 0.34 * reflection_key +
+        0.20 * reflection_fill + 0.08 * reflection_fresnel;
+    if (reflection_debug == 4) {
+        out_color = vec4(vec3(pc.rt_params.z), 1.0);
+        out_bloom = vec4(0.0);
+        return;
+    }
+    if (reflection_debug == 5) {
+        out_color = vec4(vec3(reflection_response * pc.rt_params.z * 4.0), 1.0);
+        out_bloom = vec4(0.0);
+        return;
+    }
+    if (reflection_debug == 6) {
+        out_color = vec4(vec3(reflection_response * pc.rt_params.z * 4.0), 1.0);
+        out_bloom = vec4(0.0);
+        return;
+    }
     vec3 lm = pc.lm_scale.x < 0.0 ? vec3(1.0) :
         texture(lm_sampler, v_lmuv).rgb;
     vec4 static_lighting = surface_info.z != 0u ?
@@ -382,6 +410,39 @@ void main()
         const vec3 luma_weights = vec3(0.2126, 0.7152, 0.0722);
         vec3 raster_rgb = texel.rgb *
             max(base_lighting + dynamic_lighting, vec3(0.0));
+        float reflection_surface_mask = 1.0;
+#ifdef RT_GLOWMAP
+        float glow_luma = dot(glow.rgb, vec3(0.2126, 0.7152, 0.0722));
+        reflection_surface_mask = 1.0 - smoothstep(0.08, 0.35, glow_luma);
+#endif
+        if (pc.rt_params.z > 0.001) {
+            float surface_luma = dot(raster_rgb, luma_weights);
+            vec3 metallic_surface = mix(raster_rgb, vec3(surface_luma), 0.55);
+            vec3 environment_tint = vec3(0.10, 0.16, 0.25) * reflection_key +
+                                    vec3(0.18, 0.12, 0.08) * reflection_fill;
+            vec3 tint = clamp(metallic_surface * 0.78 + environment_tint +
+                               max(dynamic_lighting + surface_lighting, vec3(0.0)),
+                               vec3(0.0), vec3(1.0));
+            vec3 highlight = tint *
+                (pc.rt_params.z * reflection_response * 0.75 *
+                 reflection_surface_mask);
+            float highlight_luma = dot(highlight, luma_weights);
+            float cap = max(surface_luma * 0.20, 0.035);
+            highlight *= min(1.0, cap / max(highlight_luma, 0.000001));
+            raster_rgb += highlight;
+            float bloom_weight = smoothstep(0.01, 0.04, highlight_luma);
+            bloom += highlight * bloom_weight * 0.35;
+            if (reflection_debug == 7) {
+                out_color = vec4(0.08 + clamp(highlight * 6.0, 0.0, 0.92), 1.0);
+                out_bloom = vec4(0.0);
+                return;
+            }
+        }
+        if (reflection_debug == 7) {
+            out_color = vec4(0.08, 0.08, 0.08, 1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
         float raster_luma = dot(raster_rgb, luma_weights);
         vec3 emissive_pool = max(texel.rgb * surface_lighting, vec3(0.0));
         float pool_luma = dot(emissive_pool, luma_weights);
@@ -399,7 +460,9 @@ void main()
         }
         out_color = texel;
         out_color.rgb = max(raster_rgb + emissive_add, vec3(0.0));
-        out_color.a *= v_color.a;
+        // Scene alpha carries material reflection strength. The secondary
+        // MRT alpha carries roughness while its RGB remains bloom.
+        out_color.a = pc.rt_params.z;
         if (pc.intensity < 0.0) {
             out_color.rgb *= (out_color.r + out_color.g + out_color.b) / 3.0;
             out_color.rgb *= v_color.a;
@@ -436,5 +499,5 @@ void main()
         out_color.rgb = mix(out_color.rgb, pc.fog.rgb, fog);
         bloom *= 1.0 - fog;
     }
-    out_bloom = vec4(bloom, out_color.a);
+    out_bloom = vec4(bloom, v_color.a);
 }

@@ -792,11 +792,33 @@ vk_rt_emissive::
     0.35; 0 removes colored pools and static RT bloom while the shared atlas
     remains available for ambient occlusion.
 
+vk_rt_reflections::
+    Controls half-resolution screen-space reflections on floors and grazing
+    walls, clamped between 0 and 1. Eight depth-march steps keep the effect
+    affordable; objects outside the screen or hidden behind other geometry
+    cannot be reflected. Requires multisampling 1x. Default value is 0.35;
+    value 0 disables it.
+
+materials/rt_reflections.mat::
+    Optional exact-name reflection allowlist used by the Vulkan SSR pass.
+    When present, unlisted textures do not reflect. Entries use a Q2RTX-style
+    block with `reflect` and `roughness` values clamped between 0 and 1:
+
+    textures/base_floor:
+        reflect 0.85
+        roughness 0.35
+
+    The existing `textures/<name>.mat` footstep files and Q2RTX
+    `materials/baseq2.mat` are not parsed for SSR.
+
 vk_rt_debug::
     Visualizes the static ray-tracing atlas on BSP world surfaces. Value 1
     shows atlas coverage, 2 shows decoded ambient occlusion, and 3 shows
-    amplified visibility-weighted emitter radiance. Value 0 restores normal
-    rendering. This
+    amplified visibility-weighted emitter radiance. Value 4 shows the SSR
+    strength, 5 shows the reconstructed surface mask (green is reflective),
+    6 shows ray hits in blue and misses in brown, and 7 shows only the final
+    reflection contribution. Value 0 restores
+    normal rendering. This
     diagnostic is applied immediately, does not rebake the map, and adds no
     work while disabled. Default value is 0.
 
