@@ -8839,6 +8839,7 @@ static bool vk_ssr_enabled_for_frame(void)
     return vk.ssr_ready && vk.raytracing_active && vk_raytracing &&
         vk_raytracing->integer && vk_rt_reflections &&
         vk_rt_reflections->value > 0.001f && vk.fd_valid &&
+        (!vk_rt_debug || vk_rt_debug->integer != 8) &&
         !(vk.fd.rdflags & RDF_NOWORLDMODEL);
 #else
     return false;
@@ -10395,12 +10396,16 @@ static void vk_world_rt_params(float *params, bool pixel_world,
                 Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f) : 0.0f;
             params[1] = vk_rt_ao ?
                 Cvar_ClampValue(vk_rt_ao, 0.0f, 0.5f) : 0.0f;
+            if (requested_debug == 8)
+                params[1] = -8.0f;
             params[2] = packed_material;
         }
     } else if (vk.raytracing_active && world_entity) {
         // This position aliases rt_enabled in vk_world_lit_push_t.
         params[0] = requested_debug >= 1 && requested_debug <= 3 ?
             -(float)requested_debug : 1.0f;
+        if (requested_debug == 8)
+            params[1] = -8.0f;
         params[2] = packed_material;
     }
 #else
@@ -15914,7 +15919,9 @@ static void vk_render_ssr(void)
         .projection = { proj[0], proj[5], proj[10], proj[14] },
         .control = {
             vk_rt_reflections ? Cvar_ClampValue(vk_rt_reflections, 0.0f, 1.0f) : 0.0f,
-            vk_rt_debug ? Cvar_ClampInteger(vk_rt_debug, 0, 7) : 0.0f,
+            vk_rt_debug && vk_rt_debug->integer >= 4 &&
+                vk_rt_debug->integer <= 7 ?
+                (float)vk_rt_debug->integer : 0.0f,
             1.0f / max((float)vk.scene_texture.width, 1.0f),
             1.0f / max((float)vk.scene_texture.height, 1.0f),
         },

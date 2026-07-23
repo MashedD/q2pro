@@ -47,9 +47,11 @@ vec3 dynamic_light(vec3 normal, float reflectivity, float roughness,
     vec3 light = vec3(0.0);
     specular = vec3(0.0);
     vec3 view_dir = normalize(pc.dlight.xyz - v_position);
-    float exponent = mix(96.0, 8.0, roughness);
+    float gloss = 1.0 - roughness;
+    float exponent = mix(4.0, 60.0, pow(gloss, 1.1));
+    float lobe_normalization = mix(0.80, 1.85, gloss);
     float specular_scale = reflectivity * pc.rt_params.w *
-        mix(0.72, 0.22, roughness);
+        mix(1.30, 0.68, roughness) * lobe_normalization;
     for (int i = 0; i < 3; i++) {
         float range = pc.dlight_origins[i].w;
         if (range <= 0.0)
@@ -90,11 +92,12 @@ void main()
     if (dot(normal, pc.dlight.xyz - v_position) < 0.0)
         normal = -normal;
     int rt_debug = pc.rt_params.x < 0.0 ?
-        int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) : 0;
+        int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
+        (pc.rt_params.y < -7.5 ? 8 : 0);
     vec2 material = material_params(pc.rt_params.z);
     float material_reflect = material.x;
     float material_roughness = material.y;
-    if (rt_debug != 0) {
+    if (rt_debug >= 1 && rt_debug <= 3) {
         out_color = rt_debug == 1 ? vec4(1.0) : vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
@@ -112,6 +115,12 @@ void main()
         vec3 dynamic_specular;
         vec3 dynamic = dynamic_light(normal, material_reflect,
                                      material_roughness, dynamic_specular);
+        if (rt_debug == 8) {
+            out_color = vec4(clamp(dynamic_specular *
+                vec3(0.0, 8.0, 8.0), 0.0, 1.0), 1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
         out_color.rgb *= clamp(v_color.rgb + dynamic, 0.0, 1.0);
         vec3 raster_surface = out_color.rgb;
         if (material_reflect > 0.001 && pc.rt_params.w > 0.001) {
@@ -119,7 +128,7 @@ void main()
             float surface_luma = dot(raster_surface, luma_weights);
             vec3 highlight = dynamic_specular;
             float highlight_luma = dot(highlight, luma_weights);
-            float cap = min(max(surface_luma * 0.16, 0.025), 0.10);
+            float cap = min(max(surface_luma * 0.22, 0.035), 0.14);
             highlight *= min(1.0, cap / max(highlight_luma, 0.000001));
             highlight_luma = dot(highlight, luma_weights);
             out_color.rgb += highlight;

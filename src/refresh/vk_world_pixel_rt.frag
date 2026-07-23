@@ -71,9 +71,11 @@ vec3 dynamic_light(vec3 normal, float reflectivity, float roughness,
     vec3 light = vec3(0.0);
     specular = vec3(0.0);
     vec3 view_dir = normalize(pc.dlight.xyz - v_position);
-    float exponent = mix(96.0, 8.0, roughness);
+    float gloss = 1.0 - roughness;
+    float exponent = mix(4.0, 60.0, pow(gloss, 1.1));
+    float lobe_normalization = mix(0.80, 1.85, gloss);
     float specular_scale = reflectivity * pc.rt_params.w *
-        mix(0.72, 0.22, roughness);
+        mix(1.30, 0.68, roughness) * lobe_normalization;
     for (int i = 0; i < 3; i++) {
         float range = pc.dlight_origins[i].w;
         if (range <= 0.0)
@@ -226,16 +228,19 @@ vec3 surface_specular(vec3 normal, vec3 baked_light,
     if (surface_info.z == 0u || reflectivity <= 0.001 ||
         pc.rt_params.w <= 0.001)
         return vec3(0.0);
-    float baked_gate = smoothstep(0.002, 0.045,
+    float baked_gate = smoothstep(0.001, 0.020,
         dot(baked_light, vec3(0.2126, 0.7152, 0.0722)));
     if (baked_gate <= 0.001)
         return vec3(0.0);
 
     uint candidate_count = min(v_rt_data.y & 0xffu, 2u);
     vec3 view_dir = normalize(pc.dlight.xyz - v_position);
-    float exponent = mix(96.0, 8.0, roughness);
+    float gloss = 1.0 - roughness;
+    float exponent = mix(4.0, 60.0, pow(gloss, 1.1));
+    float lobe_normalization = mix(0.80, 1.85, gloss);
+    float visibility_gate = 0.35 + 0.65 * sqrt(baked_gate);
     float scale = reflectivity * pc.rt_params.w *
-        mix(0.58, 0.16, roughness) * baked_gate;
+        mix(1.20, 0.62, roughness) * lobe_normalization * visibility_gate;
     float emissive = clamp(pc.rt_params.x, 0.0, 2.0);
     float strength_scale = pow(emissive, 0.75) * 1.5;
     vec3 specular = vec3(0.0);
@@ -402,8 +407,9 @@ void main()
 
     vec3 bloom = vec3(0.0);
     int rt_debug = pc.rt_params.x < 0.0 ?
-        int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) : 0;
-    if (rt_debug != 0) {
+        int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
+        (pc.rt_params.y < -7.5 ? 8 : 0);
+    if (rt_debug >= 1 && rt_debug <= 3) {
         if (rt_debug == 1)
             out_color = vec4(vec3(static_coverage), 1.0);
         else if (rt_debug == 2)
@@ -444,6 +450,15 @@ void main()
                                          dynamic_specular);
         surface_lighting = surface_light(normal, static_lighting.rgb);
 #endif
+        vec3 static_specular = surface_specular(normal,
+            static_lighting.rgb, material_reflect, material_roughness);
+        if (rt_debug == 8) {
+            vec3 diagnostic = dynamic_specular * vec3(0.0, 8.0, 8.0) +
+                              static_specular * vec3(8.0, 4.5, 0.0);
+            out_color = vec4(clamp(diagnostic, 0.0, 1.0), 1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
         surface_lighting *= mix(1.0, ao, 0.75);
 #ifdef RT_GLOWMAP
         lm = mix(lm, vec3(1.0), glow.a);
@@ -467,12 +482,10 @@ void main()
 #endif
         if (material_reflect > 0.001 && pc.rt_params.w > 0.001) {
             float surface_luma = dot(raster_rgb, luma_weights);
-            vec3 static_specular = surface_specular(normal,
-                static_lighting.rgb, material_reflect, material_roughness);
             vec3 highlight = (dynamic_specular + static_specular) *
                              reflection_surface_mask;
             float highlight_luma = dot(highlight, luma_weights);
-            float cap = min(max(surface_luma * 0.16, 0.025), 0.10);
+            float cap = min(max(surface_luma * 0.22, 0.035), 0.14);
             highlight *= min(1.0, cap / max(highlight_luma, 0.000001));
             highlight_luma = dot(highlight, luma_weights);
             raster_rgb += highlight;

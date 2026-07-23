@@ -807,8 +807,10 @@ vk_rt_specular::
     ray-shadow or baked-emissive visibility and adds no ray queries. It does
     not add an environment term, so surfaces without a suitable light remain
     unchanged even at value 1. Reflection strength and roughness come from
-    `materials/rt_reflections.mat`; smooth materials receive focused glints
-    while rough materials receive broader, weaker highlights. Changes apply
+    `materials/rt_reflections.mat`; a 4-to-60 roughness-shaped,
+    energy-normalized lobe
+    gives smooth materials focused glints and rough materials broader visible
+    highlights. Changes apply
     immediately. Default value is 0.45; value 0 disables the highlights
     without disabling screen-space reflections.
 
@@ -832,7 +834,9 @@ vk_rt_debug::
     amplified visibility-weighted emitter radiance. Value 4 shows the SSR
     strength, 5 shows the reconstructed surface mask (green is reflective),
     6 shows ray hits in blue and misses in brown, and 7 shows only the final
-    reflection contribution. Value 0 restores
+    resolved reflection contribution. Value 8 disables SSR and shows only
+    amplified specular: dynamic-light highlights are cyan and baked-emitter
+    highlights are amber. Value 0 restores
     normal rendering. This
     diagnostic is applied immediately, does not rebake the map, and adds no
     work while disabled. Default value is 0.
