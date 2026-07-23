@@ -72,7 +72,7 @@ vec3 dynamic_light(vec3 normal, float reflectivity, float roughness,
     specular = vec3(0.0);
     vec3 view_dir = normalize(pc.dlight.xyz - v_position);
     float gloss = 1.0 - roughness;
-    float exponent = mix(4.0, 60.0, pow(gloss, 1.1));
+    float exponent = mix(10.0, 96.0, pow(gloss, 0.9));
     float lobe_normalization = mix(0.80, 1.85, gloss);
     float specular_scale = reflectivity * pc.rt_params.w *
         mix(1.30, 0.68, roughness) * lobe_normalization;
@@ -222,14 +222,10 @@ vec3 surface_light(vec3 normal, vec3 baked_light)
     return light;
 }
 
-vec3 surface_specular(vec3 normal, vec3 baked_light,
-                      float reflectivity, float roughness)
+vec3 surface_specular(vec3 normal, float reflectivity, float roughness)
 {
     if (surface_info.z == 0u || reflectivity <= 0.001 ||
         pc.rt_params.w <= 0.001)
-        return vec3(0.0);
-    float baked_visibility = dot(baked_light, vec3(0.2126, 0.7152, 0.0722));
-    if (baked_visibility <= 0.0005)
         return vec3(0.0);
 
     uint candidate_count = min(v_rt_data.y & 0xffu, 4u);
@@ -448,8 +444,8 @@ void main()
                                          dynamic_specular);
         surface_lighting = surface_light(normal, static_lighting.rgb);
 #endif
-        vec3 static_specular = surface_specular(normal,
-            static_lighting.rgb, material_reflect, material_roughness);
+        vec3 static_specular = surface_specular(normal, material_reflect,
+                                                material_roughness);
         if (rt_debug == 8) {
             vec3 diagnostic = dynamic_specular * vec3(0.0, 8.0, 8.0) +
                               static_specular * vec3(8.0, 4.5, 0.0);

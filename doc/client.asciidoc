@@ -804,13 +804,15 @@ vk_rt_reflections::
 vk_rt_specular::
     Controls material-aware highlights from dynamic lights and nearby emissive
     `SURF_LIGHT` surfaces, clamped between 0 and 1. The effect reuses existing
-    ray-shadow or baked-emissive visibility and adds no ray queries. It does
+    candidate lists and smooth source falloff and adds no ray queries. It does
     not add an environment term, so surfaces without a suitable light remain
     unchanged even at value 1. Reflection strength and roughness come from
-    `materials/rt_reflections.mat`; a 4-to-60 roughness-shaped,
-    energy-normalized lobe
-    gives smooth materials focused glints and rough materials broader visible
-    highlights. Changes apply
+    `materials/rt_reflections.mat`; a 10-to-96 roughness-shaped,
+    energy-normalized lobe gives smooth materials focused glints and rough
+    materials broader visible highlights. Nearby emissive candidates are
+    shared across geometry-connected coplanar surface islands, including BSP
+    T-junctions, so highlights remain continuous across polygon boundaries.
+    Changes apply
     immediately. Default value is 0.45; value 0 disables the highlights
     without disabling screen-space reflections.
 

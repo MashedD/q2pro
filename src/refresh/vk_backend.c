@@ -13673,6 +13673,85 @@ static bool vk_surface_faces_are_coplanar(const mface_t *first,
         fabsf(first_dist - second_dist) < 0.1f;
 }
 
+static bool vk_surface_bounds_touch(const vec3_t first_mins,
+                                    const vec3_t first_maxs,
+                                    const vec3_t second_mins,
+                                    const vec3_t second_maxs)
+{
+    const float tolerance = 0.25f;
+    for (int axis = 0; axis < 3; axis++) {
+        if (first_maxs[axis] + tolerance < second_mins[axis] ||
+            second_maxs[axis] + tolerance < first_mins[axis])
+            return false;
+    }
+    return true;
+}
+
+static bool vk_surface_segments_overlap(const vec3_t first_start,
+                                        const vec3_t first_end,
+                                        const vec3_t second_start,
+                                        const vec3_t second_end)
+{
+    const float tolerance = 0.25f;
+    vec3_t first_direction, second_direction;
+    VectorSubtract(first_end, first_start, first_direction);
+    VectorSubtract(second_end, second_start, second_direction);
+    float first_length = VectorLength(first_direction);
+    float second_length = VectorLength(second_direction);
+    if (first_length <= tolerance || second_length <= tolerance)
+        return false;
+    VectorScale(first_direction, 1.0f / first_length, first_direction);
+    VectorScale(second_direction, 1.0f / second_length, second_direction);
+    if (fabsf(DotProduct(first_direction, second_direction)) < 0.9999f)
+        return false;
+
+    vec3_t delta, rejection;
+    VectorSubtract(second_start, first_start, delta);
+    VectorMA(delta, -DotProduct(delta, first_direction),
+             first_direction, rejection);
+    if (VectorLength(rejection) > tolerance)
+        return false;
+    VectorSubtract(second_end, first_start, delta);
+    VectorMA(delta, -DotProduct(delta, first_direction),
+             first_direction, rejection);
+    if (VectorLength(rejection) > tolerance)
+        return false;
+
+    VectorSubtract(second_start, first_start, delta);
+    float second_first = DotProduct(delta, first_direction);
+    VectorSubtract(second_end, first_start, delta);
+    float second_last = DotProduct(delta, first_direction);
+    float second_min = min(second_first, second_last);
+    float second_max = max(second_first, second_last);
+    float overlap = min(first_length, second_max) - max(0.0f, second_min);
+    return overlap >= tolerance;
+}
+
+static bool vk_surface_boundaries_touch(const vk_world_face_t *first,
+                                        const vk_world_face_t *second,
+                                        const vk_vertex_t *vertices)
+{
+    for (uint32_t i = 0; i < first->edge_count; i++) {
+        const vec3_t first_start = {
+            vertices[first->first_vertex + i].position[0],
+            vertices[first->first_vertex + i].position[1],
+            vertices[first->first_vertex + i].position[2],
+        };
+        const float *first_end = vertices[first->first_vertex +
+            (i + 1) % first->edge_count].position;
+        for (uint32_t j = 0; j < second->edge_count; j++) {
+            const float *second_start =
+                vertices[second->first_vertex + j].position;
+            const float *second_end = vertices[second->first_vertex +
+                (j + 1) % second->edge_count].position;
+            if (vk_surface_segments_overlap(first_start, first_end,
+                                            second_start, second_end))
+                return true;
+        }
+    }
+    return false;
+}
+
 static void vk_build_surface_lights(const bsp_t *bsp,
                                     vk_world_face_t *faces, uint32_t face_count,
                                     const vk_vertex_t *vertices)
@@ -13758,13 +13837,33 @@ static void vk_build_surface_lights(const bsp_t *bsp,
         Z_Mallocz(sizeof(*island_offsets) * face_count) : NULL;
     byte *island_lights = face_count ?
         Z_Mallocz(sizeof(*island_lights) * face_count) : NULL;
+    vec3_t *face_mins = face_count ?
+        Z_Malloc(sizeof(*face_mins) * face_count) : NULL;
+    vec3_t *face_maxs = face_count ?
+        Z_Malloc(sizeof(*face_maxs) * face_count) : NULL;
+    uint64_t island_start = vk_time_usec();
 
     for (uint32_t i = 0; i < face_count; i++) {
         parents[i] = i;
         eligible[i] = vk_surface_island_eligible(bsp, &faces[i]);
+        if (!eligible[i])
+            continue;
+        for (uint32_t k = 0; k < faces[i].edge_count; k++) {
+            const float *point = vertices[faces[i].first_vertex + k].position;
+            if (!k) {
+                VectorCopy(point, face_mins[i]);
+                VectorCopy(point, face_maxs[i]);
+            } else {
+                for (int axis = 0; axis < 3; axis++) {
+                    face_mins[i][axis] = min(face_mins[i][axis], point[axis]);
+                    face_maxs[i][axis] = max(face_maxs[i][axis], point[axis]);
+                }
+            }
+        }
     }
     for (int i = 0; i < bsp->numedges; i++)
         edge_owners[i] = UINT32_MAX;
+    uint32_t exact_unions = 0;
     for (uint32_t i = 0; i < face_count; i++) {
         if (!eligible[i])
             continue;
@@ -13775,24 +13874,44 @@ static void vk_build_surface_lights(const bsp_t *bsp,
             if (owner == UINT32_MAX) {
                 edge_owners[edge] = i;
             } else if (vk_surface_faces_are_coplanar(faces[owner].face, face)) {
+                if (vk_surface_island_find(parents, owner) !=
+                    vk_surface_island_find(parents, i))
+                    exact_unions++;
                 vk_surface_island_union(parents, ranks, owner, i);
             }
+        }
+    }
+
+    uint32_t geometry_unions = 0;
+    for (uint32_t i = 0; i < face_count; i++) {
+        if (!eligible[i])
+            continue;
+        for (uint32_t j = i + 1; j < face_count; j++) {
+            if (!eligible[j] ||
+                vk_surface_island_find(parents, i) ==
+                    vk_surface_island_find(parents, j) ||
+                !vk_surface_faces_are_coplanar(faces[i].face, faces[j].face) ||
+                !vk_surface_bounds_touch(face_mins[i], face_maxs[i],
+                                         face_mins[j], face_maxs[j]) ||
+                !vk_surface_boundaries_touch(&faces[i], &faces[j], vertices))
+                continue;
+            vk_surface_island_union(parents, ranks, i, j);
+            geometry_unions++;
         }
     }
     for (uint32_t i = 0; i < face_count; i++) {
         if (!eligible[i])
             continue;
         uint32_t root = vk_surface_island_find(parents, i);
-        for (uint32_t k = 0; k < faces[i].edge_count; k++) {
-            const float *point = vertices[faces[i].first_vertex + k].position;
-            if (!island_faces[root] && k == 0) {
-                VectorCopy(point, island_mins[root]);
-                VectorCopy(point, island_maxs[root]);
-            } else {
-                for (int axis = 0; axis < 3; axis++) {
-                    island_mins[root][axis] = min(island_mins[root][axis], point[axis]);
-                    island_maxs[root][axis] = max(island_maxs[root][axis], point[axis]);
-                }
+        if (!island_faces[root]) {
+            VectorCopy(face_mins[i], island_mins[root]);
+            VectorCopy(face_maxs[i], island_maxs[root]);
+        } else {
+            for (int axis = 0; axis < 3; axis++) {
+                island_mins[root][axis] = min(island_mins[root][axis],
+                                              face_mins[i][axis]);
+                island_maxs[root][axis] = max(island_maxs[root][axis],
+                                              face_maxs[i][axis]);
             }
         }
         island_faces[root]++;
@@ -13854,14 +13973,19 @@ static void vk_build_surface_lights(const bsp_t *bsp,
         faces[i].rt_light_count = island_lights[root];
     }
     vk.world.surface_light_indices = indices;
-    Com_DPrintf("Vulkan RT surface lights: %u, islands %u, faces avg %.1f max %u, candidates max %u selected %u\n",
+    double island_msec = (vk_time_usec() - island_start) / 1000.0;
+    Com_DPrintf("Vulkan RT surface lights: %u, islands %u, faces avg %.1f max %u, candidates max %u selected %u; unions %u exact + %u geometric, %.2f ms\n",
                 vk.world.surface_light_count,
                 island_count,
                 island_count ? (double)island_face_total / island_count : 0.0,
                 island_face_max,
-                candidate_max, selected_max);
+                candidate_max, selected_max, exact_unions, geometry_unions,
+                island_msec);
     (void)island_count;
     (void)island_face_total;
+    (void)exact_unions;
+    (void)geometry_unions;
+    (void)island_msec;
     Z_Free(parents);
     Z_Free(ranks);
     Z_Free(eligible);
@@ -13871,6 +13995,8 @@ static void vk_build_surface_lights(const bsp_t *bsp,
     Z_Free(island_faces);
     Z_Free(island_offsets);
     Z_Free(island_lights);
+    Z_Free(face_mins);
+    Z_Free(face_maxs);
 }
 
 static bool vk_upload_surface_light_storage(void)
