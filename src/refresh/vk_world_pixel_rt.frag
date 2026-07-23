@@ -459,10 +459,8 @@ void main()
                 max(vec3(1.0) - raster_rgb, vec3(0.0));
         }
         out_color = texel;
+        out_color.a *= v_color.a;
         out_color.rgb = max(raster_rgb + emissive_add, vec3(0.0));
-        // Scene alpha carries material reflection strength. The secondary
-        // MRT alpha carries roughness while its RGB remains bloom.
-        out_color.a = pc.rt_params.z;
         if (pc.intensity < 0.0) {
             out_color.rgb *= (out_color.r + out_color.g + out_color.b) / 3.0;
             out_color.rgb *= v_color.a;
@@ -499,5 +497,6 @@ void main()
         out_color.rgb = mix(out_color.rgb, pc.fog.rgb, fog);
         bloom *= 1.0 - fog;
     }
-    out_bloom = vec4(bloom, v_color.a);
+    out_bloom = vec4(bloom,
+        (v_color.a > 0.99 && v_mode < 4.0) ? pc.rt_params.z : 0.0);
 }

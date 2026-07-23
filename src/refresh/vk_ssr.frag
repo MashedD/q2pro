@@ -37,7 +37,7 @@ void main()
         out_color = vec4(0.0);
         return;
     }
-    float material_reflect = texture(scene_sampler, v_uv).a;
+    float material_reflect = texture(material_sampler, v_uv).a;
     if (material_reflect <= 0.001) {
         out_color = vec4(0.0);
         return;

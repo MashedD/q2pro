@@ -105,3 +105,32 @@ textures/e2u1/metal36_4:
 textures/e3u1/metal2_1:
 	reflect 0.40
 	roughness 0.48
+
+// Translucent liquids: keep native warp/transparency and exclude from SSR.
+textures/water:
+	reflect 0.0
+	roughness 1.0
+
+textures/water1:
+	reflect 0.0
+	roughness 1.0
+
+textures/water2:
+	reflect 0.0
+	roughness 1.0
+
+textures/lava:
+	reflect 0.0
+	roughness 1.0
+
+textures/brlava:
+	reflect 0.0
+	roughness 1.0
+
+textures/tlava1_3:
+	reflect 0.0
+	roughness 1.0
+
+textures/slime:
+	reflect 0.0
+	roughness 1.0

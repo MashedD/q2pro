@@ -9862,6 +9862,10 @@ static float vk_world_face_alpha(const mface_t *face)
         return 0.33f;
     if (face->drawflags & SURF_TRANS66)
         return 0.66f;
+    // Warp liquids are opaque textures by default, but their surface is
+    // meant to be viewed as a translucent volume (water/lava/slime).
+    if (face->drawflags & SURF_WARP)
+        return 0.66f;
     return 1.0f;
 }
 
@@ -9877,7 +9881,7 @@ static bool vk_world_face_backfacing(const mface_t *face, const vec3_t vieworg)
 
 static bool vk_world_face_in_pass(const mface_t *face, vk_world_pass_t pass)
 {
-    bool translucent = face->drawflags & SURF_TRANS_MASK;
+    bool translucent = face->drawflags & (SURF_TRANS_MASK | SURF_WARP);
 
     if (pass == VK_WORLD_ENTITY_ALPHA)
         return true;
@@ -10284,6 +10288,8 @@ static void vk_world_rt_params(float *params, bool pixel_world,
 #if USE_VULKAN_RAYTRACING
     float material_reflect, material_roughness;
     vk_world_material(face, &material_reflect, &material_roughness);
+    if (vk.world.rt_material_file_loaded)
+        material_reflect *= 1.0f - 0.65f * material_roughness;
     if (pixel_world) {
         int debug = (int)params[3];
         if (debug >= 1 && debug <= 3) {
@@ -10579,12 +10585,6 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     push.lm_scale[0] = 1.0f;
                     push.lm_scale[1] = pixel_world ? 1.0f : 0.0f;
                     vk_world_rt_params(push.rt_params, pixel_world, !ent, face->face);
-                    if (!ent) {
-                        float material_reflect, material_roughness;
-                        vk_world_material(face->face, &material_reflect,
-                                          &material_roughness);
-                        push.color[3] = material_roughness;
-                    }
                 }
                 for (uint32_t k = 0; k < face->edge_count - 2; k++) {
                     vk.world.batch_index_data[group_count++] = face->first_vertex;
@@ -10667,12 +10667,6 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 push.lm_scale[1] = 0.0f;
             }
             vk_world_rt_params(push.rt_params, pixel_world, !ent, face->face);
-            if (!ent) {
-                float material_reflect, material_roughness;
-                vk_world_material(face->face, &material_reflect,
-                                  &material_roughness);
-                push.color[3] = material_roughness;
-            }
             if (pixel_world)
                 vk_push_pixel_world_constants(cmd, sizeof(push), &push);
             else

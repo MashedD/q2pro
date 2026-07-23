@@ -96,6 +96,7 @@ void main()
         out_color = v_color;
     } else {
         out_color = texture(tex_sampler, uv);
+        out_color.a *= v_color.a;
         if (pc.desaturation > 0.0) {
             float luma = dot(out_color.rgb, vec3(0.2126, 0.7152, 0.0722));
             out_color.rgb = mix(out_color.rgb, vec3(luma), pc.desaturation);
@@ -129,10 +130,10 @@ void main()
             out_color = vec4(0.08, 0.08, 0.08, 1.0);
             return;
         }
-        // Scene alpha carries the material reflection allowlist value;
-        // the secondary MRT alpha carries roughness for SSR.
-        out_color.a = pc.rt_params.z;
-        out_bloom.a = v_color.a;
+        // Preserve scene alpha for normal translucency. Material eligibility
+        // is carried separately in the secondary MRT alpha.
+        out_bloom.a = (v_color.a > 0.99 && v_mode < 4.0) ?
+            pc.rt_params.z : 0.0;
     }
 
     if (pc.fog.a < 0.0) {
