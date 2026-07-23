@@ -59,9 +59,21 @@ float trace_hit_distance(vec3 origin, vec3 direction, float max_distance)
     return rayQueryGetIntersectionTEXT(query, true);
 }
 
-vec3 dynamic_light(vec3 normal)
+vec2 material_params(float packed)
+{
+    float bits = floor(clamp(packed, 0.0, 1.0) * 255.0 + 0.5);
+    return vec2(floor(bits / 16.0), mod(bits, 16.0)) / 15.0;
+}
+
+vec3 dynamic_light(vec3 normal, float reflectivity, float roughness,
+                   out vec3 specular)
 {
     vec3 light = vec3(0.0);
+    specular = vec3(0.0);
+    vec3 view_dir = normalize(pc.dlight.xyz - v_position);
+    float exponent = mix(96.0, 8.0, roughness);
+    float specular_scale = reflectivity * pc.rt_params.w *
+        mix(0.72, 0.22, roughness);
     for (int i = 0; i < 3; i++) {
         float range = pc.dlight_origins[i].w;
         if (range <= 0.0)
@@ -77,9 +89,9 @@ vec3 dynamic_light(vec3 normal)
                 max(pc.dlight_colors[i].g, pc.dlight_colors[i].b)) *
             energy < 0.01)
             continue;
-        float hit_distance = trace_hit_distance(
-            v_position + oriented_normal * 0.05,
-            delta / max(distance_to_light, 0.001), distance_to_light);
+        vec3 light_dir = delta / max(distance_to_light, 0.001);
+        float hit_distance = trace_hit_distance(v_position + oriented_normal * 0.05,
+                                                light_dir, distance_to_light);
         float visibility = 1.0;
         if (hit_distance >= 0.0) {
             float blocker_ratio = hit_distance / max(distance_to_light, 0.001);
@@ -87,7 +99,18 @@ vec3 dynamic_light(vec3 normal)
                 smoothstep(0.15, 0.85, blocker_ratio));
             visibility -= shadow_opacity;
         }
-        light += pc.dlight_colors[i].rgb * energy * visibility;
+        vec3 radiance = pc.dlight_colors[i].rgb * energy * visibility;
+        light += radiance;
+        if (specular_scale > 0.001) {
+            vec3 half_dir = normalize(light_dir + view_dir);
+            float ndoth = max(dot(normal, half_dir), 0.0);
+            float ndotl = max(dot(normal, light_dir), 0.0);
+            float grazing = 0.12 + 0.88 * pow(1.0 -
+                max(dot(normal, view_dir), 0.0), 3.0);
+            specular += radiance * pow(ndoth, exponent) *
+                smoothstep(0.0, 0.20, ndotl) * specular_scale *
+                (0.65 + 0.35 * grazing);
+        }
     }
     return light;
 }
@@ -197,6 +220,46 @@ vec3 surface_light(vec3 normal, vec3 baked_light)
     return light;
 }
 
+vec3 surface_specular(vec3 normal, vec3 baked_light,
+                      float reflectivity, float roughness)
+{
+    if (surface_info.z == 0u || reflectivity <= 0.001 ||
+        pc.rt_params.w <= 0.001)
+        return vec3(0.0);
+    float baked_gate = smoothstep(0.002, 0.045,
+        dot(baked_light, vec3(0.2126, 0.7152, 0.0722)));
+    if (baked_gate <= 0.001)
+        return vec3(0.0);
+
+    uint candidate_count = min(v_rt_data.y & 0xffu, 2u);
+    vec3 view_dir = normalize(pc.dlight.xyz - v_position);
+    float exponent = mix(96.0, 8.0, roughness);
+    float scale = reflectivity * pc.rt_params.w *
+        mix(0.58, 0.16, roughness) * baked_gate;
+    float emissive = clamp(pc.rt_params.x, 0.0, 2.0);
+    float strength_scale = pow(emissive, 0.75) * 1.5;
+    vec3 specular = vec3(0.0);
+    for (uint i = 0u; i < candidate_count; ++i) {
+        uint index_offset = v_rt_data.x + i;
+        if (index_offset >= surface_info.y)
+            break;
+        uint light_index = light_indices[index_offset];
+        if (light_index >= surface_info.x || light_index >= 64u)
+            continue;
+        vec3 color, direction, oriented_normal;
+        float distance_to_light;
+        float contribution = surface_light_sample(light_index, normal,
+            color, direction, oriented_normal, distance_to_light,
+            strength_scale);
+        float ndotl = max(dot(normal, direction), 0.0);
+        vec3 half_dir = normalize(direction + view_dir);
+        float ndoth = max(dot(normal, half_dir), 0.0);
+        specular += color * contribution * pow(ndoth, exponent) *
+            smoothstep(0.0, 0.20, ndotl) * scale;
+    }
+    return specular;
+}
+
 float ambient_visibility(vec3 normal, float lightmap_weight,
                          float baked_occlusion)
 {
@@ -245,14 +308,18 @@ float quad_anchor_distance()
     return subgroupQuadBroadcast(distance(v_position, pc.dlight.xyz), 0);
 }
 
-vec3 adaptive_dynamic_light(vec3 normal, bool full_resolution)
+vec3 adaptive_dynamic_light(vec3 normal, bool full_resolution,
+                            float reflectivity, float roughness,
+                            out vec3 specular)
 {
     if (full_resolution)
-        return dynamic_light(normal);
+        return dynamic_light(normal, reflectivity, roughness, specular);
 
     vec3 light = vec3(0.0);
+    specular = vec3(0.0);
     if ((gl_SubgroupInvocationID & 3u) == 0u)
-        light = dynamic_light(normal);
+        light = dynamic_light(normal, reflectivity, roughness, specular);
+    specular = subgroupQuadBroadcast(specular, 0);
     return subgroupQuadBroadcast(light, 0);
 }
 
@@ -297,32 +364,9 @@ void main()
     vec3 normal = normalize(cross(dFdx(v_position), dFdy(v_position)));
     if (dot(normal, pc.dlight.xyz - v_position) < 0.0)
         normal = -normal;
-    int reflection_debug = int(clamp(floor(pc.rt_params.w + 0.5), 0.0, 7.0));
-    vec3 reflection_view = normalize(pc.dlight.xyz - v_position);
-    float reflection_ndotv = max(dot(normal, reflection_view), 0.0);
-    float reflection_fresnel = pow(1.0 - reflection_ndotv, 1.5);
-    vec3 reflected_view = normalize(reflect(-reflection_view, normal));
-    float reflection_key = pow(max(dot(reflected_view,
-        normalize(vec3(0.45, 0.30, 0.84))), 0.0), 6.0);
-    float reflection_fill = pow(max(dot(reflected_view,
-        normalize(vec3(-0.55, -0.12, 0.83))), 0.0), 5.0);
-    float reflection_response = 0.05 + 0.34 * reflection_key +
-        0.20 * reflection_fill + 0.08 * reflection_fresnel;
-    if (reflection_debug == 4) {
-        out_color = vec4(vec3(pc.rt_params.z), 1.0);
-        out_bloom = vec4(0.0);
-        return;
-    }
-    if (reflection_debug == 5) {
-        out_color = vec4(vec3(reflection_response * pc.rt_params.z * 4.0), 1.0);
-        out_bloom = vec4(0.0);
-        return;
-    }
-    if (reflection_debug == 6) {
-        out_color = vec4(vec3(reflection_response * pc.rt_params.z * 4.0), 1.0);
-        out_bloom = vec4(0.0);
-        return;
-    }
+    vec2 material = material_params(pc.rt_params.z);
+    float material_reflect = material.x;
+    float material_roughness = material.y;
     vec3 lm = pc.lm_scale.x < 0.0 ? vec3(1.0) :
         texture(lm_sampler, v_lmuv).rgb;
     vec4 static_lighting = surface_info.z != 0u ?
@@ -350,8 +394,10 @@ void main()
                                                 baked_occlusion);
     vec3 quad_surface_light = adaptive_surface_light(normal, full_resolution,
                                                      static_lighting.rgb);
+    vec3 quad_dynamic_specular;
     vec3 quad_dynamic_light = adaptive_dynamic_light(
-        normal, full_dynamic_resolution);
+        normal, full_dynamic_resolution, material_reflect,
+        material_roughness, quad_dynamic_specular);
 #endif
 
     vec3 bloom = vec3(0.0);
@@ -383,15 +429,19 @@ void main()
         }
         float ao = 1.0;
         vec3 dynamic_lighting;
+        vec3 dynamic_specular;
         vec3 surface_lighting;
 #ifdef RT_QUAD_SHARING
         ao = quad_ao;
         dynamic_lighting = quad_dynamic_light;
+        dynamic_specular = quad_dynamic_specular;
         surface_lighting = quad_surface_light;
 #else
         if (pc.lm_scale.x >= 0.0)
             ao = ambient_visibility(normal, ao_weight, baked_occlusion);
-        dynamic_lighting = dynamic_light(normal);
+        dynamic_lighting = dynamic_light(normal, material_reflect,
+                                         material_roughness,
+                                         dynamic_specular);
         surface_lighting = surface_light(normal, static_lighting.rgb);
 #endif
         surface_lighting *= mix(1.0, ao, 0.75);
@@ -415,33 +465,19 @@ void main()
         float glow_luma = dot(glow.rgb, vec3(0.2126, 0.7152, 0.0722));
         reflection_surface_mask = 1.0 - smoothstep(0.08, 0.35, glow_luma);
 #endif
-        if (pc.rt_params.z > 0.001) {
+        if (material_reflect > 0.001 && pc.rt_params.w > 0.001) {
             float surface_luma = dot(raster_rgb, luma_weights);
-            vec3 metallic_surface = mix(raster_rgb, vec3(surface_luma), 0.55);
-            vec3 environment_tint = vec3(0.10, 0.16, 0.25) * reflection_key +
-                                    vec3(0.18, 0.12, 0.08) * reflection_fill;
-            vec3 tint = clamp(metallic_surface * 0.78 + environment_tint +
-                               max(dynamic_lighting + surface_lighting, vec3(0.0)),
-                               vec3(0.0), vec3(1.0));
-            vec3 highlight = tint *
-                (pc.rt_params.z * reflection_response * 0.75 *
-                 reflection_surface_mask);
+            vec3 static_specular = surface_specular(normal,
+                static_lighting.rgb, material_reflect, material_roughness);
+            vec3 highlight = (dynamic_specular + static_specular) *
+                             reflection_surface_mask;
             float highlight_luma = dot(highlight, luma_weights);
-            float cap = max(surface_luma * 0.20, 0.035);
+            float cap = min(max(surface_luma * 0.16, 0.025), 0.10);
             highlight *= min(1.0, cap / max(highlight_luma, 0.000001));
+            highlight_luma = dot(highlight, luma_weights);
             raster_rgb += highlight;
             float bloom_weight = smoothstep(0.01, 0.04, highlight_luma);
             bloom += highlight * bloom_weight * 0.35;
-            if (reflection_debug == 7) {
-                out_color = vec4(0.08 + clamp(highlight * 6.0, 0.0, 0.92), 1.0);
-                out_bloom = vec4(0.0);
-                return;
-            }
-        }
-        if (reflection_debug == 7) {
-            out_color = vec4(0.08, 0.08, 0.08, 1.0);
-            out_bloom = vec4(0.0);
-            return;
         }
         float raster_luma = dot(raster_rgb, luma_weights);
         vec3 emissive_pool = max(texel.rgb * surface_lighting, vec3(0.0));

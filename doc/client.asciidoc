@@ -794,22 +794,37 @@ vk_rt_emissive::
 
 vk_rt_reflections::
     Controls half-resolution screen-space reflections on floors and grazing
-    walls, clamped between 0 and 1. Eight depth-march steps keep the effect
-    affordable; objects outside the screen or hidden behind other geometry
-    cannot be reflected. Requires multisampling 1x. Default value is 0.35;
-    value 0 disables it.
+    walls, clamped between 0 and 1. Materials use 10 to 14 adaptive half-size
+    depth-march steps followed by a full-resolution, roughness-aware bilateral
+    resolve. Strict depth crossings reject self-reflections, while continuous
+    distance and screen-edge fades avoid hard reflection boundaries. Objects
+    outside the screen or hidden behind other geometry cannot be reflected.
+    Requires multisampling 1x. Default value is 0.35; value 0 disables it.
+
+vk_rt_specular::
+    Controls material-aware highlights from dynamic lights and nearby emissive
+    `SURF_LIGHT` surfaces, clamped between 0 and 1. The effect reuses existing
+    ray-shadow or baked-emissive visibility and adds no ray queries. It does
+    not add an environment term, so surfaces without a suitable light remain
+    unchanged even at value 1. Reflection strength and roughness come from
+    `materials/rt_reflections.mat`; smooth materials receive focused glints
+    while rough materials receive broader, weaker highlights. Changes apply
+    immediately. Default value is 0.45; value 0 disables the highlights
+    without disabling screen-space reflections.
 
 materials/rt_reflections.mat::
-    Optional exact-name reflection allowlist used by the Vulkan SSR pass.
-    When present, unlisted textures do not reflect. Entries use a Q2RTX-style
-    block with `reflect` and `roughness` values clamped between 0 and 1:
+    Optional exact-name material overrides used by the Vulkan SSR and specular
+    paths. Entries use a Q2RTX-style block with independent `reflect` and
+    `roughness` values clamped between 0 and 1:
 
     textures/base_floor:
         reflect 0.85
         roughness 0.35
 
     The existing `textures/<name>.mat` footstep files and Q2RTX
-    `materials/baseq2.mat` are not parsed for SSR.
+    `materials/baseq2.mat` are not parsed for SSR. Unlisted opaque textures use
+    the renderer's conservative fallback material; warp and translucent
+    surfaces remain excluded.
 
 vk_rt_debug::
     Visualizes the static ray-tracing atlas on BSP world surfaces. Value 1

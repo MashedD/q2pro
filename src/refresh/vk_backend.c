@@ -88,6 +88,10 @@ static const uint32_t vk_ssr_frag_spv[] =
 #include "vk_ssr_frag_spv.h"
 ;
 
+static const uint32_t vk_ssr_resolve_frag_spv[] =
+#include "vk_ssr_resolve_frag_spv.h"
+;
+
 static const uint32_t vk_color3d_vert_spv[] =
 #include "vk_color3d_vert_spv.h"
 ;
@@ -528,8 +532,7 @@ typedef struct {
     float intensity;
     float desaturation;
     float lm_scale[2];
-    float rt_params[3];
-    float rt_debug;
+    float rt_params[4];
 } vk_world_pixel_push_t;
 
 typedef char vk_world_pixel_lm_scale_offset_check[
@@ -723,6 +726,7 @@ typedef struct {
     VkDescriptorSetLayout texture_set_layout;
     VkDescriptorSetLayout ssr_set_layout;
     VkDescriptorSet ssr_descriptor_set;
+    VkDescriptorSet ssr_resolve_descriptor_set;
 #if USE_VULKAN_RAYTRACING
     VkDescriptorSetLayout rt_set_layout;
     VkDescriptorSet rt_descriptor_set;
@@ -750,6 +754,7 @@ typedef struct {
     VkPipeline bloom_blur_pipeline;
     VkPipeline bloom_add_pipeline;
     VkPipeline ssr_pipeline;
+    VkPipeline ssr_resolve_pipeline;
     VkPipeline color3d_pipeline;
     VkPipeline line3d_pipeline;
     VkPipeline debug_line_pipeline;
@@ -815,6 +820,7 @@ typedef struct {
     VkFramebuffer bloom_framebuffer;
     VkFramebuffer blur_framebuffer;
     VkFramebuffer ssr_framebuffer;
+    VkFramebuffer ssr_resolve_framebuffer;
     VkImageLayout *swapchain_layouts;
     VkImageLayout scene_layout;
     VkImageLayout bloom_source_layout;
@@ -822,6 +828,7 @@ typedef struct {
     VkImageLayout blur_layout;
     VkImageLayout depth_layout;
     VkImageLayout ssr_layout;
+    VkImageLayout ssr_resolve_layout;
     VkCommandBuffer *command_buffers;
     uint32_t swapchain_image_count;
     bool swapchain_transfer_src;
@@ -853,6 +860,7 @@ typedef struct {
     vk_texture_t bloom_texture;
     vk_texture_t blur_texture;
     vk_texture_t ssr_texture;
+    vk_texture_t ssr_resolve_texture;
     vk_texture_t particle_texture;
     vk_texture_t beam_texture;
     vk_mesh_t skybox;
@@ -959,6 +967,7 @@ static cvar_t *vk_raytracing;
 static cvar_t *vk_rt_emissive;
 static cvar_t *vk_rt_ao;
 static cvar_t *vk_rt_reflections;
+static cvar_t *vk_rt_specular;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -5437,7 +5446,7 @@ static bool vk_create_frame_resources(void)
 #endif
 
     const uint32_t texture_descriptor_count =
-        MAX_RIMAGES * 2 + VK_MAX_CUBEMAPS * 6 + 14;
+        MAX_RIMAGES * 2 + VK_MAX_CUBEMAPS * 6 + 17;
     VkDescriptorPoolSize pool_sizes[3] = { {
         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount = texture_descriptor_count,
@@ -5469,17 +5478,25 @@ static bool vk_create_frame_resources(void)
         return vk_fail_result("vkCreateDescriptorPool", result);
 
     if (vk.ssr_set_layout) {
+        VkDescriptorSetLayout layouts[2] = {
+            vk.ssr_set_layout, vk.ssr_set_layout
+        };
+        VkDescriptorSet sets[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
         VkDescriptorSetAllocateInfo ssr_alloc = {
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
             .descriptorPool = vk.descriptor_pool,
-            .descriptorSetCount = 1,
-            .pSetLayouts = &vk.ssr_set_layout,
+            .descriptorSetCount = 2,
+            .pSetLayouts = layouts,
         };
         result = vk.AllocateDescriptorSets(vk.device, &ssr_alloc,
-                                            &vk.ssr_descriptor_set);
+                                            sets);
         if (result != VK_SUCCESS) {
             Com_WPrintf("Couldn't allocate Vulkan SSR descriptors; reflections will be disabled\n");
             vk.ssr_descriptor_set = VK_NULL_HANDLE;
+            vk.ssr_resolve_descriptor_set = VK_NULL_HANDLE;
+        } else {
+            vk.ssr_descriptor_set = sets[0];
+            vk.ssr_resolve_descriptor_set = sets[1];
         }
     }
 
@@ -5720,6 +5737,10 @@ static void vk_destroy_swapchain(void)
         vk.DestroyPipeline(vk.device, vk.ssr_pipeline, NULL);
         vk.ssr_pipeline = VK_NULL_HANDLE;
     }
+    if (vk.ssr_resolve_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.ssr_resolve_pipeline, NULL);
+        vk.ssr_resolve_pipeline = VK_NULL_HANDLE;
+    }
 
     if (vk.color3d_pipeline) {
         vk.DestroyPipeline(vk.device, vk.color3d_pipeline, NULL);
@@ -5924,17 +5945,23 @@ static void vk_destroy_swapchain(void)
         vk.DestroyFramebuffer(vk.device, vk.ssr_framebuffer, NULL);
         vk.ssr_framebuffer = VK_NULL_HANDLE;
     }
+    if (vk.ssr_resolve_framebuffer) {
+        vk.DestroyFramebuffer(vk.device, vk.ssr_resolve_framebuffer, NULL);
+        vk.ssr_resolve_framebuffer = VK_NULL_HANDLE;
+    }
 
     vk_destroy_texture_resource(&vk.scene_texture);
     vk_destroy_texture_resource(&vk.bloom_source_texture);
     vk_destroy_texture_resource(&vk.bloom_texture);
     vk_destroy_texture_resource(&vk.ssr_texture);
+    vk_destroy_texture_resource(&vk.ssr_resolve_texture);
     vk_destroy_texture_resource(&vk.blur_texture);
     vk.scene_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.bloom_source_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.bloom_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.blur_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.ssr_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.ssr_resolve_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.depth_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.ssr_ready = false;
 
@@ -6456,6 +6483,8 @@ static bool vk_create_scene_target(void)
         { &vk.ssr_texture, &vk.ssr_layout,
           max(vk.swapchain_extent.width / 2, 1),
           max(vk.swapchain_extent.height / 2, 1) },
+        { &vk.ssr_resolve_texture, &vk.ssr_resolve_layout,
+          vk.swapchain_extent.width, vk.swapchain_extent.height },
     };
 
     for (size_t i = 0; i < q_countof(targets); i++) {
@@ -6512,6 +6541,7 @@ static bool vk_create_scene_target(void)
         { &vk.bloom_texture, &vk.bloom_framebuffer },
         { &vk.blur_texture, &vk.blur_framebuffer },
         { &vk.ssr_texture, &vk.ssr_framebuffer },
+        { &vk.ssr_resolve_texture, &vk.ssr_resolve_framebuffer },
     };
     for (size_t i = 0; i < q_countof(post_targets); i++) {
         VkImageView attachment = post_targets[i].texture->view;
@@ -6528,8 +6558,9 @@ static bool vk_create_scene_target(void)
 
     vk.ssr_ready = false;
     if (vk.sample_count == VK_SAMPLE_COUNT_1_BIT && vk.ssr_pipeline_layout &&
-        vk.ssr_descriptor_set && vk.depth_sample_view &&
-        vk.scene_texture.view && vk.ssr_framebuffer) {
+        vk.ssr_descriptor_set && vk.ssr_resolve_descriptor_set &&
+        vk.depth_sample_view && vk.scene_texture.view && vk.ssr_framebuffer &&
+        vk.ssr_resolve_framebuffer) {
         VkDescriptorImageInfo images[3] = {
             {
                 .sampler = vk.postprocess_sampler,
@@ -6547,15 +6578,35 @@ static bool vk_create_scene_target(void)
                 .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             },
         };
-        VkWriteDescriptorSet writes[3];
+        VkDescriptorImageInfo resolve_images[3] = {
+            {
+                .sampler = vk.postprocess_sampler,
+                .imageView = vk.ssr_texture.view,
+                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            },
+            {
+                .sampler = vk.postprocess_sampler,
+                .imageView = vk.depth_sample_view,
+                .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            },
+            {
+                .sampler = vk.postprocess_sampler,
+                .imageView = vk.bloom_source_texture.view,
+                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            },
+        };
+        VkWriteDescriptorSet writes[6];
         memset(writes, 0, sizeof(writes));
-        for (uint32_t i = 0; i < q_countof(writes); i++) {
+        for (uint32_t i = 0; i < 3; i++) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = vk.ssr_descriptor_set;
             writes[i].dstBinding = i;
             writes[i].descriptorCount = 1;
             writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             writes[i].pImageInfo = &images[i];
+            writes[i + 3] = writes[i];
+            writes[i + 3].dstSet = vk.ssr_resolve_descriptor_set;
+            writes[i + 3].pImageInfo = &resolve_images[i];
         }
         vk.UpdateDescriptorSets(vk.device, q_countof(writes), writes, 0, NULL);
     }
@@ -6992,6 +7043,25 @@ static bool vk_create_ssr_pipeline(void)
     };
     VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
                                                   &info, NULL, &vk.ssr_pipeline);
+    vk.DestroyShaderModule(vk.device, frag, NULL);
+    if (result != VK_SUCCESS) {
+        vk.DestroyShaderModule(vk.device, vert, NULL);
+        return false;
+    }
+
+    frag = vk_create_shader_module(vk_ssr_resolve_frag_spv,
+                                   sizeof(vk_ssr_resolve_frag_spv));
+    if (!frag) {
+        vk.DestroyShaderModule(vk.device, vert, NULL);
+        return false;
+    }
+    stages[1].module = frag;
+    viewport.width = vk.swapchain_extent.width;
+    viewport.height = vk.swapchain_extent.height;
+    scissor.extent = vk.swapchain_extent;
+    result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
+                                         &info, NULL,
+                                         &vk.ssr_resolve_pipeline);
     vk.DestroyShaderModule(vk.device, frag, NULL);
     vk.DestroyShaderModule(vk.device, vert, NULL);
     return result == VK_SUCCESS;
@@ -8071,10 +8141,12 @@ static bool vk_create_swapchain(int width, int height)
         return false;
 
     if (vk.sample_count == VK_SAMPLE_COUNT_1_BIT && vk.ssr_pipeline_layout &&
-        vk.ssr_descriptor_set && vk.depth_sample_view && vk.ssr_framebuffer) {
+        vk.ssr_descriptor_set && vk.ssr_resolve_descriptor_set &&
+        vk.depth_sample_view && vk.ssr_framebuffer &&
+        vk.ssr_resolve_framebuffer) {
         if (vk_create_ssr_pipeline()) {
             vk.ssr_ready = true;
-            Com_Printf("Vulkan SSR: half resolution, 12 steps\n");
+            Com_Printf("Vulkan SSR: half resolution, 10-14 adaptive steps, full-resolution resolve\n");
         } else {
             Com_WPrintf("Couldn't create Vulkan SSR pipeline: %s; reflections disabled\n",
                         Com_GetLastError());
@@ -10289,37 +10361,47 @@ static void vk_world_material(const mface_t *face, float *reflect,
     }
 }
 
+static float vk_world_pack_material(float reflect, float roughness)
+{
+    // The secondary MRT alpha remains available alongside bloom RGB. Four
+    // bits per property are sufficient for broad Quake II material classes
+    // and keep reflection eligibility and roughness independent.
+    unsigned reflect_q = (unsigned)(min(max(reflect, 0.0f), 1.0f) * 15.0f + 0.5f);
+    unsigned roughness_q = (unsigned)(min(max(roughness, 0.0f), 1.0f) * 15.0f + 0.5f);
+    return (float)((reflect_q << 4) | roughness_q) / 255.0f;
+}
+
 static void vk_world_rt_params(float *params, bool pixel_world,
                                bool world_entity, const mface_t *face)
 {
     params[0] = 0.0f;
     params[1] = 0.0f;
     params[2] = 0.0f;
+    params[3] = vk_rt_specular ?
+        Cvar_ClampValue(vk_rt_specular, 0.0f, 1.0f) : 0.0f;
     int requested_debug = vk_rt_debug ? vk_rt_debug->integer : 0;
-    params[3] = requested_debug >= 1 && requested_debug <= 3 ?
-        (float)requested_debug : 0.0f;
 #if USE_VULKAN_RAYTRACING
     float material_reflect, material_roughness;
     vk_world_material(face, &material_reflect, &material_roughness);
     if (face && (face->drawflags & (SURF_TRANS_MASK | SURF_WARP)))
         material_reflect = 0.0f;
-    if (vk.world.rt_material_file_loaded)
-        material_reflect *= 1.0f - 0.65f * material_roughness;
+    float packed_material = vk_world_pack_material(material_reflect,
+                                                   material_roughness);
     if (pixel_world) {
-        int debug = (int)params[3];
-        if (debug >= 1 && debug <= 3) {
-            params[0] = -(float)debug;
+        if (requested_debug >= 1 && requested_debug <= 3) {
+            params[0] = -(float)requested_debug;
         } else {
             params[0] = vk_rt_emissive ?
                 Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f) : 0.0f;
             params[1] = vk_rt_ao ?
                 Cvar_ClampValue(vk_rt_ao, 0.0f, 0.5f) : 0.0f;
-            params[2] = material_reflect;
+            params[2] = packed_material;
         }
     } else if (vk.raytracing_active && world_entity) {
         // This position aliases rt_enabled in vk_world_lit_push_t.
-        params[0] = 1.0f;
-        params[2] = material_reflect;
+        params[0] = requested_debug >= 1 && requested_debug <= 3 ?
+            -(float)requested_debug : 1.0f;
+        params[2] = packed_material;
     }
 #else
     (void)pixel_world;
@@ -14795,6 +14877,7 @@ bool VKR_Init(bool total)
     vk_rt_emissive = Cvar_Get("vk_rt_emissive", "0.35", CVAR_ARCHIVE);
     vk_rt_ao = Cvar_Get("vk_rt_ao", "0.24", CVAR_ARCHIVE);
     vk_rt_reflections = Cvar_Get("vk_rt_reflections", "0.35", CVAR_ARCHIVE);
+    vk_rt_specular = Cvar_Get("vk_rt_specular", "0.45", CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
@@ -15852,6 +15935,33 @@ static void vk_render_ssr(void)
                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                VK_ACCESS_SHADER_READ_BIT,
                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    vk_transition_color_target(cmd, &vk.ssr_resolve_texture,
+                               &vk.ssr_resolve_layout,
+                               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    width = max(vk.ssr_resolve_texture.width, 1);
+    height = max(vk.ssr_resolve_texture.height, 1);
+    vk_begin_render_pass_sized(vk.bloom_render_pass,
+                               vk.ssr_resolve_framebuffer,
+                               black, width, height);
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                       vk.ssr_resolve_pipeline);
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.ssr_pipeline_layout, 0, 1,
+                             &vk.ssr_resolve_descriptor_set, 0, NULL);
+    vk.CmdPushConstants(cmd, vk.ssr_pipeline_layout,
+                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+    vk.CmdDraw(cmd, 6, 1, 0, 0);
+    c.trisDrawn += 2;
+    vk.CmdEndRenderPass(cmd);
+    vk.render_pass_active = false;
+    vk_reset_bind_cache();
+    vk_transition_color_target(cmd, &vk.ssr_resolve_texture,
+                               &vk.ssr_resolve_layout,
+                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                               VK_ACCESS_SHADER_READ_BIT,
+                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 }
 
 static void vk_composite_ssr(void)
@@ -15859,9 +15969,8 @@ static void vk_composite_ssr(void)
     if (!vk.frame_ssr)
         return;
     const vec4_t white = { 1, 1, 1, 1 };
-    int debug_mode = vk_rt_debug ? Cvar_ClampInteger(vk_rt_debug, 0, 7) : 0;
-    vk_draw_refdef_texture(debug_mode >= 4 ? vk.texture_pipeline :
-                          vk.bloom_add_pipeline, &vk.ssr_texture, white);
+    vk_draw_refdef_texture(vk.texture_pipeline,
+                          &vk.ssr_resolve_texture, white);
 }
 
 static void vk_finish_postprocess_scene(void)
