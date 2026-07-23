@@ -228,19 +228,17 @@ vec3 surface_specular(vec3 normal, vec3 baked_light,
     if (surface_info.z == 0u || reflectivity <= 0.001 ||
         pc.rt_params.w <= 0.001)
         return vec3(0.0);
-    float baked_gate = smoothstep(0.001, 0.020,
-        dot(baked_light, vec3(0.2126, 0.7152, 0.0722)));
-    if (baked_gate <= 0.001)
+    float baked_visibility = dot(baked_light, vec3(0.2126, 0.7152, 0.0722));
+    if (baked_visibility <= 0.0005)
         return vec3(0.0);
 
-    uint candidate_count = min(v_rt_data.y & 0xffu, 2u);
+    uint candidate_count = min(v_rt_data.y & 0xffu, 4u);
     vec3 view_dir = normalize(pc.dlight.xyz - v_position);
     float gloss = 1.0 - roughness;
     float exponent = mix(4.0, 60.0, pow(gloss, 1.1));
     float lobe_normalization = mix(0.80, 1.85, gloss);
-    float visibility_gate = 0.35 + 0.65 * sqrt(baked_gate);
     float scale = reflectivity * pc.rt_params.w *
-        mix(1.20, 0.62, roughness) * lobe_normalization * visibility_gate;
+        mix(1.20, 0.62, roughness) * lobe_normalization;
     float emissive = clamp(pc.rt_params.x, 0.0, 2.0);
     float strength_scale = pow(emissive, 0.75) * 1.5;
     vec3 specular = vec3(0.0);

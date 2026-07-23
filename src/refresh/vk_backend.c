@@ -13612,6 +13612,67 @@ static bool vk_surface_light_may_affect_face(const vk_surface_light_t *light,
     return DotProduct(light->normal, delta) + radius > 0.0f;
 }
 
+static uint32_t vk_surface_island_find(uint32_t *parents, uint32_t face)
+{
+    uint32_t root = face;
+    while (parents[root] != root)
+        root = parents[root];
+    while (parents[face] != face) {
+        uint32_t next = parents[face];
+        parents[face] = root;
+        face = next;
+    }
+    return root;
+}
+
+static void vk_surface_island_union(uint32_t *parents, byte *ranks,
+                                    uint32_t first, uint32_t second)
+{
+    first = vk_surface_island_find(parents, first);
+    second = vk_surface_island_find(parents, second);
+    if (first == second)
+        return;
+    if (ranks[first] < ranks[second]) {
+        uint32_t swap = first;
+        first = second;
+        second = swap;
+    }
+    parents[second] = first;
+    if (ranks[first] == ranks[second])
+        ranks[first]++;
+}
+
+static bool vk_surface_island_eligible(const bsp_t *bsp,
+                                       const vk_world_face_t *draw)
+{
+    const mface_t *face = draw->face;
+    int excluded = SURF_TRANS_MASK | SURF_WARP | SURF_SKY | SURF_NODRAW;
+    return face && face->plane && face->texinfo && draw->edge_count >= 3 &&
+        !(face->drawflags & excluded) &&
+        !(face->texinfo->c.flags & excluded) &&
+        vk_face_edges_are_valid(bsp, face);
+}
+
+static bool vk_surface_faces_are_coplanar(const mface_t *first,
+                                          const mface_t *second)
+{
+    vec3_t first_normal, second_normal;
+    VectorCopy(first->plane->normal, first_normal);
+    VectorCopy(second->plane->normal, second_normal);
+    float first_dist = first->plane->dist;
+    float second_dist = second->plane->dist;
+    if (first->drawflags & DSURF_PLANEBACK) {
+        VectorNegate(first_normal, first_normal);
+        first_dist = -first_dist;
+    }
+    if (second->drawflags & DSURF_PLANEBACK) {
+        VectorNegate(second_normal, second_normal);
+        second_dist = -second_dist;
+    }
+    return DotProduct(first_normal, second_normal) > 0.9999f &&
+        fabsf(first_dist - second_dist) < 0.1f;
+}
+
 static void vk_build_surface_lights(const bsp_t *bsp,
                                     vk_world_face_t *faces, uint32_t face_count,
                                     const vk_vertex_t *vertices)
@@ -13684,29 +13745,80 @@ static void vk_build_surface_lights(const bsp_t *bsp,
 
     size_t capacity = (size_t)face_count * VK_MAX_FACE_SURFACE_LIGHTS;
     uint32_t *indices = capacity ? Z_Malloc(capacity * sizeof(*indices)) : NULL;
-    uint32_t candidate_max = 0, selected_max = 0;
+    uint32_t *parents = face_count ? Z_Malloc(sizeof(*parents) * face_count) : NULL;
+    byte *ranks = face_count ? Z_Mallocz(sizeof(*ranks) * face_count) : NULL;
+    byte *eligible = face_count ? Z_Mallocz(sizeof(*eligible) * face_count) : NULL;
+    uint32_t *edge_owners = bsp->numedges > 0 ?
+        Z_Malloc(sizeof(*edge_owners) * (size_t)bsp->numedges) : NULL;
+    vec3_t *island_mins = face_count ? Z_Malloc(sizeof(*island_mins) * face_count) : NULL;
+    vec3_t *island_maxs = face_count ? Z_Malloc(sizeof(*island_maxs) * face_count) : NULL;
+    uint32_t *island_faces = face_count ?
+        Z_Mallocz(sizeof(*island_faces) * face_count) : NULL;
+    uint32_t *island_offsets = face_count ?
+        Z_Mallocz(sizeof(*island_offsets) * face_count) : NULL;
+    byte *island_lights = face_count ?
+        Z_Mallocz(sizeof(*island_lights) * face_count) : NULL;
+
     for (uint32_t i = 0; i < face_count; i++) {
-        float radius_sq = 0.0f;
-        for (uint32_t k = 0; k < faces[i].edge_count; k++) {
-            vec3_t delta;
-            VectorSubtract(vertices[faces[i].first_vertex + k].position,
-                           faces[i].center, delta);
-            radius_sq = max(radius_sq, DotProduct(delta, delta));
+        parents[i] = i;
+        eligible[i] = vk_surface_island_eligible(bsp, &faces[i]);
+    }
+    for (int i = 0; i < bsp->numedges; i++)
+        edge_owners[i] = UINT32_MAX;
+    for (uint32_t i = 0; i < face_count; i++) {
+        if (!eligible[i])
+            continue;
+        const mface_t *face = faces[i].face;
+        for (uint32_t k = 0; k < face->numsurfedges; k++) {
+            uint32_t edge = face->firstsurfedge[k].edge;
+            uint32_t owner = edge_owners[edge];
+            if (owner == UINT32_MAX) {
+                edge_owners[edge] = i;
+            } else if (vk_surface_faces_are_coplanar(faces[owner].face, face)) {
+                vk_surface_island_union(parents, ranks, owner, i);
+            }
         }
-        float radius = sqrtf(radius_sq);
-        faces[i].rt_light_offset = vk.world.surface_light_index_count;
+    }
+    for (uint32_t i = 0; i < face_count; i++) {
+        if (!eligible[i])
+            continue;
+        uint32_t root = vk_surface_island_find(parents, i);
+        for (uint32_t k = 0; k < faces[i].edge_count; k++) {
+            const float *point = vertices[faces[i].first_vertex + k].position;
+            if (!island_faces[root] && k == 0) {
+                VectorCopy(point, island_mins[root]);
+                VectorCopy(point, island_maxs[root]);
+            } else {
+                for (int axis = 0; axis < 3; axis++) {
+                    island_mins[root][axis] = min(island_mins[root][axis], point[axis]);
+                    island_maxs[root][axis] = max(island_maxs[root][axis], point[axis]);
+                }
+            }
+        }
+        island_faces[root]++;
+    }
+
+    uint32_t candidate_max = 0, selected_max = 0;
+    uint32_t island_count = 0, island_face_max = 0, island_face_total = 0;
+    for (uint32_t root = 0; root < face_count; root++) {
+        if (!island_faces[root] || vk_surface_island_find(parents, root) != root)
+            continue;
+        vec3_t center, extent;
+        VectorAdd(island_mins[root], island_maxs[root], center);
+        VectorScale(center, 0.5f, center);
+        VectorSubtract(island_maxs[root], center, extent);
+        float radius = VectorLength(extent);
+        island_offsets[root] = vk.world.surface_light_index_count;
         uint32_t selected_indices[VK_MAX_FACE_SURFACE_LIGHTS];
         float selected_scores[VK_MAX_FACE_SURFACE_LIGHTS];
         uint32_t selected_count = 0;
         uint32_t candidate_count = 0;
         for (uint32_t j = 0; j < vk.world.surface_light_count; j++) {
             const vk_surface_light_t *light = &vk.world.surface_lights[j];
-            if (!vk_surface_light_may_affect_face(light, faces[i].center,
-                                                  radius))
+            if (!vk_surface_light_may_affect_face(light, center, radius))
                 continue;
             candidate_count++;
-            float score = vk_surface_light_face_score(light, faces[i].center,
-                                                      radius);
+            float score = vk_surface_light_face_score(light, center, radius);
             uint32_t position = selected_count;
             if (selected_count < VK_MAX_FACE_SURFACE_LIGHTS) {
                 selected_count++;
@@ -13727,16 +13839,38 @@ static void vk_build_surface_lights(const bsp_t *bsp,
         }
         for (uint32_t j = 0; j < selected_count; j++)
             indices[vk.world.surface_light_index_count++] = selected_indices[j];
-        faces[i].rt_light_count = selected_count;
+        island_lights[root] = selected_count;
         candidate_max = max(candidate_max, candidate_count);
         selected_max = max(selected_max, selected_count);
+        island_count++;
+        island_face_total += island_faces[root];
+        island_face_max = max(island_face_max, island_faces[root]);
+    }
+    for (uint32_t i = 0; i < face_count; i++) {
+        if (!eligible[i])
+            continue;
+        uint32_t root = vk_surface_island_find(parents, i);
+        faces[i].rt_light_offset = island_offsets[root];
+        faces[i].rt_light_count = island_lights[root];
     }
     vk.world.surface_light_indices = indices;
-    Com_DPrintf("Vulkan RT surface lights: %u, face influences avg %.1f max %u selected %u\n",
+    Com_DPrintf("Vulkan RT surface lights: %u, islands %u, faces avg %.1f max %u, candidates max %u selected %u\n",
                 vk.world.surface_light_count,
-                face_count ?
-                    (double)vk.world.surface_light_index_count / face_count : 0.0,
+                island_count,
+                island_count ? (double)island_face_total / island_count : 0.0,
+                island_face_max,
                 candidate_max, selected_max);
+    (void)island_count;
+    (void)island_face_total;
+    Z_Free(parents);
+    Z_Free(ranks);
+    Z_Free(eligible);
+    Z_Free(edge_owners);
+    Z_Free(island_mins);
+    Z_Free(island_maxs);
+    Z_Free(island_faces);
+    Z_Free(island_offsets);
+    Z_Free(island_lights);
 }
 
 static bool vk_upload_surface_light_storage(void)
