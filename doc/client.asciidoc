@@ -812,7 +812,10 @@ vk_rt_specular::
     materials focused glints and rough materials broader visible highlights.
     A fifth-power Fresnel response strengthens grazing highlights, while a
     small base-texture luminance modulation preserves visible material detail
-    without extra texture samples. Nearby emissive candidates are
+    without extra texture samples. Smooth, reflective materials also tint
+    their direct highlights toward the base-texture color, producing a mild
+    metallic sheen while rough surfaces remain nearly neutral. Nearby
+    emissive candidates are
     shared across geometry-connected coplanar surface islands, including BSP
     T-junctions, so highlights remain continuous across polygon boundaries.
     Changes apply

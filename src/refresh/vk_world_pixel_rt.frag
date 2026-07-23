@@ -83,6 +83,16 @@ float material_detail_factor(vec3 albedo, float roughness)
     return mix(1.0, detail, 0.55 * (1.0 - roughness));
 }
 
+vec3 material_specular_tint(vec3 albedo, float reflectivity, float roughness)
+{
+    float luma = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
+    vec3 chroma = clamp(albedo / max(luma, 0.08), vec3(0.45), vec3(1.65));
+    chroma = mix(vec3(1.0), chroma, smoothstep(0.04, 0.20, luma));
+    float gloss = 1.0 - roughness;
+    float metallic = 0.55 * reflectivity * gloss * (0.70 + 0.30 * gloss);
+    return mix(vec3(1.0), chroma, metallic);
+}
+
 vec3 dynamic_light(vec3 normal, float reflectivity, float roughness,
                    out vec3 specular)
 {
@@ -498,6 +508,8 @@ void main()
             vec3 highlight = (dynamic_specular + static_specular) *
                              reflection_surface_mask;
             highlight *= material_detail_factor(texel.rgb,
+                                                material_roughness);
+            highlight *= material_specular_tint(texel.rgb, material_reflect,
                                                 material_roughness);
             float highlight_luma = dot(highlight, luma_weights);
             float cap = min(max(surface_luma * 0.22, 0.035), 0.14);
