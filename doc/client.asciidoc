@@ -743,7 +743,7 @@ vk_raytracing::
     Stable world AO and visibility-weighted color from ‘SURF_LIGHT’ emitters
     are baked once when a map loads into an RGBA atlas capped at 2048x2048.
     Existing lightmaps remain the authoritative diffuse lighting: baked RT
-    emitter data supplies only a luminance-neutral tint and a tightly gated
+    emitter data supplies localized, capped colored light pools and a matching
     bloom source. AO and emitter visibility each receive a budget of
     approximately four million rays. The renderer validates atlas coverage and
     reports AO/emissive statistics after the bake. Successful bakes therefore
@@ -773,22 +773,24 @@ vk_rt_ao::
     Default value is 0.24.
 
 vk_rt_emissive::
-    Controls restrained, ray-shadowed color from opaque BSP surfaces marked
+    Controls ray-shadowed color from opaque BSP surfaces marked
     with the Quake II ‘SURF_LIGHT’ flag. Original lightmap luminance is never
-    replaced or supplemented by this data. Visible emitters may instead add a
-    subtle luminance-neutral tint and, when bloom is enabled, a localized bloom
+    replaced by this data. Visible emitters add localized colored illumination
+    on top of the raster result and, when bloom is enabled, a matching bloom
     source. Light color is derived from each surface's glow mask or
     brightest base-texture pixels when no glow mask exists. Each face retains
     its strongest 12 possible sources. The map-load bake chooses the strongest
     two at each atlas texel and samples across the emitting surface to create
-    soft, stable visibility. Tint is capped at two percent of local luminance
-    and 0.01 absolute intensity. Static bloom requires strong emitter radiance
-    and is capped independently, preventing broad exposure changes. If baking
-    fails, the per-frame two-source implementation supplies the same tint and
-    bloom inputs. Influence lists remain in the world mesh so ordinary face
-    batching stays available. Changes apply immediately without rebaking.
-    Default value is 0.35; 0 removes tint and static RT bloom while the shared
-    atlas remains available for ambient occlusion.
+    soft, stable visibility. Weak distant contributions are rejected. Added
+    luminance is capped at 45 percent of the local raster result, with a small
+    dark-surface floor and a 0.12 absolute maximum. Screen-style headroom keeps
+    bright texture detail from clipping. Static RT bloom is capped separately
+    at 0.06, preventing broad exposure changes. If baking fails, the per-frame
+    two-source implementation supplies the same light-pool and bloom inputs.
+    Influence lists remain in the world mesh so ordinary face batching stays
+    available. Changes apply immediately without rebaking. Default value is
+    0.35; 0 removes colored pools and static RT bloom while the shared atlas
+    remains available for ambient occlusion.
 
 vk_rt_debug::
     Visualizes the static ray-tracing atlas on BSP world surfaces. Value 1

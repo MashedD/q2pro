@@ -103,10 +103,10 @@ float surface_light_sample(uint light_index, vec3 normal,
     direction = delta / max(distance_to_light, 0.001);
     float falloff = clamp(1.0 - distance_to_light / source.origin_range.w,
                           0.0, 1.0);
-    // Smooth the finite edge, then concentrate energy near the emitter so a
-    // stronger local pool does not turn into broad scene-wide illumination.
+    // Smooth the finite edge, then concentrate energy near the emitter so
+    // overlapping ranges on light-dense maps do not lift global exposure.
     falloff = falloff * falloff * (3.0 - 2.0 * falloff);
-    falloff *= sqrt(falloff);
+    falloff = falloff * falloff * sqrt(falloff);
     oriented_normal = dot(normal, delta) >= 0.0 ? normal : -normal;
     float source_cosine = max(dot(source.normal.xyz, -direction), 0.0);
     float receiver_cosine = abs(dot(normal, direction));
@@ -375,22 +375,30 @@ void main()
         lm *= ao;
         vec3 base_lighting = (lm + pc.scroll.www) * pc.color.rgb;
 
-        // Preserve raster luminance exactly. Static emissive radiance may
-        // shift hue very slightly, but its contribution is projected onto a
-        // zero-luminance vector after the base texture has been applied.
+        // Keep the raster/lightmap result authoritative, then add a localized
+        // colored pool from ray-shadowed surface emitters. Reject weak tails
+        // and cap the added luminance so they cannot become a global exposure
+        // correction. Screen-style headroom protects bright surface detail.
         const vec3 luma_weights = vec3(0.2126, 0.7152, 0.0722);
         vec3 raster_rgb = texel.rgb *
             max(base_lighting + dynamic_lighting, vec3(0.0));
-        vec3 tint_source = texel.rgb * surface_lighting;
-        vec3 tint = tint_source -
-            vec3(dot(tint_source, luma_weights));
         float raster_luma = dot(raster_rgb, luma_weights);
-        float tint_limit = min(max(raster_luma, 0.0) * 0.02, 0.01);
-        float tint_peak = max(abs(tint.r), max(abs(tint.g), abs(tint.b)));
-        if (tint_peak > tint_limit && tint_peak > 0.0)
-            tint *= tint_limit / tint_peak;
+        vec3 emissive_pool = max(texel.rgb * surface_lighting, vec3(0.0));
+        float pool_luma = dot(emissive_pool, luma_weights);
+        vec3 emissive_add = vec3(0.0);
+        if (pool_luma > 0.004) {
+            float pool_scale = 1.35 *
+                smoothstep(0.004, 0.025, pool_luma);
+            emissive_pool *= pool_scale;
+            pool_luma *= pool_scale;
+            float pool_limit = min(max(raster_luma * 0.45, 0.025), 0.12);
+            if (pool_luma > pool_limit)
+                emissive_pool *= pool_limit / pool_luma;
+            emissive_add = emissive_pool *
+                max(vec3(1.0) - raster_rgb, vec3(0.0));
+        }
         out_color = texel;
-        out_color.rgb = max(raster_rgb + tint, vec3(0.0));
+        out_color.rgb = max(raster_rgb + emissive_add, vec3(0.0));
         out_color.a *= v_color.a;
         if (pc.intensity < 0.0) {
             out_color.rgb *= (out_color.r + out_color.g + out_color.b) / 3.0;
@@ -401,17 +409,19 @@ void main()
 #ifdef RT_GLOWMAP
         bloom = texel.rgb * glow.a * pc.intensity;
 #endif
-        float surface_luma = dot(surface_lighting,
-                                 vec3(0.2126, 0.7152, 0.0722));
         float dynamic_luma = dot(dynamic_lighting,
                                  vec3(0.2126, 0.7152, 0.0722));
-        float surface_bloom = smoothstep(0.05, 0.12, surface_luma);
         float dynamic_bloom = smoothstep(0.22, 0.55, dynamic_luma) * 0.18;
-        vec3 static_bloom = surface_lighting * surface_bloom * 0.15;
-        float static_bloom_luma = dot(static_bloom,
-                                      vec3(0.2126, 0.7152, 0.0722));
-        if (static_bloom_luma > 0.02)
-            static_bloom *= 0.02 / static_bloom_luma;
+        float emissive_add_luma = dot(emissive_add, luma_weights);
+        vec3 static_bloom = vec3(0.0);
+        if (emissive_add_luma > 0.008) {
+            float surface_bloom = smoothstep(0.008, 0.04,
+                                             emissive_add_luma);
+            static_bloom = emissive_add * surface_bloom * 0.75;
+            float static_bloom_luma = dot(static_bloom, luma_weights);
+            if (static_bloom_luma > 0.06)
+                static_bloom *= 0.06 / static_bloom_luma;
+        }
         bloom += (static_bloom +
                   texel.rgb * dynamic_lighting * dynamic_bloom) *
                  max(pc.intensity, 0.0);

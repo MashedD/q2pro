@@ -93,7 +93,10 @@ float light_contribution(uint light_index, vec3 normal, out vec3 color)
     float range = source.origin_range.w;
     float falloff = clamp(1.0 - distance_to_light / range, 0.0, 1.0);
     falloff = falloff * falloff * (3.0 - 2.0 * falloff);
-    falloff *= sqrt(falloff);
+    // Concentrate the pool around its fixture. Dense custom maps can contain
+    // dozens of overlapping SURF_LIGHT ranges; cubic falloff prevents those
+    // weak tails from becoming a map-wide exposure lift.
+    falloff = falloff * falloff * sqrt(falloff);
     float source_cosine = max(dot(source.normal.xyz, -direction), 0.0);
     float receiver_cosine = abs(dot(normal, direction));
     float direct = source_cosine * (0.25 + 0.75 * receiver_cosine);
