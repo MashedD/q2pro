@@ -83,7 +83,7 @@ vec3 dynamic_light(vec3 normal)
         float visibility = 1.0;
         if (hit_distance >= 0.0) {
             float blocker_ratio = hit_distance / max(distance_to_light, 0.001);
-            float shadow_opacity = mix(0.92, 0.68,
+            float shadow_opacity = mix(0.96, 0.72,
                 smoothstep(0.15, 0.85, blocker_ratio));
             visibility -= shadow_opacity;
         }
@@ -201,14 +201,14 @@ float ambient_visibility(vec3 normal, float lightmap_weight,
                          float baked_occlusion)
 {
     float ao_control = clamp(pc.rt_params.y * 2.0, 0.0, 1.0);
-    // Give the useful lower half of the control more perceptual range while
-    // preserving the existing 0.5 maximum darkening limit.
-    float strength = 0.5 * pow(ao_control, 0.65) * lightmap_weight;
+    // Make the default setting clearly visible in contact regions while the
+    // lightmap weighting prevents a broad exposure shift.
+    float strength = 0.78 * pow(ao_control, 0.60) * lightmap_weight;
     if (pc.lm_scale.x < 0.0 || strength < 0.005)
         return 1.0;
 
     if (surface_info.z != 0u) {
-        return 1.0 - strength * baked_occlusion;
+        return max(1.0 - strength * baked_occlusion, 0.45);
     }
 
     float view_distance = distance(v_position, pc.dlight.xyz);
@@ -232,8 +232,10 @@ float ambient_visibility(vec3 normal, float lightmap_weight,
         1.0 - smoothstep(2.0, 16.0, hit_distance);
     float broad = hit_distance < 0.0 ? 0.0 :
         1.0 - smoothstep(8.0, 160.0, hit_distance);
-    float occlusion = min(0.80, 0.65 * contact + 0.35 * broad);
-    float visibility = 1.0 - strength * occlusion;
+    float raw_occlusion = 0.70 * contact + 0.30 * broad;
+    float occlusion = min(0.90,
+        1.25 * smoothstep(0.015, 0.38, raw_occlusion));
+    float visibility = max(1.0 - strength * occlusion, 0.45);
     return mix(visibility, 1.0, smoothstep(384.0, 640.0, view_distance));
 }
 
@@ -304,7 +306,7 @@ void main()
     vec4 glow = texture(glow_sampler, uv);
 #endif
     float lm_luma = dot(lm, vec3(0.2126, 0.7152, 0.0722));
-    float ao_weight = mix(0.50, 1.0,
+    float ao_weight = mix(0.75, 1.0,
                           smoothstep(0.05, 0.35, lm_luma));
 #ifdef RT_GLOWMAP
     ao_weight *= 1.0 - glow.a;

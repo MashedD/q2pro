@@ -76,10 +76,12 @@ float bake_ambient_occlusion(vec3 normal, uint seed)
             1.0 - smoothstep(2.0, 16.0, hit_distance);
         float broad = hit_distance < 0.0 ? 0.0 :
             1.0 - smoothstep(8.0, 160.0, hit_distance);
-        occlusion += 0.65 * contact + 0.35 * broad;
+        // Favor creases and nearby blockers over broad scene darkening. This
+        // keeps the effect easy to read without flattening the lightmap.
+        occlusion += 0.70 * contact + 0.30 * broad;
     }
     float raw_occlusion = occlusion / float(sample_count);
-    return min(0.80, 1.15 * smoothstep(0.01, 0.42, raw_occlusion));
+    return min(0.90, 1.25 * smoothstep(0.015, 0.38, raw_occlusion));
 }
 
 float light_contribution(uint light_index, vec3 normal, out vec3 color)

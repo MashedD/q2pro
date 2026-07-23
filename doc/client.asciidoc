@@ -762,9 +762,12 @@ vk_raytracing::
 
 vk_rt_ao::
     Controls ray-traced ambient-occlusion strength on opaque BSP world
-    surfaces, clamped between 0 and 0.5. A contact-focused sampling cone keeps
-    corners and undersides distinct, including on moderately dark lightmap
-    texels, while limiting overall scene darkening. Glowmapped pixels remain
+    surfaces, clamped between 0 and 0.5. A contact-focused sampling cone and
+    response curve make corners, wall/floor junctions, stairs, and undersides
+    clearly deeper while limiting broad scene darkening. The default setting
+    darkens ordinary strongly occluded contacts by roughly one third, with the
+    strongest well-lit contacts capped at 45 percent; an ambient floor
+    preserves texture detail at higher settings. Glowmapped pixels remain
     protected. The baked atlas is reused when this value changes, so changes
     apply immediately without rebuilding the map. Value 0 disables the effect.
     Default value is 0.24.
