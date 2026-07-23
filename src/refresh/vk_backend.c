@@ -955,6 +955,7 @@ static cvar_t *vk_showbloom;
 static cvar_t *vk_waterwarp;
 static cvar_t *vk_bloom_sigma;
 static cvar_t *vk_bloom_downsample;
+static cvar_t *vk_bloom_streaks;
 static cvar_t *vk_glare;
 static cvar_t *vk_glare_threshold;
 static cvar_t *vk_glare_size;
@@ -15128,6 +15129,7 @@ bool VKR_Init(bool total)
     vk_waterwarp = Cvar_Get("gl_waterwarp", "0", 0);
     vk_bloom_sigma = Cvar_Get("gl_bloom_sigma", "4", 0);
     vk_bloom_downsample = Cvar_Get("vk_bloom_downsample", "4", 0);
+    vk_bloom_streaks = Cvar_Get("vk_bloom_streaks", "0.45", CVAR_ARCHIVE);
     vk_glare = Cvar_Get("gl_glare", "0", CVAR_ARCHIVE);
     vk_glare->changed = vk_glare_changed;
     vk_glare_threshold = Cvar_Get("gl_glare_threshold", "0.3", 0);
@@ -16270,8 +16272,13 @@ static void vk_finish_postprocess_scene(void)
         // when vk_bloom_downsample changes.
         sigma = max(sigma, 1.0f) * 2.0f /
             (float)vk_bloom_downsample_value();
+        int iterations = (vk_showbloom && vk_showbloom->integer >= 2) ? 0 :
+            (gl_bloom ? Cvar_ClampInteger(gl_bloom, 1, 8) : 1);
+        float streaks = vk_bloom_streaks ?
+            Cvar_ClampValue(vk_bloom_streaks, 0.0f, 1.0f) : 0.45f;
+        float horizontal_stretch = 1.0f + 3.0f * streaks;
         vec4_t blur_x = {
-            sigma / (float)bloom_w,
+            sigma * horizontal_stretch / (float)bloom_w,
             0.0f,
             0.0f,
             1.0f,
@@ -16314,8 +16321,6 @@ static void vk_finish_postprocess_scene(void)
         vk.CmdEndRenderPass(cmd);
         vk.render_pass_active = false;
 
-        int iterations = (vk_showbloom && vk_showbloom->integer >= 2) ? 0 :
-            (gl_bloom ? Cvar_ClampInteger(gl_bloom, 1, 8) : 1);
         for (int i = 0; i < iterations; i++) {
             vk_transition_color_target(cmd, &vk.bloom_texture, &vk.bloom_layout,
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -16644,8 +16649,13 @@ void VKR_EndFrame(void)
         sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
         sigma = max(sigma, 1.0f) * 2.0f /
             (float)vk_bloom_downsample_value();
+        int iterations = (vk_showbloom && vk_showbloom->integer >= 2) ? 0 :
+            (gl_bloom ? Cvar_ClampInteger(gl_bloom, 1, 8) : 1);
+        float streaks = vk_bloom_streaks ?
+            Cvar_ClampValue(vk_bloom_streaks, 0.0f, 1.0f) : 0.45f;
+        float horizontal_stretch = 1.0f + 3.0f * streaks;
         vec4_t blur_x = {
-            sigma / (float)bloom_w,
+            sigma * horizontal_stretch / (float)bloom_w,
             0.0f,
             0.0f,
             1.0f,
@@ -16683,8 +16693,6 @@ void VKR_EndFrame(void)
         vk.CmdEndRenderPass(cmd);
         vk.render_pass_active = false;
 
-        int iterations = (vk_showbloom && vk_showbloom->integer >= 2) ? 0 :
-            (gl_bloom ? Cvar_ClampInteger(gl_bloom, 1, 8) : 1);
         for (int i = 0; i < iterations; i++) {
             vk_transition_color_target(cmd, &vk.bloom_texture, &vk.bloom_layout,
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,

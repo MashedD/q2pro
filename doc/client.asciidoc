@@ -935,6 +935,13 @@ gl_bloom_sigma::
     Specifies strength parameter of gaussian blur filter used for the bloom
     effect. Default value is 4.
 
+vk_bloom_streaks::
+    Controls horizontal anamorphic streaks from Vulkan bloom sources, clamped
+    between 0 and 1. The effect stretches the complete horizontal Gaussian
+    radius from 1x to 4x without adding samples or passes, while preserving
+    normalized bloom energy. Value 0 restores ordinary Gaussian bloom. Default
+    value is 0.45 (2.35x); the setting has no effect while ‘gl_bloom’ is 0.
+
 NOTE: Bloom only works with glowmaps. Enabling it with non-remastered content
 (or glowmaps disabled) is a waste of resources.
 
