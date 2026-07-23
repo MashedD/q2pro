@@ -427,6 +427,8 @@ if vulkan.found()
                 '@INPUT@', '-o', '@OUTPUT@'],
     )
     foreach rt_shader : [
+      ['vk_alias_rt_frag_spv.h', []],
+      ['vk_alias_rt_alpha_frag_spv.h', ['-DRT_ALPHA_TEST=1']],
       ['vk_world_pixel_rt_frag_spv.h', []],
       ['vk_world_pixel_rt_alpha_frag_spv.h', ['-DRT_ALPHA_TEST=1']],
       ['vk_world_pixel_rt_glow_frag_spv.h', ['-DRT_GLOWMAP=1']],

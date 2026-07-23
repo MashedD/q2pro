@@ -174,6 +174,14 @@ static const uint32_t vk_alias_shadow_vert_spv[] =
 static const uint32_t vk_alias_shadow_frag_spv[] =
 #include "vk_alias_shadow_frag_spv.h"
 ;
+#if USE_VULKAN_RAYTRACING
+static const uint32_t vk_alias_rt_frag_spv[] =
+#include "vk_alias_rt_frag_spv.h"
+;
+static const uint32_t vk_alias_rt_alpha_frag_spv[] =
+#include "vk_alias_rt_alpha_frag_spv.h"
+;
+#endif
 
 typedef struct {
     float rect[4];
@@ -508,6 +516,11 @@ typedef struct {
     float fog[4];
     float intensity;
     float desaturation;
+    float rt_light_origin[4];
+    float rt_light_color[4];
+    float rt_entity_origin[4];
+    float rt_enabled;
+    float _rt_pad[3];
 } vk_alias_push_t;
 
 typedef struct {
@@ -730,6 +743,8 @@ typedef struct {
     VkPipeline alias_pipeline;
     VkPipeline alias_bloom_pipeline;
     VkPipeline alias_alpha_pipeline;
+    VkPipeline alias_rt_pipeline;
+    VkPipeline alias_rt_alpha_pipeline;
     VkPipeline alias_depth_pipeline;
     VkPipeline alias_blend_pipeline;
     VkPipeline alias_shadow_pipeline;
@@ -5659,6 +5674,8 @@ static void vk_destroy_swapchain(void)
         vk.DestroyPipeline(vk.device, vk.alias_alpha_pipeline, NULL);
         vk.alias_alpha_pipeline = VK_NULL_HANDLE;
     }
+    if (vk.alias_rt_pipeline) { vk.DestroyPipeline(vk.device, vk.alias_rt_pipeline, NULL); vk.alias_rt_pipeline = VK_NULL_HANDLE; }
+    if (vk.alias_rt_alpha_pipeline) { vk.DestroyPipeline(vk.device, vk.alias_rt_alpha_pipeline, NULL); vk.alias_rt_alpha_pipeline = VK_NULL_HANDLE; }
 
     if (vk.alias_depth_pipeline) {
         vk.DestroyPipeline(vk.device, vk.alias_depth_pipeline, NULL);
@@ -7241,9 +7258,22 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
     if (!vert)
         return false;
 
+    bool rt_alias =
+#if USE_VULKAN_RAYTRACING
+        pipeline == &vk.alias_rt_pipeline || pipeline == &vk.alias_rt_alpha_pipeline;
+#else
+        false;
+#endif
     VkShaderModule frag = color_only ?
         vk_create_shader_module(vk_alias_shadow_frag_spv,
                                 sizeof(vk_alias_shadow_frag_spv)) :
+        rt_alias ?
+#if USE_VULKAN_RAYTRACING
+        vk_create_shader_module(alpha_test ? vk_alias_rt_alpha_frag_spv : vk_alias_rt_frag_spv,
+                                alpha_test ? sizeof(vk_alias_rt_alpha_frag_spv) : sizeof(vk_alias_rt_frag_spv)) :
+#else
+        VK_NULL_HANDLE :
+#endif
         alpha_test ?
         vk_create_shader_module(vk_world_alpha_frag_spv,
                                 sizeof(vk_world_alpha_frag_spv)) :
@@ -7700,6 +7730,11 @@ static bool vk_create_swapchain(int width, int height)
         return false;
 
 #if USE_VULKAN_RAYTRACING
+    /* RT alias pipelines are intentionally deferred until compatibility with
+     * the active RADV driver is verified. Never let their creation prevent
+     * the renderer from starting; world RT remains fully available. */
+    if (vk.raytracing_active)
+        Com_WPrintf("Vulkan RT alias shadows: deferred; using raster model lighting\n");
     vk.raytracing_pixel_ready = false;
     if (vk.raytracing_active) {
         bool rt_ok =
@@ -10797,6 +10832,30 @@ static void vk_add_dynamic_lights(const refdef_t *fd, const vec3_t origin, vec3_
     }
 }
 
+static bool vk_alias_rt_light(const entity_t *ent, const refdef_t *fd,
+                              vec4_t origin, vec4_t color)
+{
+    float best = 0.0f;
+    const dlight_t *best_light = NULL;
+    if (!vk.raytracing_active || !vk_dynamic_lights_enabled() || !fd ||
+        !fd->dlights || fd->num_dlights <= 0 ||
+        (ent->flags & (RF_TRANSLUCENT | RF_SHELL_MASK | RF_FULLBRIGHT | RF_TRACKER)) ||
+        Distance(ent->origin, fd->vieworg) > 384.0f)
+        return false;
+    for (int i = 0; i < fd->num_dlights; i++) {
+        const dlight_t *light = &fd->dlights[i];
+        float f = light->intensity - DLIGHT_CUTOFF - Distance(light->origin, ent->origin);
+        if (f > best) { best = f; best_light = light; }
+    }
+    if (!best_light || best < 8.0f)
+        return false;
+    Vector4Set(origin, best_light->origin[0], best_light->origin[1], best_light->origin[2],
+               max(best_light->intensity - DLIGHT_CUTOFF, 1.0f));
+    Vector4Set(color, best_light->color[0] / 255.0f, best_light->color[1] / 255.0f,
+               best_light->color[2] / 255.0f, best / 255.0f);
+    return true;
+}
+
 static float vk_entity_light_modulate(void)
 {
     return Cvar_ClampValue(vk_modulate, 0.0f, 1e6f) *
@@ -10930,6 +10989,11 @@ static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
     vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
     vk_bind_index_buffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+#if USE_VULKAN_RAYTRACING
+    if ((pipeline == vk.alias_rt_pipeline || pipeline == vk.alias_rt_alpha_pipeline) && vk.rt_descriptor_set)
+        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.rect_pipeline_layout,
+                                 1, 1, &vk.rt_descriptor_set, 0, NULL);
+#endif
     vk_push_constants(cmd, sizeof(*push), push);
     vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
     c.trisDrawn += index_count / 3;
@@ -11230,6 +11294,9 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
                               model, &push, count_stats);
 }
 
+static bool vk_alias_rt_light(const entity_t *ent, const refdef_t *fd,
+                              vec4_t origin, vec4_t color);
+
 static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 {
     vk_model_t *model = vk_model_for_handle(ent->model);
@@ -11314,6 +11381,16 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     push.intensity = vk_texture_intensity();
     push.desaturation = 0.0f;
 
+    Vector4Clear(push.rt_light_origin);
+    Vector4Clear(push.rt_light_color);
+    Vector4Set(push.rt_entity_origin, ent->origin[0], ent->origin[1], ent->origin[2], 1.0f);
+    push.rt_enabled = 0.0f;
+#if USE_VULKAN_RAYTRACING
+    if (vk.alias_rt_pipeline && vk_alias_rt_light(ent, fd, push.rt_light_origin,
+                                                   push.rt_light_color))
+        push.rt_enabled = 1.0f;
+#endif
+
     for (int i = 0; i < model->alias_batch_count; i++) {
         const vk_alias_batch_t *batch = &model->alias_batches[i];
         const image_t *skin = vk_skin_for_alias_batch(model, batch, ent);
@@ -11331,9 +11408,9 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         else if (translucent)
             pipeline = vk.alias_blend_pipeline;
         else if ((skin->flags & IF_TRANSPARENT) && vk.alias_alpha_pipeline)
-            pipeline = vk.alias_alpha_pipeline;
+            pipeline = push.rt_enabled && vk.alias_rt_alpha_pipeline ? vk.alias_rt_alpha_pipeline : vk.alias_alpha_pipeline;
         else
-            pipeline = vk.alias_pipeline;
+            pipeline = push.rt_enabled && vk.alias_rt_pipeline ? vk.alias_rt_pipeline : vk.alias_pipeline;
 
         if (!vk.drawing_bloom && translucent &&
             (ent->flags & (RF_FULLBRIGHT | RF_BLOOM_ONLY)) == 0 &&
