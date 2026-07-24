@@ -101,6 +101,12 @@ vec2 material_params(float packed)
     return vec2(floor(bits / 16.0), mod(bits, 16.0)) / 15.0;
 }
 
+vec2 rt_controls(float packed)
+{
+    uint bits = uint(clamp(floor(packed + 0.5), 0.0, 65535.0));
+    return vec2(float(bits & 255u), float((bits >> 8) & 255u)) / 255.0;
+}
+
 float material_specular_lobe(float ndoth, float ndotv, float gloss,
                              float exponent)
 {
@@ -183,10 +189,12 @@ vec3 liquid_ripple_normal(vec3 position, vec3 normal, vec2 uv, float time,
 
 vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
                    float reflectivity, float roughness,
-                   float specular_control, out vec3 specular)
+                   float specular_control, float bounce_control,
+                   out vec3 specular, out vec3 bounce)
 {
     vec3 light = vec3(0.0);
     specular = vec3(0.0);
+    bounce = vec3(0.0);
     vec3 view_dir = normalize(pc.dlight.xyz - v_position);
     float gloss = 1.0 - roughness;
     float exponent = mix(10.0, 96.0, pow(gloss, 0.9));
@@ -217,6 +225,21 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
                 ray_origin, ray_delta, range, contribution, i);
             vec3 radiance = pc.dlight_colors[i].rgb * energy * visibility;
             light += radiance;
+            if (bounce_control > 0.001) {
+                float color_high = max(pc.dlight_colors[i].r,
+                    max(pc.dlight_colors[i].g, pc.dlight_colors[i].b));
+                float color_low = min(pc.dlight_colors[i].r,
+                    min(pc.dlight_colors[i].g, pc.dlight_colors[i].b));
+                float chroma = (color_high - color_low) /
+                               max(color_high, 0.001);
+                float color_weight = mix(0.35, 1.0,
+                    smoothstep(0.08, 0.45, chroma));
+                float locality = falloff * falloff * (3.0 - 2.0 * falloff);
+                float facing = abs(dot(geometric_normal, light_dir));
+                float wrap = 0.35 + 0.65 *
+                    (1.0 - facing) * (1.0 - facing);
+                bounce += radiance * locality * wrap * color_weight;
+            }
             if (specular_scale > 0.001) {
                 vec3 half_dir = normalize(light_dir + view_dir);
                 float ndoth = max(dot(shading_normal, half_dir), 0.0);
@@ -228,6 +251,7 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
             }
         }
     }
+    bounce *= 0.65 * bounce_control;
     return light;
 }
 
@@ -256,19 +280,22 @@ void main()
         normal = -normal;
     int rt_debug = pc.rt_params.x < 0.0 ?
         int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
-        (pc.rt_params.y < -7.5 ? 8 : 0);
+        (pc.rt_params.y < -7.5 ?
+            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 9.0)) : 0);
     vec2 material = material_params(pc.rt_params.z);
     float material_reflect = material.x;
     float material_roughness = material.y;
     vec4 material_texel = texture(tex_sampler, uv);
     vec3 bloom = vec3(0.0);
     float bump_mask = 1.0 - step(1.5, mode);
-    float specular_control = pc.rt_params.w;
+    vec2 controls = liquid ? vec2(previous_specular, 0.0) :
+                             rt_controls(pc.rt_params.w);
+    float specular_control = liquid ? liquid_strength : controls.x;
+    float bounce_control = controls.y;
     vec3 shading_normal;
     if (liquid && liquid_strength > 0.0) {
         material_reflect = 0.72 * liquid_strength;
         material_roughness = mix(0.55, 0.24, liquid_strength);
-        specular_control = liquid_strength;
         vec3 previous_normal = material_bump_normal(v_position, normal,
             material_texel.rgb, 0.0, 0.0, bump_mask, previous_specular);
         vec3 ripple_normal = liquid_ripple_normal(v_position, normal, v_uv,
@@ -299,9 +326,11 @@ void main()
         }
         out_color.rgb *= pc.intensity;
         vec3 dynamic_specular;
+        vec3 dynamic_bounce;
         vec3 dynamic = dynamic_light(shading_normal, normal, material_reflect,
                                      material_roughness, specular_control,
-                                     dynamic_specular);
+                                     bounce_control, dynamic_specular,
+                                     dynamic_bounce);
         if (rt_debug == 8) {
             out_color = vec4(clamp(dynamic_specular *
                 vec3(0.0, 8.0, 8.0), 0.0, 1.0), 1.0);
@@ -310,8 +339,29 @@ void main()
         }
         out_color.rgb *= clamp(v_color.rgb + dynamic, 0.0, 1.0);
         vec3 raster_surface = out_color.rgb;
+        const vec3 luma_weights = vec3(0.2126, 0.7152, 0.0722);
+        float bounce_luma = dot(dynamic_bounce, luma_weights);
+        float bounce_cap = min(max(dot(raster_surface, luma_weights) * 0.30,
+                                   0.02), 0.10);
+        dynamic_bounce *= min(1.0, bounce_cap /
+                              max(bounce_luma, 0.000001));
+        vec3 bounce_add = dynamic_bounce * max(
+            vec3(1.0) - clamp(raster_surface, 0.0, 1.0), vec3(0.0));
+        float bounce_add_luma = dot(bounce_add, luma_weights);
+        if (rt_debug == 9) {
+            out_color = vec4(clamp(bounce_add * 8.0, 0.0, 1.0), 1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
+        out_color.rgb += bounce_add;
+        float bounce_bloom_weight = smoothstep(0.018, 0.065,
+                                                bounce_add_luma);
+        vec3 bounce_bloom = bounce_add * bounce_bloom_weight * 0.25;
+        float bounce_bloom_luma = dot(bounce_bloom, luma_weights);
+        bounce_bloom *= min(1.0, 0.025 /
+                            max(bounce_bloom_luma, 0.000001));
+        out_bloom.rgb += bounce_bloom;
         if (liquid && liquid_strength > 0.0) {
-            const vec3 luma_weights = vec3(0.2126, 0.7152, 0.0722);
             vec3 view_dir = normalize(pc.dlight.xyz - v_position);
             float edge = 1.0 - max(dot(shading_normal, view_dir), 0.0);
             float edge2 = edge * edge;
@@ -345,9 +395,8 @@ void main()
                 out_color.rgb += lava_emission * 0.32 *
                     max(vec3(1.0) - out_color.rgb, vec3(0.0));
             }
-            out_bloom = vec4(bloom, out_color.a);
-        } else if (material_reflect > 0.001 && pc.rt_params.w > 0.001) {
-            const vec3 luma_weights = vec3(0.2126, 0.7152, 0.0722);
+            out_bloom += vec4(bloom, 0.0);
+        } else if (material_reflect > 0.001 && specular_control > 0.001) {
             float surface_luma = dot(raster_surface, luma_weights);
             vec3 highlight = dynamic_specular *
                 material_detail_factor(material_albedo, material_roughness);
@@ -360,7 +409,7 @@ void main()
             highlight_luma = dot(highlight, luma_weights);
             out_color.rgb += highlight;
             float bloom_weight = smoothstep(0.01, 0.04, highlight_luma);
-            out_bloom = vec4(highlight * bloom_weight * 0.35, out_color.a);
+            out_bloom.rgb += highlight * bloom_weight * 0.35;
         }
         // Preserve scene alpha for normal translucency. Material eligibility
         // is carried separately in the secondary MRT alpha.

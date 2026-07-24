@@ -123,6 +123,12 @@ vec2 material_params(float packed)
     return vec2(floor(bits / 16.0), mod(bits, 16.0)) / 15.0;
 }
 
+vec2 rt_controls(float packed)
+{
+    uint bits = uint(clamp(floor(packed + 0.5), 0.0, 65535.0));
+    return vec2(float(bits & 255u), float((bits >> 8) & 255u)) / 255.0;
+}
+
 float material_specular_lobe(float ndoth, float ndotv, float gloss,
                              float exponent)
 {
@@ -167,7 +173,7 @@ vec3 material_bump_normal(vec3 position, vec3 normal, vec3 albedo,
         min(determinant, -0.000001) : max(determinant, 0.000001);
     vec3 gradient = (first * dhdx + second * dhdy) / safe_determinant;
     float gloss = 1.0 - roughness;
-    float strength = 3.0 * pc.rt_params.w * mask *
+    float strength = 3.0 * rt_controls(pc.rt_params.w).x * mask *
         mix(0.35, 1.0, reflectivity) * mix(0.30, 1.0, gloss);
     gradient *= strength * valid;
     float slope = length(gradient);
@@ -176,15 +182,18 @@ vec3 material_bump_normal(vec3 position, vec3 normal, vec3 albedo,
 }
 
 vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
-                   float reflectivity, float roughness, out vec3 specular)
+                   float reflectivity, float roughness, out vec3 specular,
+                   out vec3 bounce)
 {
     vec3 light = vec3(0.0);
     specular = vec3(0.0);
+    bounce = vec3(0.0);
+    vec2 controls = rt_controls(pc.rt_params.w);
     vec3 view_dir = normalize(pc.dlight.xyz - v_position);
     float gloss = 1.0 - roughness;
     float exponent = mix(10.0, 96.0, pow(gloss, 0.9));
     float lobe_normalization = mix(0.80, 1.85, gloss);
-    float specular_scale = reflectivity * pc.rt_params.w *
+    float specular_scale = reflectivity * controls.x *
         mix(1.30, 0.68, roughness) * lobe_normalization;
     for (int i = 0; i < 3; i++) {
         float range = pc.dlight_origins[i].w;
@@ -213,6 +222,20 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
             ray_origin, ray_delta, range, contribution, i);
         vec3 radiance = pc.dlight_colors[i].rgb * energy * visibility;
         light += radiance;
+        if (controls.y > 0.001) {
+            float color_high = max(pc.dlight_colors[i].r,
+                max(pc.dlight_colors[i].g, pc.dlight_colors[i].b));
+            float color_low = min(pc.dlight_colors[i].r,
+                min(pc.dlight_colors[i].g, pc.dlight_colors[i].b));
+            float chroma = (color_high - color_low) /
+                           max(color_high, 0.001);
+            float color_weight = mix(0.35, 1.0,
+                smoothstep(0.08, 0.45, chroma));
+            float locality = falloff * falloff * (3.0 - 2.0 * falloff);
+            float facing = abs(dot(geometric_normal, light_dir));
+            float wrap = 0.35 + 0.65 * (1.0 - facing) * (1.0 - facing);
+            bounce += radiance * locality * wrap * color_weight;
+        }
         if (specular_scale > 0.001) {
             vec3 half_dir = normalize(light_dir + view_dir);
             float ndoth = max(dot(shading_normal, half_dir), 0.0);
@@ -223,6 +246,7 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
                 smoothstep(0.0, 0.20, ndotl) * specular_scale;
         }
     }
+    bounce *= 0.65 * controls.y;
     return light;
 }
 
@@ -334,7 +358,7 @@ vec3 surface_light(vec3 normal, vec3 baked_light)
 vec3 surface_specular(vec3 normal, float reflectivity, float roughness)
 {
     if (surface_info.z == 0u || reflectivity <= 0.001 ||
-        pc.rt_params.w <= 0.001)
+        rt_controls(pc.rt_params.w).x <= 0.001)
         return vec3(0.0);
 
     uint candidate_count = min(v_rt_data.y & 0xffu, 4u);
@@ -342,7 +366,7 @@ vec3 surface_specular(vec3 normal, float reflectivity, float roughness)
     float gloss = 1.0 - roughness;
     float exponent = mix(10.0, 96.0, pow(gloss, 0.9));
     float lobe_normalization = mix(0.80, 1.85, gloss);
-    float scale = reflectivity * pc.rt_params.w *
+    float scale = reflectivity * rt_controls(pc.rt_params.w).x *
         mix(1.20, 0.62, roughness) * lobe_normalization;
     float emissive = clamp(pc.rt_params.x, 0.0, 2.0);
     float strength_scale = pow(emissive, 0.75) * 1.5;
@@ -420,18 +444,20 @@ float quad_anchor_distance()
 
 vec3 adaptive_dynamic_light(vec3 shading_normal, vec3 geometric_normal,
                             bool full_resolution, float reflectivity, float roughness,
-                            out vec3 specular)
+                            out vec3 specular, out vec3 bounce)
 {
     if (full_resolution)
         return dynamic_light(shading_normal, geometric_normal, reflectivity,
-                             roughness, specular);
+                             roughness, specular, bounce);
 
     vec3 light = vec3(0.0);
     specular = vec3(0.0);
+    bounce = vec3(0.0);
     if ((gl_SubgroupInvocationID & 3u) == 0u)
         light = dynamic_light(shading_normal, geometric_normal, reflectivity,
-                              roughness, specular);
+                              roughness, specular, bounce);
     specular = subgroupQuadBroadcast(specular, 0);
+    bounce = subgroupQuadBroadcast(bounce, 0);
     return subgroupQuadBroadcast(light, 0);
 }
 
@@ -517,15 +543,17 @@ void main()
     vec3 quad_surface_light = adaptive_surface_light(shading_normal,
         full_resolution, static_lighting.rgb);
     vec3 quad_dynamic_specular;
+    vec3 quad_dynamic_bounce;
     vec3 quad_dynamic_light = adaptive_dynamic_light(
         shading_normal, normal, full_dynamic_resolution, material_reflect,
-        material_roughness, quad_dynamic_specular);
+        material_roughness, quad_dynamic_specular, quad_dynamic_bounce);
 #endif
 
     vec3 bloom = vec3(0.0);
     int rt_debug = pc.rt_params.x < 0.0 ?
         int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
-        (pc.rt_params.y < -7.5 ? 8 : 0);
+        (pc.rt_params.y < -7.5 ?
+            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 9.0)) : 0);
     if (rt_debug >= 1 && rt_debug <= 3) {
         if (rt_debug == 1)
             out_color = vec4(vec3(static_coverage), 1.0);
@@ -553,18 +581,20 @@ void main()
         float ao = 1.0;
         vec3 dynamic_lighting;
         vec3 dynamic_specular;
+        vec3 dynamic_bounce;
         vec3 surface_lighting;
 #ifdef RT_QUAD_SHARING
         ao = quad_ao;
         dynamic_lighting = quad_dynamic_light;
         dynamic_specular = quad_dynamic_specular;
+        dynamic_bounce = quad_dynamic_bounce;
         surface_lighting = quad_surface_light;
 #else
         if (pc.lm_scale.x >= 0.0)
             ao = ambient_visibility(normal, ao_weight, baked_occlusion);
         dynamic_lighting = dynamic_light(shading_normal, normal,
                                          material_reflect, material_roughness,
-                                         dynamic_specular);
+                                         dynamic_specular, dynamic_bounce);
         surface_lighting = surface_light(shading_normal, static_lighting.rgb);
 #endif
         vec3 static_specular = surface_specular(shading_normal,
@@ -585,19 +615,40 @@ void main()
         lm *= ao;
         vec3 base_lighting = (lm + pc.scroll.www) * pc.color.rgb;
 
-        // Keep the raster/lightmap result authoritative, then add a localized
-        // colored pool from ray-shadowed surface emitters. Reject weak tails
-        // and cap the added luminance so they cannot become a global exposure
-        // correction. Screen-style headroom protects bright surface detail.
+        // Keep the raster/lightmap result authoritative, then add localized,
+        // capped dynamic color spill and ray-shadowed surface-emitter pools.
+        // Screen-style headroom protects bright texture detail.
         const vec3 luma_weights = vec3(0.2126, 0.7152, 0.0722);
         vec3 raster_rgb = texel.rgb *
             max(base_lighting + dynamic_lighting, vec3(0.0));
+        float bounce_luma = dot(dynamic_bounce, luma_weights);
+        float bounce_cap = min(max(dot(raster_rgb, luma_weights) * 0.30,
+                                   0.02), 0.10);
+        dynamic_bounce *= min(1.0, bounce_cap /
+                              max(bounce_luma, 0.000001));
+        vec3 bounce_add = dynamic_bounce *
+            max(vec3(1.0) - clamp(raster_rgb, 0.0, 1.0), vec3(0.0));
+        float bounce_add_luma = dot(bounce_add, luma_weights);
+        if (rt_debug == 9) {
+            out_color = vec4(clamp(bounce_add * 8.0, 0.0, 1.0), 1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
+        raster_rgb += bounce_add;
+        float bounce_bloom_weight = smoothstep(0.018, 0.065,
+                                                bounce_add_luma);
+        vec3 bounce_bloom = bounce_add * bounce_bloom_weight * 0.25;
+        float bounce_bloom_luma = dot(bounce_bloom, luma_weights);
+        bounce_bloom *= min(1.0, 0.025 /
+                            max(bounce_bloom_luma, 0.000001));
+        bloom += bounce_bloom;
         float reflection_surface_mask = 1.0;
 #ifdef RT_GLOWMAP
         float glow_luma = dot(glow.rgb, vec3(0.2126, 0.7152, 0.0722));
         reflection_surface_mask = 1.0 - smoothstep(0.08, 0.35, glow_luma);
 #endif
-        if (material_reflect > 0.001 && pc.rt_params.w > 0.001) {
+        if (material_reflect > 0.001 &&
+            rt_controls(pc.rt_params.w).x > 0.001) {
             float surface_luma = dot(raster_rgb, luma_weights);
             vec3 highlight = (dynamic_specular + static_specular) *
                              reflection_surface_mask;
@@ -638,7 +689,7 @@ void main()
             out_color.rgb *= pc.intensity;
         }
 #ifdef RT_GLOWMAP
-        bloom = texel.rgb * glow.a * pc.intensity;
+        bloom += texel.rgb * glow.a * pc.intensity;
 #endif
         float dynamic_luma = dot(dynamic_lighting,
                                  vec3(0.2126, 0.7152, 0.0722));

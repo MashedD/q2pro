@@ -756,8 +756,10 @@ vk_raytracing::
     receiver is within 320 world units; weaker or distant lights retain a
     single center sample. Dynamic shadows remain per-pixel
     within 512 world units and share results in 2x2 quads beyond that distance.
-    AO affects baked lightmaps but preserves emissive glow. A renderer restart
-    is required. If the selected
+    The same visibility results drive a capped dynamic color-bounce
+    approximation, adding localized combat-light spill without extra rays or
+    render passes. AO affects baked lightmaps but preserves emissive glow. A
+    renderer restart is required. If the selected
     device lacks Vulkan 1.2, acceleration structures, ray queries, buffer
     device addresses, or the required descriptor features, Q2PRO reports the
     reason and continues with the raster path. Default value is 0.
@@ -839,22 +841,16 @@ vk_rt_liquids::
     Changes apply immediately. Default value is 0.65; value 0 restores the
     previous liquid shading.
 
-vk_rt_entity_rim::
-    Controls RT-mode entity rim lighting, clamped between 0 and 1. Opaque and
-    alpha-tested alias models, including the view weapon, receive a broad cool
-    per-pixel edge light and a small warm glint from the existing shaded-light
-    direction. A restrained persistent cool fill prevents low-poly models
-    from losing the effect at particular angles or medium distances, while
-    the stronger angular edge and glint feed bloom without making the complete
-    skin glow. A thin cool silhouette, scaled to remain stable in screen
-    pixels, keeps eligible models outlined from every view direction. The
-    silhouette is drawn once per model, does not feed bloom, and yields to the
-    existing black contour when ‘gl_celshading’ is enabled.
-    Translucent, shell, tracker, bloom-only, shadow,
-    outline, and depth-only draws are excluded. The stable raster alias path
-    supplies the effect without enabling alias ray queries or adding texture
-    samples, draws, or passes. Changes apply immediately. Default value is
-    0.55; value 0 restores legacy entity shading.
+vk_rt_bounce::
+    Controls a performance-friendly approximation of colored indirect light
+    from explosions, projectiles, muzzle flashes, and other dynamic lights,
+    clamped between 0 and 1. It reuses the existing dynamic-light candidates
+    and ray-shadow visibility to add localized color spill across nearby BSP
+    world surfaces. Occluded lights do not leak through walls. The contribution
+    preserves texture detail, has separate luminance and bloom limits, and adds
+    no ray queries, render passes, draws, descriptors, or texture samples.
+    Changes apply immediately. Default value is 0.65; value 0 disables the
+    indirect contribution while retaining ordinary dynamic lighting.
 
 materials/rt_reflections.mat::
     Optional exact-name material overrides used by the Vulkan SSR and specular
@@ -878,7 +874,9 @@ vk_rt_debug::
     6 shows ray hits in blue and misses in brown, and 7 shows only the final
     resolved reflection contribution. Value 8 disables SSR and shows only
     amplified specular: dynamic-light highlights are cyan and baked-emitter
-    highlights are amber. Value 0 restores
+    highlights are amber. Value 9 shows the final capped dynamic color-bounce
+    contribution amplified eight times; black means that no bounce reaches the
+    surface. Value 0 restores
     normal rendering. This
     diagnostic is applied immediately, does not rebake the map, and adds no
     work while disabled. Default value is 0.
