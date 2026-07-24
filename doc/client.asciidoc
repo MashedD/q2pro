@@ -839,6 +839,23 @@ vk_rt_liquids::
     Changes apply immediately. Default value is 0.65; value 0 restores the
     previous liquid shading.
 
+vk_rt_entity_rim::
+    Controls RT-mode entity rim lighting, clamped between 0 and 1. Opaque and
+    alpha-tested alias models, including the view weapon, receive a broad cool
+    per-pixel edge light and a small warm glint from the existing shaded-light
+    direction. A restrained persistent cool fill prevents low-poly models
+    from losing the effect at particular angles or medium distances, while
+    the stronger angular edge and glint feed bloom without making the complete
+    skin glow. A thin cool silhouette, scaled to remain stable in screen
+    pixels, keeps eligible models outlined from every view direction. The
+    silhouette is drawn once per model, does not feed bloom, and yields to the
+    existing black contour when ‘gl_celshading’ is enabled.
+    Translucent, shell, tracker, bloom-only, shadow,
+    outline, and depth-only draws are excluded. The stable raster alias path
+    supplies the effect without enabling alias ray queries or adding texture
+    samples, draws, or passes. Changes apply immediately. Default value is
+    0.55; value 0 restores legacy entity shading.
+
 materials/rt_reflections.mat::
     Optional exact-name material overrides used by the Vulkan SSR and specular
     paths. Entries use a Q2RTX-style block with independent `reflect` and

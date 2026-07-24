@@ -397,7 +397,8 @@ if vulkan.found()
                     'vk_world_pixel_glow.frag',
                     'vk_world_pixel_glow_alpha.frag',
                     'vk_world_glow.frag',
-                    'vk_alias.vert', 'vk_alias_shadow.vert',
+                    'vk_alias.vert', 'vk_alias_effect.frag',
+                    'vk_alias_shadow.vert',
                     'vk_alias_shadow.frag']
     vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
       input: 'src/refresh' / shader,
@@ -414,6 +415,12 @@ if vulkan.found()
                   '@INPUT@', '-o', '@OUTPUT@'],
       )
     endforeach
+    vk_shader_headers += custom_target('vk_alias_effect_alpha_frag_spv_h',
+      input: 'src/refresh/vk_alias_effect.frag',
+      output: 'vk_alias_effect_alpha_frag_spv.h',
+      command: [glslc, '-DALIAS_ALPHA_TEST=1', '-mfmt=c',
+                '@INPUT@', '-o', '@OUTPUT@'],
+    )
     shader = 'vk_world_pixel_rt.vert'
     vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
       input: 'src/refresh' / shader,

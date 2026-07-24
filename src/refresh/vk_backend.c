@@ -183,6 +183,14 @@ static const uint32_t vk_alias_vert_spv[] =
 #include "vk_alias_vert_spv.h"
 ;
 
+static const uint32_t vk_alias_effect_frag_spv[] =
+#include "vk_alias_effect_frag_spv.h"
+;
+
+static const uint32_t vk_alias_effect_alpha_frag_spv[] =
+#include "vk_alias_effect_alpha_frag_spv.h"
+;
+
 static const uint32_t vk_alias_shadow_vert_spv[] =
 #include "vk_alias_shadow_vert_spv.h"
 ;
@@ -556,6 +564,7 @@ typedef struct {
     float rt_entity_origin[4];
     float rt_enabled;
     float _rt_pad[3];
+    float rim_view[4];
 } vk_alias_push_t;
 
 typedef struct {
@@ -971,6 +980,7 @@ static cvar_t *vk_rt_ao;
 static cvar_t *vk_rt_reflections;
 static cvar_t *vk_rt_specular;
 static cvar_t *vk_rt_liquids;
+static cvar_t *vk_rt_entity_rim;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -7670,6 +7680,9 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
 #else
         false;
 #endif
+    bool effect_alias = pipeline == &vk.alias_pipeline ||
+                        pipeline == &vk.alias_alpha_pipeline ||
+                        pipeline == &vk.alias_blend_pipeline;
     VkShaderModule frag = color_only ?
         vk_create_shader_module(vk_alias_shadow_frag_spv,
                                 sizeof(vk_alias_shadow_frag_spv)) :
@@ -7680,6 +7693,11 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
 #else
         VK_NULL_HANDLE :
 #endif
+        effect_alias ?
+        vk_create_shader_module(alpha_test ? vk_alias_effect_alpha_frag_spv :
+                                             vk_alias_effect_frag_spv,
+                                alpha_test ? sizeof(vk_alias_effect_alpha_frag_spv) :
+                                             sizeof(vk_alias_effect_frag_spv)) :
         alpha_test ?
         vk_create_shader_module(vk_world_alpha_frag_spv,
                                 sizeof(vk_world_alpha_frag_spv)) :
@@ -7815,16 +7833,9 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
         color_blend_attachment[0].colorWriteMask = 0;
     } else if (pipeline == &vk.alias_pipeline ||
                pipeline == &vk.alias_alpha_pipeline) {
-        // Opaque alias fragments replace any bloom left by geometry drawn
-        // earlier. Zero/zero blending writes black without requiring a
-        // separate fragment shader; alpha-tested holes still discard.
-        color_blend_attachment[1].blendEnable = VK_TRUE;
-        color_blend_attachment[1].srcColorBlendFactor = VK_BLEND_FACTOR_ZERO;
-        color_blend_attachment[1].dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
-        color_blend_attachment[1].colorBlendOp = VK_BLEND_OP_ADD;
-        color_blend_attachment[1].srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-        color_blend_attachment[1].dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-        color_blend_attachment[1].alphaBlendOp = VK_BLEND_OP_ADD;
+        // The dedicated alias shader writes optional rim/glint bloom. A
+        // disabled effect retains the old black bloom attachment while
+        // alpha-tested holes still discard.
         color_blend_attachment[1].colorWriteMask =
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -11622,6 +11633,50 @@ static void vk_draw_alias_cel_edges(VkCommandBuffer cmd,
     vk_count_batch3d();
 }
 
+static void vk_draw_alias_rt_outline(VkCommandBuffer cmd,
+                                     const VkBuffer buffers[2],
+                                     const VkDeviceSize offsets[2],
+                                     const vk_model_t *model,
+                                     const vk_alias_push_t *base_push,
+                                     const entity_t *ent,
+                                     const refdef_t *fd)
+{
+    if (!vk.raytracing_active || !vk_rt_entity_rim ||
+        vk_rt_entity_rim->value <= 0.0f || !vk.alias_cel_pipeline ||
+        !vk.textures[1].descriptor_set || !model->mesh.index_count || !fd ||
+        (vk_celshading && vk_celshading->value > 0.0f) ||
+        (ent->flags & (RF_TRANSLUCENT | RF_SHELL_MASK | RF_TRACKER |
+                       RF_BLOOM_ONLY)))
+        return;
+
+    vk_alias_push_t push = *base_push;
+    float strength = Cvar_ClampValue(vk_rt_entity_rim, 0.0f, 1.0f);
+    float width = 0.75f + 1.25f * strength;
+    float alpha = min(0.85f, 1.25f * strength);
+    float distance = max(Distance(ent->origin, fd->vieworg), 1.0f);
+    float view_height = max(fd->height, 1);
+    float entity_scale = ent->scale ? fabsf(ent->scale) : 1.0f;
+    float world_per_pixel = 2.0f * distance *
+        tanf(DEG2RAD(fd->fov_y) * 0.5f) / view_height;
+
+    Vector4Set(push.color, 0.08f, 0.28f, 0.65f, alpha);
+    Vector4Clear(push.shadedir);
+    Vector4Clear(push.rim_view);
+    push.shellscale = width * world_per_pixel / entity_scale;
+    push.depthscale = (ent->flags & RF_DEPTHHACK) ? 0.25f : 1.0f;
+    push.intensity = 1.0f;
+
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                     vk.alias_cel_pipeline);
+    vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
+    vk_bind_index_buffer(cmd, model->mesh.indices.buffer, 0,
+                         VK_INDEX_TYPE_UINT32);
+    vk_bind_texture_descriptor(cmd, vk.textures[1].descriptor_set);
+    vk_push_constants(cmd, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0, 0, 0);
+    vk_count_batch3d();
+}
+
 static void vk_draw_alias_outlines(VkCommandBuffer cmd,
                                     const VkBuffer buffers[2],
                                     const VkDeviceSize offsets[2],
@@ -11946,6 +12001,16 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     Vector4Clear(push.rt_light_color);
     Vector4Set(push.rt_entity_origin, ent->origin[0], ent->origin[1], ent->origin[2], 1.0f);
     push.rt_enabled = 0.0f;
+    Vector4Clear(push.rim_view);
+    if (vk.raytracing_active && vk_rt_entity_rim &&
+        vk_rt_entity_rim->value > 0.0f &&
+        !(ent->flags & (RF_TRANSLUCENT | RF_SHELL_MASK | RF_TRACKER |
+                        RF_BLOOM_ONLY))) {
+        vec3_t local_view;
+        vk_transform_to_entity_local(fd->vieworg, ent, axis, local_view);
+        VectorCopy(local_view, push.rim_view);
+        push.rim_view[3] = Cvar_ClampValue(vk_rt_entity_rim, 0.0f, 1.0f);
+    }
 #if USE_VULKAN_RAYTRACING
     if (vk.alias_rt_pipeline && vk_alias_rt_light(ent, fd, push.rt_light_origin,
                                                    push.rt_light_color))
@@ -11991,6 +12056,10 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
                 vk_alias_push_t glow_push = push;
 
                 glow_push.intensity = vk_glowmap_intensity();
+                // The base alias pass already contributes the entity rim.
+                // Reapplying it through a blended glowmap makes the response
+                // depend on the skin layout and can brighten it twice.
+                Vector4Clear(glow_push.rim_view);
                 vk_draw_alias_pass(cmd, vk.drawing_bloom ? vk.alias_bloom_pipeline :
                                    vk.alias_blend_pipeline, buffers, offsets,
                                    model, batch, glow, &glow_push);
@@ -12000,6 +12069,10 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
             vk_draw_alias_outlines(cmd, buffers, offsets, model, batch,
                                    texture, &push, ent, fd);
     }
+
+    if (!vk.drawing_bloom)
+        vk_draw_alias_rt_outline(cmd, buffers, offsets, model, &push,
+                                 ent, fd);
 
     if (!vk.drawing_bloom)
         vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp, false);
@@ -15175,6 +15248,7 @@ bool VKR_Init(bool total)
     vk_rt_reflections = Cvar_Get("vk_rt_reflections", "0.35", CVAR_ARCHIVE);
     vk_rt_specular = Cvar_Get("vk_rt_specular", "0.45", CVAR_ARCHIVE);
     vk_rt_liquids = Cvar_Get("vk_rt_liquids", "0.65", CVAR_ARCHIVE);
+    vk_rt_entity_rim = Cvar_Get("vk_rt_entity_rim", "0.55", CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);

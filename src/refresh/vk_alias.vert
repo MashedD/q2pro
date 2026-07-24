@@ -16,6 +16,7 @@ layout(push_constant) uniform Push {
     vec4 rt_entity_origin;
     float rt_enabled;
     vec3 _rt_pad;
+    vec4 rim_view;
 } pc;
 
 layout(location = 0) in vec3 in_position;
@@ -30,6 +31,9 @@ layout(location = 2) flat out float v_mode;
 layout(location = 3) flat out vec4 v_rt_light_origin;
 layout(location = 4) flat out vec4 v_rt_light_color;
 layout(location = 5) flat out vec4 v_rt_entity_origin;
+layout(location = 6) out vec3 v_rim_view;
+layout(location = 7) out vec3 v_rim_normal;
+layout(location = 8) flat out float v_rim_strength;
 
 void main()
 {
@@ -53,4 +57,10 @@ void main()
     v_rt_light_origin = pc.rt_light_origin;
     v_rt_light_color = pc.rt_light_color;
     v_rt_entity_origin = pc.rt_entity_origin;
+    // Preserve the view vector and animated normal until the fragment stage.
+    // Computing a scalar Fresnel term here made low-poly alias triangles pop
+    // in and out as their sparse vertex normals crossed the narrow response.
+    v_rim_view = pc.rim_view.xyz - position;
+    v_rim_normal = normal;
+    v_rim_strength = pc.rim_view.w;
 }

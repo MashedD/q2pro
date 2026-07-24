@@ -37,6 +37,27 @@ float trace_hit_distance(vec3 origin, vec3 direction, float distance)
     return rayQueryGetIntersectionTEXT(query, true);
 }
 
+float dynamic_ray_bias(vec3 position)
+{
+    float magnitude = max(abs(position.x),
+        max(abs(position.y), abs(position.z)));
+    return clamp(0.25 + magnitude * 0.00005, 0.25, 0.75);
+}
+
+float trace_dynamic_hit_distance(vec3 origin, vec3 direction,
+                                 float max_distance)
+{
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, scene,
+        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+        0xff, origin, 0.10, direction, max(max_distance - 0.20, 0.101));
+    while (rayQueryProceedEXT(query)) { }
+    if (rayQueryGetIntersectionTypeEXT(query, true) ==
+        gl_RayQueryCommittedIntersectionNoneEXT)
+        return -1.0;
+    return rayQueryGetIntersectionTEXT(query, true);
+}
+
 float dynamic_shadow_visibility(float hit_distance, float ray_distance)
 {
     if (hit_distance < 0.0)
@@ -53,8 +74,8 @@ float dynamic_light_visibility(vec3 origin, vec3 delta, float range,
     float center_distance = length(delta);
     vec3 center_direction = delta / max(center_distance, 0.001);
     if (light_index != 0 || contribution < 0.06 || center_distance > 320.0) {
-        float hit = trace_hit_distance(origin, center_direction,
-                                       center_distance);
+        float hit = trace_dynamic_hit_distance(origin, center_direction,
+                                               center_distance);
         return dynamic_shadow_visibility(hit, center_distance);
     }
 
@@ -66,9 +87,9 @@ float dynamic_light_visibility(vec3 origin, vec3 delta, float range,
     vec3 second_delta = delta - tangent * source_radius;
     float first_distance = length(first_delta);
     float second_distance = length(second_delta);
-    float first_hit = trace_hit_distance(origin,
+    float first_hit = trace_dynamic_hit_distance(origin,
         first_delta / max(first_distance, 0.001), first_distance);
-    float second_hit = trace_hit_distance(origin,
+    float second_hit = trace_dynamic_hit_distance(origin,
         second_delta / max(second_distance, 0.001), second_distance);
     return 0.5 * (dynamic_shadow_visibility(first_hit, first_distance) +
                   dynamic_shadow_visibility(second_hit, second_distance));
@@ -160,7 +181,8 @@ vec3 liquid_ripple_normal(vec3 position, vec3 normal, vec2 uv, float time,
                      bitangent * gradient.y);
 }
 
-vec3 dynamic_light(vec3 normal, float reflectivity, float roughness,
+vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
+                   float reflectivity, float roughness,
                    float specular_control, out vec3 specular)
 {
     vec3 light = vec3(0.0);
@@ -185,16 +207,22 @@ vec3 dynamic_light(vec3 normal, float reflectivity, float roughness,
                 max(pc.dlight_colors[i].g, pc.dlight_colors[i].b)) * energy;
             if (contribution < 0.01)
                 continue;
+            vec3 oriented_normal = dot(geometric_normal, delta) >= 0.0 ?
+                geometric_normal : -geometric_normal;
+            float bias = dynamic_ray_bias(v_position);
+            vec3 ray_origin = v_position + oriented_normal * bias +
+                              light_dir * 0.05;
+            vec3 ray_delta = pc.dlight_origins[i].xyz - ray_origin;
             float visibility = dynamic_light_visibility(
-                v_position + normal * 0.05, delta, range, contribution, i);
+                ray_origin, ray_delta, range, contribution, i);
             vec3 radiance = pc.dlight_colors[i].rgb * energy * visibility;
             light += radiance;
             if (specular_scale > 0.001) {
                 vec3 half_dir = normalize(light_dir + view_dir);
-                float ndoth = max(dot(normal, half_dir), 0.0);
-                float ndotl = max(dot(normal, light_dir), 0.0);
+                float ndoth = max(dot(shading_normal, half_dir), 0.0);
+                float ndotl = max(dot(shading_normal, light_dir), 0.0);
                 float lobe = material_specular_lobe(ndoth,
-                    max(dot(normal, view_dir), 0.0), gloss, exponent);
+                    max(dot(shading_normal, view_dir), 0.0), gloss, exponent);
                 specular += radiance * lobe *
                     smoothstep(0.0, 0.20, ndotl) * specular_scale;
             }
@@ -271,7 +299,7 @@ void main()
         }
         out_color.rgb *= pc.intensity;
         vec3 dynamic_specular;
-        vec3 dynamic = dynamic_light(shading_normal, material_reflect,
+        vec3 dynamic = dynamic_light(shading_normal, normal, material_reflect,
                                      material_roughness, specular_control,
                                      dynamic_specular);
         if (rt_debug == 8) {
