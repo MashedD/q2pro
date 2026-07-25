@@ -75,6 +75,8 @@ begin video
     values "fov scaling" cl_adjustfov vert- hor+
     field --numeric --width 4 "field of view" fov
     toggle "vertical sync" gl_swapinterval
+    pairs "Vulkan present mode" vk_present_mode \
+        automatic 0 FIFO 1 mailbox 2 immediate 3
     pairs "anti-aliasing" gl_multisamples no 0 "2x MSAA" 2 "4x MSAA" 4 "8x MSAA" 8
     range "texture gamma" vid_gamma 1.3 0.3
     toggle "hardware gamma" vid_hwgamma

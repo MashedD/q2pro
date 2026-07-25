@@ -831,7 +831,10 @@ typedef struct {
     VkImageLayout ssr_resolve_layout;
     VkCommandBuffer *command_buffers;
     uint32_t swapchain_image_count;
+    unsigned swapchain_retry_time;
     bool swapchain_transfer_src;
+    bool swapchain_deferred;
+    bool swapchain_recreate_failed;
     vk_queue_families_t queues;
     VkSemaphore image_available[VK_MAX_FRAMES_IN_FLIGHT];
     VkSemaphore render_finished[VK_MAX_FRAMES_IN_FLIGHT];
@@ -916,6 +919,8 @@ static vk_state_t vk;
 static cvar_t *vk_drawentities;
 static cvar_t *vk_drawsky;
 static cvar_t *vk_swapinterval;
+static cvar_t *vk_present_mode;
+static bool vk_present_mode_warned;
 static cvar_t *vk_finish;
 static cvar_t *vk_texturemode;
 static cvar_t *vk_anisotropy;
@@ -1038,7 +1043,7 @@ static void vk_entity_axis(const entity_t *ent, vec3_t axis[3]);
 static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
                           const entity_t *ent, const vec3_t axis[3]);
 static bool vk_create_swapchain(int width, int height);
-static bool vk_recreate_swapchain(void);
+static bool vk_recreate_swapchain(const char *reason);
 static const char *vk_device_type_string(VkPhysicalDeviceType type);
 static void vk_destroy_mesh(vk_mesh_t *mesh);
 #if USE_VULKAN_RAYTRACING
@@ -5302,7 +5307,13 @@ static void vk_swapinterval_changed(cvar_t *self)
     if (!vk.device || !vk.swapchain)
         return;
 
-    vk_recreate_swapchain();
+    vk_recreate_swapchain("present mode change");
+}
+
+static void vk_present_mode_changed(cvar_t *self)
+{
+    vk_present_mode_warned = false;
+    vk_swapinterval_changed(self);
 }
 
 static void vk_drawsky_changed(cvar_t *self)
@@ -5637,17 +5648,40 @@ static VkSurfaceFormatKHR vk_choose_surface_format(const VkSurfaceFormatKHR *for
 static VkPresentModeKHR vk_choose_present_mode(const VkPresentModeKHR *modes,
                                                uint32_t count)
 {
-    if (!vk_swapinterval || vk_swapinterval->integer)
-        return VK_PRESENT_MODE_FIFO_KHR;
+    VkPresentModeKHR requested = VK_PRESENT_MODE_FIFO_KHR;
+    bool explicit_mode = vk_present_mode && vk_present_mode->integer > 0;
 
-    for (uint32_t i = 0; i < count; i++) {
-        if (modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR)
-            return modes[i];
+    if (explicit_mode) {
+        switch (vk_present_mode->integer) {
+        case 2:
+            requested = VK_PRESENT_MODE_MAILBOX_KHR;
+            break;
+        case 3:
+            requested = VK_PRESENT_MODE_IMMEDIATE_KHR;
+            break;
+        default:
+            requested = VK_PRESENT_MODE_FIFO_KHR;
+            break;
+        }
+    } else if (!vk_swapinterval || vk_swapinterval->integer) {
+        return VK_PRESENT_MODE_FIFO_KHR;
+    } else {
+        requested = VK_PRESENT_MODE_IMMEDIATE_KHR;
     }
 
     for (uint32_t i = 0; i < count; i++) {
-        if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR)
-            return modes[i];
+        if (modes[i] == requested)
+            return requested;
+    }
+
+    if (!explicit_mode) {
+        for (uint32_t i = 0; i < count; i++) {
+            if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR)
+                return modes[i];
+        }
+    } else if (!vk_present_mode_warned) {
+        Com_WPrintf("Requested Vulkan present mode is unavailable; falling back to fifo.\n");
+        vk_present_mode_warned = true;
     }
 
     return VK_PRESENT_MODE_FIFO_KHR;
@@ -6060,7 +6094,7 @@ static void vk_destroy_swapchain(void)
     vk.swapchain_image_count = 0;
 }
 
-static bool vk_recreate_swapchain(void)
+static bool vk_recreate_swapchain(const char *reason)
 {
     if (!vk.device)
         return false;
@@ -6070,11 +6104,23 @@ static bool vk_recreate_swapchain(void)
 
     vk_destroy_swapchain();
     if (!vk_create_swapchain(width, height)) {
-        Com_EPrintf("Couldn't recreate Vulkan swapchain: %s\n", Com_GetLastError());
+        if (vk.swapchain_deferred) {
+            vk.swapchain_retry_time = Sys_Milliseconds() + 1000;
+            vk_destroy_swapchain();
+            return false;
+        }
+        if (!vk.swapchain_recreate_failed) {
+            Com_EPrintf("Couldn't recreate Vulkan swapchain after %s: %s\n",
+                        reason, Com_GetLastError());
+        }
+        vk.swapchain_recreate_failed = true;
+        vk.swapchain_retry_time = Sys_Milliseconds() + 1000;
         vk_destroy_swapchain();
         return false;
     }
 
+    vk.swapchain_recreate_failed = false;
+    vk.swapchain_retry_time = 0;
     return true;
 }
 
@@ -7901,6 +7947,8 @@ static VkPipelineDepthStencilStateCreateInfo vk_shadow_depth_stencil_state(void)
 static bool vk_create_swapchain(int width, int height)
 {
     VkSurfaceCapabilitiesKHR caps;
+    vk.swapchain_deferred = false;
+
     VkResult result = vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(vk.physical_device,
                                                                  vk.surface, &caps);
     if (result != VK_SUCCESS)
@@ -7944,7 +7992,7 @@ static bool vk_create_swapchain(int width, int height)
 
     VkExtent2D extent = vk_choose_extent(&caps, width, height);
     if (!extent.width || !extent.height) {
-        Com_SetLastError("Vulkan surface has zero extent");
+        vk.swapchain_deferred = true;
         return false;
     }
 
@@ -15120,6 +15168,8 @@ bool VKR_Init(bool total)
     vk_drawsky->changed = vk_drawsky_changed;
     vk_swapinterval = Cvar_Get("gl_swapinterval", "1", CVAR_ARCHIVE);
     vk_swapinterval->changed = vk_swapinterval_changed;
+    vk_present_mode = Cvar_Get("vk_present_mode", "0", CVAR_ARCHIVE);
+    vk_present_mode->changed = vk_present_mode_changed;
     vk_finish = Cvar_Get("gl_finish", "0", 0);
     vk_texturemode = Cvar_Get("gl_texturemode", "GL_LINEAR_MIPMAP_LINEAR",
                               CVAR_ARCHIVE);
@@ -15324,6 +15374,8 @@ void VKR_Shutdown(bool total)
 
     if (vk_swapinterval)
         vk_swapinterval->changed = NULL;
+    if (vk_present_mode)
+        vk_present_mode->changed = NULL;
     if (vk_texturemode)
         vk_texturemode->changed = NULL;
     if (vk_texturemode)
@@ -15655,7 +15707,8 @@ void VKR_EndRegistration(void)
 
 void VKR_RenderFrame(const refdef_t *fd)
 {
-    if (!fd)
+    if (!fd || !vk.frame_active || !vk.render_pass_active ||
+        !vk.command_buffers || vk.current_image >= vk.swapchain_image_count)
         return;
 
     vk.fd = *fd;
@@ -16463,12 +16516,24 @@ void VKR_BeginFrame(void)
     vk.present_usec = 0;
     vk.frame_start_usec = 0;
 
+    if (!vk.swapchain) {
+        unsigned now = Sys_Milliseconds();
+
+        if (!vk.swapchain_retry_time ||
+            (int)(now - vk.swapchain_retry_time) >= 0) {
+            vk_recreate_swapchain("deferred retry");
+        }
+        if (!vk.swapchain)
+            return;
+    }
+
     if (gl_bloom && gl_bloom->modified) {
         bool enable_mrt = gl_bloom->integer > 0 ||
             (vk_raytracing && vk_raytracing->integer && vk_rt_reflections &&
              vk_rt_reflections->value > 0.001f);
         gl_bloom->modified = false;
-        if (enable_mrt != vk.mrt_bloom && !vk_recreate_swapchain())
+        if (enable_mrt != vk.mrt_bloom &&
+            !vk_recreate_swapchain("bloom configuration change"))
             return;
     }
     if (vk_rt_reflections && vk_rt_reflections->modified) {
@@ -16476,12 +16541,14 @@ void VKR_BeginFrame(void)
             (vk_raytracing && vk_raytracing->integer &&
              vk_rt_reflections->value > 0.001f);
         vk_rt_reflections->modified = false;
-        if (enable_mrt != vk.mrt_bloom && !vk_recreate_swapchain())
+        if (enable_mrt != vk.mrt_bloom &&
+            !vk_recreate_swapchain("ray-traced reflection change"))
             return;
     }
     if (vk_bloom_downsample && vk_bloom_downsample->modified) {
         vk_bloom_downsample->modified = false;
-        if (vk.mrt_bloom && !vk_recreate_swapchain())
+        if (vk.mrt_bloom &&
+            !vk_recreate_swapchain("bloom downsample change"))
             return;
     }
 
@@ -16522,7 +16589,7 @@ void VKR_BeginFrame(void)
                                         &vk.current_image);
         vk.acquire_usec = vk_time_usec() - start;
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-            vk_recreate_swapchain();
+            vk_recreate_swapchain("image acquisition out of date");
             return;
         }
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
@@ -16894,7 +16961,9 @@ void VKR_EndFrame(void)
     result = vk.QueuePresentKHR(vk.present_queue, &present_info);
     vk.present_usec = vk_time_usec() - start;
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
-        vk_recreate_swapchain();
+        vk_recreate_swapchain(result == VK_ERROR_OUT_OF_DATE_KHR ?
+                              "presentation out of date" :
+                              "presentation suboptimal");
     } else if (result != VK_SUCCESS) {
         Com_EPrintf("vkQueuePresentKHR failed: Vulkan error %d\n", result);
     }
@@ -16917,7 +16986,7 @@ void VKR_ModeChanged(int width, int height, int flags)
     if (!vk.device)
         return;
 
-    vk_recreate_swapchain();
+    vk_recreate_swapchain("video mode change");
 }
 
 bool VKR_VideoSync(void)
@@ -16948,7 +17017,7 @@ bool VKR_VideoSync(void)
         if (result == VK_NOT_READY || result == VK_TIMEOUT)
             return false;
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-            vk_recreate_swapchain();
+            vk_recreate_swapchain("video sync acquisition out of date");
             return false;
         }
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
