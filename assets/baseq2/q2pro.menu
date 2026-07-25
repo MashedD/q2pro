@@ -69,8 +69,8 @@ begin video
     banner m_banner_video
     pairs "renderer" vid_ref "OpenGL" gl "Vulkan" vk
     pairs "Vulkan device" vk_device $$vk_devicelist
-    toggle "Vulkan ray tracing" vk_raytracing
-    range "RT emissive lighting" vk_rt_emissive 0 2 0.05
+    action --align --status "Requires the Vulkan renderer" \
+        "Vulkan ray tracing..." pushmenu raytracing
     values "video mode" vid_fullscreen windowed $$vid_modelist
     values "fov scaling" cl_adjustfov vert- hor+
     field --numeric --width 4 "field of view" fov
@@ -102,6 +102,27 @@ begin video
     range "glare intensity" gl_glare_intensity 0 2
     range "glare size" gl_glare_size 8 96
     range "glare threshold" gl_glare_threshold 0 1
+end
+
+begin raytracing
+    title "Ray Tracing Setup"
+    toggle --status "Enable Vulkan ray tracing; changing this refreshes the renderer" \
+        "ray tracing" vk_raytracing
+    range --status "Contact shadowing in corners and at surface junctions" \
+        "ambient occlusion" vk_rt_ao 0 0.5 0.01
+    range --status "Colored lighting from emissive world surfaces" \
+        "emissive lighting" vk_rt_emissive 0 2 0.05
+    range --status "Screen-space reflections on configured materials" \
+        "reflections" vk_rt_reflections 0 1 0.05
+    range --status "Material highlights from dynamic and emissive lights" \
+        "specular highlights" vk_rt_specular 0 1 0.05
+    range --status "Ripples, sheen, highlights, and glow on liquids" \
+        "liquid effects" vk_rt_liquids 0 1 0.05
+    range --status "Localized color spill from explosions and projectiles" \
+        "dynamic color bounce" vk_rt_bounce 0 1 0.05
+    blank
+    toggle --status "Allow bright ray-traced effects to contribute bloom" \
+        "bloom" gl_bloom
 end
 
 begin options
