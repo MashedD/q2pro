@@ -101,10 +101,43 @@ vec2 material_params(float packed)
     return vec2(floor(bits / 16.0), mod(bits, 16.0)) / 15.0;
 }
 
-vec2 rt_controls(float packed)
+vec4 rt_controls(float packed)
 {
-    uint bits = uint(clamp(floor(packed + 0.5), 0.0, 65535.0));
-    return vec2(float(bits & 255u), float((bits >> 8) & 255u)) / 255.0;
+    uint bits = uint(clamp(floor(packed + 0.5), 0.0, 16777215.0));
+    return vec4(float(bits & 255u) / 255.0,
+                float((bits >> 8) & 255u) / 255.0,
+                float((bits >> 16) & 63u) / 63.0,
+                float((bits >> 22) & 3u));
+}
+
+vec3 underwater_caustics(vec3 position, vec3 normal, vec4 controls)
+{
+    float strength = controls.z;
+    int kind = int(controls.w + 0.5);
+    if (strength <= 0.001 || kind < 1 || kind > 3)
+        return vec3(0.0);
+
+    vec3 axis = abs(normal);
+    vec2 coord = axis.z >= axis.x && axis.z >= axis.y ? position.xy :
+        (axis.x >= axis.y ? position.yz : position.xz);
+    float scale = kind == 2 ? 0.038 : (kind == 3 ? 0.052 : 0.045);
+    float speed = kind == 2 ? 0.65 : (kind == 3 ? 1.40 : 1.0);
+    vec2 p = coord * scale;
+    float time = pc.dlight.w * speed;
+    float wave0 = sin(dot(p, vec2(1.72, 1.13)) + time);
+    float wave1 = sin(dot(p, vec2(-1.31, 1.91)) - time * 1.27);
+    float wave2 = sin(dot(p, vec2(0.73, -2.08)) + time * 0.71);
+    float ridge = 1.0 - abs((wave0 + wave1 + wave2) / 3.0);
+    float pattern = smoothstep(kind == 3 ? 0.38 : 0.52,
+                               kind == 3 ? 0.92 : 0.88, ridge);
+    float orientation = 0.40 + 0.60 * axis.z;
+    float distance_fade = 1.0 - smoothstep(512.0, 1152.0,
+        distance(position, pc.dlight.xyz));
+    vec3 tint = kind == 2 ? vec3(0.18, 0.75, 0.22) :
+        (kind == 3 ? vec3(1.0, 0.28, 0.035) :
+                     vec3(0.18, 0.55, 0.85));
+    float energy = kind == 3 ? 0.22 : (kind == 2 ? 0.15 : 0.18);
+    return tint * pattern * orientation * distance_fade * energy * strength;
 }
 
 float material_specular_lobe(float ndoth, float ndotv, float gloss,
@@ -281,14 +314,14 @@ void main()
     int rt_debug = pc.rt_params.x < 0.0 ?
         int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
         (pc.rt_params.y < -7.5 ?
-            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 9.0)) : 0);
+            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 10.0)) : 0);
     vec2 material = material_params(pc.rt_params.z);
     float material_reflect = material.x;
     float material_roughness = material.y;
     vec4 material_texel = texture(tex_sampler, uv);
     vec3 bloom = vec3(0.0);
     float bump_mask = 1.0 - step(1.5, mode);
-    vec2 controls = liquid ? vec2(previous_specular, 0.0) :
+    vec4 controls = liquid ? vec4(previous_specular, 0.0, 0.0, 0.0) :
                              rt_controls(pc.rt_params.w);
     float specular_control = liquid ? liquid_strength : controls.x;
     float bounce_control = controls.y;
@@ -340,6 +373,29 @@ void main()
         out_color.rgb *= clamp(v_color.rgb + dynamic, 0.0, 1.0);
         vec3 raster_surface = out_color.rgb;
         const vec3 luma_weights = vec3(0.2126, 0.7152, 0.0722);
+        vec3 caustics = underwater_caustics(v_position, normal, controls);
+        float caustics_luma = dot(caustics, luma_weights);
+        float caustics_cap = min(max(dot(raster_surface, luma_weights) * 0.22,
+                                     0.015), 0.08);
+        caustics *= min(1.0, caustics_cap /
+                        max(caustics_luma, 0.000001));
+        vec3 caustics_add = caustics * max(
+            vec3(1.0) - clamp(raster_surface, 0.0, 1.0), vec3(0.0));
+        float caustics_add_luma = dot(caustics_add, luma_weights);
+        if (rt_debug == 10) {
+            out_color = vec4(clamp(caustics_add * 8.0, 0.0, 1.0), 1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
+        out_color.rgb += caustics_add;
+        raster_surface = out_color.rgb;
+        float caustics_bloom_weight = smoothstep(0.018, 0.065,
+                                                  caustics_add_luma);
+        vec3 caustics_bloom = caustics_add * caustics_bloom_weight * 0.12;
+        float caustics_bloom_luma = dot(caustics_bloom, luma_weights);
+        caustics_bloom *= min(1.0, 0.012 /
+                              max(caustics_bloom_luma, 0.000001));
+        out_bloom.rgb += caustics_bloom;
         float bounce_luma = dot(dynamic_bounce, luma_weights);
         float bounce_cap = min(max(dot(raster_surface, luma_weights) * 0.30,
                                    0.02), 0.10);

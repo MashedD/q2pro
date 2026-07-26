@@ -888,6 +888,7 @@ typedef struct {
     vec3_t sky_axis;
     refdef_t fd;
     bool fd_valid;
+    int view_liquid_kind;
     vk_world_t world;
     vk_model_t models[MAX_MODELS];
     uint32_t model_count;
@@ -977,6 +978,7 @@ static cvar_t *vk_rt_reflections;
 static cvar_t *vk_rt_specular;
 static cvar_t *vk_rt_liquids;
 static cvar_t *vk_rt_bounce;
+static cvar_t *vk_rt_caustics;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -8891,7 +8893,7 @@ static bool vk_ssr_enabled_for_frame(void)
     return vk.ssr_ready && vk.raytracing_active && vk_raytracing &&
         vk_raytracing->integer && vk_rt_reflections &&
         vk_rt_reflections->value > 0.001f && vk.fd_valid &&
-        (!vk_rt_debug || vk_rt_debug->integer != 8) &&
+        (!vk_rt_debug || vk_rt_debug->integer < 8) &&
         !(vk.fd.rdflags & RDF_NOWORLDMODEL);
 #else
     return false;
@@ -10424,15 +10426,21 @@ static float vk_world_pack_material(float reflect, float roughness)
     return (float)((reflect_q << 4) | roughness_q) / 255.0f;
 }
 
-static float vk_world_pack_rt_controls(float specular, float bounce)
+static float vk_world_pack_rt_controls(float specular, float bounce,
+                                       float caustics, int liquid_kind)
 {
-    // A float represents every 16-bit integer exactly. Packing both controls
-    // here keeps the world push constants within the portable 256-byte limit.
+    // A float represents every 24-bit integer exactly. Keep the two general
+    // controls at eight bits each and use the final byte for a six-bit
+    // caustics strength plus the two-bit view-liquid class.
     unsigned specular_q = (unsigned)(min(max(specular, 0.0f), 1.0f) *
                                      255.0f + 0.5f);
     unsigned bounce_q = (unsigned)(min(max(bounce, 0.0f), 1.0f) *
                                    255.0f + 0.5f);
-    return (float)(specular_q | (bounce_q << 8));
+    unsigned caustics_q = (unsigned)(min(max(caustics, 0.0f), 1.0f) *
+                                     63.0f + 0.5f);
+    unsigned kind_q = (unsigned)min(max(liquid_kind, 0), 3);
+    return (float)(specular_q | (bounce_q << 8) |
+                   ((caustics_q | (kind_q << 6)) << 16));
 }
 
 static int vk_world_liquid_kind(const mface_t *face)
@@ -10448,6 +10456,23 @@ static int vk_world_liquid_kind(const mface_t *face)
     return 1;
 }
 
+#if USE_VULKAN_RAYTRACING
+static int vk_view_liquid_kind(const refdef_t *fd)
+{
+    if (!fd || !(fd->rdflags & RDF_UNDERWATER) ||
+        !vk.world.cache || !vk.world.cache->nodes)
+        return 0;
+
+    const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, fd->vieworg);
+    int contents = leaf ? leaf->contents[0] : 0;
+    if (contents & CONTENTS_LAVA)
+        return 3;
+    if (contents & CONTENTS_SLIME)
+        return 2;
+    return contents & CONTENTS_WATER ? 1 : 0;
+}
+#endif
+
 static void vk_world_rt_params(float *params, bool pixel_world,
                                bool world_entity, const mface_t *face)
 {
@@ -10458,7 +10483,11 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         Cvar_ClampValue(vk_rt_specular, 0.0f, 1.0f) : 0.0f;
     float bounce = vk_rt_bounce ?
         Cvar_ClampValue(vk_rt_bounce, 0.0f, 1.0f) : 0.0f;
-    params[3] = vk_world_pack_rt_controls(specular, bounce);
+    float caustics = world_entity && vk.view_liquid_kind && vk_rt_caustics ?
+        Cvar_ClampValue(vk_rt_caustics, 0.0f, 1.0f) : 0.0f;
+    int view_liquid_kind = caustics > 0.0f ? vk.view_liquid_kind : 0;
+    params[3] = vk_world_pack_rt_controls(specular, bounce, caustics,
+                                          view_liquid_kind);
     int requested_debug = vk_rt_debug ? vk_rt_debug->integer : 0;
 #if USE_VULKAN_RAYTRACING
     float material_reflect, material_roughness;
@@ -10475,7 +10504,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
                 Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f) : 0.0f;
             params[1] = vk_rt_ao ?
                 Cvar_ClampValue(vk_rt_ao, 0.0f, 0.5f) : 0.0f;
-            if (requested_debug == 8 || requested_debug == 9)
+            if (requested_debug >= 8 && requested_debug <= 10)
                 params[1] = -(float)requested_debug;
             params[2] = packed_material;
         }
@@ -10483,7 +10512,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         // This position aliases rt_enabled in vk_world_lit_push_t.
         params[0] = requested_debug >= 1 && requested_debug <= 3 ?
             -(float)requested_debug : 1.0f;
-        if (requested_debug == 8 || requested_debug == 9)
+        if (requested_debug >= 8 && requested_debug <= 10)
             params[1] = -(float)requested_debug;
         params[2] = packed_material;
     }
@@ -15280,6 +15309,7 @@ bool VKR_Init(bool total)
     vk_rt_specular = Cvar_Get("vk_rt_specular", "0.45", CVAR_ARCHIVE);
     vk_rt_liquids = Cvar_Get("vk_rt_liquids", "0.65", CVAR_ARCHIVE);
     vk_rt_bounce = Cvar_Get("vk_rt_bounce", "0.65", CVAR_ARCHIVE);
+    vk_rt_caustics = Cvar_Get("vk_rt_caustics", "0.65", CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
@@ -15748,6 +15778,11 @@ void VKR_RenderFrame(const refdef_t *fd)
 
     vk.fd = *fd;
     vk.fd_valid = true;
+#if USE_VULKAN_RAYTRACING
+    vk.view_liquid_kind = vk.raytracing_active ? vk_view_liquid_kind(&vk.fd) : 0;
+#else
+    vk.view_liquid_kind = 0;
+#endif
     if (!vk_dynamic_lights_enabled())
         vk.fd.num_dlights = 0;
     glr.fd = vk.fd;

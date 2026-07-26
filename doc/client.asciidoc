@@ -841,6 +841,17 @@ vk_rt_liquids::
     Changes apply immediately. Default value is 0.65; value 0 restores the
     previous liquid shading.
 
+vk_rt_caustics::
+    Controls animated underwater caustic lighting on nearby BSP surfaces while
+    Vulkan ray tracing is active, clamped between 0 and 1. Water uses a cool
+    blue tint, slime green, and lava orange. Floors receive the strongest
+    pattern while walls retain a softer contribution; the effect fades between
+    512 and 1152 world units from the camera. It is procedural and adds no ray
+    queries, texture samples, render passes, descriptors, or draw calls. Bright
+    crests provide a restrained bloom contribution when ‘gl_bloom’ is enabled.
+    Changes apply immediately. Default value is 0.65; value 0 disables the
+    effect.
+
 vk_rt_bounce::
     Controls a performance-friendly approximation of colored indirect light
     from explosions, projectiles, muzzle flashes, and other dynamic lights,
@@ -876,7 +887,8 @@ vk_rt_debug::
     amplified specular: dynamic-light highlights are cyan and baked-emitter
     highlights are amber. Value 9 shows the final capped dynamic color-bounce
     contribution amplified eight times; black means that no bounce reaches the
-    surface. Value 0 restores
+    surface. Value 10 shows underwater caustics amplified eight times and is
+    black while the camera is outside water, slime, or lava. Value 0 restores
     normal rendering. This
     diagnostic is applied immediately, does not rebake the map, and adds no
     work while disabled. Default value is 0.
