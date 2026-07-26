@@ -333,14 +333,19 @@ static void GL_MarkLeaves(void)
 
     leaf = BSP_PointLeaf(bsp->nodes, glr.fd.vieworg);
     cluster1 = cluster2 = leaf->cluster;
-    VectorCopy(glr.fd.vieworg, tmp);
-    if (!leaf->contents[0])
-        tmp[2] -= 16;
-    else
-        tmp[2] += 16;
-    leaf = BSP_PointLeaf(bsp->nodes, tmp);
-    if (!(leaf->contents[0] & CONTENTS_SOLID))
-        cluster2 = leaf->cluster;
+    // Sampling across a nearby liquid boundary prevents visibility popping
+    // from the air side. From underwater it would instead merge the complete
+    // above-water PVS before the camera actually crosses the surface.
+    if (!(glr.fd.rdflags & RDF_UNDERWATER)) {
+        VectorCopy(glr.fd.vieworg, tmp);
+        if (!leaf->contents[0])
+            tmp[2] -= 16;
+        else
+            tmp[2] += 16;
+        leaf = BSP_PointLeaf(bsp->nodes, tmp);
+        if (!(leaf->contents[0] & CONTENTS_SOLID))
+            cluster2 = leaf->cluster;
+    }
 
     if (cluster1 == glr.viewcluster1 && cluster2 == glr.viewcluster2)
         return;

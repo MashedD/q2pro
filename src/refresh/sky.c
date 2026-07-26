@@ -327,6 +327,11 @@ R_DrawSkyBox
 */
 void R_DrawSkyBox(void)
 {
+    // An underwater translucent surface must not reveal the global sky when
+    // the world above the liquid is outside the current PVS.
+    if (glr.fd.rdflags & RDF_UNDERWATER)
+        return;
+
     // check for no sky at all
     if (!skyfaces)
         return; // nothing visible

@@ -532,6 +532,30 @@ static void GL_ClassifyEntities(void)
         return;
 
     for (i = 0, ent = glr.fd.entities; i < glr.fd.num_entities; i++, ent++) {
+        if ((glr.fd.rdflags & RDF_UNDERWATER) &&
+            !(ent->flags & (RF_WEAPONMODEL | RF_DEPTHHACK)) &&
+            !(ent->model & BIT(31)) && gl_static.world.cache &&
+            gl_static.world.cache->nodes) {
+            const mleaf_t *view_leaf = BSP_PointLeaf(
+                gl_static.world.cache->nodes, glr.fd.vieworg);
+            const mleaf_t *entity_leaf = BSP_PointLeaf(
+                gl_static.world.cache->nodes, ent->origin);
+            int medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
+            bool same_medium = medium && entity_leaf &&
+                (entity_leaf->contents[0] & medium);
+
+            // Beams may cross the liquid boundary. Retain the beam when
+            // either endpoint remains in the viewer's liquid medium.
+            if (!same_medium && (ent->flags & RF_BEAM)) {
+                entity_leaf = BSP_PointLeaf(gl_static.world.cache->nodes,
+                                            ent->oldorigin);
+                same_medium = medium && entity_leaf &&
+                    (entity_leaf->contents[0] & medium);
+            }
+            if (medium && !same_medium)
+                continue;
+        }
+
         if (ent->flags & RF_BEAM) {
             if (ent->frame) {
                 ent->next = glr.ents.beams;

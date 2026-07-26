@@ -10975,6 +10975,11 @@ static void vk_draw_skybox(const refdef_t *fd)
 {
     if (vk_drawsky && !vk_drawsky->integer)
         return;
+    // The water surface is translucent, but the above-water PVS can be
+    // intentionally absent from an underwater view. Do not let that surface
+    // reveal the global sky background by itself.
+    if (fd && (fd->rdflags & RDF_UNDERWATER))
+        return;
     if (!vk.world.sky_visible)
         return;
     if (!vk.render_pass_active || !vk.sky_pipeline ||
@@ -11136,16 +11141,20 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
     if (!leaf)
         return;
     cluster1 = cluster2 = leaf->cluster;
-    VectorCopy(fd->vieworg, tmp);
-    if (!leaf->contents[0])
-        tmp[2] -= 16;
-    else
-        tmp[2] += 16;
-    leaf = BSP_PointLeaf(bsp->nodes, tmp);
-    if (!leaf)
-        return;
-    if (!(leaf->contents[0] & CONTENTS_SOLID))
-        cluster2 = leaf->cluster;
+    // Preserve cross-boundary visibility from air into liquid, but never
+    // import the above-water PVS while the camera is still underwater.
+    if (!(fd->rdflags & RDF_UNDERWATER)) {
+        VectorCopy(fd->vieworg, tmp);
+        if (!leaf->contents[0])
+            tmp[2] -= 16;
+        else
+            tmp[2] += 16;
+        leaf = BSP_PointLeaf(bsp->nodes, tmp);
+        if (!leaf)
+            return;
+        if (!(leaf->contents[0] & CONTENTS_SOLID))
+            cluster2 = leaf->cluster;
+    }
 
     if (!bsp->vis || (vk_novis && vk_novis->integer) || cluster1 == -1) {
         for (int i = 0; i < bsp->numleafs; i++)
@@ -13001,6 +13010,31 @@ typedef enum {
     VK_ENTITY_BLOOM_SOURCE,
 } vk_entity_pass_t;
 
+static bool vk_entity_in_view_medium(const entity_t *ent,
+                                     const refdef_t *fd)
+{
+    if (!(fd->rdflags & RDF_UNDERWATER) ||
+        (ent->flags & (RF_WEAPONMODEL | RF_DEPTHHACK)) ||
+        (ent->model & BIT(31)) || !vk.world.cache || !vk.world.cache->nodes)
+        return true;
+
+    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                             fd->vieworg);
+    const mleaf_t *entity_leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                               ent->origin);
+    int medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
+    bool same_medium = medium && entity_leaf &&
+        (entity_leaf->contents[0] & medium);
+
+    if (!same_medium && (ent->flags & RF_BEAM)) {
+        entity_leaf = BSP_PointLeaf(vk.world.cache->nodes, ent->oldorigin);
+        same_medium = medium && entity_leaf &&
+            (entity_leaf->contents[0] & medium);
+    }
+
+    return !medium || same_medium;
+}
+
 static bool vk_entity_in_pass(const entity_t *ent, vk_entity_pass_t pass)
 {
     if (ent->flags & RF_BEAM)
@@ -13097,7 +13131,8 @@ static void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass)
     for (int i = fd->num_entities - 1; i >= 0; i--) {
         const entity_t *ent = &fd->entities[i];
 
-        if (vk_entity_in_pass(ent, pass))
+        if (vk_entity_in_view_medium(ent, fd) &&
+            vk_entity_in_pass(ent, pass))
             vk_draw_entity(ent, fd, pass);
     }
 
