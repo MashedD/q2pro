@@ -62,5 +62,21 @@ void main()
         color += ghosts * ghost_strength;
     }
 
+    float shaft_strength = clamp(pc.color.w, 0.0, 1.0);
+    if (shaft_strength > 0.0001) {
+        vec2 toward_center = vec2(0.5) - v_uv;
+        vec3 shafts = ghost_sample(v_uv + toward_center * 0.08) * 0.34;
+        shafts += ghost_sample(v_uv + toward_center * 0.18) * 0.28;
+        shafts += ghost_sample(v_uv + toward_center * 0.32) * 0.22;
+        shafts += ghost_sample(v_uv + toward_center * 0.50) * 0.16;
+
+        float center_fade = smoothstep(0.06, 0.22,
+                                       length(toward_center));
+        shafts *= center_fade;
+        float shaft_luma = dot(shafts, vec3(0.2126, 0.7152, 0.0722));
+        shafts *= min(1.0, 0.08 / max(shaft_luma, 0.000001));
+        color += shafts * shaft_strength;
+    }
+
     out_color = vec4(color, 1.0);
 }

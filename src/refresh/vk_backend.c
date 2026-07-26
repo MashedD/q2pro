@@ -963,6 +963,7 @@ static cvar_t *vk_bloom_sigma;
 static cvar_t *vk_bloom_downsample;
 static cvar_t *vk_bloom_streaks;
 static cvar_t *vk_bloom_ghosts;
+static cvar_t *vk_bloom_shafts;
 static cvar_t *vk_glare;
 static cvar_t *vk_glare_threshold;
 static cvar_t *vk_glare_size;
@@ -979,6 +980,7 @@ static cvar_t *vk_rt_specular;
 static cvar_t *vk_rt_liquids;
 static cvar_t *vk_rt_bounce;
 static cvar_t *vk_rt_caustics;
+static cvar_t *vk_rt_shadow_fringe;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -10427,20 +10429,21 @@ static float vk_world_pack_material(float reflect, float roughness)
 }
 
 static float vk_world_pack_rt_controls(float specular, float bounce,
-                                       float caustics, int liquid_kind)
+                                       float caustics, float shadow_fringe)
 {
-    // A float represents every 24-bit integer exactly. Keep the two general
-    // controls at eight bits each and use the final byte for a six-bit
-    // caustics strength plus the two-bit view-liquid class.
+    // A float represents every 24-bit integer exactly. Seven-bit general
+    // controls and five-bit effect controls retain smooth menu adjustment
+    // while fitting water caustics and dynamic-shadow fringes together.
     unsigned specular_q = (unsigned)(min(max(specular, 0.0f), 1.0f) *
-                                     255.0f + 0.5f);
+                                     127.0f + 0.5f);
     unsigned bounce_q = (unsigned)(min(max(bounce, 0.0f), 1.0f) *
-                                   255.0f + 0.5f);
+                                   127.0f + 0.5f);
     unsigned caustics_q = (unsigned)(min(max(caustics, 0.0f), 1.0f) *
-                                     63.0f + 0.5f);
-    unsigned kind_q = (unsigned)min(max(liquid_kind, 0), 3);
-    return (float)(specular_q | (bounce_q << 8) |
-                   ((caustics_q | (kind_q << 6)) << 16));
+                                     31.0f + 0.5f);
+    unsigned fringe_q = (unsigned)(min(max(shadow_fringe, 0.0f), 1.0f) *
+                                   31.0f + 0.5f);
+    return (float)(specular_q | (bounce_q << 7) | (caustics_q << 14) |
+                   (fringe_q << 19));
 }
 
 static int vk_world_liquid_kind(const mface_t *face)
@@ -10465,10 +10468,8 @@ static int vk_view_liquid_kind(const refdef_t *fd)
 
     const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, fd->vieworg);
     int contents = leaf ? leaf->contents[0] : 0;
-    if (contents & CONTENTS_LAVA)
-        return 3;
-    if (contents & CONTENTS_SLIME)
-        return 2;
+    if (contents & (CONTENTS_LAVA | CONTENTS_SLIME))
+        return 0;
     return contents & CONTENTS_WATER ? 1 : 0;
 }
 #endif
@@ -10485,9 +10486,10 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         Cvar_ClampValue(vk_rt_bounce, 0.0f, 1.0f) : 0.0f;
     float caustics = world_entity && vk.view_liquid_kind && vk_rt_caustics ?
         Cvar_ClampValue(vk_rt_caustics, 0.0f, 1.0f) : 0.0f;
-    int view_liquid_kind = caustics > 0.0f ? vk.view_liquid_kind : 0;
+    float shadow_fringe = world_entity && vk_rt_shadow_fringe ?
+        Cvar_ClampValue(vk_rt_shadow_fringe, 0.0f, 1.0f) : 0.0f;
     params[3] = vk_world_pack_rt_controls(specular, bounce, caustics,
-                                          view_liquid_kind);
+                                          shadow_fringe);
     int requested_debug = vk_rt_debug ? vk_rt_debug->integer : 0;
 #if USE_VULKAN_RAYTRACING
     float material_reflect, material_roughness;
@@ -10504,7 +10506,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
                 Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f) : 0.0f;
             params[1] = vk_rt_ao ?
                 Cvar_ClampValue(vk_rt_ao, 0.0f, 0.5f) : 0.0f;
-            if (requested_debug >= 8 && requested_debug <= 10)
+            if (requested_debug >= 8 && requested_debug <= 11)
                 params[1] = -(float)requested_debug;
             params[2] = packed_material;
         }
@@ -10512,7 +10514,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         // This position aliases rt_enabled in vk_world_lit_push_t.
         params[0] = requested_debug >= 1 && requested_debug <= 3 ?
             -(float)requested_debug : 1.0f;
-        if (requested_debug >= 8 && requested_debug <= 10)
+        if (requested_debug >= 8 && requested_debug <= 11)
             params[1] = -(float)requested_debug;
         params[2] = packed_material;
     }
@@ -15292,6 +15294,7 @@ bool VKR_Init(bool total)
     vk_bloom_downsample = Cvar_Get("vk_bloom_downsample", "4", 0);
     vk_bloom_streaks = Cvar_Get("vk_bloom_streaks", "0.45", CVAR_ARCHIVE);
     vk_bloom_ghosts = Cvar_Get("vk_bloom_ghosts", "0.5", CVAR_ARCHIVE);
+    vk_bloom_shafts = Cvar_Get("vk_bloom_shafts", "0.4", CVAR_ARCHIVE);
     vk_glare = Cvar_Get("gl_glare", "0", CVAR_ARCHIVE);
     vk_glare->changed = vk_glare_changed;
     vk_glare_threshold = Cvar_Get("gl_glare_threshold", "0.3", 0);
@@ -15310,6 +15313,7 @@ bool VKR_Init(bool total)
     vk_rt_liquids = Cvar_Get("vk_rt_liquids", "0.65", CVAR_ARCHIVE);
     vk_rt_bounce = Cvar_Get("vk_rt_bounce", "0.65", CVAR_ARCHIVE);
     vk_rt_caustics = Cvar_Get("vk_rt_caustics", "0.65", CVAR_ARCHIVE);
+    vk_rt_shadow_fringe = Cvar_Get("vk_rt_shadow_fringe", "0.6", CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
@@ -16436,7 +16440,8 @@ static void vk_finish_postprocess_scene(void)
             1.0f / (float)max(vk.bloom_source_texture.height, 1),
             vk_bloom_ghosts ?
                 Cvar_ClampValue(vk_bloom_ghosts, 0.0f, 1.0f) : 0.5f,
-            1.0f,
+            vk_bloom_shafts ?
+                Cvar_ClampValue(vk_bloom_shafts, 0.0f, 1.0f) : 0.4f,
         };
         float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
         sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
@@ -16832,7 +16837,8 @@ void VKR_EndFrame(void)
             1.0f / (float)max(vk.bloom_source_texture.height, 1),
             vk_bloom_ghosts ?
                 Cvar_ClampValue(vk_bloom_ghosts, 0.0f, 1.0f) : 0.5f,
-            1.0f,
+            vk_bloom_shafts ?
+                Cvar_ClampValue(vk_bloom_shafts, 0.0f, 1.0f) : 0.4f,
         };
         float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
         sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;

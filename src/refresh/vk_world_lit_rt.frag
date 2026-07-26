@@ -69,8 +69,10 @@ float dynamic_shadow_visibility(float hit_distance, float ray_distance)
 }
 
 float dynamic_light_visibility(vec3 origin, vec3 delta, float range,
-                               float contribution, int light_index)
+                               float contribution, int light_index,
+                               out float penumbra)
 {
+    penumbra = 0.0;
     float center_distance = length(delta);
     vec3 center_direction = delta / max(center_distance, 0.001);
     if (light_index != 0 || contribution < 0.06 || center_distance > 320.0) {
@@ -91,8 +93,13 @@ float dynamic_light_visibility(vec3 origin, vec3 delta, float range,
         first_delta / max(first_distance, 0.001), first_distance);
     float second_hit = trace_dynamic_hit_distance(origin,
         second_delta / max(second_distance, 0.001), second_distance);
-    return 0.5 * (dynamic_shadow_visibility(first_hit, first_distance) +
-                  dynamic_shadow_visibility(second_hit, second_distance));
+    float first_visibility = dynamic_shadow_visibility(first_hit,
+                                                        first_distance);
+    float second_visibility = dynamic_shadow_visibility(second_hit,
+                                                         second_distance);
+    penumbra = smoothstep(0.12, 0.55,
+                          abs(first_visibility - second_visibility));
+    return 0.5 * (first_visibility + second_visibility);
 }
 
 vec2 material_params(float packed)
@@ -104,40 +111,33 @@ vec2 material_params(float packed)
 vec4 rt_controls(float packed)
 {
     uint bits = uint(clamp(floor(packed + 0.5), 0.0, 16777215.0));
-    return vec4(float(bits & 255u) / 255.0,
-                float((bits >> 8) & 255u) / 255.0,
-                float((bits >> 16) & 63u) / 63.0,
-                float((bits >> 22) & 3u));
+    return vec4(float(bits & 127u) / 127.0,
+                float((bits >> 7) & 127u) / 127.0,
+                float((bits >> 14) & 31u) / 31.0,
+                float((bits >> 19) & 31u) / 31.0);
 }
 
 vec3 underwater_caustics(vec3 position, vec3 normal, vec4 controls)
 {
     float strength = controls.z;
-    int kind = int(controls.w + 0.5);
-    if (strength <= 0.001 || kind < 1 || kind > 3)
+    if (strength <= 0.001)
         return vec3(0.0);
 
     vec3 axis = abs(normal);
     vec2 coord = axis.z >= axis.x && axis.z >= axis.y ? position.xy :
         (axis.x >= axis.y ? position.yz : position.xz);
-    float scale = kind == 2 ? 0.038 : (kind == 3 ? 0.052 : 0.045);
-    float speed = kind == 2 ? 0.65 : (kind == 3 ? 1.40 : 1.0);
-    vec2 p = coord * scale;
-    float time = pc.dlight.w * speed;
+    vec2 p = coord * 0.045;
+    float time = pc.dlight.w;
     float wave0 = sin(dot(p, vec2(1.72, 1.13)) + time);
     float wave1 = sin(dot(p, vec2(-1.31, 1.91)) - time * 1.27);
     float wave2 = sin(dot(p, vec2(0.73, -2.08)) + time * 0.71);
     float ridge = 1.0 - abs((wave0 + wave1 + wave2) / 3.0);
-    float pattern = smoothstep(kind == 3 ? 0.38 : 0.52,
-                               kind == 3 ? 0.92 : 0.88, ridge);
+    float pattern = smoothstep(0.52, 0.88, ridge);
     float orientation = 0.40 + 0.60 * axis.z;
     float distance_fade = 1.0 - smoothstep(512.0, 1152.0,
         distance(position, pc.dlight.xyz));
-    vec3 tint = kind == 2 ? vec3(0.18, 0.75, 0.22) :
-        (kind == 3 ? vec3(1.0, 0.28, 0.035) :
-                     vec3(0.18, 0.55, 0.85));
-    float energy = kind == 3 ? 0.22 : (kind == 2 ? 0.15 : 0.18);
-    return tint * pattern * orientation * distance_fade * energy * strength;
+    vec3 tint = vec3(0.18, 0.55, 0.85);
+    return tint * pattern * orientation * distance_fade * 0.18 * strength;
 }
 
 float material_specular_lobe(float ndoth, float ndotv, float gloss,
@@ -223,11 +223,13 @@ vec3 liquid_ripple_normal(vec3 position, vec3 normal, vec2 uv, float time,
 vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
                    float reflectivity, float roughness,
                    float specular_control, float bounce_control,
-                   out vec3 specular, out vec3 bounce)
+                   float fringe_control, out vec3 specular, out vec3 bounce,
+                   out vec3 fringe)
 {
     vec3 light = vec3(0.0);
     specular = vec3(0.0);
     bounce = vec3(0.0);
+    fringe = vec3(0.0);
     vec3 view_dir = normalize(pc.dlight.xyz - v_position);
     float gloss = 1.0 - roughness;
     float exponent = mix(10.0, 96.0, pow(gloss, 0.9));
@@ -254,10 +256,12 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
             vec3 ray_origin = v_position + oriented_normal * bias +
                               light_dir * 0.05;
             vec3 ray_delta = pc.dlight_origins[i].xyz - ray_origin;
+            float penumbra;
             float visibility = dynamic_light_visibility(
-                ray_origin, ray_delta, range, contribution, i);
+                ray_origin, ray_delta, range, contribution, i, penumbra);
             vec3 radiance = pc.dlight_colors[i].rgb * energy * visibility;
             light += radiance;
+            fringe += pc.dlight_colors[i].rgb * energy * penumbra;
             if (bounce_control > 0.001) {
                 float color_high = max(pc.dlight_colors[i].r,
                     max(pc.dlight_colors[i].g, pc.dlight_colors[i].b));
@@ -284,6 +288,9 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
             }
         }
     }
+    fringe *= 0.22 * fringe_control;
+    float fringe_luma = dot(fringe, vec3(0.2126, 0.7152, 0.0722));
+    fringe *= min(1.0, 0.06 / max(fringe_luma, 0.000001));
     bounce *= 0.65 * bounce_control;
     return light;
 }
@@ -314,7 +321,7 @@ void main()
     int rt_debug = pc.rt_params.x < 0.0 ?
         int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
         (pc.rt_params.y < -7.5 ?
-            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 10.0)) : 0);
+            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 11.0)) : 0);
     vec2 material = material_params(pc.rt_params.z);
     float material_reflect = material.x;
     float material_roughness = material.y;
@@ -360,17 +367,25 @@ void main()
         out_color.rgb *= pc.intensity;
         vec3 dynamic_specular;
         vec3 dynamic_bounce;
+        vec3 dynamic_fringe;
         vec3 dynamic = dynamic_light(shading_normal, normal, material_reflect,
                                      material_roughness, specular_control,
-                                     bounce_control, dynamic_specular,
-                                     dynamic_bounce);
+                                     bounce_control, controls.w,
+                                     dynamic_specular, dynamic_bounce,
+                                     dynamic_fringe);
         if (rt_debug == 8) {
             out_color = vec4(clamp(dynamic_specular *
                 vec3(0.0, 8.0, 8.0), 0.0, 1.0), 1.0);
             out_bloom = vec4(0.0);
             return;
         }
-        out_color.rgb *= clamp(v_color.rgb + dynamic, 0.0, 1.0);
+        if (rt_debug == 11) {
+            out_color = vec4(clamp(dynamic_fringe * 8.0, 0.0, 1.0), 1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
+        out_color.rgb *= clamp(v_color.rgb + dynamic + dynamic_fringe,
+                               0.0, 1.0);
         vec3 raster_surface = out_color.rgb;
         const vec3 luma_weights = vec3(0.2126, 0.7152, 0.0722);
         vec3 caustics = underwater_caustics(v_position, normal, controls);

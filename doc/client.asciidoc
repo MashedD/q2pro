@@ -843,14 +843,25 @@ vk_rt_liquids::
 
 vk_rt_caustics::
     Controls animated underwater caustic lighting on nearby BSP surfaces while
-    Vulkan ray tracing is active, clamped between 0 and 1. Water uses a cool
-    blue tint, slime green, and lava orange. Floors receive the strongest
-    pattern while walls retain a softer contribution; the effect fades between
-    512 and 1152 world units from the camera. It is procedural and adds no ray
-    queries, texture samples, render passes, descriptors, or draw calls. Bright
-    crests provide a restrained bloom contribution when ‘gl_bloom’ is enabled.
-    Changes apply immediately. Default value is 0.65; value 0 disables the
-    effect.
+    Vulkan ray tracing is active, clamped between 0 and 1. Only water receives
+    the cool-blue pattern; slime and lava are deliberately excluded. Floors
+    receive the strongest pattern while walls retain a softer contribution;
+    the effect fades between 512 and 1152 world units from the camera. It is
+    procedural and adds no ray queries, texture samples, render passes,
+    descriptors, or draw calls. Bright crests provide a restrained bloom
+    contribution when ‘gl_bloom’ is enabled. Changes apply immediately.
+    Default value is 0.65; value 0 disables the effect.
+
+vk_rt_shadow_fringe::
+    Controls colored penumbra fringes from the strongest nearby dynamic light,
+    clamped between 0 and 1. The effect uses disagreement between the two
+    existing area-light visibility samples, so fully lit, fully blocked, and
+    single-ray regions remain unchanged. Fringe color follows the light, is
+    capped at 0.06 luminance, and does not contribute to bloom, specular, or
+    color bounce. It adds no additional ray queries or visibility samples and
+    no passes, descriptors, or draws. Runtime transport quantizes specular and bounce controls to 7 bits
+    and caustic and fringe controls to 5 bits, which remains finer than their
+    menu increments. Changes apply immediately. Default value is 0.6.
 
 vk_rt_bounce::
     Controls a performance-friendly approximation of colored indirect light
@@ -888,7 +899,8 @@ vk_rt_debug::
     highlights are amber. Value 9 shows the final capped dynamic color-bounce
     contribution amplified eight times; black means that no bounce reaches the
     surface. Value 10 shows underwater caustics amplified eight times and is
-    black while the camera is outside water, slime, or lava. Value 0 restores
+    black outside water, including in slime and lava. Value 11 shows the final
+    colored dynamic-shadow fringe amplified eight times. Value 0 restores
     normal rendering. This
     diagnostic is applied immediately, does not rebake the map, and adds no
     work while disabled. Default value is 0.
@@ -991,6 +1003,16 @@ vk_bloom_ghosts::
     passes. It works with raster and ray-traced bloom sources. Default value is
     0.5; value 0 restores the previous bloom exactly. The setting has no effect
     while ‘gl_bloom’ is 0.
+
+vk_bloom_shafts::
+    Controls radial light shafts from bright Vulkan bloom sources, clamped
+    between 0 and 1. Four brightness-gated samples extend each source toward
+    the optical center in the existing low-resolution bloom downscale pass.
+    Center and screen-edge fades plus a separate luminance cap prevent broad
+    scene washout. The effect adds no images, descriptors, draws, render
+    passes, or ray queries, and works with raster and ray-traced bloom sources.
+    Default value is 0.4; value 0 skips the extra samples and restores the
+    previous bloom exactly. The setting has no effect while ‘gl_bloom’ is 0.
 
 NOTE: Bloom requires glowmaps or another renderer-generated bloom source, such
 as RT lighting, specular highlights, enhanced liquids, beams, or particles.
