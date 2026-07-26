@@ -126,6 +126,8 @@ begin raytracing
         "underwater caustics" vk_rt_caustics 0 1 0.05
     range --status "Colored penumbrae from nearby dynamic lights" \
         "shadow fringes" vk_rt_shadow_fringe 0 1 0.05
+    range --status "Dynamic-light highlights on models and weapons" \
+        "entity specular" vk_rt_entity_specular 0 1 0.05
     range --status "Localized color spill from explosions and projectiles" \
         "dynamic color bounce" vk_rt_bounce 0 1 0.05
     blank

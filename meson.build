@@ -429,22 +429,28 @@ if vulkan.found()
                 '@INPUT@', '-o', '@OUTPUT@'],
     )
     foreach rt_shader : [
-      ['vk_alias_rt_frag_spv.h', []],
-      ['vk_alias_rt_alpha_frag_spv.h', ['-DRT_ALPHA_TEST=1']],
-      ['vk_world_pixel_rt_frag_spv.h', []],
-      ['vk_world_pixel_rt_alpha_frag_spv.h', ['-DRT_ALPHA_TEST=1']],
-      ['vk_world_pixel_rt_glow_frag_spv.h', ['-DRT_GLOWMAP=1']],
+      ['vk_alias_rt_frag_spv.h', 'src/refresh/vk_alias_rt.frag', []],
+      ['vk_alias_rt_alpha_frag_spv.h', 'src/refresh/vk_alias_rt.frag',
+       ['-DRT_ALPHA_TEST=1']],
+      ['vk_world_pixel_rt_frag_spv.h', 'src/refresh/vk_world_pixel_rt.frag', []],
+      ['vk_world_pixel_rt_alpha_frag_spv.h', 'src/refresh/vk_world_pixel_rt.frag',
+       ['-DRT_ALPHA_TEST=1']],
+      ['vk_world_pixel_rt_glow_frag_spv.h', 'src/refresh/vk_world_pixel_rt.frag',
+       ['-DRT_GLOWMAP=1']],
       ['vk_world_pixel_rt_glow_alpha_frag_spv.h',
+       'src/refresh/vk_world_pixel_rt.frag',
        ['-DRT_GLOWMAP=1', '-DRT_ALPHA_TEST=1']],
-      ['vk_world_pixel_rt_quad_frag_spv.h', ['-DRT_QUAD_SHARING=1']],
+      ['vk_world_pixel_rt_quad_frag_spv.h', 'src/refresh/vk_world_pixel_rt.frag',
+       ['-DRT_QUAD_SHARING=1']],
       ['vk_world_pixel_rt_quad_glow_frag_spv.h',
+       'src/refresh/vk_world_pixel_rt.frag',
        ['-DRT_QUAD_SHARING=1', '-DRT_GLOWMAP=1']],
     ]
       vk_shader_headers += custom_target(rt_shader[0].underscorify(),
-        input: 'src/refresh/vk_world_pixel_rt.frag',
+        input: rt_shader[1],
         output: rt_shader[0],
         command: [glslc, '--target-env=vulkan1.2', '-mfmt=c'] +
-                 rt_shader[1] + ['@INPUT@', '-o', '@OUTPUT@'],
+                 rt_shader[2] + ['@INPUT@', '-o', '@OUTPUT@'],
       )
     endforeach
   endif

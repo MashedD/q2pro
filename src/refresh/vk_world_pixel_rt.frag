@@ -597,7 +597,7 @@ void main()
     int rt_debug = pc.rt_params.x < 0.0 ?
         int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
         (pc.rt_params.y < -7.5 ?
-            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 11.0)) : 0);
+            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 12.0)) : 0);
     if (rt_debug >= 1 && rt_debug <= 3) {
         if (rt_debug == 1)
             out_color = vec4(vec3(static_coverage), 1.0);
@@ -608,6 +608,11 @@ void main()
                              1.0);
         }
         out_bloom = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    if (rt_debug == 12) {
+        out_color = vec4(0.0, 0.0, 0.0, 1.0);
+        out_bloom = vec4(0.0);
         return;
     }
     if (mode > 1.5) {

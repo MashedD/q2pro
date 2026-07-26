@@ -38,11 +38,17 @@ vec3 ghost_sample(vec2 uv)
 void main()
 {
     vec2 step_uv = pc.color.xy;
-    vec3 color = texture(tex_sampler, v_uv + vec2(-step_uv.x, -step_uv.y)).rgb;
-    color += texture(tex_sampler, v_uv + vec2(-step_uv.x,  step_uv.y)).rgb;
-    color += texture(tex_sampler, v_uv + vec2( step_uv.x, -step_uv.y)).rgb;
-    color += texture(tex_sampler, v_uv + vec2( step_uv.x,  step_uv.y)).rgb;
-    color *= 0.25;
+    // Keep a center tap so narrow highlights and one-pixel glow sources are
+    // not lost between the four diagonal samples at quarter resolution.
+    vec3 color = texture(tex_sampler, v_uv).rgb * 0.50;
+    color += texture(tex_sampler,
+                     v_uv + vec2(-step_uv.x, -step_uv.y)).rgb * 0.125;
+    color += texture(tex_sampler,
+                     v_uv + vec2(-step_uv.x,  step_uv.y)).rgb * 0.125;
+    color += texture(tex_sampler,
+                     v_uv + vec2( step_uv.x, -step_uv.y)).rgb * 0.125;
+    color += texture(tex_sampler,
+                     v_uv + vec2( step_uv.x,  step_uv.y)).rgb * 0.125;
 
     float ghost_strength = clamp(pc.color.z, 0.0, 1.0);
     if (ghost_strength > 0.0001) {
