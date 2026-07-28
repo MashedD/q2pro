@@ -976,6 +976,7 @@ static cvar_t *vk_rt_ao;
 static cvar_t *vk_rt_skylight;
 static cvar_t *vk_rt_environment;
 static cvar_t *vk_rt_afterglow;
+static cvar_t *vk_rt_sunlight;
 static cvar_t *vk_rt_reflections;
 static cvar_t *vk_rt_specular;
 static cvar_t *vk_rt_liquids;
@@ -10518,7 +10519,8 @@ static void vk_world_material(const mface_t *face, float *reflect,
 }
 
 static float vk_world_pack_material(float reflect, float roughness,
-                                    float skylight, float environment)
+                                    float skylight, float environment,
+                                    float sunlight)
 {
     // The secondary MRT alpha remains available alongside bloom RGB. Four
     // bits per property are sufficient for broad Quake II material classes
@@ -10529,7 +10531,10 @@ static float vk_world_pack_material(float reflect, float roughness,
                                      15.0f + 0.5f);
     unsigned environment_q = (unsigned)(min(max(environment, 0.0f), 1.0f) *
                                         15.0f + 0.5f);
-    return (float)((environment_q << 12) | (skylight_q << 8) |
+    unsigned sunlight_q = (unsigned)(min(max(sunlight, 0.0f), 1.0f) *
+                                     15.0f + 0.5f);
+    return (float)((sunlight_q << 16) | (environment_q << 12) |
+                   (skylight_q << 8) |
                    (reflect_q << 4) | roughness_q);
 }
 
@@ -10597,17 +10602,22 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         Cvar_ClampValue(vk_rt_skylight, 0.0f, 1.0f) : 0.0f;
     float environment = world_entity && vk_rt_environment ?
         Cvar_ClampValue(vk_rt_environment, 0.0f, 1.0f) : 0.0f;
+    float sunlight = world_entity && vk_rt_sunlight ?
+        Cvar_ClampValue(vk_rt_sunlight, 0.0f, 1.0f) : 0.0f;
     params[3] = vk_world_pack_rt_controls(specular, bounce, caustics,
                                           shadow_fringe);
     int requested_debug = vk_rt_debug ? vk_rt_debug->integer : 0;
 #if USE_VULKAN_RAYTRACING
     float material_reflect, material_roughness;
     vk_world_material(face, &material_reflect, &material_roughness);
-    if (face && (face->drawflags & (SURF_TRANS_MASK | SURF_WARP)))
+    if (face && (face->drawflags & (SURF_TRANS_MASK | SURF_WARP))) {
         material_reflect = 0.0f;
+        sunlight = 0.0f;
+    }
     float packed_material = vk_world_pack_material(material_reflect,
                                                    material_roughness,
-                                                   skylight, environment);
+                                                   skylight, environment,
+                                                   sunlight);
     if (pixel_world) {
         if (requested_debug >= 1 && requested_debug <= 3) {
             params[0] = -(float)requested_debug;
@@ -10616,7 +10626,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
                 Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f) : 0.0f;
             params[1] = vk_rt_ao ?
                 Cvar_ClampValue(vk_rt_ao, 0.0f, 0.5f) : 0.0f;
-            if (requested_debug >= 8 && requested_debug <= 14)
+            if (requested_debug >= 8 && requested_debug <= 15)
                 params[1] = -(float)requested_debug;
             params[2] = packed_material;
         }
@@ -10624,7 +10634,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         // This position aliases rt_enabled in vk_world_lit_push_t.
         params[0] = requested_debug >= 1 && requested_debug <= 3 ?
             -(float)requested_debug : 1.0f;
-        if (requested_debug >= 8 && requested_debug <= 14)
+        if (requested_debug >= 8 && requested_debug <= 15)
             params[1] = -(float)requested_debug;
         params[2] = packed_material;
     }
@@ -15375,6 +15385,7 @@ bool VKR_Init(bool total)
     vk_rt_skylight = Cvar_Get("vk_rt_skylight", "0.6", CVAR_ARCHIVE);
     vk_rt_environment = Cvar_Get("vk_rt_environment", "0.65", CVAR_ARCHIVE);
     vk_rt_afterglow = Cvar_Get("vk_rt_afterglow", "0.35", CVAR_ARCHIVE);
+    vk_rt_sunlight = Cvar_Get("vk_rt_sunlight", "0.65", CVAR_ARCHIVE);
     vk_rt_reflections = Cvar_Get("vk_rt_reflections", "0.35", CVAR_ARCHIVE);
     vk_rt_specular = Cvar_Get("vk_rt_specular", "0.45", CVAR_ARCHIVE);
     vk_rt_liquids = Cvar_Get("vk_rt_liquids", "0.65", CVAR_ARCHIVE);

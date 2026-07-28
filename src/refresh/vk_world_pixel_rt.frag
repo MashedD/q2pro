@@ -140,6 +140,11 @@ float material_environment(float packed)
     return mod(floor(max(packed, 0.0) / 4096.0), 16.0) / 15.0;
 }
 
+float material_sunlight(float packed)
+{
+    return mod(floor(max(packed, 0.0) / 65536.0), 16.0) / 15.0;
+}
+
 float material_output(float packed)
 {
     return mod(floor(max(packed, 0.0) + 0.5), 256.0) / 255.0;
@@ -619,7 +624,7 @@ void main()
     int rt_debug = pc.rt_params.x < 0.0 ?
         int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
         (pc.rt_params.y < -7.5 ?
-            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 14.0)) : 0);
+            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 15.0)) : 0);
     if (rt_debug >= 1 && rt_debug <= 3) {
         if (rt_debug == 1)
             out_color = vec4(vec3(static_coverage), 1.0);
@@ -806,6 +811,29 @@ void main()
             return;
         }
         raster_rgb += environment_add;
+        vec3 sun_direction = normalize(vec3(0.45, 0.35, 0.82));
+        float sun_facing = smoothstep(0.08, 0.72,
+                                      dot(normal, sun_direction));
+        float sun_visibility_weight = mix(0.82, 1.0,
+                                           clamp(sky_visibility, 0.0, 1.0));
+        sun_visibility_weight = mix(sun_visibility_weight, 1.0,
+            smoothstep(0.025, 0.16, sky_visibility_edge));
+        float sun_openness = sky_broad_open * sky_broad_open *
+                             sun_visibility_weight;
+        vec3 sunlight_add = texel.rgb * vec3(1.0, 0.70, 0.40) * 0.42 *
+            material_sunlight(pc.rt_params.z) * sun_facing *
+            sun_openness * sky_mask;
+        float sunlight_luma = dot(sunlight_add, luma_weights);
+        sunlight_add *= min(1.0, 0.12 /
+                            max(sunlight_luma, 0.000001));
+        sunlight_add *= max(vec3(1.0) - clamp(raster_rgb, 0.0, 1.0),
+                            vec3(0.0));
+        if (rt_debug == 15) {
+            out_color = vec4(clamp(sunlight_add * 8.0, 0.0, 1.0), 1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
+        raster_rgb += sunlight_add;
         float reflection_surface_mask = 1.0;
 #ifdef RT_GLOWMAP
         float glow_luma = dot(glow.rgb, vec3(0.2126, 0.7152, 0.0722));

@@ -116,6 +116,8 @@ begin raytracing
         "ambient occlusion" vk_rt_ao 0 0.5 0.01
     range --status "Cool ambient fill on open world surfaces" \
         "aperture skylight" vk_rt_skylight 0 1 0.05
+    range --status "Warm directional light on exposed world surfaces" \
+        "sunlit apertures" vk_rt_sunlight 0 1 0.05
     range --status "Colored lighting from emissive world surfaces" \
         "emissive lighting" vk_rt_emissive 0 2 0.05
     range --status "Screen-space reflections on configured materials" \

@@ -873,6 +873,17 @@ vk_rt_caustics::
     contribution when ‘gl_bloom’ is enabled. Changes apply immediately.
     Default value is 0.65; value 0 disables the effect.
 
+vk_rt_sunlight::
+    Controls warm directional light on exposed static BSP world surfaces while
+    Vulkan ray tracing is active, clamped between 0 and 1. The fixed elevated
+    direction is normalized from `(0.45, 0.35, 0.82)`. Existing stabilized
+    aperture openness limits the effect in enclosed areas, with baked
+    visibility restricted to mild modulation so coarse AO cannot create dark
+    islands. The contribution preserves texture detail, is capped at 0.12
+    luminance, and does not feed bloom. It adds no ray queries, texture
+    samples, passes, descriptors, or draws. Changes apply immediately. Default
+    value is 0.65; value 0 disables the effect.
+
 vk_rt_shadow_fringe::
     Controls colored penumbra fringes from the strongest nearby dynamic light,
     clamped between 0 and 1. The effect uses disagreement between the two
@@ -937,7 +948,8 @@ vk_rt_debug::
     colored dynamic-shadow fringe amplified eight times. Value 12 shows the
     final aperture-skylight contribution amplified eight times. Value 13 shows
     the final environment-sheen contribution amplified eight times. Value 14
-    shows only fading-source direct radiance amplified eight times. Value 0 restores
+    shows only fading-source direct radiance amplified eight times. Value 15
+    shows the final warm sunlight contribution amplified eight times. Value 0 restores
     normal rendering. This
     diagnostic is applied immediately, does not rebake the map, and adds no
     work while disabled. Default value is 0.
