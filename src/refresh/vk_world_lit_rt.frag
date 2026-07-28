@@ -135,7 +135,18 @@ float rt_light_scattering_control(float packed)
 
 float rt_fog_turbulence_control(float packed)
 {
-    return floor(max(packed, 0.0) / 64.0) / 15.0;
+    return mod(floor(max(packed, 0.0) / 64.0), 16.0) / 15.0;
+}
+
+float rt_emissive_flicker_code(float packed)
+{
+    return mod(floor(max(packed, 0.0) / 1024.0), 256.0);
+}
+
+float rt_emissive_flicker_factor(float packed)
+{
+    float code = rt_emissive_flicker_code(packed);
+    return code > 0.5 ? code / 128.0 : 1.0;
 }
 
 float fog_turbulence_scale(float packed, vec3 position, float time)
@@ -390,11 +401,21 @@ void main()
     int rt_debug = pc.rt_params.x < 0.0 ?
         int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
         (pc.rt_params.y < -7.5 ?
-            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 17.0)) : 0);
+            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 19.0)) : 0);
     vec2 material = material_params(pc.rt_params.z);
     float material_reflect = material.x;
     float material_roughness = material.y;
     vec4 material_texel = texture(tex_sampler, uv);
+    float flicker_code = rt_emissive_flicker_code(pc.rt_params.x);
+    float flicker_mask = smoothstep(0.28, 0.72,
+        dot(material_texel.rgb, vec3(0.2126, 0.7152, 0.0722))) *
+        step(0.5, flicker_code);
+    float flicker_factor = rt_emissive_flicker_factor(pc.rt_params.x);
+    if (rt_debug == 19) {
+        out_color = vec4(vec3(flicker_mask * flicker_factor), 1.0);
+        out_bloom = vec4(0.0);
+        return;
+    }
     vec3 bloom = vec3(0.0);
     float bump_mask = 1.0 - step(1.5, mode);
     vec4 controls = liquid ? vec4(previous_specular, 0.0, 0.0, 0.0) :
@@ -422,6 +443,7 @@ void main()
         out_color = rt_debug == 1 ? vec4(1.0) : vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
+    material_texel.rgb *= mix(1.0, flicker_factor, flicker_mask);
     if (mode > 1.5) {
         out_color = v_color;
     } else {

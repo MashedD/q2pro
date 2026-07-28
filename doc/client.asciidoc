@@ -834,6 +834,18 @@ vk_rt_emissive_halo::
     independent of `vk_rt_emissive`. Changes apply immediately. Default value
     is 0.65; value 0 disables both local and bloom contributions.
 
+vk_rt_emissive_flicker::
+    Controls irregular texture-seeded variation of opaque `SURF_LIGHT` lamp
+    cores, edge halos, and glowmap bloom while Vulkan ray tracing is active,
+    clamped between 0 and 1. Two smooth waves provide ordinary variation and
+    a slower waveform adds occasional shallow dips; lamps never switch fully
+    off. Faces sharing a lamp texture remain synchronized, while liquids,
+    translucent surfaces, sky, baked emissive illumination, and dynamic
+    lights remain unchanged. The factor is calculated on the CPU and reuses
+    existing RT controls, adding no shader trigonometry, texture samples, ray
+    queries, passes, descriptors, or draws. Changes apply immediately.
+    Default value is 0.55; value 0 restores stable emission.
+
 vk_rt_specular::
     Controls material-aware highlights from dynamic lights and nearby emissive
     `SURF_LIGHT` surfaces, clamped between 0 and 1. The effect reuses existing
@@ -1055,6 +1067,8 @@ vk_rt_debug::
     non-emissive surfaces. Value 17 shows the final dynamic-light ripple
     contribution amplified eight times. Value 18 keeps SSR active and shows
     only the final reflected-light glint contribution amplified eight times.
+    Value 19 shows the emissive-lamp flicker mask at its current intensity and
+    is black on ineligible surfaces.
     Value 0 restores
     normal rendering. This
     diagnostic is applied immediately, does not rebake the map, and adds no

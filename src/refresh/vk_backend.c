@@ -987,6 +987,7 @@ static cvar_t *vk_rt_dust;
 static cvar_t *vk_rt_afterglow;
 static cvar_t *vk_rt_sunlight;
 static cvar_t *vk_rt_emissive_halo;
+static cvar_t *vk_rt_emissive_flicker;
 static cvar_t *vk_rt_reflections;
 static cvar_t *vk_rt_reflection_glints;
 static cvar_t *vk_rt_specular;
@@ -10667,14 +10668,51 @@ static float vk_world_pack_rt_controls(float specular, float bounce,
 
 static float vk_world_pack_atmosphere_controls(float emissive,
                                                float scattering,
-                                               float turbulence)
+                                               float turbulence,
+                                               float flicker_factor)
 {
     unsigned scattering_q = (unsigned)(min(max(scattering, 0.0f), 1.0f) *
                                        15.0f + 0.5f);
     unsigned turbulence_q = (unsigned)(min(max(turbulence, 0.0f), 1.0f) *
                                        15.0f + 0.5f);
+    // Zero marks an ineligible surface. Eligible factors use fixed-point
+    // 1/128 units, making a disabled factor of exactly 1.0 lossless.
+    unsigned flicker_q = flicker_factor > 0.0f ?
+        (unsigned)(min(max(flicker_factor, 0.0f), 1.9921875f) *
+                   128.0f + 0.5f) : 0;
     return min(max(emissive, 0.0f), 2.0f) +
-        (float)((scattering_q << 2) | (turbulence_q << 6));
+        (float)((scattering_q << 2) | (turbulence_q << 6) |
+                (flicker_q << 10));
+}
+
+static bool vk_world_emissive_flicker_eligible(const mface_t *face)
+{
+    return face && face->texinfo &&
+        (face->texinfo->c.flags & SURF_LIGHT) &&
+        !(face->drawflags & (SURF_TRANS_MASK | SURF_WARP | SURF_SKY));
+}
+
+static float vk_world_emissive_flicker_factor(const mface_t *face,
+                                              float time)
+{
+    if (!vk_world_emissive_flicker_eligible(face))
+        return 0.0f;
+
+    float strength = vk_rt_emissive_flicker ?
+        Cvar_ClampValue(vk_rt_emissive_flicker, 0.0f, 1.0f) : 0.0f;
+    uint32_t hash = FS_HashPath(face->texinfo->name, UINT32_MAX);
+    float seed0 = (hash & 0xffffu) * (1.0f / 65535.0f);
+    float seed1 = ((hash >> 16) & 0xffffu) * (1.0f / 65535.0f);
+    float phase0 = seed0 * (2.0f * M_PIf);
+    float phase1 = seed1 * (2.0f * M_PIf);
+    float wave = 1.0f + 0.10f * sinf(time * (1.35f + seed0 * 0.55f) + phase0) +
+        0.05f * sinf(time * (3.70f + seed1 * 1.10f) + phase1);
+    float dip_wave = 0.5f + 0.5f * sinf(time * (0.38f + seed1 * 0.14f) +
+                                        phase0 * 0.37f + phase1);
+    float dip = Q_clipf((dip_wave - 0.84f) / 0.16f, 0.0f, 1.0f);
+    dip = dip * dip * (3.0f - 2.0f * dip);
+    float target = Q_clipf(wave - dip * 0.12f, 0.72f, 1.16f);
+    return 1.0f + (target - 1.0f) * strength;
 }
 
 static int vk_world_liquid_kind(const mface_t *face)
@@ -10733,11 +10771,12 @@ static void vk_world_rt_params(float *params, bool pixel_world,
     float turbulence = world_entity && vk.fd_valid &&
         !(vk.fd.rdflags & RDF_UNDERWATER) && vk_rt_fog_turbulence ?
         Cvar_ClampValue(vk_rt_fog_turbulence, 0.0f, 1.0f) : 0.0f;
-    bool emissive_face = world_entity && face && face->texinfo &&
-        (face->texinfo->c.flags & SURF_LIGHT) &&
-        !(face->drawflags & (SURF_TRANS_MASK | SURF_WARP));
+    bool emissive_face = world_entity &&
+        vk_world_emissive_flicker_eligible(face);
     float emissive_halo = emissive_face && vk_rt_emissive_halo ?
         Cvar_ClampValue(vk_rt_emissive_halo, 0.0f, 1.0f) : 0.0f;
+    float emissive_flicker = emissive_face && vk.fd_valid ?
+        vk_world_emissive_flicker_factor(face, vk.fd.time) : 0.0f;
     params[3] = vk_world_pack_rt_controls(specular, bounce, caustics,
                                           shadow_fringe, light_ripples);
     int requested_debug = vk_rt_debug ? vk_rt_debug->integer : 0;
@@ -10760,10 +10799,11 @@ static void vk_world_rt_params(float *params, bool pixel_world,
                 Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f) : 0.0f;
             params[0] = vk_world_pack_atmosphere_controls(emissive,
                                                           scattering,
-                                                          turbulence);
+                                                          turbulence,
+                                                          emissive_flicker);
             params[1] = vk_rt_ao ?
                 Cvar_ClampValue(vk_rt_ao, 0.0f, 0.5f) : 0.0f;
-            if (requested_debug >= 8 && requested_debug <= 17)
+            if (requested_debug >= 8 && requested_debug <= 19)
                 params[1] = -(float)requested_debug;
             params[2] = packed_material;
         }
@@ -10772,8 +10812,9 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         params[0] = requested_debug >= 1 && requested_debug <= 3 ?
             -(float)requested_debug :
             vk_world_pack_atmosphere_controls(1.0f, scattering,
-                                              turbulence);
-        if (requested_debug >= 8 && requested_debug <= 17)
+                                              turbulence,
+                                              emissive_flicker);
+        if (requested_debug >= 8 && requested_debug <= 19)
             params[1] = -(float)requested_debug;
         params[2] = packed_material;
     }
@@ -11002,6 +11043,10 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                    vk.world_glow_pipeline);
                 vk_bind_texture_descriptor(cmd, glow->descriptor_set);
                 push.intensity = vk_glowmap_intensity();
+                if (vk.raytracing_active &&
+                    vk_world_emissive_flicker_eligible(face->face))
+                    push.intensity *= vk_world_emissive_flicker_factor(
+                        face->face, fd ? fd->time : 0.0f);
                 push.color[0] = 1.0f;
                 push.color[1] = 1.0f;
                 push.color[2] = 1.0f;
@@ -11172,6 +11217,10 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     vk_bind_texture_descriptor(cmd, glow->descriptor_set);
                     bound_texture_index = image->texnum2;
                     push.intensity = vk_glowmap_intensity();
+                    if (vk.raytracing_active &&
+                        vk_world_emissive_flicker_eligible(face->face))
+                        push.intensity *= vk_world_emissive_flicker_factor(
+                            face->face, fd ? fd->time : 0.0f);
                     push.color[0] = 1.0f;
                     push.color[1] = 1.0f;
                     push.color[2] = 1.0f;
@@ -15737,6 +15786,8 @@ bool VKR_Init(bool total)
     vk_rt_sunlight = Cvar_Get("vk_rt_sunlight", "0.65", CVAR_ARCHIVE);
     vk_rt_emissive_halo = Cvar_Get("vk_rt_emissive_halo", "0.65",
                                    CVAR_ARCHIVE);
+    vk_rt_emissive_flicker = Cvar_Get("vk_rt_emissive_flicker", "0.55",
+                                      CVAR_ARCHIVE);
     vk_rt_reflections = Cvar_Get("vk_rt_reflections", "0.35", CVAR_ARCHIVE);
     vk_rt_reflection_glints = Cvar_Get("vk_rt_reflection_glints", "0.55",
                                        CVAR_ARCHIVE);
