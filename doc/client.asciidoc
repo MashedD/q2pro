@@ -896,6 +896,18 @@ vk_rt_bounce::
     Changes apply immediately. Default value is 0.65; value 0 disables the
     indirect contribution while retaining ordinary dynamic lighting.
 
+vk_rt_afterglow::
+    Controls how long bright transient dynamic lights remain after their live
+    source disappears, in seconds, clamped between 0 and 1. Sources with at
+    least 160 intensity are retained in an eight-entry renderer cache and fade
+    quadratically. Live and fading sources compete for the same three
+    per-surface light slots, so the effect does not increase shader loops or
+    ray queries. The fading source retains the existing diffuse, shadow,
+    bounce, specular, fringe, and bloom response. History is cleared on map or
+    renderer changes, time reversal, and RT or dynamic-light disablement.
+    Changes apply immediately. Default value is 0.35 seconds; value 0 disables
+    the effect.
+
 materials/rt_reflections.mat::
     Optional exact-name material overrides used by the Vulkan SSR and specular
     paths. Entries use a Q2RTX-style block with independent `reflect` and
@@ -924,7 +936,8 @@ vk_rt_debug::
     black outside water, including in slime and lava. Value 11 shows the final
     colored dynamic-shadow fringe amplified eight times. Value 12 shows the
     final aperture-skylight contribution amplified eight times. Value 13 shows
-    the final environment-sheen contribution amplified eight times. Value 0 restores
+    the final environment-sheen contribution amplified eight times. Value 14
+    shows only fading-source direct radiance amplified eight times. Value 0 restores
     normal rendering. This
     diagnostic is applied immediately, does not rebake the map, and adds no
     work while disabled. Default value is 0.

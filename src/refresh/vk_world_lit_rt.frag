@@ -239,12 +239,13 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
                    float reflectivity, float roughness,
                    float specular_control, float bounce_control,
                    float fringe_control, out vec3 specular, out vec3 bounce,
-                   out vec3 fringe)
+                   out vec3 fringe, out vec3 afterglow)
 {
     vec3 light = vec3(0.0);
     specular = vec3(0.0);
     bounce = vec3(0.0);
     fringe = vec3(0.0);
+    afterglow = vec3(0.0);
     vec3 view_dir = normalize(pc.dlight.xyz - v_position);
     float gloss = 1.0 - roughness;
     float exponent = mix(10.0, 96.0, pow(gloss, 0.9));
@@ -260,7 +261,8 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
         float falloff = max(1.0 - distance_to_light / range, 0.0);
         vec3 light_dir = delta / max(distance_to_light, 0.001);
         if (falloff > 0.0) {
-            float energy = pc.dlight_colors[i].w * falloff / 255.0;
+            bool cached_afterglow = pc.dlight_colors[i].w < 0.0;
+            float energy = abs(pc.dlight_colors[i].w) * falloff / 255.0;
             float contribution = max(pc.dlight_colors[i].r,
                 max(pc.dlight_colors[i].g, pc.dlight_colors[i].b)) * energy;
             if (contribution < 0.01)
@@ -276,6 +278,8 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
                 ray_origin, ray_delta, range, contribution, i, penumbra);
             vec3 radiance = pc.dlight_colors[i].rgb * energy * visibility;
             light += radiance;
+            if (cached_afterglow)
+                afterglow += radiance;
             fringe += pc.dlight_colors[i].rgb * energy * penumbra;
             if (bounce_control > 0.001) {
                 float color_high = max(pc.dlight_colors[i].r,
@@ -336,7 +340,7 @@ void main()
     int rt_debug = pc.rt_params.x < 0.0 ?
         int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
         (pc.rt_params.y < -7.5 ?
-            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 13.0)) : 0);
+            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 14.0)) : 0);
     vec2 material = material_params(pc.rt_params.z);
     float material_reflect = material.x;
     float material_roughness = material.y;
@@ -382,11 +386,12 @@ void main()
         vec3 dynamic_specular;
         vec3 dynamic_bounce;
         vec3 dynamic_fringe;
+        vec3 dynamic_afterglow;
         vec3 dynamic = dynamic_light(shading_normal, normal, material_reflect,
                                      material_roughness, specular_control,
                                      bounce_control, controls.w,
                                      dynamic_specular, dynamic_bounce,
-                                     dynamic_fringe);
+                                     dynamic_fringe, dynamic_afterglow);
         if (rt_debug == 8) {
             out_color = vec4(clamp(dynamic_specular *
                 vec3(0.0, 8.0, 8.0), 0.0, 1.0), 1.0);
@@ -395,6 +400,11 @@ void main()
         }
         if (rt_debug == 11) {
             out_color = vec4(clamp(dynamic_fringe * 8.0, 0.0, 1.0), 1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
+        if (rt_debug == 14) {
+            out_color = vec4(clamp(dynamic_afterglow * 8.0, 0.0, 1.0), 1.0);
             out_bloom = vec4(0.0);
             return;
         }

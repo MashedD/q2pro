@@ -266,7 +266,15 @@ typedef enum {
 } vk_world_pass_t;
 
 #define VK_WORLD_MAX_DLIGHTS 3
+#define VK_RT_AFTERGLOW_LIGHTS 8
 #define VK_RT_MATERIAL_RULES 256
+
+typedef struct {
+    dlight_t light;
+    float last_seen;
+    uint32_t seen_frame;
+    bool valid;
+} vk_rt_afterglow_light_t;
 
 typedef struct {
     char name[MAX_TEXNAME];
@@ -876,6 +884,9 @@ typedef struct {
     refdef_t fd;
     bool fd_valid;
     int view_liquid_kind;
+    vk_rt_afterglow_light_t afterglow_lights[VK_RT_AFTERGLOW_LIGHTS];
+    uint32_t afterglow_frame;
+    float afterglow_time;
     vk_world_t world;
     vk_model_t models[MAX_MODELS];
     uint32_t model_count;
@@ -964,6 +975,7 @@ static cvar_t *vk_rt_emissive;
 static cvar_t *vk_rt_ao;
 static cvar_t *vk_rt_skylight;
 static cvar_t *vk_rt_environment;
+static cvar_t *vk_rt_afterglow;
 static cvar_t *vk_rt_reflections;
 static cvar_t *vk_rt_specular;
 static cvar_t *vk_rt_liquids;
@@ -10204,6 +10216,142 @@ static float vk_world_dynamic_light_fraction(const dlight_t *light,
     return rad - dist * scale;
 }
 
+static bool vk_afterglow_rt_active(void)
+{
+#if USE_VULKAN_RAYTRACING
+    return vk.raytracing_active;
+#else
+    return false;
+#endif
+}
+
+static void vk_update_afterglow(const refdef_t *fd)
+{
+    float duration = vk_rt_afterglow ?
+        Cvar_ClampValue(vk_rt_afterglow, 0.0f, 1.0f) : 0.0f;
+    if (!fd || !vk_afterglow_rt_active() || duration <= 0.0f ||
+        !vk_dynamic_lights_enabled()) {
+        memset(vk.afterglow_lights, 0, sizeof(vk.afterglow_lights));
+        vk.afterglow_time = fd ? fd->time : 0.0f;
+        return;
+    }
+
+    if (fd->time < vk.afterglow_time) {
+        memset(vk.afterglow_lights, 0, sizeof(vk.afterglow_lights));
+        vk.afterglow_frame = 0;
+    }
+    vk.afterglow_time = fd->time;
+    uint32_t frame = ++vk.afterglow_frame;
+    if (!frame) {
+        memset(vk.afterglow_lights, 0, sizeof(vk.afterglow_lights));
+        frame = ++vk.afterglow_frame;
+    }
+
+    for (int i = 0; i < fd->num_dlights && fd->dlights; i++) {
+        const dlight_t *light = &fd->dlights[i];
+        float peak = max(light->color[0],
+                         max(light->color[1], light->color[2]));
+        if (light->intensity < 160.0f || peak <= 0.10f)
+            continue;
+
+        int best = -1;
+        float best_distance = 128.0f;
+        float light_color_length = sqrtf(DotProduct(light->color,
+                                                     light->color));
+        for (int j = 0; j < VK_RT_AFTERGLOW_LIGHTS; j++) {
+            vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[j];
+            if (!cached->valid || cached->seen_frame == frame)
+                continue;
+            float age = fd->time - cached->last_seen;
+            if (age < 0.0f || age > duration)
+                continue;
+            float cached_color_length = sqrtf(DotProduct(cached->light.color,
+                                                          cached->light.color));
+            float similarity = DotProduct(light->color, cached->light.color) /
+                max(light_color_length * cached_color_length, 0.0001f);
+            float distance = Distance(light->origin, cached->light.origin);
+            if (similarity >= 0.75f && distance <= best_distance) {
+                best = j;
+                best_distance = distance;
+            }
+        }
+
+        if (best < 0) {
+            float oldest = 1e30f;
+            for (int j = 0; j < VK_RT_AFTERGLOW_LIGHTS; j++) {
+                vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[j];
+                if (!cached->valid || fd->time - cached->last_seen > duration) {
+                    best = j;
+                    break;
+                }
+                if (cached->seen_frame != frame && cached->last_seen < oldest) {
+                    oldest = cached->last_seen;
+                    best = j;
+                }
+            }
+        }
+        if (best < 0)
+            continue;
+
+        vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[best];
+        cached->light = *light;
+        cached->last_seen = fd->time;
+        cached->seen_frame = frame;
+        cached->valid = true;
+    }
+
+    for (int i = 0; i < VK_RT_AFTERGLOW_LIGHTS; i++) {
+        vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[i];
+        if (cached->valid && fd->time - cached->last_seen > duration)
+            cached->valid = false;
+    }
+}
+
+static int vk_world_insert_dynamic_light(const vk_world_face_t *face,
+                                         const dlight_t *light,
+                                         bool afterglow,
+                                         const entity_t *ent,
+                                         const vec3_t axis[3], int count,
+                                         float scores[VK_WORLD_MAX_DLIGHTS],
+                                         float origins[VK_WORLD_MAX_DLIGHTS][4],
+                                         float colors[VK_WORLD_MAX_DLIGHTS][4])
+{
+    vec3_t light_origin;
+    float plane_dist = vk_world_face_light_plane_dist(face->face, light,
+                                                       ent, axis);
+    vk_world_face_light_origin(light, ent, axis, light_origin);
+    float f = vk_world_dynamic_light_fraction(light, face->face, light_origin,
+                                               plane_dist);
+    if (f <= 0.0f)
+        return count;
+
+    int slot = min(count, VK_WORLD_MAX_DLIGHTS - 1);
+    while (slot > 0 && f > scores[slot - 1]) {
+        if (origins)
+            memcpy(origins[slot], origins[slot - 1], sizeof(origins[slot]));
+        if (colors)
+            memcpy(colors[slot], colors[slot - 1], sizeof(colors[slot]));
+        scores[slot] = scores[slot - 1];
+        slot--;
+    }
+    if (slot >= VK_WORLD_MAX_DLIGHTS ||
+        (count >= VK_WORLD_MAX_DLIGHTS && f <= scores[slot]))
+        return count;
+
+    scores[slot] = f;
+    if (origins) {
+        VectorCopy(light_origin, origins[slot]);
+        origins[slot][3] = max(light->intensity - DLIGHT_CUTOFF *
+            ((vk_dlight_falloff && vk_dlight_falloff->integer) ? 0.8f : 1.0f),
+            0.0f);
+    }
+    if (colors) {
+        VectorCopy(light->color, colors[slot]);
+        colors[slot][3] = afterglow ? -light->intensity : light->intensity;
+    }
+    return count < VK_WORLD_MAX_DLIGHTS ? count + 1 : count;
+}
+
 static int vk_world_dynamic_lights(const vk_world_face_t *face,
                                    const refdef_t *fd, const entity_t *ent,
                                    const vec3_t axis[3],
@@ -10219,49 +10367,32 @@ static int vk_world_dynamic_lights(const vk_world_face_t *face,
         memset(colors, 0, sizeof(float) * VK_WORLD_MAX_DLIGHTS * 4);
 
     if (!face || !face->face || !face->face->plane ||
-        !fd || fd->num_dlights <= 0 || !fd->dlights ||
-        !vk_dynamic_lights_enabled() ||
+        !fd || !vk_dynamic_lights_enabled() ||
         (face->face->drawflags & vk.world.nolm_mask))
         return 0;
 
-    for (int i = 0; i < fd->num_dlights; i++) {
-        const dlight_t *light = &fd->dlights[i];
-        vec3_t light_origin;
-        float plane_dist = vk_world_face_light_plane_dist(face->face, light,
-                                                         ent, axis);
-        float f;
+    for (int i = 0; i < fd->num_dlights && fd->dlights; i++)
+        count = vk_world_insert_dynamic_light(face, &fd->dlights[i], false,
+            ent, axis, count, scores, origins, colors);
 
-        vk_world_face_light_origin(light, ent, axis, light_origin);
-        f = vk_world_dynamic_light_fraction(light, face->face, light_origin, plane_dist);
-        if (f <= 0.0f)
-            continue;
-
-        int slot = min(count, VK_WORLD_MAX_DLIGHTS - 1);
-        while (slot > 0 && f > scores[slot - 1]) {
-            if (origins)
-                memcpy(origins[slot], origins[slot - 1], sizeof(origins[slot]));
-            if (colors)
-                memcpy(colors[slot], colors[slot - 1], sizeof(colors[slot]));
-            scores[slot] = scores[slot - 1];
-            slot--;
+    float duration = vk_rt_afterglow ?
+        Cvar_ClampValue(vk_rt_afterglow, 0.0f, 1.0f) : 0.0f;
+    if (vk_afterglow_rt_active() && duration > 0.0f) {
+        for (int i = 0; i < VK_RT_AFTERGLOW_LIGHTS; i++) {
+            const vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[i];
+            if (!cached->valid || cached->seen_frame == vk.afterglow_frame)
+                continue;
+            float age = fd->time - cached->last_seen;
+            if (age < 0.0f || age >= duration)
+                continue;
+            float fade = 1.0f - age / duration;
+            fade *= fade;
+            dlight_t light = cached->light;
+            light.intensity = DLIGHT_CUTOFF +
+                max(light.intensity - DLIGHT_CUTOFF, 0.0f) * fade;
+            count = vk_world_insert_dynamic_light(face, &light, true, ent,
+                axis, count, scores, origins, colors);
         }
-        if (slot >= VK_WORLD_MAX_DLIGHTS ||
-            (count >= VK_WORLD_MAX_DLIGHTS && f <= scores[slot]))
-            continue;
-
-        scores[slot] = f;
-        if (origins) {
-            VectorCopy(light_origin, origins[slot]);
-            origins[slot][3] = max(light->intensity - DLIGHT_CUTOFF *
-                ((vk_dlight_falloff && vk_dlight_falloff->integer) ? 0.8f : 1.0f),
-                0.0f);
-        }
-        if (colors) {
-            VectorCopy(light->color, colors[slot]);
-            colors[slot][3] = light->intensity;
-        }
-        if (count < VK_WORLD_MAX_DLIGHTS)
-            count++;
     }
 
     return count;
@@ -10485,7 +10616,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
                 Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f) : 0.0f;
             params[1] = vk_rt_ao ?
                 Cvar_ClampValue(vk_rt_ao, 0.0f, 0.5f) : 0.0f;
-            if (requested_debug >= 8 && requested_debug <= 13)
+            if (requested_debug >= 8 && requested_debug <= 14)
                 params[1] = -(float)requested_debug;
             params[2] = packed_material;
         }
@@ -10493,7 +10624,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         // This position aliases rt_enabled in vk_world_lit_push_t.
         params[0] = requested_debug >= 1 && requested_debug <= 3 ?
             -(float)requested_debug : 1.0f;
-        if (requested_debug >= 8 && requested_debug <= 13)
+        if (requested_debug >= 8 && requested_debug <= 14)
             params[1] = -(float)requested_debug;
         params[2] = packed_material;
     }
@@ -15243,6 +15374,7 @@ bool VKR_Init(bool total)
     vk_rt_ao = Cvar_Get("vk_rt_ao", "0.24", CVAR_ARCHIVE);
     vk_rt_skylight = Cvar_Get("vk_rt_skylight", "0.6", CVAR_ARCHIVE);
     vk_rt_environment = Cvar_Get("vk_rt_environment", "0.65", CVAR_ARCHIVE);
+    vk_rt_afterglow = Cvar_Get("vk_rt_afterglow", "0.35", CVAR_ARCHIVE);
     vk_rt_reflections = Cvar_Get("vk_rt_reflections", "0.35", CVAR_ARCHIVE);
     vk_rt_specular = Cvar_Get("vk_rt_specular", "0.45", CVAR_ARCHIVE);
     vk_rt_liquids = Cvar_Get("vk_rt_liquids", "0.65", CVAR_ARCHIVE);
@@ -15576,6 +15708,9 @@ void VKR_BeginRegistration(const char *map)
     r_registration_sequence++;
     memset(vk.flare_fracs, 0, sizeof(vk.flare_fracs));
     memset(vk.flare_times, 0, sizeof(vk.flare_times));
+    memset(vk.afterglow_lights, 0, sizeof(vk.afterglow_lights));
+    vk.afterglow_frame = 0;
+    vk.afterglow_time = 0.0f;
     vk_load_world(map);
 }
 
@@ -15724,6 +15859,7 @@ void VKR_RenderFrame(const refdef_t *fd)
 #endif
     if (!vk_dynamic_lights_enabled())
         vk.fd.num_dlights = 0;
+    vk_update_afterglow(&vk.fd);
     glr.fd = vk.fd;
     fd = &vk.fd;
 

@@ -132,6 +132,8 @@ begin raytracing
         "shadow fringes" vk_rt_shadow_fringe 0 1 0.05
     range --status "Localized color spill from explosions and projectiles" \
         "dynamic color bounce" vk_rt_bounce 0 1 0.05
+    range --status "Fade time for bright transient ray-traced lights" \
+        "dynamic light afterglow" vk_rt_afterglow 0 1 0.05
     blank
     toggle --status "Allow bright ray-traced effects to contribute bloom" \
         "bloom" gl_bloom
