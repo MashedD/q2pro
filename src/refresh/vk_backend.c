@@ -984,6 +984,7 @@ static cvar_t *vk_rt_atmosphere;
 static cvar_t *vk_rt_light_scattering;
 static cvar_t *vk_rt_fog_turbulence;
 static cvar_t *vk_rt_dust;
+static cvar_t *vk_rt_dust_lighting;
 static cvar_t *vk_rt_afterglow;
 static cvar_t *vk_rt_sunlight;
 static cvar_t *vk_rt_emissive_halo;
@@ -12633,6 +12634,13 @@ typedef struct {
     uint32_t hash;
 } vk_dust_mote_t;
 
+typedef struct {
+    dlight_t light;
+    float score;
+} vk_dust_light_t;
+
+#define VK_MAX_DUST_LIGHTS 3
+
 static uint32_t vk_dust_hash(int x, int y, int z)
 {
     uint32_t hash = (uint32_t)x * 0x8da6b343u;
@@ -12648,6 +12656,105 @@ static uint32_t vk_dust_hash(int x, int y, int z)
 static float vk_dust_random(uint32_t hash)
 {
     return (hash & 0xffffu) * (1.0f / 65535.0f);
+}
+
+static int vk_insert_dust_light(const refdef_t *fd, const dlight_t *light,
+                                vk_dust_light_t lights[VK_MAX_DUST_LIGHTS],
+                                int count)
+{
+    if (!fd || !light || !vk.world.cache || !vk.world.cache->nodes)
+        return count;
+
+    float peak = max(light->color[0],
+                     max(light->color[1], light->color[2]));
+    float reach = light->intensity - DLIGHT_CUTOFF;
+    float camera_distance = Distance(light->origin, fd->vieworg);
+    if (peak <= 0.10f || reach <= 0.0f || camera_distance >= reach + 400.0f)
+        return count;
+
+    const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, light->origin);
+    if (!leaf || leaf->visframe != vk.world.visframe ||
+        (leaf->contents[0] & (CONTENTS_SOLID | MASK_WATER)) ||
+        (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+        return count;
+
+    // This is the strongest contribution the light can make anywhere inside
+    // the camera's bounded dust volume.
+    float score = reach - max(camera_distance - 400.0f, 0.0f);
+    if (score <= 0.0f)
+        return count;
+
+    int slot = min(count, VK_MAX_DUST_LIGHTS - 1);
+    while (slot > 0 && score > lights[slot - 1].score) {
+        lights[slot] = lights[slot - 1];
+        slot--;
+    }
+    if (count >= VK_MAX_DUST_LIGHTS && score <= lights[slot].score)
+        return count;
+
+    lights[slot].light = *light;
+    lights[slot].score = score;
+    return count < VK_MAX_DUST_LIGHTS ? count + 1 : count;
+}
+
+static int vk_select_dust_lights(const refdef_t *fd,
+                                 vk_dust_light_t lights[VK_MAX_DUST_LIGHTS])
+{
+    memset(lights, 0, sizeof(*lights) * VK_MAX_DUST_LIGHTS);
+    if (!fd || !vk_rt_dust_lighting ||
+        Cvar_ClampValue(vk_rt_dust_lighting, 0.0f, 1.0f) <= 0.0f ||
+        !vk_dynamic_lights_enabled())
+        return 0;
+
+    int count = 0;
+    for (int i = 0; fd->dlights && i < fd->num_dlights; i++)
+        count = vk_insert_dust_light(fd, &fd->dlights[i], lights, count);
+
+    float duration = vk_rt_afterglow ?
+        Cvar_ClampValue(vk_rt_afterglow, 0.0f, 1.0f) : 0.0f;
+    if (duration <= 0.0f)
+        return count;
+
+    for (int i = 0; i < VK_RT_AFTERGLOW_LIGHTS; i++) {
+        const vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[i];
+        if (!cached->valid || cached->seen_frame == vk.afterglow_frame)
+            continue;
+        float age = fd->time - cached->last_seen;
+        if (age < 0.0f || age >= duration)
+            continue;
+        float fade = 1.0f - age / duration;
+        fade *= fade;
+        dlight_t light = cached->light;
+        light.intensity = DLIGHT_CUTOFF +
+            max(light.intensity - DLIGHT_CUTOFF, 0.0f) * fade;
+        count = vk_insert_dust_light(fd, &light, lights, count);
+    }
+    return count;
+}
+
+static void vk_light_dust_mote(const vec3_t origin,
+                               const vk_dust_light_t *lights,
+                               int light_count, float strength,
+                               float color[4])
+{
+    vec3_t response = { 0.0f, 0.0f, 0.0f };
+    for (int i = 0; i < light_count; i++) {
+        const dlight_t *light = &lights[i].light;
+        float reach = max(light->intensity - DLIGHT_CUTOFF, 1.0f);
+        float fraction = Q_clipf((reach - Distance(light->origin, origin)) /
+                                 reach, 0.0f, 1.0f);
+        fraction = fraction * fraction * (3.0f - 2.0f * fraction);
+        fraction *= min(reach / 255.0f, 1.0f);
+        VectorMA(response, fraction, light->color, response);
+    }
+
+    float energy = Q_clipf(max(response[0],
+                         max(response[1], response[2])), 0.0f, 1.0f);
+    float brighten = 1.0f + energy * strength * 0.25f;
+    for (int i = 0; i < 3; i++)
+        color[i] = Q_clipf(color[i] * brighten +
+                           response[i] * strength * 0.55f, 0.0f, 1.0f);
+    color[3] = min(color[3] * (1.0f + energy * strength * 0.45f), 0.34f);
 }
 
 static void vk_append_particle_quad(uint32_t *vertex_count,
@@ -12698,6 +12805,10 @@ static uint32_t vk_append_dust_motes(const refdef_t *fd,
 
     enum { CELL_SIZE = 160, CELL_RADIUS = 4, Z_RADIUS = 2 };
     vk_dust_mote_t motes[VK_MAX_DUST_MOTES];
+    vk_dust_light_t lights[VK_MAX_DUST_LIGHTS];
+    int light_count = vk_select_dust_lights(fd, lights);
+    float light_strength = vk_rt_dust_lighting ?
+        Cvar_ClampValue(vk_rt_dust_lighting, 0.0f, 1.0f) : 0.0f;
     uint32_t mote_count = 0;
     int center[3] = {
         (int)floorf(fd->vieworg[0] / CELL_SIZE),
@@ -12761,6 +12872,9 @@ motes_ready:
             0.64f + tint * 0.08f,
             (0.16f + 0.10f * strength) * fade,
         };
+        if (light_count)
+            vk_light_dust_mote(motes[i].origin, lights, light_count,
+                               light_strength, color);
         float scale = 1.8f + distance * 0.003f +
             vk_dust_random(motes[i].hash >> 11) * 0.8f;
         vk_append_particle_quad(&vertex_count, motes[i].origin, scale,
@@ -15782,6 +15896,8 @@ bool VKR_Init(bool total)
     vk_rt_fog_turbulence = Cvar_Get("vk_rt_fog_turbulence", "0.4",
                                     CVAR_ARCHIVE);
     vk_rt_dust = Cvar_Get("vk_rt_dust", "0.35", CVAR_ARCHIVE);
+    vk_rt_dust_lighting = Cvar_Get("vk_rt_dust_lighting", "0.65",
+                                   CVAR_ARCHIVE);
     vk_rt_afterglow = Cvar_Get("vk_rt_afterglow", "0.35", CVAR_ARCHIVE);
     vk_rt_sunlight = Cvar_Get("vk_rt_sunlight", "0.65", CVAR_ARCHIVE);
     vk_rt_emissive_halo = Cvar_Get("vk_rt_emissive_halo", "0.65",

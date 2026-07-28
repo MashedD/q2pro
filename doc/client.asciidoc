@@ -917,6 +917,18 @@ vk_rt_dust::
     original capacity and blend mode. Changes apply immediately. Default
     value is 0.35; value 0 disables the effect.
 
+vk_rt_dust_lighting::
+    Controls colored dynamic lighting on ambient dust while Vulkan ray tracing
+    is active, clamped between 0 and 1. At most three visible live or cached
+    afterglow lights are selected once per frame, then evaluated across the
+    existing maximum of 48 motes. Smooth distance falloff tints and moderately
+    brightens nearby dust without changing its density, size, movement, or
+    standard-alpha draw. Light selection rejects solid, liquid, out-of-range,
+    and non-visible BSP locations. The effect adds no particles, draws,
+    triangles, descriptors, texture samples, render passes, ray queries, or
+    per-frame allocations. Changes apply immediately and require `vk_rt_dust`.
+    Default value is 0.65; value 0 restores neutral dust.
+
 vk_rt_light_scattering::
     Controls colored light scattering inside active distance fog while Vulkan
     ray tracing is active, clamped between 0 and 1. Strong explosions,
