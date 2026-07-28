@@ -110,7 +110,12 @@ vec2 material_params(float packed)
 
 float material_skylight(float packed)
 {
-    return floor(max(packed, 0.0) / 256.0) / 15.0;
+    return mod(floor(max(packed, 0.0) / 256.0), 16.0) / 15.0;
+}
+
+float material_environment(float packed)
+{
+    return mod(floor(max(packed, 0.0) / 4096.0), 16.0) / 15.0;
 }
 
 float material_output(float packed)
@@ -331,7 +336,7 @@ void main()
     int rt_debug = pc.rt_params.x < 0.0 ?
         int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
         (pc.rt_params.y < -7.5 ?
-            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 12.0)) : 0);
+            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 13.0)) : 0);
     vec2 material = material_params(pc.rt_params.z);
     float material_reflect = material.x;
     float material_roughness = material.y;
@@ -464,7 +469,35 @@ void main()
                 return;
             }
             out_color.rgb += skylight_add;
-        } else if (rt_debug == 12) {
+            vec3 environment_view = normalize(pc.dlight.xyz - v_position);
+            float environment_edge = 1.0 -
+                max(dot(shading_normal, environment_view), 0.0);
+            float environment_edge2 = environment_edge * environment_edge;
+            float environment_fresnel = 0.30 + 0.70 *
+                (environment_edge2 * environment_edge2 * environment_edge);
+            float environment_smoothness = 1.0 - material_roughness;
+            float environment_orientation = mix(0.30, 0.80,
+                smoothstep(0.15, 0.90, abs(normal.z)));
+            vec3 environment_add = vec3(0.18, 0.30, 0.50) * 0.55 *
+                material_environment(pc.rt_params.z) * material_reflect *
+                mix(0.35, 1.0, environment_smoothness) *
+                environment_fresnel * environment_orientation *
+                sky_openness;
+            environment_add *= material_specular_tint(material_albedo,
+                material_reflect, material_roughness);
+            float environment_luma = dot(environment_add, luma_weights);
+            environment_add *= min(1.0, 0.055 /
+                                   max(environment_luma, 0.000001));
+            environment_add *= max(
+                vec3(1.0) - clamp(out_color.rgb, 0.0, 1.0), vec3(0.0));
+            if (rt_debug == 13) {
+                out_color = vec4(clamp(environment_add * 8.0, 0.0, 1.0),
+                                 1.0);
+                out_bloom = vec4(0.0);
+                return;
+            }
+            out_color.rgb += environment_add;
+        } else if (rt_debug == 12 || rt_debug == 13) {
             out_color = vec4(0.0, 0.0, 0.0, 1.0);
             out_bloom = vec4(0.0);
             return;

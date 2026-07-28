@@ -841,6 +841,18 @@ vk_rt_liquids::
     Changes apply immediately. Default value is 0.65; value 0 restores the
     previous liquid shading.
 
+vk_rt_environment::
+    Controls a material-aware cool blue-gray environment sheen on opaque BSP
+    world surfaces while Vulkan ray tracing is active, clamped between 0 and
+    1. Reflectivity and roughness come from the existing reflection material
+    system. A broad Fresnel response keeps the effect visible away from
+    extreme grazing angles, while smooth upward-facing surfaces receive the
+    strongest response and walls and rough surfaces remain softer. The
+    contribution uses stabilized aperture openness, preserves bright texture
+    detail, is capped at 0.08 luminance, and does not feed bloom. It adds no
+    ray queries, texture samples, render passes, descriptors, or draw calls.
+    Changes apply immediately. Default value is 0.65; value 0 disables it.
+
 vk_rt_skylight::
     Controls a cool blue-gray ambient fill on open static BSP world surfaces
     while Vulkan ray tracing is active, clamped between 0 and 1. Baked ambient
@@ -911,7 +923,8 @@ vk_rt_debug::
     surface. Value 10 shows underwater caustics amplified eight times and is
     black outside water, including in slime and lava. Value 11 shows the final
     colored dynamic-shadow fringe amplified eight times. Value 12 shows the
-    final aperture-skylight contribution amplified eight times. Value 0 restores
+    final aperture-skylight contribution amplified eight times. Value 13 shows
+    the final environment-sheen contribution amplified eight times. Value 0 restores
     normal rendering. This
     diagnostic is applied immediately, does not rebake the map, and adds no
     work while disabled. Default value is 0.

@@ -132,7 +132,12 @@ vec2 material_params(float packed)
 
 float material_skylight(float packed)
 {
-    return floor(max(packed, 0.0) / 256.0) / 15.0;
+    return mod(floor(max(packed, 0.0) / 256.0), 16.0) / 15.0;
+}
+
+float material_environment(float packed)
+{
+    return mod(floor(max(packed, 0.0) / 4096.0), 16.0) / 15.0;
 }
 
 float material_output(float packed)
@@ -607,7 +612,7 @@ void main()
     int rt_debug = pc.rt_params.x < 0.0 ?
         int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
         (pc.rt_params.y < -7.5 ?
-            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 12.0)) : 0);
+            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 13.0)) : 0);
     if (rt_debug >= 1 && rt_debug <= 3) {
         if (rt_debug == 1)
             out_color = vec4(vec3(static_coverage), 1.0);
@@ -760,6 +765,33 @@ void main()
             return;
         }
         raster_rgb += skylight_add;
+        vec3 environment_view = normalize(pc.dlight.xyz - v_position);
+        float environment_edge = 1.0 -
+            max(dot(shading_normal, environment_view), 0.0);
+        float environment_edge2 = environment_edge * environment_edge;
+        float environment_fresnel = 0.30 + 0.70 *
+            (environment_edge2 * environment_edge2 * environment_edge);
+        float environment_smoothness = 1.0 - material_roughness;
+        float environment_orientation = mix(0.35, 1.0,
+            smoothstep(0.10, 0.85, abs(normal.z)));
+        vec3 environment_add = vec3(0.18, 0.30, 0.50) * 0.65 *
+            material_environment(pc.rt_params.z) * material_reflect *
+            mix(0.35, 1.0, environment_smoothness) *
+            environment_fresnel * environment_orientation *
+            sky_openness * sky_mask;
+        environment_add *= material_specular_tint(texel.rgb,
+            material_reflect, material_roughness);
+        float environment_luma = dot(environment_add, luma_weights);
+        environment_add *= min(1.0, 0.08 /
+                               max(environment_luma, 0.000001));
+        environment_add *= max(vec3(1.0) - clamp(raster_rgb, 0.0, 1.0),
+                               vec3(0.0));
+        if (rt_debug == 13) {
+            out_color = vec4(clamp(environment_add * 8.0, 0.0, 1.0), 1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
+        raster_rgb += environment_add;
         float reflection_surface_mask = 1.0;
 #ifdef RT_GLOWMAP
         float glow_luma = dot(glow.rgb, vec3(0.2126, 0.7152, 0.0722));
