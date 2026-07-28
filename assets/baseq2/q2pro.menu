@@ -124,6 +124,8 @@ begin raytracing
         "emissive edge halos" vk_rt_emissive_halo 0 1 0.05
     range --status "Screen-space reflections on configured materials" \
         "reflections" vk_rt_reflections 0 1 0.05
+    range --status "Compact colored highlights around bright reflections" \
+        "reflection glints" vk_rt_reflection_glints 0 1 0.05
     range --status "Material highlights from dynamic and emissive lights" \
         "specular highlights" vk_rt_specular 0 1 0.05
     range --status "Ambient sheen on reflective world materials" \
@@ -138,6 +140,8 @@ begin raytracing
         "dynamic color bounce" vk_rt_bounce 0 1 0.05
     range --status "Animated shadow-aware rings from strong dynamic lights" \
         "dynamic light ripples" vk_rt_light_ripples 0 1 0.05
+    range --status "Depth-tested colored trails behind strong moving lights" \
+        "projectile light trails" vk_rt_light_trails 0 1 0.05
     range --status "Fade time for bright transient ray-traced lights" \
         "dynamic light afterglow" vk_rt_afterglow 0 1 0.05
     blank

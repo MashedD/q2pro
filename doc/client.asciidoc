@@ -805,6 +805,16 @@ vk_rt_reflections::
     outside the screen or hidden behind other geometry cannot be reflected.
     Requires multisampling 1x. Default value is 0.35; value 0 disables it.
 
+vk_rt_reflection_glints::
+    Controls compact colored highlights around bright details in resolved
+    screen-space reflections, clamped between 0 and 1. Brightness and
+    screen-space luminance variation isolate reflected lamps, explosions, and
+    projectiles after the depth- and material-aware bilateral resolve. Smooth
+    materials respond most strongly while rough surfaces suppress the effect.
+    Added luminance is capped at 0.12. The effect adds no ray queries, texture
+    samples, passes, descriptors, or draws and requires `vk_rt_reflections`.
+    Changes apply immediately. Default value is 0.55; value 0 disables it.
+
 vk_rt_emissive_halo::
     Controls stable colored edge halos on opaque static BSP `SURF_LIGHT`
     textures while Vulkan ray tracing is active, clamped between 0 and 1. The
@@ -944,6 +954,19 @@ vk_rt_light_ripples::
     4-bit caustic, fringe, and ripple controls. Changes apply immediately.
     Default value is 0.6; value 0 disables the effect.
 
+vk_rt_light_trails::
+    Controls short colored trails behind strong moving dynamic lights while
+    Vulkan ray tracing is active, clamped between 0 and 1. Lights with at
+    least 160 intensity reuse the existing eight-entry transient-light tracker
+    and retain one smoothly lagged segment. Movement below 6 units is rejected,
+    teleport-like changes are reset, visible length is capped at 96 units, and
+    the segment fades for 0.10 seconds after its source disappears. Trails use
+    the existing depth-tested beam geometry and add at most eight normal draws;
+    bloom adds at most eight matching lower-energy draws when enabled. No new
+    shaders, ray queries, texture samples, or render passes are required.
+    Changes apply immediately and remain independent of `vk_rt_afterglow`.
+    Default value is 0.55; value 0 disables the effect.
+
 materials/rt_reflections.mat::
     Optional exact-name material overrides used by the Vulkan SSR and specular
     paths. Entries use a Q2RTX-style block with independent `reflect` and
@@ -977,7 +1000,9 @@ vk_rt_debug::
     shows the final warm sunlight contribution amplified eight times. Value 16
     shows the local emissive-edge halo amplified eight times and is black on
     non-emissive surfaces. Value 17 shows the final dynamic-light ripple
-    contribution amplified eight times. Value 0 restores
+    contribution amplified eight times. Value 18 keeps SSR active and shows
+    only the final reflected-light glint contribution amplified eight times.
+    Value 0 restores
     normal rendering. This
     diagnostic is applied immediately, does not rebake the map, and adds no
     work while disabled. Default value is 0.

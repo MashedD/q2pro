@@ -271,8 +271,10 @@ typedef enum {
 
 typedef struct {
     dlight_t light;
+    vec3_t trail_origin;
     float last_seen;
     uint32_t seen_frame;
+    bool trail_valid;
     bool valid;
 } vk_rt_afterglow_light_t;
 
@@ -979,12 +981,14 @@ static cvar_t *vk_rt_afterglow;
 static cvar_t *vk_rt_sunlight;
 static cvar_t *vk_rt_emissive_halo;
 static cvar_t *vk_rt_reflections;
+static cvar_t *vk_rt_reflection_glints;
 static cvar_t *vk_rt_specular;
 static cvar_t *vk_rt_liquids;
 static cvar_t *vk_rt_bounce;
 static cvar_t *vk_rt_caustics;
 static cvar_t *vk_rt_shadow_fringe;
 static cvar_t *vk_rt_light_ripples;
+static cvar_t *vk_rt_light_trails;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -8878,7 +8882,8 @@ static bool vk_ssr_enabled_for_frame(void)
     return vk.ssr_ready && vk.raytracing_active && vk_raytracing &&
         vk_raytracing->integer && vk_rt_reflections &&
         vk_rt_reflections->value > 0.001f && vk.fd_valid &&
-        (!vk_rt_debug || vk_rt_debug->integer < 8) &&
+        (!vk_rt_debug || vk_rt_debug->integer < 8 ||
+         vk_rt_debug->integer == 18) &&
         !(vk.fd.rdflags & RDF_NOWORLDMODEL);
 #else
     return false;
@@ -10232,7 +10237,10 @@ static void vk_update_afterglow(const refdef_t *fd)
 {
     float duration = vk_rt_afterglow ?
         Cvar_ClampValue(vk_rt_afterglow, 0.0f, 1.0f) : 0.0f;
-    if (!fd || !vk_afterglow_rt_active() || duration <= 0.0f ||
+    float trail_strength = vk_rt_light_trails ?
+        Cvar_ClampValue(vk_rt_light_trails, 0.0f, 1.0f) : 0.0f;
+    float history_window = max(duration, trail_strength > 0.0f ? 0.25f : 0.0f);
+    if (!fd || !vk_afterglow_rt_active() || history_window <= 0.0f ||
         !vk_dynamic_lights_enabled()) {
         memset(vk.afterglow_lights, 0, sizeof(vk.afterglow_lights));
         vk.afterglow_time = fd ? fd->time : 0.0f;
@@ -10258,6 +10266,7 @@ static void vk_update_afterglow(const refdef_t *fd)
             continue;
 
         int best = -1;
+        bool matched = false;
         float best_distance = 128.0f;
         float light_color_length = sqrtf(DotProduct(light->color,
                                                      light->color));
@@ -10266,7 +10275,7 @@ static void vk_update_afterglow(const refdef_t *fd)
             if (!cached->valid || cached->seen_frame == frame)
                 continue;
             float age = fd->time - cached->last_seen;
-            if (age < 0.0f || age > duration)
+            if (age < 0.0f || age > history_window)
                 continue;
             float cached_color_length = sqrtf(DotProduct(cached->light.color,
                                                           cached->light.color));
@@ -10275,6 +10284,7 @@ static void vk_update_afterglow(const refdef_t *fd)
             float distance = Distance(light->origin, cached->light.origin);
             if (similarity >= 0.75f && distance <= best_distance) {
                 best = j;
+                matched = true;
                 best_distance = distance;
             }
         }
@@ -10283,7 +10293,8 @@ static void vk_update_afterglow(const refdef_t *fd)
             float oldest = 1e30f;
             for (int j = 0; j < VK_RT_AFTERGLOW_LIGHTS; j++) {
                 vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[j];
-                if (!cached->valid || fd->time - cached->last_seen > duration) {
+                if (!cached->valid ||
+                    fd->time - cached->last_seen > history_window) {
                     best = j;
                     break;
                 }
@@ -10297,6 +10308,28 @@ static void vk_update_afterglow(const refdef_t *fd)
             continue;
 
         vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[best];
+        if (matched && trail_strength > 0.0f) {
+            float dt = fd->time - cached->last_seen;
+            float movement = Distance(light->origin, cached->light.origin);
+            if (dt > 0.0f && dt <= 0.10f && movement <= 128.0f) {
+                if (!cached->trail_valid)
+                    VectorCopy(cached->light.origin, cached->trail_origin);
+                vec3_t follow_delta;
+                VectorSubtract(cached->light.origin, cached->trail_origin,
+                               follow_delta);
+                float follow = 1.0f - expf(-dt / 0.12f);
+                VectorMA(cached->trail_origin, follow, follow_delta,
+                         cached->trail_origin);
+                cached->trail_valid =
+                    Distance(light->origin, cached->trail_origin) >= 6.0f;
+            } else {
+                VectorCopy(light->origin, cached->trail_origin);
+                cached->trail_valid = false;
+            }
+        } else {
+            VectorCopy(light->origin, cached->trail_origin);
+            cached->trail_valid = false;
+        }
         cached->light = *light;
         cached->last_seen = fd->time;
         cached->seen_frame = frame;
@@ -10305,7 +10338,8 @@ static void vk_update_afterglow(const refdef_t *fd)
 
     for (int i = 0; i < VK_RT_AFTERGLOW_LIGHTS; i++) {
         vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[i];
-        if (cached->valid && fd->time - cached->last_seen > duration)
+        if (cached->valid &&
+            fd->time - cached->last_seen > history_window)
             cached->valid = false;
     }
 }
@@ -12958,6 +12992,68 @@ static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
     }
 }
 
+static void vk_draw_rt_light_trails(const refdef_t *fd)
+{
+    float strength = vk_rt_light_trails ?
+        Cvar_ClampValue(vk_rt_light_trails, 0.0f, 1.0f) : 0.0f;
+    if (!fd || strength <= 0.0f || !vk_afterglow_rt_active() ||
+        !vk.render_pass_active || !vk.sprite_pipeline ||
+        !vk.beam_texture.descriptor_set ||
+        !vk.sprite_quad.vertices.buffer || !vk.sprite_quad.indices.buffer)
+        return;
+
+    VkPipeline pipeline = vk.drawing_bloom ?
+        vk.sprite_bloom_pipeline : vk.sprite_pipeline;
+    if (!pipeline)
+        return;
+
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk_bind_texture_descriptor(cmd, vk.beam_texture.descriptor_set);
+
+    vk_draw_scope_t old_scope = vk.draw_scope;
+    vk.draw_scope = VK_DRAW_ENTITY;
+    for (int i = 0; i < VK_RT_AFTERGLOW_LIGHTS; i++) {
+        const vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[i];
+        if (!cached->valid || !cached->trail_valid)
+            continue;
+
+        float age = fd->time - cached->last_seen;
+        if (age < 0.0f || age >= 0.10f)
+            continue;
+        float fade = cached->seen_frame == vk.afterglow_frame ?
+            1.0f : 1.0f - age / 0.10f;
+
+        vec3_t start, end, direction;
+        VectorCopy(cached->trail_origin, start);
+        VectorCopy(cached->light.origin, end);
+        VectorSubtract(end, start, direction);
+        float length = VectorNormalize(direction);
+        if (length < 6.0f)
+            continue;
+        if (length > 96.0f)
+            VectorMA(end, -96.0f, direction, start);
+
+        float peak = max(cached->light.color[0],
+                         max(cached->light.color[1], cached->light.color[2]));
+        if (peak <= 0.10f)
+            continue;
+        float color[4] = {
+            min(cached->light.color[0] / peak, 1.0f),
+            min(cached->light.color[1] / peak, 1.0f),
+            min(cached->light.color[2] / peak, 1.0f),
+            (0.18f + 0.34f * strength) * fade,
+        };
+        if (vk.drawing_bloom)
+            color[3] *= 0.55f;
+        float intensity_weight = Q_clipf(
+            (cached->light.intensity - 160.0f) / 400.0f, 0.0f, 1.0f);
+        float width = 1.4f + strength * 1.8f + intensity_weight * 1.2f;
+        vk_draw_beam_segment(start, end, fd, color, width);
+    }
+    vk.draw_scope = old_scope;
+}
+
 static float vk_lightstyle_value(const refdef_t *fd, byte style)
 {
     if (!fd || !fd->lightstyles || style >= MAX_LIGHTSTYLES)
@@ -13276,6 +13372,7 @@ static void vk_draw_bloom_beams(const refdef_t *fd)
     vk.drawing_bloom = true;
     vk_set_3d_viewport(fd);
     vk_draw_entities(fd, VK_ENTITY_BEAM);
+    vk_draw_rt_light_trails(fd);
     vk.drawing_bloom = old;
 }
 
@@ -15404,12 +15501,15 @@ bool VKR_Init(bool total)
     vk_rt_emissive_halo = Cvar_Get("vk_rt_emissive_halo", "0.65",
                                    CVAR_ARCHIVE);
     vk_rt_reflections = Cvar_Get("vk_rt_reflections", "0.35", CVAR_ARCHIVE);
+    vk_rt_reflection_glints = Cvar_Get("vk_rt_reflection_glints", "0.55",
+                                       CVAR_ARCHIVE);
     vk_rt_specular = Cvar_Get("vk_rt_specular", "0.45", CVAR_ARCHIVE);
     vk_rt_liquids = Cvar_Get("vk_rt_liquids", "0.65", CVAR_ARCHIVE);
     vk_rt_bounce = Cvar_Get("vk_rt_bounce", "0.65", CVAR_ARCHIVE);
     vk_rt_caustics = Cvar_Get("vk_rt_caustics", "0.65", CVAR_ARCHIVE);
     vk_rt_shadow_fringe = Cvar_Get("vk_rt_shadow_fringe", "0.6", CVAR_ARCHIVE);
     vk_rt_light_ripples = Cvar_Get("vk_rt_light_ripples", "0.6", CVAR_ARCHIVE);
+    vk_rt_light_trails = Cvar_Get("vk_rt_light_trails", "0.55", CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
@@ -15930,6 +16030,7 @@ void VKR_RenderFrame(const refdef_t *fd)
         vk_draw_world_outlines(mvp, false, VK_WORLD_ALPHA, fd, NULL);
     }
     vk_draw_entities(fd, VK_ENTITY_BEAM);
+    vk_draw_rt_light_trails(fd);
     vk_draw_particles(fd);
     vk_draw_glare(fd);
     vk_draw_entities(fd, VK_ENTITY_ALPHA_FRONT);
@@ -16458,13 +16559,18 @@ static void vk_render_ssr(void)
         .projection = { proj[0], proj[5], proj[10], proj[14] },
         .control = {
             vk_rt_reflections ? Cvar_ClampValue(vk_rt_reflections, 0.0f, 1.0f) : 0.0f,
-            vk_rt_debug && vk_rt_debug->integer >= 4 &&
-                vk_rt_debug->integer <= 7 ?
+            vk_rt_debug && ((vk_rt_debug->integer >= 4 &&
+                vk_rt_debug->integer <= 7) ||
+                vk_rt_debug->integer == 18) ?
                 (float)vk_rt_debug->integer : 0.0f,
             1.0f / max((float)vk.scene_texture.width, 1.0f),
             1.0f / max((float)vk.scene_texture.height, 1.0f),
         },
-        .view_up = { view[8], view[9], view[10], 0.0f },
+        .view_up = {
+            view[8], view[9], view[10],
+            vk_rt_reflection_glints ?
+                Cvar_ClampValue(vk_rt_reflection_glints, 0.0f, 1.0f) : 0.55f,
+        },
     };
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.ssr_pipeline);
     vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
