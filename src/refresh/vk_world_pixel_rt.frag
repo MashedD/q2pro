@@ -145,6 +145,11 @@ float material_sunlight(float packed)
     return mod(floor(max(packed, 0.0) / 65536.0), 16.0) / 15.0;
 }
 
+float material_emissive_halo(float packed)
+{
+    return mod(floor(max(packed, 0.0) / 1048576.0), 16.0) / 15.0;
+}
+
 float material_output(float packed)
 {
     return mod(floor(max(packed, 0.0) + 0.5), 256.0) / 255.0;
@@ -153,10 +158,16 @@ float material_output(float packed)
 vec4 rt_controls(float packed)
 {
     uint bits = uint(clamp(floor(packed + 0.5), 0.0, 16777215.0));
-    return vec4(float(bits & 127u) / 127.0,
-                float((bits >> 7) & 127u) / 127.0,
-                float((bits >> 14) & 31u) / 31.0,
-                float((bits >> 19) & 31u) / 31.0);
+    return vec4(float(bits & 63u) / 63.0,
+                float((bits >> 6) & 63u) / 63.0,
+                float((bits >> 12) & 15u) / 15.0,
+                float((bits >> 16) & 15u) / 15.0);
+}
+
+float rt_light_ripple_control(float packed)
+{
+    uint bits = uint(clamp(floor(packed + 0.5), 0.0, 16777215.0));
+    return float((bits >> 20) & 15u) / 15.0;
 }
 
 vec3 underwater_caustics(vec3 position, vec3 normal, vec4 controls)
@@ -236,14 +247,17 @@ vec3 material_bump_normal(vec3 position, vec3 normal, vec3 albedo,
 
 vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
                    float reflectivity, float roughness, out vec3 specular,
-                   out vec3 bounce, out vec3 fringe, out vec3 afterglow)
+                   out vec3 bounce, out vec3 fringe, out vec3 afterglow,
+                   out vec3 ripple)
 {
     vec3 light = vec3(0.0);
     specular = vec3(0.0);
     bounce = vec3(0.0);
     fringe = vec3(0.0);
     afterglow = vec3(0.0);
+    ripple = vec3(0.0);
     vec4 controls = rt_controls(pc.rt_params.w);
+    float ripple_control = rt_light_ripple_control(pc.rt_params.w);
     vec3 view_dir = normalize(pc.dlight.xyz - v_position);
     float gloss = 1.0 - roughness;
     float exponent = mix(10.0, 96.0, pow(gloss, 0.9));
@@ -281,6 +295,17 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
         light += radiance;
         if (cached_afterglow)
             afterglow += radiance;
+        if (!cached_afterglow && abs(pc.dlight_colors[i].w) >= 160.0 &&
+            ripple_control > 0.001) {
+            float phase = fract(distance_to_light * 0.0125 -
+                                pc.dlight.w * 1.25);
+            float triangle = 1.0 - abs(phase * 2.0 - 1.0);
+            float band = smoothstep(0.72, 0.96, triangle);
+            float facing = abs(dot(geometric_normal, light_dir));
+            float surface_weight = mix(0.55, 1.0, facing);
+            ripple += radiance * band * falloff * surface_weight *
+                      ripple_control * 0.22;
+        }
         fringe += pc.dlight_colors[i].rgb * energy * penumbra;
         if (controls.y > 0.001) {
             float color_high = max(pc.dlight_colors[i].r,
@@ -310,6 +335,8 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
     float fringe_luma = dot(fringe, vec3(0.2126, 0.7152, 0.0722));
     fringe *= min(1.0, 0.06 / max(fringe_luma, 0.000001));
     bounce *= 0.65 * controls.y;
+    float ripple_luma = dot(ripple, vec3(0.2126, 0.7152, 0.0722));
+    ripple *= min(1.0, 0.07 / max(ripple_luma, 0.000001));
     return light;
 }
 
@@ -508,24 +535,29 @@ float quad_anchor_distance()
 vec3 adaptive_dynamic_light(vec3 shading_normal, vec3 geometric_normal,
                             bool full_resolution, float reflectivity, float roughness,
                             out vec3 specular, out vec3 bounce,
-                            out vec3 fringe, out vec3 afterglow)
+                            out vec3 fringe, out vec3 afterglow,
+                            out vec3 ripple)
 {
     if (full_resolution)
         return dynamic_light(shading_normal, geometric_normal, reflectivity,
-                             roughness, specular, bounce, fringe, afterglow);
+                             roughness, specular, bounce, fringe, afterglow,
+                             ripple);
 
     vec3 light = vec3(0.0);
     specular = vec3(0.0);
     bounce = vec3(0.0);
     fringe = vec3(0.0);
     afterglow = vec3(0.0);
+    ripple = vec3(0.0);
     if ((gl_SubgroupInvocationID & 3u) == 0u)
         light = dynamic_light(shading_normal, geometric_normal, reflectivity,
-                              roughness, specular, bounce, fringe, afterglow);
+                              roughness, specular, bounce, fringe, afterglow,
+                              ripple);
     specular = subgroupQuadBroadcast(specular, 0);
     bounce = subgroupQuadBroadcast(bounce, 0);
     fringe = subgroupQuadBroadcast(fringe, 0);
     afterglow = subgroupQuadBroadcast(afterglow, 0);
+    ripple = subgroupQuadBroadcast(ripple, 0);
     return subgroupQuadBroadcast(light, 0);
 }
 
@@ -614,17 +646,18 @@ void main()
     vec3 quad_dynamic_bounce;
     vec3 quad_dynamic_fringe;
     vec3 quad_dynamic_afterglow;
+    vec3 quad_dynamic_ripple;
     vec3 quad_dynamic_light = adaptive_dynamic_light(
         shading_normal, normal, full_dynamic_resolution, material_reflect,
         material_roughness, quad_dynamic_specular, quad_dynamic_bounce,
-        quad_dynamic_fringe, quad_dynamic_afterglow);
+        quad_dynamic_fringe, quad_dynamic_afterglow, quad_dynamic_ripple);
 #endif
 
     vec3 bloom = vec3(0.0);
     int rt_debug = pc.rt_params.x < 0.0 ?
         int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
         (pc.rt_params.y < -7.5 ?
-            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 15.0)) : 0);
+            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 17.0)) : 0);
     if (rt_debug >= 1 && rt_debug <= 3) {
         if (rt_debug == 1)
             out_color = vec4(vec3(static_coverage), 1.0);
@@ -655,6 +688,7 @@ void main()
         vec3 dynamic_bounce;
         vec3 dynamic_fringe;
         vec3 dynamic_afterglow;
+        vec3 dynamic_ripple;
         vec3 surface_lighting;
 #ifdef RT_QUAD_SHARING
         ao = quad_ao;
@@ -663,6 +697,7 @@ void main()
         dynamic_bounce = quad_dynamic_bounce;
         dynamic_fringe = quad_dynamic_fringe;
         dynamic_afterglow = quad_dynamic_afterglow;
+        dynamic_ripple = quad_dynamic_ripple;
         surface_lighting = quad_surface_light;
 #else
         if (pc.lm_scale.x >= 0.0)
@@ -670,7 +705,8 @@ void main()
         dynamic_lighting = dynamic_light(shading_normal, normal,
                                          material_reflect, material_roughness,
                                          dynamic_specular, dynamic_bounce,
-                                         dynamic_fringe, dynamic_afterglow);
+                                         dynamic_fringe, dynamic_afterglow,
+                                         dynamic_ripple);
         surface_lighting = surface_light(shading_normal, static_lighting.rgb);
 #endif
         vec3 static_specular = surface_specular(shading_normal,
@@ -751,6 +787,22 @@ void main()
         bounce_bloom *= min(1.0, 0.025 /
                             max(bounce_bloom_luma, 0.000001));
         bloom += bounce_bloom;
+        vec3 ripple_add = dynamic_ripple *
+            max(vec3(1.0) - clamp(raster_rgb, 0.0, 1.0), vec3(0.0));
+        float ripple_add_luma = dot(ripple_add, luma_weights);
+        if (rt_debug == 17) {
+            out_color = vec4(clamp(ripple_add * 8.0, 0.0, 1.0), 1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
+        raster_rgb += ripple_add;
+        float ripple_bloom_weight = smoothstep(0.012, 0.050,
+                                                ripple_add_luma);
+        vec3 ripple_bloom = ripple_add * ripple_bloom_weight * 0.30;
+        float ripple_bloom_luma = dot(ripple_bloom, luma_weights);
+        ripple_bloom *= min(1.0, 0.02 /
+                            max(ripple_bloom_luma, 0.000001));
+        bloom += ripple_bloom;
         // Treat the lightmap as the broad aperture signal and use baked AO
         // only as restrained secondary modulation.  The old direct AO mask
         // could remove the fill completely and expose coarse bake regions as
@@ -834,6 +886,45 @@ void main()
             return;
         }
         raster_rgb += sunlight_add;
+        vec3 emissive_halo_add = vec3(0.0);
+        vec3 emissive_halo_bloom = vec3(0.0);
+#if !defined(RT_ALPHA_TEST)
+        float halo_control = material_emissive_halo(pc.rt_params.z);
+        float texel_luma = dot(texel.rgb, luma_weights);
+        float texel_width = fwidth(texel_luma);
+        float halo_mask = smoothstep(0.30, 0.72,
+                                     texel_luma + texel_width * 2.0);
+        halo_mask *= smoothstep(0.006, 0.10, texel_width);
+        halo_mask *= 1.0 - smoothstep(0.80, 1.0, texel_luma);
+        vec3 halo_color = texel.rgb;
+#ifdef RT_GLOWMAP
+        float glow_width = fwidth(glow.a);
+        float glow_mask = smoothstep(0.008, 0.12, glow_width);
+        glow_mask *= smoothstep(0.02, 0.32,
+                                glow.a + glow_width * 2.0);
+        glow_mask *= 1.0 - smoothstep(0.70, 0.98, glow.a);
+        halo_mask = max(halo_mask, glow_mask);
+        halo_color = max(halo_color, glow.rgb);
+#endif
+        emissive_halo_add = halo_color * halo_mask * halo_control * 0.14;
+        float halo_luma = dot(emissive_halo_add, luma_weights);
+        emissive_halo_add *= min(1.0, 0.045 /
+                                 max(halo_luma, 0.000001));
+        emissive_halo_add *= max(
+            vec3(1.0) - clamp(raster_rgb, 0.0, 1.0), vec3(0.0));
+        emissive_halo_bloom = halo_color * halo_mask * halo_control * 0.10;
+        float halo_bloom_luma = dot(emissive_halo_bloom, luma_weights);
+        emissive_halo_bloom *= min(1.0, 0.035 /
+                                   max(halo_bloom_luma, 0.000001));
+#endif
+        if (rt_debug == 16) {
+            out_color = vec4(clamp(emissive_halo_add * 8.0, 0.0, 1.0),
+                             1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
+        raster_rgb += emissive_halo_add;
+        bloom += emissive_halo_bloom;
         float reflection_surface_mask = 1.0;
 #ifdef RT_GLOWMAP
         float glow_luma = dot(glow.rgb, vec3(0.2126, 0.7152, 0.0722));

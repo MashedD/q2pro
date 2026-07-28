@@ -120,6 +120,8 @@ begin raytracing
         "sunlit apertures" vk_rt_sunlight 0 1 0.05
     range --status "Colored lighting from emissive world surfaces" \
         "emissive lighting" vk_rt_emissive 0 2 0.05
+    range --status "Colored edge glow on emissive world textures" \
+        "emissive edge halos" vk_rt_emissive_halo 0 1 0.05
     range --status "Screen-space reflections on configured materials" \
         "reflections" vk_rt_reflections 0 1 0.05
     range --status "Material highlights from dynamic and emissive lights" \
@@ -134,6 +136,8 @@ begin raytracing
         "shadow fringes" vk_rt_shadow_fringe 0 1 0.05
     range --status "Localized color spill from explosions and projectiles" \
         "dynamic color bounce" vk_rt_bounce 0 1 0.05
+    range --status "Animated shadow-aware rings from strong dynamic lights" \
+        "dynamic light ripples" vk_rt_light_ripples 0 1 0.05
     range --status "Fade time for bright transient ray-traced lights" \
         "dynamic light afterglow" vk_rt_afterglow 0 1 0.05
     blank

@@ -977,12 +977,14 @@ static cvar_t *vk_rt_skylight;
 static cvar_t *vk_rt_environment;
 static cvar_t *vk_rt_afterglow;
 static cvar_t *vk_rt_sunlight;
+static cvar_t *vk_rt_emissive_halo;
 static cvar_t *vk_rt_reflections;
 static cvar_t *vk_rt_specular;
 static cvar_t *vk_rt_liquids;
 static cvar_t *vk_rt_bounce;
 static cvar_t *vk_rt_caustics;
 static cvar_t *vk_rt_shadow_fringe;
+static cvar_t *vk_rt_light_ripples;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -10520,7 +10522,7 @@ static void vk_world_material(const mface_t *face, float *reflect,
 
 static float vk_world_pack_material(float reflect, float roughness,
                                     float skylight, float environment,
-                                    float sunlight)
+                                    float sunlight, float emissive_halo)
 {
     // The secondary MRT alpha remains available alongside bloom RGB. Four
     // bits per property are sufficient for broad Quake II material classes
@@ -10533,27 +10535,33 @@ static float vk_world_pack_material(float reflect, float roughness,
                                         15.0f + 0.5f);
     unsigned sunlight_q = (unsigned)(min(max(sunlight, 0.0f), 1.0f) *
                                      15.0f + 0.5f);
-    return (float)((sunlight_q << 16) | (environment_q << 12) |
+    unsigned halo_q = (unsigned)(min(max(emissive_halo, 0.0f), 1.0f) *
+                                 15.0f + 0.5f);
+    return (float)((halo_q << 20) | (sunlight_q << 16) |
+                   (environment_q << 12) |
                    (skylight_q << 8) |
                    (reflect_q << 4) | roughness_q);
 }
 
 static float vk_world_pack_rt_controls(float specular, float bounce,
-                                       float caustics, float shadow_fringe)
+                                       float caustics, float shadow_fringe,
+                                       float light_ripples)
 {
-    // A float represents every 24-bit integer exactly. Seven-bit general
-    // controls and five-bit effect controls retain smooth menu adjustment
-    // while fitting water caustics and dynamic-shadow fringes together.
+    // A float represents every 24-bit integer exactly. Six-bit general
+    // controls and four-bit effect controls retain useful menu precision
+    // while leaving the 256-byte world push constants unchanged.
     unsigned specular_q = (unsigned)(min(max(specular, 0.0f), 1.0f) *
-                                     127.0f + 0.5f);
+                                     63.0f + 0.5f);
     unsigned bounce_q = (unsigned)(min(max(bounce, 0.0f), 1.0f) *
-                                   127.0f + 0.5f);
+                                   63.0f + 0.5f);
     unsigned caustics_q = (unsigned)(min(max(caustics, 0.0f), 1.0f) *
-                                     31.0f + 0.5f);
+                                     15.0f + 0.5f);
     unsigned fringe_q = (unsigned)(min(max(shadow_fringe, 0.0f), 1.0f) *
-                                   31.0f + 0.5f);
-    return (float)(specular_q | (bounce_q << 7) | (caustics_q << 14) |
-                   (fringe_q << 19));
+                                   15.0f + 0.5f);
+    unsigned ripple_q = (unsigned)(min(max(light_ripples, 0.0f), 1.0f) *
+                                   15.0f + 0.5f);
+    return (float)(specular_q | (bounce_q << 6) | (caustics_q << 12) |
+                   (fringe_q << 16) | (ripple_q << 20));
 }
 
 static int vk_world_liquid_kind(const mface_t *face)
@@ -10598,14 +10606,21 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         Cvar_ClampValue(vk_rt_caustics, 0.0f, 1.0f) : 0.0f;
     float shadow_fringe = world_entity && vk_rt_shadow_fringe ?
         Cvar_ClampValue(vk_rt_shadow_fringe, 0.0f, 1.0f) : 0.0f;
+    float light_ripples = world_entity && vk_rt_light_ripples ?
+        Cvar_ClampValue(vk_rt_light_ripples, 0.0f, 1.0f) : 0.0f;
     float skylight = world_entity && vk_rt_skylight ?
         Cvar_ClampValue(vk_rt_skylight, 0.0f, 1.0f) : 0.0f;
     float environment = world_entity && vk_rt_environment ?
         Cvar_ClampValue(vk_rt_environment, 0.0f, 1.0f) : 0.0f;
     float sunlight = world_entity && vk_rt_sunlight ?
         Cvar_ClampValue(vk_rt_sunlight, 0.0f, 1.0f) : 0.0f;
+    bool emissive_face = world_entity && face && face->texinfo &&
+        (face->texinfo->c.flags & SURF_LIGHT) &&
+        !(face->drawflags & (SURF_TRANS_MASK | SURF_WARP));
+    float emissive_halo = emissive_face && vk_rt_emissive_halo ?
+        Cvar_ClampValue(vk_rt_emissive_halo, 0.0f, 1.0f) : 0.0f;
     params[3] = vk_world_pack_rt_controls(specular, bounce, caustics,
-                                          shadow_fringe);
+                                          shadow_fringe, light_ripples);
     int requested_debug = vk_rt_debug ? vk_rt_debug->integer : 0;
 #if USE_VULKAN_RAYTRACING
     float material_reflect, material_roughness;
@@ -10617,7 +10632,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
     float packed_material = vk_world_pack_material(material_reflect,
                                                    material_roughness,
                                                    skylight, environment,
-                                                   sunlight);
+                                                   sunlight, emissive_halo);
     if (pixel_world) {
         if (requested_debug >= 1 && requested_debug <= 3) {
             params[0] = -(float)requested_debug;
@@ -10626,7 +10641,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
                 Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f) : 0.0f;
             params[1] = vk_rt_ao ?
                 Cvar_ClampValue(vk_rt_ao, 0.0f, 0.5f) : 0.0f;
-            if (requested_debug >= 8 && requested_debug <= 15)
+            if (requested_debug >= 8 && requested_debug <= 17)
                 params[1] = -(float)requested_debug;
             params[2] = packed_material;
         }
@@ -10634,7 +10649,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         // This position aliases rt_enabled in vk_world_lit_push_t.
         params[0] = requested_debug >= 1 && requested_debug <= 3 ?
             -(float)requested_debug : 1.0f;
-        if (requested_debug >= 8 && requested_debug <= 15)
+        if (requested_debug >= 8 && requested_debug <= 17)
             params[1] = -(float)requested_debug;
         params[2] = packed_material;
     }
@@ -15386,12 +15401,15 @@ bool VKR_Init(bool total)
     vk_rt_environment = Cvar_Get("vk_rt_environment", "0.65", CVAR_ARCHIVE);
     vk_rt_afterglow = Cvar_Get("vk_rt_afterglow", "0.35", CVAR_ARCHIVE);
     vk_rt_sunlight = Cvar_Get("vk_rt_sunlight", "0.65", CVAR_ARCHIVE);
+    vk_rt_emissive_halo = Cvar_Get("vk_rt_emissive_halo", "0.65",
+                                   CVAR_ARCHIVE);
     vk_rt_reflections = Cvar_Get("vk_rt_reflections", "0.35", CVAR_ARCHIVE);
     vk_rt_specular = Cvar_Get("vk_rt_specular", "0.45", CVAR_ARCHIVE);
     vk_rt_liquids = Cvar_Get("vk_rt_liquids", "0.65", CVAR_ARCHIVE);
     vk_rt_bounce = Cvar_Get("vk_rt_bounce", "0.65", CVAR_ARCHIVE);
     vk_rt_caustics = Cvar_Get("vk_rt_caustics", "0.65", CVAR_ARCHIVE);
     vk_rt_shadow_fringe = Cvar_Get("vk_rt_shadow_fringe", "0.6", CVAR_ARCHIVE);
+    vk_rt_light_ripples = Cvar_Get("vk_rt_light_ripples", "0.6", CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);

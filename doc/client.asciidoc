@@ -805,6 +805,18 @@ vk_rt_reflections::
     outside the screen or hidden behind other geometry cannot be reflected.
     Requires multisampling 1x. Default value is 0.35; value 0 disables it.
 
+vk_rt_emissive_halo::
+    Controls stable colored edge halos on opaque static BSP `SURF_LIGHT`
+    textures while Vulkan ray tracing is active, clamped between 0 and 1. The
+    effect derives boundaries from bright base-texture details and screen-space
+    derivatives, using a glowmap as an optional refinement when one exists. It
+    preserves bright cores and rejects weak internal noise. Its
+    local contribution is capped at 0.045 luminance; a separate contribution
+    capped at 0.035 feeds the existing bloom path when enabled. It adds no
+    texture samples, ray queries, passes, descriptors, or draws and remains
+    independent of `vk_rt_emissive`. Changes apply immediately. Default value
+    is 0.65; value 0 disables both local and bloom contributions.
+
 vk_rt_specular::
     Controls material-aware highlights from dynamic lights and nearby emissive
     `SURF_LIGHT` surfaces, clamped between 0 and 1. The effect reuses existing
@@ -919,6 +931,19 @@ vk_rt_afterglow::
     Changes apply immediately. Default value is 0.35 seconds; value 0 disables
     the effect.
 
+vk_rt_light_ripples::
+    Controls animated colored illumination rings from strong live dynamic
+    lights on opaque BSP world surfaces, clamped between 0 and 1. Explosions,
+    projectiles, and muzzle flashes with at least 160 intensity produce rings
+    that follow existing distance falloff and ray-traced visibility, so walls
+    block them. Cached afterglow sources are excluded. Local luminance is
+    capped at 0.07 and remains visible without bloom; a separate contribution
+    capped at 0.02 feeds bloom when enabled. The effect reuses the existing
+    three dynamic-light slots and adds no rays, samples, passes, descriptors,
+    or draws. Runtime transport uses 6-bit specular and bounce controls plus
+    4-bit caustic, fringe, and ripple controls. Changes apply immediately.
+    Default value is 0.6; value 0 disables the effect.
+
 materials/rt_reflections.mat::
     Optional exact-name material overrides used by the Vulkan SSR and specular
     paths. Entries use a Q2RTX-style block with independent `reflect` and
@@ -949,7 +974,10 @@ vk_rt_debug::
     final aperture-skylight contribution amplified eight times. Value 13 shows
     the final environment-sheen contribution amplified eight times. Value 14
     shows only fading-source direct radiance amplified eight times. Value 15
-    shows the final warm sunlight contribution amplified eight times. Value 0 restores
+    shows the final warm sunlight contribution amplified eight times. Value 16
+    shows the local emissive-edge halo amplified eight times and is black on
+    non-emissive surfaces. Value 17 shows the final dynamic-light ripple
+    contribution amplified eight times. Value 0 restores
     normal rendering. This
     diagnostic is applied immediately, does not rebake the map, and adds no
     work while disabled. Default value is 0.

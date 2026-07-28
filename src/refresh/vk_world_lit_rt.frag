@@ -131,10 +131,16 @@ float material_output(float packed)
 vec4 rt_controls(float packed)
 {
     uint bits = uint(clamp(floor(packed + 0.5), 0.0, 16777215.0));
-    return vec4(float(bits & 127u) / 127.0,
-                float((bits >> 7) & 127u) / 127.0,
-                float((bits >> 14) & 31u) / 31.0,
-                float((bits >> 19) & 31u) / 31.0);
+    return vec4(float(bits & 63u) / 63.0,
+                float((bits >> 6) & 63u) / 63.0,
+                float((bits >> 12) & 15u) / 15.0,
+                float((bits >> 16) & 15u) / 15.0);
+}
+
+float rt_light_ripple_control(float packed)
+{
+    uint bits = uint(clamp(floor(packed + 0.5), 0.0, 16777215.0));
+    return float((bits >> 20) & 15u) / 15.0;
 }
 
 vec3 underwater_caustics(vec3 position, vec3 normal, vec4 controls)
@@ -243,14 +249,16 @@ vec3 liquid_ripple_normal(vec3 position, vec3 normal, vec2 uv, float time,
 vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
                    float reflectivity, float roughness,
                    float specular_control, float bounce_control,
-                   float fringe_control, out vec3 specular, out vec3 bounce,
-                   out vec3 fringe, out vec3 afterglow)
+                   float fringe_control, float ripple_control,
+                   out vec3 specular, out vec3 bounce,
+                   out vec3 fringe, out vec3 afterglow, out vec3 ripple)
 {
     vec3 light = vec3(0.0);
     specular = vec3(0.0);
     bounce = vec3(0.0);
     fringe = vec3(0.0);
     afterglow = vec3(0.0);
+    ripple = vec3(0.0);
     vec3 view_dir = normalize(pc.dlight.xyz - v_position);
     float gloss = 1.0 - roughness;
     float exponent = mix(10.0, 96.0, pow(gloss, 0.9));
@@ -285,6 +293,17 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
             light += radiance;
             if (cached_afterglow)
                 afterglow += radiance;
+            if (!cached_afterglow && abs(pc.dlight_colors[i].w) >= 160.0 &&
+                ripple_control > 0.001) {
+                float phase = fract(distance_to_light * 0.0125 -
+                                    pc.dlight.w * 1.25);
+                float triangle = 1.0 - abs(phase * 2.0 - 1.0);
+                float band = smoothstep(0.72, 0.96, triangle);
+                float facing = abs(dot(geometric_normal, light_dir));
+                float surface_weight = mix(0.55, 1.0, facing);
+                ripple += radiance * band * falloff * surface_weight *
+                          ripple_control * 0.22;
+            }
             fringe += pc.dlight_colors[i].rgb * energy * penumbra;
             if (bounce_control > 0.001) {
                 float color_high = max(pc.dlight_colors[i].r,
@@ -316,6 +335,8 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
     float fringe_luma = dot(fringe, vec3(0.2126, 0.7152, 0.0722));
     fringe *= min(1.0, 0.06 / max(fringe_luma, 0.000001));
     bounce *= 0.65 * bounce_control;
+    float ripple_luma = dot(ripple, vec3(0.2126, 0.7152, 0.0722));
+    ripple *= min(1.0, 0.07 / max(ripple_luma, 0.000001));
     return light;
 }
 
@@ -345,7 +366,7 @@ void main()
     int rt_debug = pc.rt_params.x < 0.0 ?
         int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
         (pc.rt_params.y < -7.5 ?
-            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 15.0)) : 0);
+            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 17.0)) : 0);
     vec2 material = material_params(pc.rt_params.z);
     float material_reflect = material.x;
     float material_roughness = material.y;
@@ -392,11 +413,14 @@ void main()
         vec3 dynamic_bounce;
         vec3 dynamic_fringe;
         vec3 dynamic_afterglow;
+        vec3 dynamic_ripple;
         vec3 dynamic = dynamic_light(shading_normal, normal, material_reflect,
                                      material_roughness, specular_control,
                                      bounce_control, controls.w,
+                                     rt_light_ripple_control(pc.rt_params.w),
                                      dynamic_specular, dynamic_bounce,
-                                     dynamic_fringe, dynamic_afterglow);
+                                     dynamic_fringe, dynamic_afterglow,
+                                     dynamic_ripple);
         if (rt_debug == 8) {
             out_color = vec4(clamp(dynamic_specular *
                 vec3(0.0, 8.0, 8.0), 0.0, 1.0), 1.0);
@@ -461,6 +485,22 @@ void main()
         bounce_bloom *= min(1.0, 0.025 /
                             max(bounce_bloom_luma, 0.000001));
         out_bloom.rgb += bounce_bloom;
+        vec3 ripple_add = dynamic_ripple * max(
+            vec3(1.0) - clamp(out_color.rgb, 0.0, 1.0), vec3(0.0));
+        float ripple_add_luma = dot(ripple_add, luma_weights);
+        if (rt_debug == 17) {
+            out_color = vec4(clamp(ripple_add * 8.0, 0.0, 1.0), 1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
+        out_color.rgb += ripple_add;
+        float ripple_bloom_weight = smoothstep(0.012, 0.050,
+                                                ripple_add_luma);
+        vec3 ripple_bloom = ripple_add * ripple_bloom_weight * 0.30;
+        float ripple_bloom_luma = dot(ripple_bloom, luma_weights);
+        ripple_bloom *= min(1.0, 0.02 /
+                            max(ripple_bloom_luma, 0.000001));
+        out_bloom.rgb += ripple_bloom;
         if (!liquid) {
             float proxy_luma = dot(v_color.rgb, luma_weights);
             // This fallback has no baked visibility atlas.  Keep a bounded
@@ -535,6 +575,38 @@ void main()
             out_bloom = vec4(0.0);
             return;
         }
+        vec3 emissive_halo_add = vec3(0.0);
+        vec3 emissive_halo_bloom = vec3(0.0);
+        if (!liquid) {
+            float halo_control = mod(floor(max(pc.rt_params.z, 0.0) /
+                1048576.0), 16.0) / 15.0;
+            float texel_luma = dot(material_texel.rgb, luma_weights);
+            float texel_width = fwidth(texel_luma);
+            float halo_mask = smoothstep(0.30, 0.72,
+                texel_luma + texel_width * 2.0);
+            halo_mask *= smoothstep(0.006, 0.10, texel_width);
+            halo_mask *= 1.0 - smoothstep(0.80, 1.0, texel_luma);
+            emissive_halo_add = material_texel.rgb * halo_mask *
+                halo_control * 0.14;
+            float halo_luma = dot(emissive_halo_add, luma_weights);
+            emissive_halo_add *= min(1.0, 0.045 /
+                max(halo_luma, 0.000001));
+            emissive_halo_add *= max(
+                vec3(1.0) - clamp(out_color.rgb, 0.0, 1.0), vec3(0.0));
+            emissive_halo_bloom = material_texel.rgb * halo_mask *
+                halo_control * 0.10;
+            float halo_bloom_luma = dot(emissive_halo_bloom, luma_weights);
+            emissive_halo_bloom *= min(1.0, 0.035 /
+                max(halo_bloom_luma, 0.000001));
+        }
+        if (rt_debug == 16) {
+            out_color = vec4(clamp(emissive_halo_add * 8.0, 0.0, 1.0),
+                             1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
+        out_color.rgb += emissive_halo_add;
+        out_bloom.rgb += emissive_halo_bloom;
         if (liquid && liquid_strength > 0.0) {
             vec3 view_dir = normalize(pc.dlight.xyz - v_position);
             float edge = 1.0 - max(dot(shading_normal, view_dir), 0.0);
