@@ -246,6 +246,13 @@ cl_railcore_color::
 cl_railcore_width::
     Width of the rail core beam. Default value is 3.
 
+cl_railcore_glow::
+    Controls the soft outer layer and pale center of the alternative rail core,
+    clamped between 0 and 1. The outer layer retains `cl_railcore_color` while
+    the narrower center is tinted toward white; black remains black. Both
+    layers reuse the existing depth-tested beam and bloom rendering paths.
+    Value 0 restores the previous single-layer core. Default value is 0.65.
+
 cl_railspiral_color::
     Color of the rail spiral. Default value is "blue".
 

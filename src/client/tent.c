@@ -599,6 +599,7 @@ typedef struct {
     color_t     rgba;
     int         width;
     int         lifetime, starttime;
+    bool        additive;
 } laser_t;
 
 static laser_t  cl_lasers[MAX_LASERS];
@@ -648,6 +649,8 @@ static void CL_AddLasers(void)
 
         ent.skinnum = l->color;
         ent.flags = RF_TRANSLUCENT | RF_BEAM;
+        if (l->additive)
+            ent.flags |= RF_BEAM_ADDITIVE;
         VectorCopy(l->start, ent.origin);
         VectorCopy(l->end, ent.oldorigin);
         ent.frame = l->width;
@@ -1130,6 +1133,7 @@ static cvar_t *cl_railtrail_type;
 static cvar_t *cl_railtrail_time;
 static cvar_t *cl_railcore_color;
 static cvar_t *cl_railcore_width;
+static cvar_t *cl_railcore_glow;
 static cvar_t *cl_railspiral_color;
 static cvar_t *cl_railspiral_radius;
 
@@ -1153,7 +1157,32 @@ static void cl_railspiral_color_changed(cvar_t *self)
 
 static void CL_RailCore(void)
 {
-    laser_t *l;
+    float glow = cl_railcore_glow ?
+        Cvar_ClampValue(cl_railcore_glow, 0.0f, 1.0f) : 0.65f;
+    int width = cl_railcore_width ?
+        Cvar_ClampInteger(cl_railcore_width, 1, 6) : 2;
+    color_t inner = railcore_color;
+    int peak = max(inner.u8[0], max(inner.u8[1], inner.u8[2]));
+    if (peak > 0 && glow > 0.0f) {
+        float white_mix = 0.55f * glow;
+        for (int i = 0; i < 3; i++)
+            inner.u8[i] = Q_rint(inner.u8[i] * (1.0f - white_mix) +
+                                255.0f * white_mix);
+    }
+
+    laser_t *l = CL_AllocLaser();
+    if (!l)
+        return;
+
+    VectorCopy(te.pos1, l->start);
+    VectorCopy(te.pos2, l->end);
+    l->color = -1;
+    l->lifetime = cl_railtrail_time->integer;
+    l->width = width;
+    l->rgba = inner;
+
+    if (glow <= 0.0f)
+        return;
 
     l = CL_AllocLaser();
     if (!l)
@@ -1163,8 +1192,10 @@ static void CL_RailCore(void)
     VectorCopy(te.pos2, l->end);
     l->color = -1;
     l->lifetime = cl_railtrail_time->integer;
-    l->width = cl_railcore_width->integer;
+    l->width = width + max(1, (int)ceilf(3.0f * glow));
     l->rgba = railcore_color;
+    l->rgba.u8[3] = Q_rint(l->rgba.u8[3] * 0.38f * glow);
+    l->additive = true;
 }
 
 static void CL_RailSpiral(void)
@@ -1676,6 +1707,7 @@ void CL_InitTEnts(void)
     cl_railcore_color->generator = Com_Color_g;
     cl_railcore_color_changed(cl_railcore_color);
     cl_railcore_width = Cvar_Get("cl_railcore_width", "2", 0);
+    cl_railcore_glow = Cvar_Get("cl_railcore_glow", "0.65", 0);
     cl_railspiral_color = Cvar_Get("cl_railspiral_color", "blue", 0);
     cl_railspiral_color->changed = cl_railspiral_color_changed;
     cl_railspiral_color->generator = Com_Color_g;

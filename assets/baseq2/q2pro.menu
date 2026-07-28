@@ -185,6 +185,7 @@ begin railtrail
         "default" "core only" "core and spiral"
     range "rail trail duration" cl_railtrail_time 0.1 3.0 0.1
     range "core width" cl_railcore_width 1 6 1
+    range "core glow" cl_railcore_glow 0 1 0.05
     range "spiral radius" cl_railspiral_radius 1 6 1
     strings "core color" cl_railcore_color \
         black red green yellow blue cyan magenta white

@@ -760,6 +760,8 @@ typedef struct {
     VkPipeline debug_text_pipeline;
     VkPipeline beam_pipeline;
     VkPipeline beam_bloom_pipeline;
+    VkPipeline beam_add_pipeline;
+    VkPipeline beam_add_bloom_pipeline;
     VkPipeline world_pipeline;
     VkPipeline world_alpha_pipeline;
     VkPipeline world_blend_pipeline;
@@ -5820,6 +5822,14 @@ static void vk_destroy_swapchain(void)
         vk.DestroyPipeline(vk.device, vk.beam_bloom_pipeline, NULL);
         vk.beam_bloom_pipeline = VK_NULL_HANDLE;
     }
+    if (vk.beam_add_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.beam_add_pipeline, NULL);
+        vk.beam_add_pipeline = VK_NULL_HANDLE;
+    }
+    if (vk.beam_add_bloom_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.beam_add_bloom_pipeline, NULL);
+        vk.beam_add_bloom_pipeline = VK_NULL_HANDLE;
+    }
 
     if (vk.world_pipeline) {
         vk.DestroyPipeline(vk.device, vk.world_pipeline, NULL);
@@ -7142,7 +7152,7 @@ static uint32_t vk_frames_in_flight_value(void)
 }
 
 static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
-                                       bool depth_write, bool blend,
+                                       bool depth_write, bool blend, bool additive,
                                        VkPrimitiveTopology topology)
 {
     VkShaderModule vert = vk_create_shader_module(vk_color3d_vert_spv,
@@ -7234,15 +7244,18 @@ static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
     VkPipelineColorBlendAttachmentState color_blend_attachment[2] = { [0] = {
         .blendEnable = blend,
         .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
-        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .dstColorBlendFactor = additive ? VK_BLEND_FACTOR_ONE :
+            VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .colorBlendOp = VK_BLEND_OP_ADD,
         .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .dstAlphaBlendFactor = additive ? VK_BLEND_FACTOR_ONE :
+            VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .alphaBlendOp = VK_BLEND_OP_ADD,
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
     } };
-    if (pipeline == &vk.beam_bloom_pipeline) {
+    if (pipeline == &vk.beam_bloom_pipeline ||
+        pipeline == &vk.beam_add_bloom_pipeline) {
         color_blend_attachment[1] = color_blend_attachment[0];
         color_blend_attachment[0].colorWriteMask = 0;
     }
@@ -8138,15 +8151,19 @@ static bool vk_create_swapchain(int width, int height)
                                        true,
                                        vk.swapchain_extent,
                                        false) ||
-        !vk_create_color3d_pipeline(&vk.color3d_pipeline, VK_TRUE, VK_TRUE, VK_FALSE,
+        !vk_create_color3d_pipeline(&vk.color3d_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE,
                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
-        !vk_create_color3d_pipeline(&vk.line3d_pipeline, VK_TRUE, VK_TRUE, VK_FALSE,
+        !vk_create_color3d_pipeline(&vk.line3d_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE,
                                     VK_PRIMITIVE_TOPOLOGY_LINE_LIST) ||
-        !vk_create_color3d_pipeline(&vk.debug_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE,
+        !vk_create_color3d_pipeline(&vk.debug_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE,
                                     VK_PRIMITIVE_TOPOLOGY_LINE_LIST) ||
-        !vk_create_color3d_pipeline(&vk.beam_pipeline, VK_TRUE, VK_FALSE, VK_TRUE,
+        !vk_create_color3d_pipeline(&vk.beam_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE,
                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
-        !vk_create_color3d_pipeline(&vk.beam_bloom_pipeline, VK_TRUE, VK_FALSE, VK_TRUE,
+        !vk_create_color3d_pipeline(&vk.beam_bloom_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE,
+                                    VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
+        !vk_create_color3d_pipeline(&vk.beam_add_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE,
+                                    VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
+        !vk_create_color3d_pipeline(&vk.beam_add_bloom_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE,
                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
         !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_TRUE) ||
@@ -12954,6 +12971,7 @@ static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
     color_t color;
     float push_color[4];
     bool poly = vk_beamstyle && vk_beamstyle->integer;
+    bool additive = ent->flags & RF_BEAM_ADDITIVE;
     float scale = poly ? 0.5f : 1.2f;
     float width = abs((int16_t)ent->frame) * scale;
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
@@ -12970,15 +12988,22 @@ static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
     push_color[3] = color.u8[3] / 255.0f;
 
     if (poly) {
-        if (!vk.beam_pipeline)
+        VkPipeline pipeline;
+        if (additive)
+            pipeline = vk.drawing_bloom ? vk.beam_add_bloom_pipeline :
+                vk.beam_add_pipeline;
+        else
+            pipeline = vk.drawing_bloom ? vk.beam_bloom_pipeline :
+                vk.beam_pipeline;
+        if (!pipeline)
             return;
-        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                         vk.drawing_bloom ? vk.beam_bloom_pipeline : vk.beam_pipeline);
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     } else {
-        if (!vk.sprite_pipeline || !vk.beam_texture.descriptor_set)
+        VkPipeline pipeline = vk.drawing_bloom ? vk.sprite_bloom_pipeline :
+            (additive ? vk.particle_add_pipeline : vk.sprite_pipeline);
+        if (!pipeline || !vk.beam_texture.descriptor_set)
             return;
-        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                         vk.drawing_bloom ? vk.sprite_bloom_pipeline : vk.sprite_pipeline);
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         vk_bind_texture_descriptor(cmd, vk.beam_texture.descriptor_set);
     }
 
