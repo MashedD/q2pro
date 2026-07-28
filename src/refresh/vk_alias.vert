@@ -11,13 +11,6 @@ layout(push_constant) uniform Push {
     vec4 fog;
     float intensity;
     float desaturation;
-    vec2 _rt_align;
-    vec4 rt_light_origin;
-    vec4 rt_light_color;
-    vec4 rt_entity_origin;
-    vec4 rt_local_light;
-    vec4 rt_local_view;
-    vec4 rt_control;
 } pc;
 
 layout(location = 0) in vec3 in_position;
@@ -29,10 +22,6 @@ layout(location = 5) in vec3 in_old_normal;
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_uv;
 layout(location = 2) flat out float v_mode;
-layout(location = 3) flat out vec4 v_rt_light_origin;
-layout(location = 4) flat out vec4 v_rt_light_color;
-layout(location = 5) flat out vec4 v_rt_entity_origin;
-layout(location = 6) out vec3 v_rt_normal;
 
 void main()
 {
@@ -53,8 +42,4 @@ void main()
     }
     v_uv = in_uv;
     v_mode = 0.0;
-    v_rt_light_origin = pc.rt_light_origin;
-    v_rt_light_color = pc.rt_light_color;
-    v_rt_entity_origin = pc.rt_entity_origin;
-    v_rt_normal = normal;
 }

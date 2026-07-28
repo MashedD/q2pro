@@ -104,8 +104,18 @@ float dynamic_light_visibility(vec3 origin, vec3 delta, float range,
 
 vec2 material_params(float packed)
 {
-    float bits = floor(clamp(packed, 0.0, 1.0) * 255.0 + 0.5);
+    float bits = mod(floor(max(packed, 0.0) + 0.5), 256.0);
     return vec2(floor(bits / 16.0), mod(bits, 16.0)) / 15.0;
+}
+
+float material_skylight(float packed)
+{
+    return floor(max(packed, 0.0) / 256.0) / 15.0;
+}
+
+float material_output(float packed)
+{
+    return mod(floor(max(packed, 0.0) + 0.5), 256.0) / 255.0;
 }
 
 vec4 rt_controls(float packed)
@@ -353,12 +363,6 @@ void main()
         out_color = rt_debug == 1 ? vec4(1.0) : vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
-    if (rt_debug == 12) {
-        out_color = vec4(0.0, 0.0, 0.0, 1.0);
-        out_bloom = vec4(0.0);
-        return;
-    }
-
     if (mode > 1.5) {
         out_color = v_color;
     } else {
@@ -437,6 +441,34 @@ void main()
         bounce_bloom *= min(1.0, 0.025 /
                             max(bounce_bloom_luma, 0.000001));
         out_bloom.rgb += bounce_bloom;
+        if (!liquid) {
+            float proxy_luma = dot(v_color.rgb, luma_weights);
+            // This fallback has no baked visibility atlas.  Keep a bounded
+            // floor under the lightmap proxy so local lightmap variation does
+            // not turn into conspicuous holes in the ambient fill.
+            float sky_openness = mix(0.30, 1.0,
+                                     smoothstep(0.10, 0.48, proxy_luma));
+            float sky_orientation = mix(0.18, 0.75,
+                smoothstep(0.20, 0.90, abs(normal.z)));
+            vec3 skylight_add = vec3(0.16, 0.27, 0.44) *
+                material_skylight(pc.rt_params.z) * sky_openness *
+                sky_orientation;
+            float skylight_luma = dot(skylight_add, luma_weights);
+            skylight_add *= min(1.0, 0.055 /
+                                max(skylight_luma, 0.000001));
+            skylight_add *= max(vec3(1.0) - clamp(out_color.rgb, 0.0, 1.0),
+                                vec3(0.0));
+            if (rt_debug == 12) {
+                out_color = vec4(clamp(skylight_add * 8.0, 0.0, 1.0), 1.0);
+                out_bloom = vec4(0.0);
+                return;
+            }
+            out_color.rgb += skylight_add;
+        } else if (rt_debug == 12) {
+            out_color = vec4(0.0, 0.0, 0.0, 1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
         if (liquid && liquid_strength > 0.0) {
             vec3 view_dir = normalize(pc.dlight.xyz - v_position);
             float edge = 1.0 - max(dot(shading_normal, view_dir), 0.0);
@@ -489,7 +521,7 @@ void main()
         }
         // Preserve scene alpha for normal translucency. Material eligibility
         // is carried separately in the secondary MRT alpha.
-        out_bloom.a = v_mode < 4.0 ? pc.rt_params.z : 0.0;
+        out_bloom.a = v_mode < 4.0 ? material_output(pc.rt_params.z) : 0.0;
     }
 
     if (pc.fog.a < 0.0) {

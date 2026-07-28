@@ -126,8 +126,18 @@ float dynamic_light_visibility(vec3 origin, vec3 delta, float range,
 
 vec2 material_params(float packed)
 {
-    float bits = floor(clamp(packed, 0.0, 1.0) * 255.0 + 0.5);
+    float bits = mod(floor(max(packed, 0.0) + 0.5), 256.0);
     return vec2(floor(bits / 16.0), mod(bits, 16.0)) / 15.0;
+}
+
+float material_skylight(float packed)
+{
+    return floor(max(packed, 0.0) / 256.0) / 15.0;
+}
+
+float material_output(float packed)
+{
+    return mod(floor(max(packed, 0.0) + 0.5), 256.0) / 255.0;
 }
 
 vec4 rt_controls(float packed)
@@ -610,11 +620,6 @@ void main()
         out_bloom = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
-    if (rt_debug == 12) {
-        out_color = vec4(0.0, 0.0, 0.0, 1.0);
-        out_bloom = vec4(0.0);
-        return;
-    }
     if (mode > 1.5) {
         out_color = v_color;
     } else {
@@ -722,6 +727,39 @@ void main()
         bounce_bloom *= min(1.0, 0.025 /
                             max(bounce_bloom_luma, 0.000001));
         bloom += bounce_bloom;
+        // Treat the lightmap as the broad aperture signal and use baked AO
+        // only as restrained secondary modulation.  The old direct AO mask
+        // could remove the fill completely and expose coarse bake regions as
+        // isolated dark blobs on otherwise flat surfaces.
+        float sky_broad_open = mix(0.30, 1.0,
+                                   smoothstep(0.04, 0.32, lm_luma));
+        float sky_visibility = static_coverage > 0.5 ?
+            1.0 - baked_occlusion : ao;
+        float sky_visibility_weight = mix(0.65, 1.0,
+                                          clamp(sky_visibility, 0.0, 1.0));
+        float sky_visibility_edge = fwidth(sky_visibility);
+        sky_visibility_weight = mix(sky_visibility_weight, 1.0,
+            smoothstep(0.025, 0.16, sky_visibility_edge));
+        float sky_openness = sky_broad_open * sky_visibility_weight;
+        float sky_orientation = mix(0.22, 1.0,
+                                    smoothstep(0.15, 0.85, abs(normal.z)));
+        float sky_mask = 1.0;
+#ifdef RT_GLOWMAP
+        sky_mask = 1.0 - smoothstep(0.12, 0.72, glow.a);
+#endif
+        vec3 skylight_add = vec3(0.16, 0.27, 0.44) *
+            material_skylight(pc.rt_params.z) * sky_openness *
+            sky_orientation * sky_mask;
+        float skylight_luma = dot(skylight_add, luma_weights);
+        skylight_add *= min(1.0, 0.075 / max(skylight_luma, 0.000001));
+        skylight_add *= max(vec3(1.0) - clamp(raster_rgb, 0.0, 1.0),
+                            vec3(0.0));
+        if (rt_debug == 12) {
+            out_color = vec4(clamp(skylight_add * 8.0, 0.0, 1.0), 1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
+        raster_rgb += skylight_add;
         float reflection_surface_mask = 1.0;
 #ifdef RT_GLOWMAP
         float glow_luma = dot(glow.rgb, vec3(0.2126, 0.7152, 0.0722));
@@ -799,5 +837,5 @@ void main()
         bloom *= 1.0 - fog;
     }
     out_bloom = vec4(bloom,
-        v_mode < 4.0 ? pc.rt_params.z : 0.0);
+        v_mode < 4.0 ? material_output(pc.rt_params.z) : 0.0);
 }

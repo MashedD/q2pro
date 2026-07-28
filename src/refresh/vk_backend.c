@@ -190,15 +190,6 @@ static const uint32_t vk_alias_shadow_vert_spv[] =
 static const uint32_t vk_alias_shadow_frag_spv[] =
 #include "vk_alias_shadow_frag_spv.h"
 ;
-#if USE_VULKAN_RAYTRACING
-static const uint32_t vk_alias_rt_frag_spv[] =
-#include "vk_alias_rt_frag_spv.h"
-;
-static const uint32_t vk_alias_rt_alpha_frag_spv[] =
-#include "vk_alias_rt_alpha_frag_spv.h"
-;
-#endif
-
 typedef struct {
     float rect[4];
     float color[4];
@@ -551,25 +542,10 @@ typedef struct {
     float fog[4];
     float intensity;
     float desaturation;
-    float _rt_align[2];
-    float rt_light_origin[4];
-    float rt_light_color[4];
-    float rt_entity_origin[4];
-    float rt_local_light[4];
-    float rt_local_view[4];
-    float rt_control[4];
 } vk_alias_push_t;
 
-typedef char vk_alias_rt_origin_offset_check[
-    offsetof(vk_alias_push_t, rt_light_origin) == 144 ? 1 : -1];
-typedef char vk_alias_rt_local_light_offset_check[
-    offsetof(vk_alias_push_t, rt_local_light) == 192 ? 1 : -1];
-typedef char vk_alias_rt_local_view_offset_check[
-    offsetof(vk_alias_push_t, rt_local_view) == 208 ? 1 : -1];
-typedef char vk_alias_rt_control_offset_check[
-    offsetof(vk_alias_push_t, rt_control) == 224 ? 1 : -1];
 typedef char vk_alias_push_size_check[
-    sizeof(vk_alias_push_t) == 240 ? 1 : -1];
+    sizeof(vk_alias_push_t) == 136 ? 1 : -1];
 
 typedef struct {
     mat4_t mvp;
@@ -798,8 +774,6 @@ typedef struct {
     VkPipeline alias_pipeline;
     VkPipeline alias_bloom_pipeline;
     VkPipeline alias_alpha_pipeline;
-    VkPipeline alias_rt_pipeline;
-    VkPipeline alias_rt_alpha_pipeline;
     VkPipeline alias_depth_pipeline;
     VkPipeline alias_blend_pipeline;
     VkPipeline alias_shadow_pipeline;
@@ -988,13 +962,13 @@ static cvar_t *vk_devicelist;
 static cvar_t *vk_raytracing;
 static cvar_t *vk_rt_emissive;
 static cvar_t *vk_rt_ao;
+static cvar_t *vk_rt_skylight;
 static cvar_t *vk_rt_reflections;
 static cvar_t *vk_rt_specular;
 static cvar_t *vk_rt_liquids;
 static cvar_t *vk_rt_bounce;
 static cvar_t *vk_rt_caustics;
 static cvar_t *vk_rt_shadow_fringe;
-static cvar_t *vk_rt_entity_specular;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -5946,9 +5920,6 @@ static void vk_destroy_swapchain(void)
         vk.DestroyPipeline(vk.device, vk.alias_alpha_pipeline, NULL);
         vk.alias_alpha_pipeline = VK_NULL_HANDLE;
     }
-    if (vk.alias_rt_pipeline) { vk.DestroyPipeline(vk.device, vk.alias_rt_pipeline, NULL); vk.alias_rt_pipeline = VK_NULL_HANDLE; }
-    if (vk.alias_rt_alpha_pipeline) { vk.DestroyPipeline(vk.device, vk.alias_rt_alpha_pipeline, NULL); vk.alias_rt_alpha_pipeline = VK_NULL_HANDLE; }
-
     if (vk.alias_depth_pipeline) {
         vk.DestroyPipeline(vk.device, vk.alias_depth_pipeline, NULL);
         vk.alias_depth_pipeline = VK_NULL_HANDLE;
@@ -7729,22 +7700,9 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
     if (!vert)
         return false;
 
-    bool rt_alias =
-#if USE_VULKAN_RAYTRACING
-        pipeline == &vk.alias_rt_pipeline || pipeline == &vk.alias_rt_alpha_pipeline;
-#else
-        false;
-#endif
     VkShaderModule frag = color_only ?
         vk_create_shader_module(vk_alias_shadow_frag_spv,
                                 sizeof(vk_alias_shadow_frag_spv)) :
-        rt_alias ?
-#if USE_VULKAN_RAYTRACING
-        vk_create_shader_module(alpha_test ? vk_alias_rt_alpha_frag_spv : vk_alias_rt_frag_spv,
-                                alpha_test ? sizeof(vk_alias_rt_alpha_frag_spv) : sizeof(vk_alias_rt_frag_spv)) :
-#else
-        VK_NULL_HANDLE :
-#endif
         alpha_test ?
         vk_create_shader_module(vk_world_alpha_frag_spv,
                                 sizeof(vk_world_alpha_frag_spv)) :
@@ -7878,20 +7836,6 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
     if (pipeline == &vk.alias_bloom_pipeline) {
         color_blend_attachment[1] = color_blend_attachment[0];
         color_blend_attachment[0].colorWriteMask = 0;
-    } else if (rt_alias) {
-        // Entity effects are a separate overlay over the ordinary alias draw.
-        // Add RGB only, so this pipeline cannot replace or darken base color.
-        color_blend_attachment[0].blendEnable = VK_TRUE;
-        color_blend_attachment[0].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
-        color_blend_attachment[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
-        color_blend_attachment[0].colorBlendOp = VK_BLEND_OP_ADD;
-        color_blend_attachment[0].srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-        color_blend_attachment[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-        color_blend_attachment[0].alphaBlendOp = VK_BLEND_OP_ADD;
-        color_blend_attachment[0].colorWriteMask =
-            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-            VK_COLOR_COMPONENT_B_BIT;
-        color_blend_attachment[1] = color_blend_attachment[0];
     } else if (pipeline == &vk.alias_pipeline ||
                pipeline == &vk.alias_alpha_pipeline) {
         // Opaque alias fragments replace any bloom left by geometry drawn
@@ -8242,39 +8186,6 @@ static bool vk_create_swapchain(int width, int height)
 #if USE_VULKAN_RAYTRACING
     vk.raytracing_pixel_ready = false;
     if (vk.raytracing_active) {
-        bool alias_rt_ok =
-            vk_create_alias_pipeline(&vk.alias_rt_pipeline,
-                                     VK_FALSE, VK_TRUE, VK_TRUE,
-                                     VK_FALSE, VK_FALSE,
-                                     VK_CULL_MODE_NONE,
-                                     VK_POLYGON_MODE_FILL,
-                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-                                     VK_COMPARE_OP_LESS_OR_EQUAL,
-                                     VK_FALSE, 0.0f, 0.0f, NULL) &&
-            vk_create_alias_pipeline(&vk.alias_rt_alpha_pipeline,
-                                     VK_FALSE, VK_TRUE, VK_TRUE,
-                                     VK_TRUE, VK_FALSE,
-                                     VK_CULL_MODE_NONE,
-                                     VK_POLYGON_MODE_FILL,
-                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-                                     VK_COMPARE_OP_LESS_OR_EQUAL,
-                                     VK_FALSE, 0.0f, 0.0f, NULL);
-        if (alias_rt_ok) {
-            Com_Printf("Vulkan RT entity effects: isolated additive overlay\n");
-        } else {
-            Com_WPrintf("Couldn't create Vulkan RT alias pipelines: %s; using raster model lighting\n",
-                        Com_GetLastError());
-            if (vk.alias_rt_pipeline) {
-                vk.DestroyPipeline(vk.device, vk.alias_rt_pipeline, NULL);
-                vk.alias_rt_pipeline = VK_NULL_HANDLE;
-            }
-            if (vk.alias_rt_alpha_pipeline) {
-                vk.DestroyPipeline(vk.device, vk.alias_rt_alpha_pipeline,
-                                   NULL);
-                vk.alias_rt_alpha_pipeline = VK_NULL_HANDLE;
-            }
-        }
-
         bool rt_ok =
             vk_create_pixel_world_pipeline(&vk.pixel_world_rt_pipeline,
                                            VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE) &&
@@ -10474,14 +10385,17 @@ static void vk_world_material(const mface_t *face, float *reflect,
     }
 }
 
-static float vk_world_pack_material(float reflect, float roughness)
+static float vk_world_pack_material(float reflect, float roughness,
+                                    float skylight)
 {
     // The secondary MRT alpha remains available alongside bloom RGB. Four
     // bits per property are sufficient for broad Quake II material classes
     // and keep reflection eligibility and roughness independent.
     unsigned reflect_q = (unsigned)(min(max(reflect, 0.0f), 1.0f) * 15.0f + 0.5f);
     unsigned roughness_q = (unsigned)(min(max(roughness, 0.0f), 1.0f) * 15.0f + 0.5f);
-    return (float)((reflect_q << 4) | roughness_q) / 255.0f;
+    unsigned skylight_q = (unsigned)(min(max(skylight, 0.0f), 1.0f) *
+                                     15.0f + 0.5f);
+    return (float)((skylight_q << 8) | (reflect_q << 4) | roughness_q);
 }
 
 static float vk_world_pack_rt_controls(float specular, float bounce,
@@ -10544,6 +10458,8 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         Cvar_ClampValue(vk_rt_caustics, 0.0f, 1.0f) : 0.0f;
     float shadow_fringe = world_entity && vk_rt_shadow_fringe ?
         Cvar_ClampValue(vk_rt_shadow_fringe, 0.0f, 1.0f) : 0.0f;
+    float skylight = world_entity && vk_rt_skylight ?
+        Cvar_ClampValue(vk_rt_skylight, 0.0f, 1.0f) : 0.0f;
     params[3] = vk_world_pack_rt_controls(specular, bounce, caustics,
                                           shadow_fringe);
     int requested_debug = vk_rt_debug ? vk_rt_debug->integer : 0;
@@ -10553,7 +10469,8 @@ static void vk_world_rt_params(float *params, bool pixel_world,
     if (face && (face->drawflags & (SURF_TRANS_MASK | SURF_WARP)))
         material_reflect = 0.0f;
     float packed_material = vk_world_pack_material(material_reflect,
-                                                   material_roughness);
+                                                   material_roughness,
+                                                   skylight);
     if (pixel_world) {
         if (requested_debug >= 1 && requested_debug <= 3) {
             params[0] = -(float)requested_debug;
@@ -11551,41 +11468,6 @@ static void vk_add_dynamic_lights(const refdef_t *fd, const vec3_t origin, vec3_
     }
 }
 
-#if USE_VULKAN_RAYTRACING
-static bool vk_alias_rt_eligible(const entity_t *ent, const refdef_t *fd,
-                                 float max_distance)
-{
-    return vk.raytracing_active && fd && ent &&
-        !(ent->flags & (RF_TRANSLUCENT | RF_SHELL_MASK | RF_TRACKER)) &&
-        (!(ent->flags & RF_FULLBRIGHT) || (ent->flags & RF_GLOW)) &&
-        (max_distance <= 0.0f ||
-         Distance(ent->origin, fd->vieworg) <= max_distance);
-}
-
-static bool vk_alias_rt_light(const entity_t *ent, const refdef_t *fd,
-                              vec4_t origin, vec4_t color)
-{
-    float best = 0.0f;
-    const dlight_t *best_light = NULL;
-    if (!vk_alias_rt_eligible(ent, fd, 384.0f) ||
-        !vk_dynamic_lights_enabled() || !fd->dlights ||
-        fd->num_dlights <= 0)
-        return false;
-    for (int i = 0; i < fd->num_dlights; i++) {
-        const dlight_t *light = &fd->dlights[i];
-        float f = light->intensity - DLIGHT_CUTOFF - Distance(light->origin, ent->origin);
-        if (f > best) { best = f; best_light = light; }
-    }
-    if (!best_light || best < 8.0f)
-        return false;
-    Vector4Set(origin, best_light->origin[0], best_light->origin[1], best_light->origin[2],
-               max(best_light->intensity - DLIGHT_CUTOFF, 1.0f));
-    Vector4Set(color, best_light->color[0] / 255.0f, best_light->color[1] / 255.0f,
-               best_light->color[2] / 255.0f, best / 255.0f);
-    return true;
-}
-#endif
-
 static float vk_entity_light_modulate(void)
 {
     return Cvar_ClampValue(vk_modulate, 0.0f, 1e6f) *
@@ -12019,11 +11901,6 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
                               model, &push, count_stats);
 }
 
-#if USE_VULKAN_RAYTRACING
-static bool vk_alias_rt_light(const entity_t *ent, const refdef_t *fd,
-                              vec4_t origin, vec4_t color);
-#endif
-
 static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 {
     vk_model_t *model = vk_model_for_handle(ent->model);
@@ -12107,63 +11984,6 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     vk_fog_params(fd, push.fog);
     push.intensity = vk_texture_intensity();
     push.desaturation = 0.0f;
-    push._rt_align[0] = 0.0f;
-    push._rt_align[1] = 0.0f;
-
-    Vector4Clear(push.rt_light_origin);
-    Vector4Clear(push.rt_light_color);
-    Vector4Set(push.rt_entity_origin, ent->origin[0], ent->origin[1], ent->origin[2], 1.0f);
-    Vector4Clear(push.rt_local_light);
-    Vector4Clear(push.rt_local_view);
-    Vector4Clear(push.rt_control);
-#if USE_VULKAN_RAYTRACING
-    bool entity_effect = false;
-    float entity_effect_distance =
-        (ent->flags & RF_WEAPONMODEL) ? 0.0f : 512.0f;
-    if (!vk.drawing_bloom && vk.alias_rt_pipeline &&
-        vk_alias_rt_eligible(ent, fd, entity_effect_distance)) {
-        vec3_t local_view;
-        float specular = vk_rt_entity_specular ?
-            Cvar_ClampValue(vk_rt_entity_specular, 0.0f, 1.0f) : 0.55f;
-
-        if (specular > 0.001f) {
-            bool valid_view;
-
-            vk_transform_to_entity_local(fd->vieworg, ent, axis, local_view);
-            valid_view = VectorNormalize(local_view) != 0.0f;
-            if (!valid_view) {
-                vec3_t viewaxis[3], fallback_view;
-                AnglesToAxis(fd->viewangles, viewaxis);
-                VectorMA(fd->vieworg, -32.0f, viewaxis[0], fallback_view);
-                vk_transform_to_entity_local(fallback_view, ent, axis,
-                                             local_view);
-                valid_view = VectorNormalize(local_view) != 0.0f;
-            }
-            if (valid_view) {
-                Vector4Set(push.rt_local_view, local_view[0], local_view[1],
-                           local_view[2], specular);
-                entity_effect = true;
-
-                if (vk_alias_rt_light(ent, fd, push.rt_light_origin,
-                                      push.rt_light_color)) {
-                    vec3_t local_light;
-                    vk_transform_to_entity_local(push.rt_light_origin, ent,
-                                                 axis, local_light);
-                    if (VectorNormalize(local_light) != 0.0f) {
-                        Vector4Set(push.rt_local_light, local_light[0],
-                                   local_light[1], local_light[2], 0.0f);
-                        push.rt_control[0] = 1.0f;
-                    } else {
-                        Vector4Clear(push.rt_light_origin);
-                        Vector4Clear(push.rt_light_color);
-                    }
-                }
-                push.rt_local_light[3] =
-                    vk_rt_debug && vk_rt_debug->integer == 12 ? 1.0f : 0.0f;
-            }
-        }
-    }
-#endif
 
     for (int i = 0; i < model->alias_batch_count; i++) {
         const vk_alias_batch_t *batch = &model->alias_batches[i];
@@ -12196,16 +12016,6 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         if (pipeline)
             vk_draw_alias_pass(cmd, pipeline, buffers, offsets, model, batch,
                                texture, &push);
-        #if USE_VULKAN_RAYTRACING
-        if (entity_effect) {
-            VkPipeline effect_pipeline =
-                (skin->flags & IF_TRANSPARENT) && vk.alias_rt_alpha_pipeline ?
-                vk.alias_rt_alpha_pipeline : vk.alias_rt_pipeline;
-            if (effect_pipeline)
-                vk_draw_alias_pass(cmd, effect_pipeline, buffers, offsets,
-                                   model, batch, texture, &push);
-        }
-        #endif
         if (skin->texnum2 && skin->texnum2 < MAX_RIMAGES &&
             vk.alias_blend_pipeline) {
             const vk_texture_t *glow = vk_texture_for_index(skin->texnum2, false);
@@ -15425,13 +15235,13 @@ bool VKR_Init(bool total)
     vk_raytracing = Cvar_Get("vk_raytracing", "0", CVAR_ARCHIVE | CVAR_REFRESH);
     vk_rt_emissive = Cvar_Get("vk_rt_emissive", "0.35", CVAR_ARCHIVE);
     vk_rt_ao = Cvar_Get("vk_rt_ao", "0.24", CVAR_ARCHIVE);
+    vk_rt_skylight = Cvar_Get("vk_rt_skylight", "0.6", CVAR_ARCHIVE);
     vk_rt_reflections = Cvar_Get("vk_rt_reflections", "0.35", CVAR_ARCHIVE);
     vk_rt_specular = Cvar_Get("vk_rt_specular", "0.45", CVAR_ARCHIVE);
     vk_rt_liquids = Cvar_Get("vk_rt_liquids", "0.65", CVAR_ARCHIVE);
     vk_rt_bounce = Cvar_Get("vk_rt_bounce", "0.65", CVAR_ARCHIVE);
     vk_rt_caustics = Cvar_Get("vk_rt_caustics", "0.65", CVAR_ARCHIVE);
     vk_rt_shadow_fringe = Cvar_Get("vk_rt_shadow_fringe", "0.6", CVAR_ARCHIVE);
-    vk_rt_entity_specular = Cvar_Get("vk_rt_entity_specular", "0.55", CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);

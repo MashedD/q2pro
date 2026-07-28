@@ -114,6 +114,8 @@ begin raytracing
         "ray tracing" vk_raytracing
     range --status "Contact shadowing in corners and at surface junctions" \
         "ambient occlusion" vk_rt_ao 0 0.5 0.01
+    range --status "Cool ambient fill on open world surfaces" \
+        "aperture skylight" vk_rt_skylight 0 1 0.05
     range --status "Colored lighting from emissive world surfaces" \
         "emissive lighting" vk_rt_emissive 0 2 0.05
     range --status "Screen-space reflections on configured materials" \
@@ -126,8 +128,6 @@ begin raytracing
         "underwater caustics" vk_rt_caustics 0 1 0.05
     range --status "Colored penumbrae from nearby dynamic lights" \
         "shadow fringes" vk_rt_shadow_fringe 0 1 0.05
-    range --status "Dynamic-light highlights on models and weapons" \
-        "entity specular" vk_rt_entity_specular 0 1 0.05
     range --status "Localized color spill from explosions and projectiles" \
         "dynamic color bounce" vk_rt_bounce 0 1 0.05
     blank

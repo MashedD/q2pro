@@ -841,6 +841,15 @@ vk_rt_liquids::
     Changes apply immediately. Default value is 0.65; value 0 restores the
     previous liquid shading.
 
+vk_rt_skylight::
+    Controls a cool blue-gray ambient fill on open static BSP world surfaces
+    while Vulkan ray tracing is active, clamped between 0 and 1. Baked ambient
+    visibility identifies apertures and open areas; upward-facing surfaces
+    receive the strongest fill and walls receive a softer amount. The result
+    is luminance-capped, preserves bright texture detail, does not feed bloom,
+    and adds no ray queries, samples, passes, descriptors, or draw calls.
+    Changes apply immediately. Default value is 0.6; value 0 disables it.
+
 vk_rt_caustics::
     Controls animated underwater caustic lighting on nearby BSP surfaces while
     Vulkan ray tracing is active, clamped between 0 and 1. Only water receives
@@ -863,42 +872,6 @@ vk_rt_shadow_fringe::
     bounce controls to 7 bits
     and caustic and fringe controls to 5 bits, which remains finer than their
     menu increments. Changes apply immediately. Default value is 0.6.
-
-vk_rt_entity_specular::
-    Controls dynamic-light specular highlights on eligible alias models while
-    Vulkan ray tracing is active, clamped between 0 and 1. Animated MD2 and
-    MD5 normals produce two-sided broad exponent-4 primary and focused
-    exponent-24 clearcoat lobes, matching the unculled legacy model geometry.
-    A mostly neutral static glint remains visible on strongly tinted skins. A
-    bounded broad sheen contributes to scene color and stabilizes bloom from
-    small and distant models without
-    introducing the removed silhouette/rim treatment; bright skin details
-    provide a restrained scene-color fallback on legacy models with unusable
-    normals. A
-    low-energy, light-tinted coverage floor keeps those models visible after
-    bloom downsampling without restoring the old full-color model bloom. The
-    existing static entity key light remains visible during ordinary play,
-    while the strongest nearby dynamic light adds a colored glint. Entity
-    effects use a separate additive overlay and do not access the acceleration
-    structure, so the dynamic glint is deliberately not occlusion checked and
-    cannot replace or darken the model's ordinary raster lighting. The held
-    weapon is always eligible; other models use the overlay only within 512
-    units to bound its draw cost. Entity effect controls use an explicitly
-    aligned push-constant layout shared by the CPU and both alias shaders.
-    Degenerate or
-    non-finite animated normals skip the effect for that fragment instead of
-    affecting its raster base color. Color headroom has a small floor for
-    bright skins and combined highlight luminance is capped at 0.35.
-    Translucent, shell, tracker, and ordinary fullbright models remain
-    excluded; glowing bonus items remain eligible even when fullbright. Static
-    highlights have no distance cutoff, while dynamic-light visibility remains
-    limited to nearby entities. Highlight shape, the broad sheen, and the
-    material fallbacks feed bloom capped at 0.45; the previous full-color
-    whole-model RT bloom is removed. Entity effects issue no ray queries and
-    add one overlay draw per eligible nearby model batch. Setting this to 0
-    removes those overlay draws and leaves only the ordinary alias-model
-    pipeline. Changes apply immediately.
-    Default value is 0.55.
 
 vk_rt_bounce::
     Controls a performance-friendly approximation of colored indirect light
@@ -937,9 +910,8 @@ vk_rt_debug::
     contribution amplified eight times; black means that no bounce reaches the
     surface. Value 10 shows underwater caustics amplified eight times and is
     black outside water, including in slime and lava. Value 11 shows the final
-    colored dynamic-shadow fringe amplified eight times. Value 12 blacks out
-    BSP surfaces and shows eligible entity highlights amplified eight times.
-    Value 0 restores
+    colored dynamic-shadow fringe amplified eight times. Value 12 shows the
+    final aperture-skylight contribution amplified eight times. Value 0 restores
     normal rendering. This
     diagnostic is applied immediately, does not rebake the map, and adds no
     work while disabled. Default value is 0.
