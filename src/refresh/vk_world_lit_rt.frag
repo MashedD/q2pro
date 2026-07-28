@@ -128,6 +128,11 @@ float material_output(float packed)
     return mod(floor(max(packed, 0.0) + 0.5), 256.0) / 255.0;
 }
 
+float rt_light_scattering_control(float packed)
+{
+    return floor(max(packed, 0.0) / 4.0) / 15.0;
+}
+
 vec4 rt_controls(float packed)
 {
     uint bits = uint(clamp(floor(packed + 0.5), 0.0, 16777215.0));
@@ -343,6 +348,7 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
 void main()
 {
     out_bloom = vec4(0.0);
+    vec3 fog_scatter = vec3(0.0);
     float mode = mod(v_mode, 4.0);
     vec2 uv = v_uv;
     float liquid_code = max(-pc.rt_params.z, 0.0);
@@ -421,6 +427,16 @@ void main()
                                      dynamic_specular, dynamic_bounce,
                                      dynamic_fringe, dynamic_afterglow,
                                      dynamic_ripple);
+        float scattering_control = rt_light_scattering_control(pc.rt_params.x);
+        if (scattering_control > 0.001 &&
+            abs(pc.dlight_colors[0].w) >= 160.0 &&
+            pc.dlight_origins[0].w > 0.0) {
+            vec3 view_ray = normalize(pc.dlight.xyz - v_position);
+            vec3 light_ray = normalize(pc.dlight_origins[0].xyz - v_position);
+            float alignment = max(dot(view_ray, light_ray), 0.0);
+            float phase = mix(0.25, 1.0, alignment * alignment);
+            fog_scatter = dynamic * phase * scattering_control * 0.30;
+        }
         if (rt_debug == 8) {
             out_color = vec4(clamp(dynamic_specular *
                 vec3(0.0, 8.0, 8.0), 0.0, 1.0), 1.0);
@@ -662,11 +678,28 @@ void main()
         out_bloom.a = v_mode < 4.0 ? material_output(pc.rt_params.z) : 0.0;
     }
 
+    float fog_amount = 0.0;
     if (pc.fog.a < 0.0) {
+        fog_amount = -pc.fog.a;
         out_color.rgb = mix(out_color.rgb, pc.fog.rgb, -pc.fog.a);
     } else if (pc.fog.a > 0.0) {
         float d = pc.fog.a * gl_FragCoord.z / gl_FragCoord.w;
         float fog = 1.0 - exp(-(d * d));
+        fog_amount = fog;
         out_color.rgb = mix(out_color.rgb, pc.fog.rgb, fog);
+    }
+    if (fog_amount > 0.0) {
+        const vec3 scatter_luma_weights = vec3(0.2126, 0.7152, 0.0722);
+        vec3 scatter_add = fog_scatter * fog_amount;
+        float scatter_luma = dot(scatter_add, scatter_luma_weights);
+        scatter_add *= min(1.0, 0.06 / max(scatter_luma, 0.000001));
+        out_color.rgb += scatter_add;
+        vec3 scatter_bloom = scatter_add *
+            smoothstep(0.008, 0.04, scatter_luma) * 0.35;
+        float scatter_bloom_luma = dot(scatter_bloom,
+                                       scatter_luma_weights);
+        scatter_bloom *= min(1.0, 0.018 /
+                             max(scatter_bloom_luma, 0.000001));
+        out_bloom.rgb += scatter_bloom;
     }
 }

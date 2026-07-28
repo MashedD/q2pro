@@ -980,6 +980,7 @@ static cvar_t *vk_rt_ao;
 static cvar_t *vk_rt_skylight;
 static cvar_t *vk_rt_environment;
 static cvar_t *vk_rt_atmosphere;
+static cvar_t *vk_rt_light_scattering;
 static cvar_t *vk_rt_afterglow;
 static cvar_t *vk_rt_sunlight;
 static cvar_t *vk_rt_emissive_halo;
@@ -10661,6 +10662,14 @@ static float vk_world_pack_rt_controls(float specular, float bounce,
                    (fringe_q << 16) | (ripple_q << 20));
 }
 
+static float vk_world_pack_emissive_scattering(float emissive,
+                                                float scattering)
+{
+    unsigned scattering_q = (unsigned)(min(max(scattering, 0.0f), 1.0f) *
+                                       15.0f + 0.5f);
+    return min(max(emissive, 0.0f), 2.0f) + (float)(scattering_q << 2);
+}
+
 static int vk_world_liquid_kind(const mface_t *face)
 {
     if (!face || !(face->drawflags & SURF_WARP) || !face->texinfo)
@@ -10711,6 +10720,9 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         Cvar_ClampValue(vk_rt_environment, 0.0f, 1.0f) : 0.0f;
     float sunlight = world_entity && vk_rt_sunlight ?
         Cvar_ClampValue(vk_rt_sunlight, 0.0f, 1.0f) : 0.0f;
+    float scattering = world_entity && vk.fd_valid &&
+        !(vk.fd.rdflags & RDF_UNDERWATER) && vk_rt_light_scattering ?
+        Cvar_ClampValue(vk_rt_light_scattering, 0.0f, 1.0f) : 0.0f;
     bool emissive_face = world_entity && face && face->texinfo &&
         (face->texinfo->c.flags & SURF_LIGHT) &&
         !(face->drawflags & (SURF_TRANS_MASK | SURF_WARP));
@@ -10734,8 +10746,10 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         if (requested_debug >= 1 && requested_debug <= 3) {
             params[0] = -(float)requested_debug;
         } else {
-            params[0] = vk_rt_emissive ?
+            float emissive = vk_rt_emissive ?
                 Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f) : 0.0f;
+            params[0] = vk_world_pack_emissive_scattering(emissive,
+                                                          scattering);
             params[1] = vk_rt_ao ?
                 Cvar_ClampValue(vk_rt_ao, 0.0f, 0.5f) : 0.0f;
             if (requested_debug >= 8 && requested_debug <= 17)
@@ -10745,7 +10759,8 @@ static void vk_world_rt_params(float *params, bool pixel_world,
     } else if (vk.raytracing_active && world_entity) {
         // This position aliases rt_enabled in vk_world_lit_push_t.
         params[0] = requested_debug >= 1 && requested_debug <= 3 ?
-            -(float)requested_debug : 1.0f;
+            -(float)requested_debug :
+            vk_world_pack_emissive_scattering(1.0f, scattering);
         if (requested_debug >= 8 && requested_debug <= 17)
             params[1] = -(float)requested_debug;
         params[2] = packed_material;
@@ -15568,6 +15583,8 @@ bool VKR_Init(bool total)
     vk_rt_skylight = Cvar_Get("vk_rt_skylight", "0.6", CVAR_ARCHIVE);
     vk_rt_environment = Cvar_Get("vk_rt_environment", "0.65", CVAR_ARCHIVE);
     vk_rt_atmosphere = Cvar_Get("vk_rt_atmosphere", "0.45", CVAR_ARCHIVE);
+    vk_rt_light_scattering = Cvar_Get("vk_rt_light_scattering", "0.5",
+                                      CVAR_ARCHIVE);
     vk_rt_afterglow = Cvar_Get("vk_rt_afterglow", "0.35", CVAR_ARCHIVE);
     vk_rt_sunlight = Cvar_Get("vk_rt_sunlight", "0.65", CVAR_ARCHIVE);
     vk_rt_emissive_halo = Cvar_Get("vk_rt_emissive_halo", "0.65",

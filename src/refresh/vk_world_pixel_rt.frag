@@ -155,6 +155,16 @@ float material_output(float packed)
     return mod(floor(max(packed, 0.0) + 0.5), 256.0) / 255.0;
 }
 
+float rt_emissive_control(float packed)
+{
+    return mod(max(packed, 0.0), 4.0);
+}
+
+float rt_light_scattering_control(float packed)
+{
+    return floor(max(packed, 0.0) / 4.0) / 15.0;
+}
+
 vec4 rt_controls(float packed)
 {
     uint bits = uint(clamp(floor(packed + 0.5), 0.0, 16777215.0));
@@ -371,7 +381,7 @@ vec3 decode_static_emissive(vec3 encoded)
 
 vec3 surface_light(vec3 normal, vec3 baked_light)
 {
-    float emissive = clamp(pc.rt_params.x, 0.0, 2.0);
+    float emissive = clamp(rt_emissive_control(pc.rt_params.x), 0.0, 2.0);
     if (emissive <= 0.0)
         return vec3(0.0);
     float strength_scale = pow(emissive, 0.75) * 1.5;
@@ -458,7 +468,7 @@ vec3 surface_specular(vec3 normal, float reflectivity, float roughness)
     float lobe_normalization = mix(0.80, 1.85, gloss);
     float scale = reflectivity * rt_controls(pc.rt_params.w).x *
         mix(1.20, 0.62, roughness) * lobe_normalization;
-    float emissive = clamp(pc.rt_params.x, 0.0, 2.0);
+    float emissive = clamp(rt_emissive_control(pc.rt_params.x), 0.0, 2.0);
     float strength_scale = pow(emissive, 0.75) * 1.5;
     vec3 specular = vec3(0.0);
     for (uint i = 0u; i < candidate_count; ++i) {
@@ -594,6 +604,7 @@ float adaptive_ambient_visibility(vec3 normal, bool full_resolution,
 
 void main()
 {
+    vec3 fog_scatter = vec3(0.0);
     float mode = mod(v_mode, 4.0);
     vec2 uv = v_uv;
     if (v_mode >= 4.0)
@@ -734,6 +745,20 @@ void main()
         ao = mix(ao, 1.0, glow.a);
         surface_lighting *= 1.0 - glow.a;
 #endif
+        float scattering_control = rt_light_scattering_control(pc.rt_params.x);
+        if (scattering_control > 0.001) {
+            fog_scatter = surface_lighting * scattering_control * 0.16;
+            if (abs(pc.dlight_colors[0].w) >= 160.0 &&
+                pc.dlight_origins[0].w > 0.0) {
+                vec3 view_ray = normalize(pc.dlight.xyz - v_position);
+                vec3 light_ray = normalize(pc.dlight_origins[0].xyz -
+                                           v_position);
+                float alignment = max(dot(view_ray, light_ray), 0.0);
+                float phase = mix(0.25, 1.0, alignment * alignment);
+                fog_scatter += dynamic_lighting * phase *
+                    scattering_control * 0.30;
+            }
+        }
         lm *= ao;
         vec3 base_lighting = (lm + pc.scroll.www) * pc.color.rgb;
 
@@ -992,14 +1017,31 @@ void main()
                  max(pc.intensity, 0.0);
     }
 
+    float fog_amount = 0.0;
     if (pc.fog.a < 0.0) {
+        fog_amount = -pc.fog.a;
         out_color.rgb = mix(out_color.rgb, pc.fog.rgb, -pc.fog.a);
         bloom *= 1.0 + pc.fog.a;
     } else if (pc.fog.a > 0.0) {
         float d = pc.fog.a * gl_FragCoord.z / gl_FragCoord.w;
         float fog = 1.0 - exp(-(d * d));
+        fog_amount = fog;
         out_color.rgb = mix(out_color.rgb, pc.fog.rgb, fog);
         bloom *= 1.0 - fog;
+    }
+    if (fog_amount > 0.0) {
+        const vec3 scatter_luma_weights = vec3(0.2126, 0.7152, 0.0722);
+        vec3 scatter_add = fog_scatter * fog_amount;
+        float scatter_luma = dot(scatter_add, scatter_luma_weights);
+        scatter_add *= min(1.0, 0.06 / max(scatter_luma, 0.000001));
+        out_color.rgb += scatter_add;
+        vec3 scatter_bloom = scatter_add *
+            smoothstep(0.008, 0.04, scatter_luma) * 0.35;
+        float scatter_bloom_luma = dot(scatter_bloom,
+                                       scatter_luma_weights);
+        scatter_bloom *= min(1.0, 0.018 /
+                             max(scatter_bloom_luma, 0.000001));
+        bloom += scatter_bloom;
     }
     out_bloom = vec4(bloom,
         v_mode < 4.0 ? material_output(pc.rt_params.z) : 0.0);

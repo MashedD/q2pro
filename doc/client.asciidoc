@@ -894,6 +894,18 @@ vk_rt_atmosphere::
     underwater and when no world model is rendered. Changes apply immediately.
     Default value is 0.45; value 0 removes only the atmospheric contribution.
 
+vk_rt_light_scattering::
+    Controls colored light scattering inside active distance fog while Vulkan
+    ray tracing is active, clamped between 0 and 1. Strong explosions,
+    projectiles, muzzle flashes, and cached afterglow sources reuse the three
+    existing shadow-tested dynamic-light candidates. The pixel-lightmap RT
+    path also reuses available static emissive illumination. View alignment
+    concentrates the broad glow toward visible light sources. Local and bloom
+    contributions are capped independently, and the effect is suppressed
+    underwater or without active fog. It adds no ray queries, texture samples,
+    render passes, descriptors, or draw calls. Changes apply immediately.
+    Default value is 0.5; value 0 disables the effect.
+
 vk_rt_skylight::
     Controls a cool blue-gray ambient fill on open static BSP world surfaces
     while Vulkan ray tracing is active, clamped between 0 and 1. Baked ambient
