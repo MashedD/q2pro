@@ -130,7 +130,25 @@ float material_output(float packed)
 
 float rt_light_scattering_control(float packed)
 {
-    return floor(max(packed, 0.0) / 4.0) / 15.0;
+    return mod(floor(max(packed, 0.0) / 4.0), 16.0) / 15.0;
+}
+
+float rt_fog_turbulence_control(float packed)
+{
+    return floor(max(packed, 0.0) / 64.0) / 15.0;
+}
+
+float fog_turbulence_scale(float packed, vec3 position, float time)
+{
+    float strength = rt_fog_turbulence_control(packed);
+    if (strength <= 0.001)
+        return 1.0;
+    float broad = sin(dot(position, vec3(0.0060, 0.0040, 0.0025)) +
+                      time * 0.11);
+    float detail = sin(dot(position, vec3(-0.0035, 0.0085, 0.0050)) -
+                       time * 0.07);
+    float wave = broad * 0.60 + detail * 0.40;
+    return 1.0 + wave * strength * 0.35;
 }
 
 vec4 rt_controls(float packed)
@@ -683,7 +701,10 @@ void main()
         fog_amount = -pc.fog.a;
         out_color.rgb = mix(out_color.rgb, pc.fog.rgb, -pc.fog.a);
     } else if (pc.fog.a > 0.0) {
-        float d = pc.fog.a * gl_FragCoord.z / gl_FragCoord.w;
+        float turbulence = fog_turbulence_scale(pc.rt_params.x, v_position,
+                                                pc.dlight.w);
+        float d = pc.fog.a * turbulence *
+            gl_FragCoord.z / gl_FragCoord.w;
         float fog = 1.0 - exp(-(d * d));
         fog_amount = fog;
         out_color.rgb = mix(out_color.rgb, pc.fog.rgb, fog);

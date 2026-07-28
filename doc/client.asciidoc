@@ -906,6 +906,17 @@ vk_rt_light_scattering::
     render passes, descriptors, or draw calls. Changes apply immediately.
     Default value is 0.5; value 0 disables the effect.
 
+vk_rt_fog_turbulence::
+    Controls slow world-space density movement in active Vulkan RT distance
+    fog, clamped between 0 and 1. Two broad procedural waves move in different
+    directions and remain continuous across BSP face boundaries. At value 1,
+    local fog density varies by at most 35 percent; sky fog, models, and HUD
+    elements remain stable. Fog light scattering and bloom attenuation reuse
+    the animated fog amount. The effect is suppressed underwater or without
+    active fog and adds no texture samples, particles, render passes,
+    descriptors, or draw calls. Changes apply immediately. Default value is
+    0.4; value 0 restores uniform fog density.
+
 vk_rt_skylight::
     Controls a cool blue-gray ambient fill on open static BSP world surfaces
     while Vulkan ray tracing is active, clamped between 0 and 1. Baked ambient
