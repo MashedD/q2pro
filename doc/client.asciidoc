@@ -882,6 +882,18 @@ vk_rt_environment::
     ray queries, texture samples, render passes, descriptors, or draw calls.
     Changes apply immediately. Default value is 0.65; value 0 disables it.
 
+vk_rt_atmosphere::
+    Controls neutral blue-gray distance haze while Vulkan ray tracing is
+    active, clamped between 0 and 1. It reuses the existing exponential fog
+    calculations for world surfaces, models, sprites, particles, and sky, so
+    it adds no ray queries, texture samples, render passes, descriptors, or
+    draw calls. Existing custom or map-authored distance and sky fog provide
+    the base color and density; atmospheric haze is combined with them instead
+    of replacing them. Authored height fog remains unchanged and can coexist
+    with the distance haze. The atmospheric contribution is suppressed
+    underwater and when no world model is rendered. Changes apply immediately.
+    Default value is 0.45; value 0 removes only the atmospheric contribution.
+
 vk_rt_skylight::
     Controls a cool blue-gray ambient fill on open static BSP world surfaces
     while Vulkan ray tracing is active, clamped between 0 and 1. Baked ambient

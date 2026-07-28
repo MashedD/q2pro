@@ -979,6 +979,7 @@ static cvar_t *vk_rt_emissive;
 static cvar_t *vk_rt_ao;
 static cvar_t *vk_rt_skylight;
 static cvar_t *vk_rt_environment;
+static cvar_t *vk_rt_atmosphere;
 static cvar_t *vk_rt_afterglow;
 static cvar_t *vk_rt_sunlight;
 static cvar_t *vk_rt_emissive_halo;
@@ -10092,15 +10093,43 @@ static bool vk_dynamic_lights_enabled(void)
            (!vk_vertexlight || !vk_vertexlight->integer);
 }
 
+static float vk_rt_atmosphere_strength(const refdef_t *fd)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_atmosphere ||
+        (vk_fog && !vk_fog->integer) ||
+        (fd->rdflags & (RDF_UNDERWATER | RDF_NOWORLDMODEL)) ||
+        !vk.world.cache)
+        return 0.0f;
+
+    return Cvar_ClampValue(vk_rt_atmosphere, 0.0f, 1.0f);
+}
+
 static void vk_fog_params(const refdef_t *fd, float fog[4])
 {
     Vector4Clear(fog);
 
-    if (!fd || (vk_fog && !vk_fog->integer) || fd->fog.density <= 0.0f)
+    if (!fd || (vk_fog && !vk_fog->integer))
         return;
 
-    VectorCopy(fd->fog.color, fog);
-    fog[3] = fd->fog.density / 64.0f;
+    const vec3_t atmosphere_color = { 0.28f, 0.32f, 0.38f };
+    float base_density = max(fd->fog.density, 0.0f) / 64.0f;
+    float atmosphere_density = 0.00065f * vk_rt_atmosphere_strength(fd);
+    if (base_density <= 0.0f && atmosphere_density <= 0.0f)
+        return;
+
+    if (base_density > 0.0f && atmosphere_density > 0.0f) {
+        float atmosphere_mix = atmosphere_density /
+            (base_density + atmosphere_density);
+        for (int i = 0; i < 3; i++)
+            fog[i] = fd->fog.color[i] +
+                (atmosphere_color[i] - fd->fog.color[i]) * atmosphere_mix;
+    } else if (base_density > 0.0f) {
+        VectorCopy(fd->fog.color, fog);
+    } else {
+        VectorCopy(atmosphere_color, fog);
+    }
+    fog[3] = sqrtf(base_density * base_density +
+                   atmosphere_density * atmosphere_density);
 }
 
 static void vk_height_fog_params(const refdef_t *fd, float start[4],
@@ -10130,11 +10159,28 @@ static void vk_sky_fog_params(const refdef_t *fd, float fog[4])
 {
     Vector4Clear(fog);
 
-    if (!fd || (vk_fog && !vk_fog->integer) || fd->fog.sky_factor <= 0.0f)
+    if (!fd || (vk_fog && !vk_fog->integer))
         return;
 
-    VectorCopy(fd->fog.color, fog);
-    fog[3] = -fd->fog.sky_factor;
+    const vec3_t atmosphere_color = { 0.28f, 0.32f, 0.38f };
+    float base_factor = Q_clipf(fd->fog.sky_factor, 0.0f, 1.0f);
+    float atmosphere_factor = 0.30f * vk_rt_atmosphere_strength(fd);
+    if (base_factor <= 0.0f && atmosphere_factor <= 0.0f)
+        return;
+
+    if (base_factor > 0.0f && atmosphere_factor > 0.0f) {
+        float atmosphere_mix = atmosphere_factor /
+            (base_factor + atmosphere_factor);
+        for (int i = 0; i < 3; i++)
+            fog[i] = fd->fog.color[i] +
+                (atmosphere_color[i] - fd->fog.color[i]) * atmosphere_mix;
+    } else if (base_factor > 0.0f) {
+        VectorCopy(fd->fog.color, fog);
+    } else {
+        VectorCopy(atmosphere_color, fog);
+    }
+    fog[3] = -(1.0f - (1.0f - base_factor) *
+                         (1.0f - atmosphere_factor));
 }
 
 static float vk_texture_intensity(void)
@@ -15521,6 +15567,7 @@ bool VKR_Init(bool total)
     vk_rt_ao = Cvar_Get("vk_rt_ao", "0.24", CVAR_ARCHIVE);
     vk_rt_skylight = Cvar_Get("vk_rt_skylight", "0.6", CVAR_ARCHIVE);
     vk_rt_environment = Cvar_Get("vk_rt_environment", "0.65", CVAR_ARCHIVE);
+    vk_rt_atmosphere = Cvar_Get("vk_rt_atmosphere", "0.45", CVAR_ARCHIVE);
     vk_rt_afterglow = Cvar_Get("vk_rt_afterglow", "0.35", CVAR_ARCHIVE);
     vk_rt_sunlight = Cvar_Get("vk_rt_sunlight", "0.65", CVAR_ARCHIVE);
     vk_rt_emissive_halo = Cvar_Get("vk_rt_emissive_halo", "0.65",
