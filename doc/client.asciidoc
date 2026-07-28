@@ -894,6 +894,17 @@ vk_rt_atmosphere::
     underwater and when no world model is rendered. Changes apply immediately.
     Default value is 0.45; value 0 removes only the atmospheric contribution.
 
+vk_rt_dust::
+    Controls depth-tested ambient dust motes while Vulkan ray tracing is
+    active, clamped between 0 and 1. Motes are anchored to deterministic
+    world-space cells, drift slowly, and fade near the edge of their bounded
+    400-unit range. Solid, liquid, underwater, and non-visible areas are
+    excluded. At full strength the effect draws at most 48 motes (96
+    triangles) in one additional alpha-blended particle draw and performs no
+    ray queries or per-frame allocations. Gameplay particles retain their
+    original capacity and blend mode. Changes apply immediately. Default
+    value is 0.35; value 0 disables the effect.
+
 vk_rt_light_scattering::
     Controls colored light scattering inside active distance fog while Vulkan
     ray tracing is active, clamped between 0 and 1. Strong explosions,

@@ -36,6 +36,7 @@ the Free Software Foundation; either version 2 of the License, or
 #define VK_MAX_DEBUG_TEXT_VERTICES (VK_MAX_DEBUG_TEXT_CHARS * 4)
 #define VK_MAX_DEBUG_TEXT_INDICES  (VK_MAX_DEBUG_TEXT_CHARS * 6)
 #define VK_MAX_PARTICLE_VERTICES   (MAX_PARTICLES * 6)
+#define VK_MAX_DUST_MOTES          48
 #define VK_MAX_LIGHTMAP_EXTENTS    513
 #define VK_MAX_FRAMES_IN_FLIGHT    3
 #define VK_MAX_CUBEMAPS            16
@@ -982,6 +983,7 @@ static cvar_t *vk_rt_environment;
 static cvar_t *vk_rt_atmosphere;
 static cvar_t *vk_rt_light_scattering;
 static cvar_t *vk_rt_fog_turbulence;
+static cvar_t *vk_rt_dust;
 static cvar_t *vk_rt_afterglow;
 static cvar_t *vk_rt_sunlight;
 static cvar_t *vk_rt_emissive_halo;
@@ -12577,10 +12579,150 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
 #define VK_PARTICLE_SIZE    (1.0f + M_SQRT1_2f)
 #define VK_PARTICLE_SCALE   (1.0f / (2.0f * VK_PARTICLE_SIZE))
 
+typedef struct {
+    vec3_t origin;
+    uint32_t hash;
+} vk_dust_mote_t;
+
+static uint32_t vk_dust_hash(int x, int y, int z)
+{
+    uint32_t hash = (uint32_t)x * 0x8da6b343u;
+    hash ^= (uint32_t)y * 0xd8163841u;
+    hash ^= (uint32_t)z * 0xcb1ab31fu;
+    hash ^= hash >> 16;
+    hash *= 0x7feb352du;
+    hash ^= hash >> 15;
+    hash *= 0x846ca68bu;
+    return hash ^ (hash >> 16);
+}
+
+static float vk_dust_random(uint32_t hash)
+{
+    return (hash & 0xffffu) * (1.0f / 65535.0f);
+}
+
+static void vk_append_particle_quad(uint32_t *vertex_count,
+                                    const vec3_t origin, float scale,
+                                    const float color[4],
+                                    const vec3_t viewaxis[3])
+{
+    vec3_t left, right, down, up, corners[4];
+    float scale2 = scale * VK_PARTICLE_SCALE;
+
+    VectorScale(viewaxis[1], scale2, left);
+    VectorScale(viewaxis[1], -scale, right);
+    VectorScale(viewaxis[2], -scale2, down);
+    VectorScale(viewaxis[2], scale, up);
+    VectorAdd3(origin, left, down, corners[0]);
+    VectorAdd3(origin, right, down, corners[1]);
+    VectorAdd3(origin, left, up, corners[2]);
+    VectorAdd3(origin, right, up, corners[3]);
+
+    static const int order[6] = { 0, 2, 1, 1, 2, 3 };
+    static const float uv[4][2] = {
+        { 0.0f, 1.0f }, { 1.0f, 1.0f }, { 0.0f, 0.0f }, { 1.0f, 0.0f },
+    };
+    for (int j = 0; j < 6; j++) {
+        int idx = order[j];
+        vk_vertex_t *v = &vk.particle_batch[(*vertex_count)++];
+        VectorCopy(corners[idx], v->position);
+        v->uv[0] = uv[idx][0];
+        v->uv[1] = uv[idx][1];
+        Vector4Copy(color, v->color);
+    }
+}
+
+static uint32_t vk_append_dust_motes(const refdef_t *fd,
+                                     const vec3_t viewaxis[3],
+                                     uint32_t vertex_count)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_dust ||
+        (fd->rdflags & (RDF_UNDERWATER | RDF_NOWORLDMODEL)) ||
+        vk.view_liquid_kind || !vk.world.cache || !vk.world.cache->nodes)
+        return vertex_count;
+
+    float strength = Cvar_ClampValue(vk_rt_dust, 0.0f, 1.0f);
+    uint32_t available = (VK_MAX_PARTICLE_VERTICES - vertex_count) / 6;
+    uint32_t wanted = min((uint32_t)VK_MAX_DUST_MOTES, available);
+    if (!wanted)
+        return vertex_count;
+
+    enum { CELL_SIZE = 160, CELL_RADIUS = 4, Z_RADIUS = 2 };
+    vk_dust_mote_t motes[VK_MAX_DUST_MOTES];
+    uint32_t mote_count = 0;
+    int center[3] = {
+        (int)floorf(fd->vieworg[0] / CELL_SIZE),
+        (int)floorf(fd->vieworg[1] / CELL_SIZE),
+        (int)floorf(fd->vieworg[2] / CELL_SIZE),
+    };
+
+    for (int z = -Z_RADIUS; z <= Z_RADIUS; z++) {
+        for (int y = -CELL_RADIUS; y <= CELL_RADIUS; y++) {
+            for (int x = -CELL_RADIUS; x <= CELL_RADIUS; x++) {
+                int cell[3] = { center[0] + x, center[1] + y, center[2] + z };
+                uint32_t hash = vk_dust_hash(cell[0], cell[1], cell[2]);
+                vec3_t origin, delta;
+
+                // Density is decided independently per world cell. New cells
+                // therefore enter at the faded edge instead of replacing a
+                // fully visible mote when the camera crosses a cell boundary.
+                if (vk_dust_random(vk_dust_hash(cell[2], cell[0], cell[1])) >=
+                    strength * 0.60f)
+                    continue;
+
+                origin[0] = (cell[0] + vk_dust_random(hash)) * CELL_SIZE;
+                origin[1] = (cell[1] + vk_dust_random(hash >> 8)) * CELL_SIZE;
+                origin[2] = (cell[2] + vk_dust_random(hash >> 16)) * CELL_SIZE;
+                origin[0] += sinf(fd->time * (0.11f + vk_dust_random(hash) * 0.08f) +
+                                  vk_dust_random(hash >> 4) * (2.0f * M_PIf)) * 10.0f;
+                origin[1] += cosf(fd->time * (0.09f + vk_dust_random(hash >> 7) * 0.07f) +
+                                  vk_dust_random(hash >> 12) * (2.0f * M_PIf)) * 8.0f;
+                origin[2] += sinf(fd->time * (0.08f + vk_dust_random(hash >> 13) * 0.06f) +
+                                  vk_dust_random(hash >> 2) * (2.0f * M_PIf)) * 12.0f;
+
+                VectorSubtract(origin, fd->vieworg, delta);
+                float distance = VectorLength(delta);
+                if (distance < 32.0f || distance >= 400.0f)
+                    continue;
+
+                const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, origin);
+                if (!leaf || leaf->visframe != vk.world.visframe ||
+                    (leaf->contents[0] & (CONTENTS_SOLID | MASK_WATER)) ||
+                    (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+                    continue;
+
+                VectorCopy(origin, motes[mote_count].origin);
+                motes[mote_count++].hash = hash;
+                if (mote_count == wanted)
+                    goto motes_ready;
+            }
+        }
+    }
+
+motes_ready:
+    for (uint32_t i = 0; i < mote_count; i++) {
+        vec3_t delta;
+        VectorSubtract(motes[i].origin, fd->vieworg, delta);
+        float distance = VectorLength(delta);
+        float fade = Q_clipf((400.0f - distance) / 100.0f, 0.0f, 1.0f);
+        float tint = vk_dust_random(motes[i].hash >> 5);
+        float color[4] = {
+            0.72f + tint * 0.12f,
+            0.70f + tint * 0.10f,
+            0.64f + tint * 0.08f,
+            (0.16f + 0.10f * strength) * fade,
+        };
+        float scale = 1.8f + distance * 0.003f +
+            vk_dust_random(motes[i].hash >> 11) * 0.8f;
+        vk_append_particle_quad(&vertex_count, motes[i].origin, scale,
+                                color, viewaxis);
+    }
+    return vertex_count;
+}
+
 static void vk_draw_particles(const refdef_t *fd)
 {
-    if (!fd->num_particles || !fd->particles ||
-        !vk.sprite_pipeline || !vk.particle_texture.descriptor_set ||
+    if (!fd || !vk.sprite_pipeline || !vk.particle_texture.descriptor_set ||
         !vk.particle_vertices.buffer || !vk.particle_vertices.memory ||
         !vk.particle_vertices_mapped)
         return;
@@ -12606,10 +12748,11 @@ static void vk_draw_particles(const refdef_t *fd)
     vk_fog_params(fd, push.fog);
     push.intensity = 1.0f;
 
-    for (int i = 0; i < fd->num_particles && vertex_count + 6 <= VK_MAX_PARTICLE_VERTICES; i++) {
+    for (int i = 0; fd->particles && i < fd->num_particles &&
+         vertex_count + 6 <= VK_MAX_PARTICLE_VERTICES; i++) {
         const particle_t *particle = &fd->particles[i];
-        vec3_t transformed, left, right, down, up, corners[4];
-        vec_t dist, scale, scale2;
+        vec3_t transformed;
+        vec_t dist, scale;
         color_t color;
 
         VectorSubtract(particle->origin, fd->vieworg, transformed);
@@ -12619,40 +12762,22 @@ static void vk_draw_particles(const refdef_t *fd)
         if (dist > 20.0f)
             scale += dist * 0.004f;
         scale *= (vk_partscale ? vk_partscale->value : 2.0f) * particle->scale;
-        scale2 = scale * VK_PARTICLE_SCALE;
-
-        VectorScale(viewaxis[1], scale2, left);
-        VectorScale(viewaxis[1], -scale, right);
-        VectorScale(viewaxis[2], -scale2, down);
-        VectorScale(viewaxis[2], scale, up);
-
         if (particle->color == -1)
             color.u32 = particle->rgba.u32;
         else
             color.u32 = d_8to24table[particle->color & 0xff];
         color.u8[3] *= particle->alpha;
 
-        VectorAdd3(particle->origin, left, down, corners[0]);
-        VectorAdd3(particle->origin, right, down, corners[1]);
-        VectorAdd3(particle->origin, left, up, corners[2]);
-        VectorAdd3(particle->origin, right, up, corners[3]);
-
-        static const int order[6] = { 0, 2, 1, 1, 2, 3 };
-        static const float uv[4][2] = {
-            { 0.0f, 1.0f }, { 1.0f, 1.0f }, { 0.0f, 0.0f }, { 1.0f, 0.0f },
+        float rgba[4] = {
+            color.u8[0] / 255.0f, color.u8[1] / 255.0f,
+            color.u8[2] / 255.0f, color.u8[3] / 255.0f,
         };
-        for (int j = 0; j < 6; j++) {
-            int idx = order[j];
-            vk_vertex_t *v = &vk.particle_batch[vertex_count++];
-            VectorCopy(corners[idx], v->position);
-            v->uv[0] = uv[idx][0];
-            v->uv[1] = uv[idx][1];
-            v->color[0] = color.u8[0] / 255.0f;
-            v->color[1] = color.u8[1] / 255.0f;
-            v->color[2] = color.u8[2] / 255.0f;
-            v->color[3] = color.u8[3] / 255.0f;
-        }
+        vk_append_particle_quad(&vertex_count, particle->origin, scale,
+                                rgba, viewaxis);
     }
+
+    uint32_t particle_vertex_count = vertex_count;
+    vertex_count = vk_append_dust_motes(fd, viewaxis, vertex_count);
 
     if (!vertex_count) {
         vk.draw_scope = old_scope;
@@ -12670,9 +12795,19 @@ static void vk_draw_particles(const refdef_t *fd)
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.particle_vertices.buffer, &offset);
     vk_bind_texture_descriptor(cmd, vk.particle_texture.descriptor_set);
     vk_push_constants(cmd, sizeof(push), &push);
-    vk.CmdDraw(cmd, vertex_count, 1, 0, 0);
-    c.trisDrawn += vertex_count / 3;
-    vk_count_batch3d();
+    if (particle_vertex_count) {
+        vk.CmdDraw(cmd, particle_vertex_count, 1, 0, 0);
+        c.trisDrawn += particle_vertex_count / 3;
+        vk_count_batch3d();
+    }
+    if (vertex_count > particle_vertex_count) {
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                         vk.sprite_pipeline);
+        vk.CmdDraw(cmd, vertex_count - particle_vertex_count, 1,
+                   particle_vertex_count, 0);
+        c.trisDrawn += (vertex_count - particle_vertex_count) / 3;
+        vk_count_batch3d();
+    }
     vk.draw_scope = old_scope;
 }
 
@@ -15597,6 +15732,7 @@ bool VKR_Init(bool total)
                                       CVAR_ARCHIVE);
     vk_rt_fog_turbulence = Cvar_Get("vk_rt_fog_turbulence", "0.4",
                                     CVAR_ARCHIVE);
+    vk_rt_dust = Cvar_Get("vk_rt_dust", "0.35", CVAR_ARCHIVE);
     vk_rt_afterglow = Cvar_Get("vk_rt_afterglow", "0.35", CVAR_ARCHIVE);
     vk_rt_sunlight = Cvar_Get("vk_rt_sunlight", "0.65", CVAR_ARCHIVE);
     vk_rt_emissive_halo = Cvar_Get("vk_rt_emissive_halo", "0.65",
