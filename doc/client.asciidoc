@@ -846,6 +846,21 @@ vk_rt_emissive_flicker::
     queries, passes, descriptors, or draws. Changes apply immediately.
     Default value is 0.55; value 0 restores stable emission.
 
+vk_rt_emissive_motes::
+    Controls restrained additive energy motes around opaque `SURF_LIGHT`
+    emitters while Vulkan ray tracing is active, clamped between 0 and 1. Up
+    to eight nearby visible surface lights supply color and orientation for
+    deterministic paths that orbit across each emitter and drift smoothly
+    outward. Values below 0.35 emit one mote per source, values from 0.35 emit
+    two, and values from 0.75 emit three, capped globally at 24 motes (48
+    triangles). Motes fade between 320 and 512 units and near the camera;
+    solid, liquid, underwater, and non-visible locations are excluded. The
+    effect reuses the existing particle buffer and additive pipeline, adding
+    at most one draw and no ray queries, texture samples, render passes,
+    descriptors, or per-frame allocations. It remains independent of ambient
+    dust, bloom, and `vk_rt_emissive`. Changes apply immediately. Default
+    value is 0.45; value 0 disables the effect.
+
 vk_rt_specular::
     Controls material-aware highlights from dynamic lights and nearby emissive
     `SURF_LIGHT` surfaces, clamped between 0 and 1. The effect reuses existing
@@ -905,6 +920,18 @@ vk_rt_atmosphere::
     with the distance haze. The atmospheric contribution is suppressed
     underwater and when no world model is rendered. Changes apply immediately.
     Default value is 0.45; value 0 removes only the atmospheric contribution.
+
+vk_rt_underwater_absorption::
+    Controls blue-green distance attenuation while the camera is underwater
+    in ordinary water with Vulkan ray tracing active, clamped between 0 and 1.
+    The contribution is combined with map-authored distance fog instead of
+    replacing it and applies consistently to world surfaces, models, weapon
+    models, sprites, and particles. Lava, slime, height fog, sky visibility,
+    and above-water rendering remain unchanged. It reuses the existing
+    exponential fog path and adds no ray queries, texture samples, render
+    passes, descriptors, or draw calls. `gl_fog` remains the master switch.
+    Changes apply immediately. Default value is 0.65; value 0 removes only the
+    underwater absorption contribution.
 
 vk_rt_dust::
     Controls depth-tested ambient dust motes while Vulkan ray tracing is

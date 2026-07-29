@@ -981,10 +981,12 @@ static cvar_t *vk_rt_ao;
 static cvar_t *vk_rt_skylight;
 static cvar_t *vk_rt_environment;
 static cvar_t *vk_rt_atmosphere;
+static cvar_t *vk_rt_underwater_absorption;
 static cvar_t *vk_rt_light_scattering;
 static cvar_t *vk_rt_fog_turbulence;
 static cvar_t *vk_rt_dust;
 static cvar_t *vk_rt_dust_lighting;
+static cvar_t *vk_rt_emissive_motes;
 static cvar_t *vk_rt_afterglow;
 static cvar_t *vk_rt_sunlight;
 static cvar_t *vk_rt_emissive_halo;
@@ -10110,6 +10112,18 @@ static float vk_rt_atmosphere_strength(const refdef_t *fd)
     return Cvar_ClampValue(vk_rt_atmosphere, 0.0f, 1.0f);
 }
 
+static float vk_rt_underwater_absorption_strength(const refdef_t *fd)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_underwater_absorption ||
+        (vk_fog && !vk_fog->integer) ||
+        !(fd->rdflags & RDF_UNDERWATER) ||
+        (fd->rdflags & RDF_NOWORLDMODEL) || vk.view_liquid_kind != 1 ||
+        !vk.world.cache)
+        return 0.0f;
+
+    return Cvar_ClampValue(vk_rt_underwater_absorption, 0.0f, 1.0f);
+}
+
 static void vk_fog_params(const refdef_t *fd, float fog[4])
 {
     Vector4Clear(fog);
@@ -10118,24 +10132,22 @@ static void vk_fog_params(const refdef_t *fd, float fog[4])
         return;
 
     const vec3_t atmosphere_color = { 0.28f, 0.32f, 0.38f };
+    const vec3_t water_color = { 0.06f, 0.18f, 0.22f };
     float base_density = max(fd->fog.density, 0.0f) / 64.0f;
     float atmosphere_density = 0.00065f * vk_rt_atmosphere_strength(fd);
-    if (base_density <= 0.0f && atmosphere_density <= 0.0f)
+    float water_density = 0.0023f *
+        vk_rt_underwater_absorption_strength(fd);
+    float density_sum = base_density + atmosphere_density + water_density;
+    if (density_sum <= 0.0f)
         return;
 
-    if (base_density > 0.0f && atmosphere_density > 0.0f) {
-        float atmosphere_mix = atmosphere_density /
-            (base_density + atmosphere_density);
-        for (int i = 0; i < 3; i++)
-            fog[i] = fd->fog.color[i] +
-                (atmosphere_color[i] - fd->fog.color[i]) * atmosphere_mix;
-    } else if (base_density > 0.0f) {
-        VectorCopy(fd->fog.color, fog);
-    } else {
-        VectorCopy(atmosphere_color, fog);
-    }
+    for (int i = 0; i < 3; i++)
+        fog[i] = (fd->fog.color[i] * base_density +
+                  atmosphere_color[i] * atmosphere_density +
+                  water_color[i] * water_density) / density_sum;
     fog[3] = sqrtf(base_density * base_density +
-                   atmosphere_density * atmosphere_density);
+                   atmosphere_density * atmosphere_density +
+                   water_density * water_density);
 }
 
 static void vk_height_fog_params(const refdef_t *fd, float start[4],
@@ -12640,6 +12652,8 @@ typedef struct {
 } vk_dust_light_t;
 
 #define VK_MAX_DUST_LIGHTS 3
+#define VK_MAX_EMISSIVE_MOTE_SOURCES 8
+#define VK_MAX_EMISSIVE_MOTES 24
 
 static uint32_t vk_dust_hash(int x, int y, int z)
 {
@@ -12883,6 +12897,156 @@ motes_ready:
     return vertex_count;
 }
 
+#if USE_VULKAN_RAYTRACING
+typedef struct {
+    uint32_t index;
+    float score;
+} vk_emissive_mote_source_t;
+
+static uint32_t vk_select_emissive_mote_sources(
+    const refdef_t *fd,
+    vk_emissive_mote_source_t sources[VK_MAX_EMISSIVE_MOTE_SOURCES])
+{
+    uint32_t count = 0;
+
+    if (!fd || !vk.world.cache || !vk.world.cache->nodes ||
+        !vk.world.surface_lights_ready)
+        return 0;
+
+    for (uint32_t i = 0; i < vk.world.surface_light_count; i++) {
+        const vk_surface_light_t *light = &vk.world.surface_lights[i];
+        float distance = Distance(light->origin, fd->vieworg);
+        if (distance >= 512.0f)
+            continue;
+
+        // Surface-light centers lie directly on BSP planes and can classify
+        // into the solid leaf. Test a point safely in front of the emitter.
+        vec3_t leaf_point;
+        VectorMA(light->origin, 8.0f, light->normal, leaf_point);
+        const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, leaf_point);
+        if (!leaf)
+            continue;
+        if (leaf->visframe != vk.world.visframe)
+            continue;
+        if ((leaf->contents[0] & (CONTENTS_SOLID | MASK_WATER)) ||
+            (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+            continue;
+
+        float fade = Q_clipf((512.0f - distance) / 192.0f, 0.0f, 1.0f);
+        float score = light->strength * fade *
+            (0.75f + 0.25f * min(light->radius / 24.0f, 1.0f));
+        uint32_t slot = min(count,
+                            (uint32_t)VK_MAX_EMISSIVE_MOTE_SOURCES - 1);
+        while (slot > 0 && score > sources[slot - 1].score) {
+            sources[slot] = sources[slot - 1];
+            slot--;
+        }
+        if (count >= VK_MAX_EMISSIVE_MOTE_SOURCES &&
+            score <= sources[slot].score)
+            continue;
+        sources[slot].index = i;
+        sources[slot].score = score;
+        if (count < VK_MAX_EMISSIVE_MOTE_SOURCES)
+            count++;
+    }
+    return count;
+}
+
+static uint32_t vk_append_emissive_motes(const refdef_t *fd,
+                                         const vec3_t viewaxis[3],
+                                         uint32_t vertex_count)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_emissive_motes ||
+        (fd->rdflags & (RDF_UNDERWATER | RDF_NOWORLDMODEL)) ||
+        vk.view_liquid_kind || !vk.world.cache || !vk.world.cache->nodes)
+        return vertex_count;
+
+    float strength = Cvar_ClampValue(vk_rt_emissive_motes, 0.0f, 1.0f);
+    uint32_t available = min((VK_MAX_PARTICLE_VERTICES - vertex_count) / 6,
+                             (uint32_t)VK_MAX_EMISSIVE_MOTES);
+    if (strength <= 0.0f || !available)
+        return vertex_count;
+
+    vk_emissive_mote_source_t sources[VK_MAX_EMISSIVE_MOTE_SOURCES] = { 0 };
+    uint32_t source_count = vk_select_emissive_mote_sources(fd, sources);
+    uint32_t mote_count = 0;
+    int per_source = 1 + (strength >= 0.35f) + (strength >= 0.75f);
+
+    for (uint32_t i = 0; i < source_count && mote_count < available; i++) {
+        const vk_surface_light_t *light =
+            &vk.world.surface_lights[sources[i].index];
+        vec3_t reference = { 0.0f, 0.0f, 1.0f };
+        vec3_t tangent, bitangent;
+        if (fabsf(light->normal[2]) > 0.90f)
+            VectorSet(reference, 0.0f, 1.0f, 0.0f);
+        CrossProduct(reference, light->normal, tangent);
+        if (VectorNormalize(tangent) <= 0.0f)
+            continue;
+        CrossProduct(light->normal, tangent, bitangent);
+        VectorNormalize(bitangent);
+
+        uint32_t source_hash = vk_dust_hash(
+            (int)floorf(light->origin[0] * 0.125f),
+            (int)floorf(light->origin[1] * 0.125f),
+            (int)floorf(light->origin[2] * 0.125f)) ^ sources[i].index;
+        for (int j = 0; j < per_source && mote_count < available; j++) {
+            uint32_t hash = vk_dust_hash((int)source_hash, j,
+                                         (int)sources[i].index);
+            float phase = vk_dust_random(hash) * (2.0f * M_PIf);
+            float speed = 0.32f + vk_dust_random(hash >> 7) * 0.24f;
+            float angle = fd->time * speed + phase;
+            float orbit = Q_clipf(light->radius *
+                                  (0.25f + vk_dust_random(hash >> 11) * 0.25f),
+                                  2.0f, 14.0f);
+            float outward = 6.0f + 16.0f *
+                (0.5f + 0.5f * sinf(angle * 0.73f + phase * 0.41f));
+            vec3_t origin;
+            VectorMA(light->origin, outward, light->normal, origin);
+            VectorMA(origin, sinf(angle) * orbit, tangent, origin);
+            VectorMA(origin, cosf(angle * 0.83f + phase) * orbit,
+                     bitangent, origin);
+
+            float distance = Distance(origin, fd->vieworg);
+            if (distance >= 512.0f)
+                continue;
+            const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, origin);
+            if (!leaf || leaf->visframe != vk.world.visframe ||
+                (leaf->contents[0] & (CONTENTS_SOLID | MASK_WATER)) ||
+                (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+                continue;
+
+            float far_fade = Q_clipf((512.0f - distance) / 192.0f,
+                                     0.0f, 1.0f);
+            float near_fade = Q_clipf((distance - 16.0f) / 32.0f,
+                                      0.0f, 1.0f);
+            float peak = max(light->color[0],
+                             max(light->color[1], light->color[2]));
+            float color[4];
+            for (int cidx = 0; cidx < 3; cidx++)
+                color[cidx] = Q_clipf(light->color[cidx] /
+                    max(peak, 0.001f) * (0.55f + 0.30f * strength),
+                    0.0f, 1.0f);
+            color[3] = (0.08f + 0.10f * strength) * far_fade * near_fade;
+            float scale = 1.1f + vk_dust_random(hash >> 15) * 0.8f +
+                distance * 0.002f;
+            vk_append_particle_quad(&vertex_count, origin, scale,
+                                    color, viewaxis);
+            mote_count++;
+        }
+    }
+    return vertex_count;
+}
+#else
+static uint32_t vk_append_emissive_motes(const refdef_t *fd,
+                                         const vec3_t viewaxis[3],
+                                         uint32_t vertex_count)
+{
+    (void)fd;
+    (void)viewaxis;
+    return vertex_count;
+}
+#endif
+
 static void vk_draw_particles(const refdef_t *fd)
 {
     if (!fd || !vk.sprite_pipeline || !vk.particle_texture.descriptor_set ||
@@ -12941,6 +13105,8 @@ static void vk_draw_particles(const refdef_t *fd)
 
     uint32_t particle_vertex_count = vertex_count;
     vertex_count = vk_append_dust_motes(fd, viewaxis, vertex_count);
+    uint32_t dust_vertex_count = vertex_count;
+    vertex_count = vk_append_emissive_motes(fd, viewaxis, vertex_count);
 
     if (!vertex_count) {
         vk.draw_scope = old_scope;
@@ -12963,12 +13129,21 @@ static void vk_draw_particles(const refdef_t *fd)
         c.trisDrawn += particle_vertex_count / 3;
         vk_count_batch3d();
     }
-    if (vertex_count > particle_vertex_count) {
+    if (dust_vertex_count > particle_vertex_count) {
         vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                          vk.sprite_pipeline);
-        vk.CmdDraw(cmd, vertex_count - particle_vertex_count, 1,
+        vk.CmdDraw(cmd, dust_vertex_count - particle_vertex_count, 1,
                    particle_vertex_count, 0);
-        c.trisDrawn += (vertex_count - particle_vertex_count) / 3;
+        c.trisDrawn += (dust_vertex_count - particle_vertex_count) / 3;
+        vk_count_batch3d();
+    }
+    if (vertex_count > dust_vertex_count) {
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                         vk.particle_add_pipeline ?
+                            vk.particle_add_pipeline : vk.sprite_pipeline);
+        vk.CmdDraw(cmd, vertex_count - dust_vertex_count, 1,
+                   dust_vertex_count, 0);
+        c.trisDrawn += (vertex_count - dust_vertex_count) / 3;
         vk_count_batch3d();
     }
     vk.draw_scope = old_scope;
@@ -15891,6 +16066,8 @@ bool VKR_Init(bool total)
     vk_rt_skylight = Cvar_Get("vk_rt_skylight", "0.6", CVAR_ARCHIVE);
     vk_rt_environment = Cvar_Get("vk_rt_environment", "0.65", CVAR_ARCHIVE);
     vk_rt_atmosphere = Cvar_Get("vk_rt_atmosphere", "0.45", CVAR_ARCHIVE);
+    vk_rt_underwater_absorption = Cvar_Get("vk_rt_underwater_absorption",
+                                           "0.65", CVAR_ARCHIVE);
     vk_rt_light_scattering = Cvar_Get("vk_rt_light_scattering", "0.5",
                                       CVAR_ARCHIVE);
     vk_rt_fog_turbulence = Cvar_Get("vk_rt_fog_turbulence", "0.4",
@@ -15898,6 +16075,8 @@ bool VKR_Init(bool total)
     vk_rt_dust = Cvar_Get("vk_rt_dust", "0.35", CVAR_ARCHIVE);
     vk_rt_dust_lighting = Cvar_Get("vk_rt_dust_lighting", "0.65",
                                    CVAR_ARCHIVE);
+    vk_rt_emissive_motes = Cvar_Get("vk_rt_emissive_motes", "0.45",
+                                    CVAR_ARCHIVE);
     vk_rt_afterglow = Cvar_Get("vk_rt_afterglow", "0.35", CVAR_ARCHIVE);
     vk_rt_sunlight = Cvar_Get("vk_rt_sunlight", "0.65", CVAR_ARCHIVE);
     vk_rt_emissive_halo = Cvar_Get("vk_rt_emissive_halo", "0.65",
