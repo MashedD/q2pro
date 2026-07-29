@@ -1001,6 +1001,7 @@ static cvar_t *vk_rt_caustics;
 static cvar_t *vk_rt_shadow_fringe;
 static cvar_t *vk_rt_light_ripples;
 static cvar_t *vk_rt_light_trails;
+static cvar_t *vk_rt_light_coronas;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -12655,6 +12656,7 @@ typedef struct {
 #define VK_MAX_DUST_LIGHTS 3
 #define VK_MAX_EMISSIVE_MOTE_SOURCES 8
 #define VK_MAX_EMISSIVE_MOTES 24
+#define VK_MAX_LIGHT_CORONAS 6
 
 static uint32_t vk_dust_hash(int x, int y, int z)
 {
@@ -12902,6 +12904,122 @@ motes_ready:
 typedef struct {
     uint32_t index;
     float score;
+    float distance;
+    float fade;
+} vk_corona_light_t;
+
+static uint32_t vk_select_corona_lights(const refdef_t *fd,
+                                        vk_corona_light_t *lights,
+                                        uint32_t limit)
+{
+    if (!fd || !fd->dlights || fd->num_dlights <= 0 || !limit ||
+        !vk.world.cache || !vk.world.cache->nodes)
+        return 0;
+
+    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                             fd->vieworg);
+    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
+    uint32_t count = 0;
+
+    for (int i = 0; i < fd->num_dlights; i++) {
+        const dlight_t *light = &fd->dlights[i];
+        float peak = max(light->color[0],
+                         max(light->color[1], light->color[2]));
+        if (light->intensity < 160.0f || peak <= 0.10f)
+            continue;
+
+        float distance = Distance(light->origin, fd->vieworg);
+        if (distance >= 1024.0f)
+            continue;
+        float far_fade = Q_clipf((1024.0f - distance) / 256.0f,
+                                 0.0f, 1.0f);
+        float near_fade = Q_clipf((distance - 8.0f) / 16.0f,
+                                  0.0f, 1.0f);
+        float fade = far_fade * near_fade;
+        if (fade <= 0.0f)
+            continue;
+
+        const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                            light->origin);
+        if (!leaf || leaf->visframe != vk.world.visframe ||
+            (leaf->contents[0] & CONTENTS_SOLID) ||
+            (leaf->contents[0] & MASK_WATER) != view_medium ||
+            (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+            continue;
+
+        float score = light->intensity * peak * fade;
+        uint32_t slot = min(count, limit - 1);
+        while (slot > 0 && score > lights[slot - 1].score) {
+            lights[slot] = lights[slot - 1];
+            slot--;
+        }
+        if (count >= limit && score <= lights[slot].score)
+            continue;
+        lights[slot].index = i;
+        lights[slot].score = score;
+        lights[slot].distance = distance;
+        lights[slot].fade = fade;
+        if (count < limit)
+            count++;
+    }
+    return count;
+}
+
+static uint32_t vk_append_light_coronas(const refdef_t *fd,
+                                        const vec3_t viewaxis[3],
+                                        uint32_t vertex_count)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_light_coronas ||
+        (fd->rdflags & RDF_NOWORLDMODEL) ||
+        !vk_dynamic_lights_enabled() || !vk.world.cache ||
+        !vk.world.cache->nodes)
+        return vertex_count;
+
+    float strength = Cvar_ClampValue(vk_rt_light_coronas, 0.0f, 1.0f);
+    uint32_t available = (VK_MAX_PARTICLE_VERTICES - vertex_count) / 6;
+    if (strength <= 0.0f || !available)
+        return vertex_count;
+
+    bool draw_core = available >= 2;
+    uint32_t limit = draw_core ? available / 2 : 1;
+    limit = min(limit, (uint32_t)VK_MAX_LIGHT_CORONAS);
+    vk_corona_light_t lights[VK_MAX_LIGHT_CORONAS] = { 0 };
+    uint32_t count = vk_select_corona_lights(fd, lights, limit);
+
+    for (uint32_t i = 0; i < count; i++) {
+        const dlight_t *light = &fd->dlights[lights[i].index];
+        float peak = max(light->color[0],
+                         max(light->color[1], light->color[2]));
+        float energy = 0.35f + 0.65f * Q_clipf(
+            (light->intensity - 160.0f) / 320.0f, 0.0f, 1.0f);
+        float reach = max(light->intensity - DLIGHT_CUTOFF, 1.0f);
+        float scale = Q_clipf(8.0f + reach * 0.06f, 10.0f, 32.0f) *
+            (0.80f + 0.35f * strength);
+        float color[4];
+        for (int channel = 0; channel < 3; channel++)
+            color[channel] = Q_clipf(light->color[channel] /
+                max(peak, 0.001f) * (0.70f + 0.30f * strength),
+                0.0f, 1.0f);
+        color[3] = min((0.08f + 0.14f * strength) * energy *
+                       lights[i].fade, 0.24f);
+        vk_append_particle_quad(&vertex_count, light->origin, scale,
+                                color, viewaxis);
+
+        if (draw_core) {
+            for (int channel = 0; channel < 3; channel++)
+                color[channel] += (1.0f - color[channel]) * 0.35f;
+            color[3] = min((0.10f + 0.16f * strength) * energy *
+                           lights[i].fade, 0.28f);
+            vk_append_particle_quad(&vertex_count, light->origin,
+                                    scale * 0.38f, color, viewaxis);
+        }
+    }
+    return vertex_count;
+}
+
+typedef struct {
+    uint32_t index;
+    float score;
 } vk_emissive_mote_source_t;
 
 static uint32_t vk_select_emissive_mote_sources(
@@ -13038,6 +13156,15 @@ static uint32_t vk_append_emissive_motes(const refdef_t *fd,
     return vertex_count;
 }
 #else
+static uint32_t vk_append_light_coronas(const refdef_t *fd,
+                                        const vec3_t viewaxis[3],
+                                        uint32_t vertex_count)
+{
+    (void)fd;
+    (void)viewaxis;
+    return vertex_count;
+}
+
 static uint32_t vk_append_emissive_motes(const refdef_t *fd,
                                          const vec3_t viewaxis[3],
                                          uint32_t vertex_count)
@@ -13107,6 +13234,7 @@ static void vk_draw_particles(const refdef_t *fd)
     uint32_t particle_vertex_count = vertex_count;
     vertex_count = vk_append_dust_motes(fd, viewaxis, vertex_count);
     uint32_t dust_vertex_count = vertex_count;
+    vertex_count = vk_append_light_coronas(fd, viewaxis, vertex_count);
     vertex_count = vk_append_emissive_motes(fd, viewaxis, vertex_count);
 
     if (!vertex_count) {
@@ -16096,6 +16224,7 @@ bool VKR_Init(bool total)
     vk_rt_shadow_fringe = Cvar_Get("vk_rt_shadow_fringe", "0.6", CVAR_ARCHIVE);
     vk_rt_light_ripples = Cvar_Get("vk_rt_light_ripples", "0.6", CVAR_ARCHIVE);
     vk_rt_light_trails = Cvar_Get("vk_rt_light_trails", "0.55", CVAR_ARCHIVE);
+    vk_rt_light_coronas = Cvar_Get("vk_rt_light_coronas", "0.6", CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);

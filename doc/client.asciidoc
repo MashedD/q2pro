@@ -1083,6 +1083,20 @@ vk_rt_light_trails::
     Changes apply immediately and remain independent of `vk_rt_afterglow`.
     Default value is 0.55; value 0 disables the effect.
 
+vk_rt_light_coronas::
+    Controls compact colored halos around strong live combat lights while
+    Vulkan ray tracing is active, clamped between 0 and 1. At most six nearby
+    visible lights with at least 160 intensity receive a soft outer corona and
+    a smaller pale core. Coronas are depth tested, respect the current PVS and
+    liquid medium, fade near the camera and between 768 and 1024 units, and do
+    not include cached afterglow sources. They reuse the existing radial
+    particle texture, fog, bloom output, vertex buffer, and additive auxiliary
+    batch. The effect adds at most 12 quads (24 triangles), no new draw when
+    that additive batch is already present and otherwise at most one draw. It
+    adds no shaders, textures, descriptors, ray queries, render passes,
+    allocations, or history tracking. Changes apply immediately. Default
+    value is 0.6; value 0 disables the effect.
+
 materials/rt_reflections.mat::
     Optional exact-name material overrides used by the Vulkan SSR and specular
     paths. Entries use a Q2RTX-style block with independent `reflect` and
