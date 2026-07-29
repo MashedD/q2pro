@@ -1100,6 +1100,22 @@ vk_rt_shockwaves::
     remain visible without bloom. Changes apply immediately. Default value is
     0.7; value 0 disables the effect.
 
+vk_rt_impact_marks::
+    Controls brief surface-aligned hot cores and expanding energy rings at
+    weapon impacts while Vulkan ray tracing is active, clamped between 0 and
+    1. Conventional gun and shotgun impacts use restrained amber marks;
+    blaster, hyperblaster, flechette, screen, shield, and laser-spark impacts
+    retain their event color. Marks use temporary effect-only client entities,
+    so the underlying OpenGL and Vulkan raster impact visuals remain
+    unchanged. They are depth tested, offset along the supplied surface normal
+    to avoid z-fighting, restricted to the current BSP visibility and liquid
+    medium, and rejected from the back side. The nearest 16 marks are rendered
+    with a procedural texture through one additive batch, capped at 32
+    triangles and one draw with no ray queries, fullscreen passes, or
+    per-frame allocations. Bright cores use existing bloom when enabled but
+    remain visible without it. Changes apply immediately. Default value is
+    0.75; value 0 disables the effect.
+
 vk_rt_light_trails::
     Controls short colored trails behind strong moving dynamic lights while
     Vulkan ray tracing is active, clamped between 0 and 1. Lights with at

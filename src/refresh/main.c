@@ -532,6 +532,9 @@ static void GL_ClassifyEntities(void)
         return;
 
     for (i = 0, ent = glr.fd.entities; i < glr.fd.num_entities; i++, ent++) {
+        if (ent->flags & RF_EFFECT_ONLY)
+            continue;
+
         if ((glr.fd.rdflags & RDF_UNDERWATER) &&
             !(ent->flags & (RF_WEAPONMODEL | RF_DEPTHHACK)) &&
             !(ent->model & BIT(31)) && gl_static.world.cache &&
