@@ -993,6 +993,7 @@ static cvar_t *vk_rt_emissive_halo;
 static cvar_t *vk_rt_emissive_flicker;
 static cvar_t *vk_rt_reflections;
 static cvar_t *vk_rt_reflection_glints;
+static cvar_t *vk_rt_reflection_dispersion;
 static cvar_t *vk_rt_specular;
 static cvar_t *vk_rt_liquids;
 static cvar_t *vk_rt_bounce;
@@ -16086,6 +16087,8 @@ bool VKR_Init(bool total)
     vk_rt_reflections = Cvar_Get("vk_rt_reflections", "0.35", CVAR_ARCHIVE);
     vk_rt_reflection_glints = Cvar_Get("vk_rt_reflection_glints", "0.55",
                                        CVAR_ARCHIVE);
+    vk_rt_reflection_dispersion = Cvar_Get("vk_rt_reflection_dispersion",
+                                           "0.6", CVAR_ARCHIVE);
     vk_rt_specular = Cvar_Get("vk_rt_specular", "0.45", CVAR_ARCHIVE);
     vk_rt_liquids = Cvar_Get("vk_rt_liquids", "0.65", CVAR_ARCHIVE);
     vk_rt_bounce = Cvar_Get("vk_rt_bounce", "0.65", CVAR_ARCHIVE);
@@ -17144,7 +17147,8 @@ static void vk_render_ssr(void)
             vk_rt_reflections ? Cvar_ClampValue(vk_rt_reflections, 0.0f, 1.0f) : 0.0f,
             vk_rt_debug && ((vk_rt_debug->integer >= 4 &&
                 vk_rt_debug->integer <= 7) ||
-                vk_rt_debug->integer == 18) ?
+                vk_rt_debug->integer == 18 ||
+                vk_rt_debug->integer == 20) ?
                 (float)vk_rt_debug->integer : 0.0f,
             1.0f / max((float)vk.scene_texture.width, 1.0f),
             1.0f / max((float)vk.scene_texture.height, 1.0f),
@@ -17185,6 +17189,11 @@ static void vk_render_ssr(void)
     vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                              vk.ssr_pipeline_layout, 0, 1,
                              &vk.ssr_resolve_descriptor_set, 0, NULL);
+    // The march shader needs inverse scene dimensions in control.zw, while
+    // the resolve derives its texel size from the input texture. Reuse the
+    // now-free control.z slot without expanding the push-constant layout.
+    push.control[2] = vk_rt_reflection_dispersion ?
+        Cvar_ClampValue(vk_rt_reflection_dispersion, 0.0f, 1.0f) : 0.6f;
     vk.CmdPushConstants(cmd, vk.ssr_pipeline_layout,
                         VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
     vk.CmdDraw(cmd, 6, 1, 0, 0);

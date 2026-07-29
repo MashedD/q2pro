@@ -822,6 +822,18 @@ vk_rt_reflection_glints::
     samples, passes, descriptors, or draws and requires `vk_rt_reflections`.
     Changes apply immediately. Default value is 0.55; value 0 disables it.
 
+vk_rt_reflection_dispersion::
+    Controls red-blue spectral separation around bright details in smooth
+    resolved screen-space reflections, clamped between 0 and 1. The effect
+    derives a radial color gradient from the four samples already used by the
+    bilateral resolve. Brightness, local detail, material smoothness,
+    reflection coverage, and screen-position masks reject broad or unstable
+    color shifts. Channel deviation and luminance change are capped to avoid
+    patches or overall scene-brightness changes. It adds no texture samples,
+    ray queries, passes, descriptors, push-constant storage, or draw calls and
+    requires `vk_rt_reflections`. Changes apply immediately. Default value is
+    0.6; value 0 restores the previous reflection resolve.
+
 vk_rt_emissive_halo::
     Controls stable colored edge halos on opaque static BSP `SURF_LIGHT`
     textures while Vulkan ray tracing is active, clamped between 0 and 1. The
@@ -1107,7 +1119,8 @@ vk_rt_debug::
     contribution amplified eight times. Value 18 keeps SSR active and shows
     only the final reflected-light glint contribution amplified eight times.
     Value 19 shows the emissive-lamp flicker mask at its current intensity and
-    is black on ineligible surfaces.
+    is black on ineligible surfaces. Value 20 keeps SSR active and shows the
+    absolute reflection-dispersion contribution amplified twelve times.
     Value 0 restores
     normal rendering. This
     diagnostic is applied immediately, does not rebake the map, and adds no
