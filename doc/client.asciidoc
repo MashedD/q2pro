@@ -1011,6 +1011,20 @@ vk_rt_caustics::
     contribution when ‘gl_bloom’ is enabled. Changes apply immediately.
     Default value is 0.65; value 0 disables the effect.
 
+vk_rt_lava_embers::
+    Controls warm additive embers rising from visible lava surfaces while
+    Vulkan ray tracing is active, clamped between 0 and 1. Deterministic
+    anchors are distributed across upward-facing lava polygons when the map
+    loads. Embers drift upward, fade smoothly over their lifetime and between
+    512 and 768 world units, and are rejected in solid or liquid space. At
+    full strength the effect draws at most 48 embers (96 triangles) through
+    the existing auxiliary particle batch, adding no ray queries, shaders,
+    textures, descriptors, render passes, or per-frame allocations. Bright
+    cores use the existing bloom output when ‘gl_bloom’ is enabled. The effect
+    remains independent of lava glowmaps, liquid shading, caustics, and
+    reflection materials. Changes apply immediately. Default value is 0.65;
+    value 0 disables the effect.
+
 vk_rt_sunlight::
     Controls warm directional light on exposed static BSP world surfaces while
     Vulkan ray tracing is active, clamped between 0 and 1. The fixed elevated

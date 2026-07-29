@@ -37,6 +37,8 @@ the Free Software Foundation; either version 2 of the License, or
 #define VK_MAX_DEBUG_TEXT_INDICES  (VK_MAX_DEBUG_TEXT_CHARS * 6)
 #define VK_MAX_PARTICLE_VERTICES   (MAX_PARTICLES * 6)
 #define VK_MAX_DUST_MOTES          48
+#define VK_MAX_LAVA_EMBER_ANCHORS  96
+#define VK_MAX_LAVA_EMBERS         48
 #define VK_MAX_LIGHTMAP_EXTENTS    513
 #define VK_MAX_FRAMES_IN_FLIGHT    3
 #define VK_MAX_CUBEMAPS            16
@@ -301,6 +303,13 @@ typedef struct {
 } vk_world_face_t;
 
 typedef struct {
+    mface_t *face;
+    vec3_t origin;
+    vec3_t normal;
+    uint32_t hash;
+} vk_lava_ember_anchor_t;
+
+typedef struct {
     int width;
     int height;
     int origin_x;
@@ -455,6 +464,8 @@ typedef struct {
     bool lightstyles_valid;
     bool has_sky;
     bool sky_visible;
+    vk_lava_ember_anchor_t lava_ember_anchors[VK_MAX_LAVA_EMBER_ANCHORS];
+    uint32_t lava_ember_anchor_count;
 } vk_world_t;
 
 typedef struct {
@@ -1002,6 +1013,7 @@ static cvar_t *vk_rt_shadow_fringe;
 static cvar_t *vk_rt_light_ripples;
 static cvar_t *vk_rt_light_trails;
 static cvar_t *vk_rt_light_coronas;
+static cvar_t *vk_rt_lava_embers;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -1079,6 +1091,7 @@ static bool vk_build_mesh_blas(vk_acceleration_structure_t *as,
                                const vk_buffer_t *indices,
                                uint32_t index_count);
 static bool vk_build_world_tlas(void);
+static float vk_lava_ember_random(uint32_t value);
 static bool vk_bake_world_rt_ao(const bsp_t *bsp,
                                 const vk_world_face_t *faces,
                                 uint32_t face_count,
@@ -1669,6 +1682,7 @@ static void vk_free_world(void)
     vk.world.batch_count = 0;
     vk.world.face_count = 0;
     vk.world.line_index_count = 0;
+    vk.world.lava_ember_anchor_count = 0;
     vk.world.size = 0.0f;
     vk.world.viewcluster = -1;
     vk.world.drawframe = 0;
@@ -12901,6 +12915,81 @@ motes_ready:
 }
 
 #if USE_VULKAN_RAYTRACING
+static uint32_t vk_append_lava_embers(const refdef_t *fd,
+                                      const vec3_t viewaxis[3],
+                                      uint32_t vertex_count)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_lava_embers ||
+        (fd->rdflags & (RDF_UNDERWATER | RDF_NOWORLDMODEL)) ||
+        !vk.world.cache || !vk.world.cache->nodes ||
+        !vk.world.lava_ember_anchor_count)
+        return vertex_count;
+
+    float strength = Cvar_ClampValue(vk_rt_lava_embers, 0.0f, 1.0f);
+    uint32_t available = min((VK_MAX_PARTICLE_VERTICES - vertex_count) / 6,
+                             (uint32_t)VK_MAX_LAVA_EMBERS);
+    if (strength <= 0.0f || !available)
+        return vertex_count;
+
+    uint32_t ember_count = 0;
+    for (uint32_t i = 0; i < vk.world.lava_ember_anchor_count &&
+         ember_count < available; i++) {
+        const vk_lava_ember_anchor_t *anchor =
+            &vk.world.lava_ember_anchors[i];
+        if (!anchor->face || anchor->face->drawframe != vk.world.drawframe)
+            continue;
+
+        float density = 0.30f + strength * 0.70f;
+        if (vk_lava_ember_random(anchor->hash ^ 0x51ed270bu) > density)
+            continue;
+
+        vec3_t delta;
+        VectorSubtract(anchor->origin, fd->vieworg, delta);
+        float distance = VectorLength(delta);
+        if (distance < 16.0f || distance >= 768.0f)
+            continue;
+
+        float phase = vk_lava_ember_random(anchor->hash ^ 0xa511e9b3u);
+        float speed = 0.32f +
+            vk_lava_ember_random(anchor->hash ^ 0x63d83595u) * 0.22f;
+        float age = fmodf(fd->time * speed + phase, 1.0f);
+        float angle = vk_lava_ember_random(anchor->hash ^ 0x9e3779b9u) *
+            (2.0f * M_PIf);
+        float curl = sinf(age * M_PIf) *
+            (2.0f + 5.0f * vk_lava_ember_random(anchor->hash >> 7));
+        vec3_t origin;
+        VectorMA(anchor->origin, 5.0f + age * 42.0f,
+                 anchor->normal, origin);
+        origin[0] += cosf(angle + fd->time * 0.65f) * curl;
+        origin[1] += sinf(angle + fd->time * 0.58f) * curl;
+
+        const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, origin);
+        if (!leaf || leaf->visframe != vk.world.visframe ||
+            (leaf->contents[0] & (CONTENTS_SOLID | MASK_WATER)) ||
+            (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+            continue;
+
+        float life = sinf(age * M_PIf);
+        life *= life;
+        float far_fade = Q_clipf((768.0f - distance) / 256.0f,
+                                 0.0f, 1.0f);
+        float near_fade = Q_clipf((distance - 16.0f) / 32.0f,
+                                  0.0f, 1.0f);
+        float variation = vk_lava_ember_random(anchor->hash ^ 0xc2b2ae35u);
+        float color[4] = {
+            1.0f,
+            0.24f + variation * 0.22f + (1.0f - age) * 0.12f,
+            0.025f + variation * 0.04f,
+            min((0.22f + strength * 0.32f) * life * far_fade * near_fade,
+                0.55f),
+        };
+        float scale = 3.5f + strength * 3.0f + variation * 1.5f + age;
+        vk_append_particle_quad(&vertex_count, origin, scale, color, viewaxis);
+        ember_count++;
+    }
+    return vertex_count;
+}
+
 typedef struct {
     uint32_t index;
     float score;
@@ -13156,6 +13245,15 @@ static uint32_t vk_append_emissive_motes(const refdef_t *fd,
     return vertex_count;
 }
 #else
+static uint32_t vk_append_lava_embers(const refdef_t *fd,
+                                      const vec3_t viewaxis[3],
+                                      uint32_t vertex_count)
+{
+    (void)fd;
+    (void)viewaxis;
+    return vertex_count;
+}
+
 static uint32_t vk_append_light_coronas(const refdef_t *fd,
                                         const vec3_t viewaxis[3],
                                         uint32_t vertex_count)
@@ -13236,6 +13334,7 @@ static void vk_draw_particles(const refdef_t *fd)
     uint32_t dust_vertex_count = vertex_count;
     vertex_count = vk_append_light_coronas(fd, viewaxis, vertex_count);
     vertex_count = vk_append_emissive_motes(fd, viewaxis, vertex_count);
+    vertex_count = vk_append_lava_embers(fd, viewaxis, vertex_count);
 
     if (!vertex_count) {
         vk.draw_scope = old_scope;
@@ -14512,6 +14611,138 @@ static float vk_polygon_area(const vk_vertex_t *vertices,
 }
 
 typedef struct {
+    const vk_world_face_t *draw;
+    vec3_t normal;
+    float area;
+    uint32_t index;
+    int anchor_count;
+} vk_lava_face_candidate_t;
+
+static int vk_lava_face_candidate_compare(const void *a, const void *b)
+{
+    const vk_lava_face_candidate_t *ca = a;
+    const vk_lava_face_candidate_t *cb = b;
+
+    if (ca->area < cb->area)
+        return 1;
+    if (ca->area > cb->area)
+        return -1;
+    if (ca->index < cb->index)
+        return -1;
+    return ca->index != cb->index;
+}
+
+static uint32_t vk_lava_ember_hash(uint32_t value)
+{
+    value ^= value >> 16;
+    value *= 0x7feb352du;
+    value ^= value >> 15;
+    value *= 0x846ca68bu;
+    return value ^ (value >> 16);
+}
+
+static float vk_lava_ember_random(uint32_t value)
+{
+    return (vk_lava_ember_hash(value) & 0x00ffffffu) / 16777216.0f;
+}
+
+static bool vk_add_lava_ember_anchor(const vk_lava_face_candidate_t *candidate,
+                                     const vk_vertex_t *vertices,
+                                     uint32_t sequence)
+{
+    if (!candidate || !candidate->draw || candidate->draw->edge_count < 3 ||
+        vk.world.lava_ember_anchor_count >= VK_MAX_LAVA_EMBER_ANCHORS)
+        return false;
+
+    const vk_world_face_t *draw = candidate->draw;
+    const vec_t *base = vertices[draw->first_vertex].position;
+    uint32_t hash = vk_lava_ember_hash(candidate->index * 0x9e3779b9u +
+                                       sequence * 0x85ebca6bu + 1u);
+    float target = vk_lava_ember_random(hash) * candidate->area;
+    uint32_t triangle = 1;
+
+    for (uint32_t i = 1; i + 1 < draw->edge_count; i++) {
+        vec3_t edge1, edge2, cross;
+        VectorSubtract(vertices[draw->first_vertex + i].position, base, edge1);
+        VectorSubtract(vertices[draw->first_vertex + i + 1].position, base, edge2);
+        CrossProduct(edge1, edge2, cross);
+        float area = VectorLength(cross) * 0.5f;
+        triangle = i;
+        if (target <= area)
+            break;
+        target -= area;
+    }
+
+    const vec_t *b = vertices[draw->first_vertex + triangle].position;
+    const vec_t *c = vertices[draw->first_vertex + triangle + 1].position;
+    float root = sqrtf(vk_lava_ember_random(hash ^ 0x68bc21ebu));
+    float split = vk_lava_ember_random(hash ^ 0x02e5be93u);
+    float weights[3] = { 1.0f - root, root * (1.0f - split), root * split };
+    vk_lava_ember_anchor_t *anchor =
+        &vk.world.lava_ember_anchors[vk.world.lava_ember_anchor_count++];
+    for (int axis = 0; axis < 3; axis++) {
+        anchor->origin[axis] = base[axis] * weights[0] + b[axis] * weights[1] +
+            c[axis] * weights[2] + candidate->normal[axis] * 4.0f;
+        anchor->normal[axis] = candidate->normal[axis];
+    }
+    anchor->face = draw->face;
+    anchor->hash = hash;
+    return true;
+}
+
+static void vk_build_lava_ember_anchors(const vk_world_face_t *faces,
+                                        uint32_t face_count,
+                                        const vk_vertex_t *vertices)
+{
+    vk.world.lava_ember_anchor_count = 0;
+    if (!faces || !face_count || !vertices)
+        return;
+
+    vk_lava_face_candidate_t *candidates =
+        Z_Malloc(sizeof(*candidates) * face_count);
+    uint32_t candidate_count = 0;
+
+    for (uint32_t i = 0; i < face_count; i++) {
+        const vk_world_face_t *draw = &faces[i];
+        if (!draw->face || vk_world_liquid_kind(draw->face) < 3)
+            continue;
+
+        vec3_t normal;
+        VectorCopy(draw->face->plane->normal, normal);
+        if (draw->face->drawflags & DSURF_PLANEBACK)
+            VectorNegate(normal, normal);
+        if (VectorNormalize(normal) <= 0.0f || normal[2] < 0.45f)
+            continue;
+
+        float area = vk_polygon_area(vertices, draw);
+        if (area < 16.0f)
+            continue;
+
+        vk_lava_face_candidate_t *candidate = &candidates[candidate_count++];
+        candidate->draw = draw;
+        VectorCopy(normal, candidate->normal);
+        candidate->area = area;
+        candidate->index = i;
+        candidate->anchor_count = Q_clip((int)ceilf(area / 2048.0f), 1, 8);
+    }
+
+    qsort(candidates, candidate_count, sizeof(*candidates),
+          vk_lava_face_candidate_compare);
+    for (int layer = 0; layer < 8 &&
+         vk.world.lava_ember_anchor_count < VK_MAX_LAVA_EMBER_ANCHORS; layer++) {
+        for (uint32_t i = 0; i < candidate_count &&
+             vk.world.lava_ember_anchor_count < VK_MAX_LAVA_EMBER_ANCHORS; i++) {
+            if (candidates[i].anchor_count > layer)
+                vk_add_lava_ember_anchor(&candidates[i], vertices, layer);
+        }
+    }
+
+    Com_DPrintf("Vulkan RT lava embers: %u anchors\n",
+                vk.world.lava_ember_anchor_count);
+    Z_Free(candidates);
+}
+
+typedef struct {
     char name[MAX_QPATH];
     vec3_t color;
 } vk_surface_light_color_t;
@@ -15337,6 +15568,10 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
 
     bool ok = vk_upload_mesh(&vk.world.mesh, vertices, v, indices, idx);
 #if USE_VULKAN_RAYTRACING
+    if (ok)
+        vk_build_lava_ember_anchors(draw_faces, draw_face_count, vertices);
+    else
+        vk.world.lava_ember_anchor_count = 0;
     if (ok && vk.raytracing_active) {
         uint32_t *rt_indices = Z_Malloc(sizeof(*rt_indices) * idx);
         uint32_t rt_index_count = 0;
@@ -16233,6 +16468,7 @@ bool VKR_Init(bool total)
     vk_rt_light_ripples = Cvar_Get("vk_rt_light_ripples", "0.6", CVAR_ARCHIVE);
     vk_rt_light_trails = Cvar_Get("vk_rt_light_trails", "0.55", CVAR_ARCHIVE);
     vk_rt_light_coronas = Cvar_Get("vk_rt_light_coronas", "0.6", CVAR_ARCHIVE);
+    vk_rt_lava_embers = Cvar_Get("vk_rt_lava_embers", "0.65", CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
