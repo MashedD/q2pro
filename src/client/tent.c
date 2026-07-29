@@ -532,6 +532,7 @@ static void CL_AddExplosions(void)
             ent->alpha = 1.0f;
             break;
         case ex_poly:
+            ent->flags |= RF_EXPLOSION;
             if (f >= ex->frames - 1) {
                 ex->type = ex_free;
                 break;

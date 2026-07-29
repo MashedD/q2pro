@@ -39,6 +39,7 @@ the Free Software Foundation; either version 2 of the License, or
 #define VK_MAX_DUST_MOTES          48
 #define VK_MAX_LAVA_EMBER_ANCHORS  96
 #define VK_MAX_LAVA_EMBERS         48
+#define VK_MAX_SHOCKWAVES          8
 #define VK_MAX_LIGHTMAP_EXTENTS    513
 #define VK_MAX_FRAMES_IN_FLIGHT    3
 #define VK_MAX_CUBEMAPS            16
@@ -877,6 +878,7 @@ typedef struct {
     vk_texture_t ssr_resolve_texture;
     vk_texture_t particle_texture;
     vk_texture_t beam_texture;
+    vk_texture_t shockwave_texture;
     vk_mesh_t skybox;
     vk_mesh_t sprite_quad;
     vk_buffer_t sprite_quad_line_indices;
@@ -1014,6 +1016,7 @@ static cvar_t *vk_rt_light_ripples;
 static cvar_t *vk_rt_light_trails;
 static cvar_t *vk_rt_light_coronas;
 static cvar_t *vk_rt_lava_embers;
+static cvar_t *vk_rt_shockwaves;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -1074,6 +1077,7 @@ static uint64_t vk_time_usec(void);
 static void vk_destroy_pixel_lightmap_staging(void);
 static bool vk_create_particle_texture(void);
 static bool vk_create_beam_texture(void);
+static bool vk_create_shockwave_texture(void);
 static uint32_t vk_frames_in_flight_value(void);
 static uint32_t vk_bloom_downsample_value(void);
 static void vk_entity_axis(const entity_t *ent, vec3_t axis[3]);
@@ -9613,6 +9617,35 @@ static bool vk_create_beam_texture(void)
     return true;
 }
 
+static bool vk_create_shockwave_texture(void)
+{
+    enum { SIZE = 128 };
+    uint32_t *pixels = Z_Malloc(sizeof(*pixels) * SIZE * SIZE);
+
+    for (int y = 0; y < SIZE; y++) {
+        for (int x = 0; x < SIZE; x++) {
+            float fx = (x + 0.5f - SIZE * 0.5f) / (SIZE * 0.5f);
+            float fy = (y + 0.5f - SIZE * 0.5f) / (SIZE * 0.5f);
+            float radius = sqrtf(fx * fx + fy * fy);
+            float delta = (radius - 0.68f) / 0.075f;
+            float band = expf(-0.5f * delta * delta);
+            float edge = Q_clipf((0.98f - radius) / 0.08f, 0.0f, 1.0f);
+            byte alpha = 255.0f * Q_clipf(band * edge * 0.90f, 0.0f, 1.0f);
+            pixels[y * SIZE + x] = MakeColor(255, 255, 255, alpha);
+        }
+    }
+
+    bool uploaded = vk_upload_texture_data(&vk.shockwave_texture,
+                                            SIZE, SIZE, pixels, false);
+    Z_Free(pixels);
+    if (!uploaded)
+        return false;
+
+    vk_update_texture_descriptor_with_sampler(&vk.shockwave_texture,
+                                               vk.postprocess_sampler);
+    return true;
+}
+
 static void vk_partshape_changed(cvar_t *self)
 {
     if (vk.device && !vk_create_particle_texture()) {
@@ -12819,6 +12852,37 @@ static void vk_append_particle_quad(uint32_t *vertex_count,
     }
 }
 
+static void vk_append_effect_quad(uint32_t *vertex_count,
+                                  const vec3_t origin, float radius,
+                                  const float color[4],
+                                  const vec3_t viewaxis[3])
+{
+    vec3_t left, up, corners[4];
+    VectorScale(viewaxis[1], radius, left);
+    VectorScale(viewaxis[2], radius, up);
+    VectorAdd3(origin, left, up, corners[0]);
+    VectorSubtract(origin, left, corners[1]);
+    VectorAdd(corners[1], up, corners[1]);
+    VectorAdd(origin, left, corners[2]);
+    VectorSubtract(corners[2], up, corners[2]);
+    VectorSubtract(origin, left, corners[3]);
+    VectorSubtract(corners[3], up, corners[3]);
+
+    static const int order[6] = { 0, 1, 2, 2, 1, 3 };
+    static const float uv[4][2] = {
+        { 0.0f, 0.0f }, { 1.0f, 0.0f },
+        { 0.0f, 1.0f }, { 1.0f, 1.0f },
+    };
+    for (int i = 0; i < 6; i++) {
+        int index = order[i];
+        vk_vertex_t *vertex = &vk.particle_batch[(*vertex_count)++];
+        VectorCopy(corners[index], vertex->position);
+        vertex->uv[0] = uv[index][0];
+        vertex->uv[1] = uv[index][1];
+        Vector4Copy(color, vertex->color);
+    }
+}
+
 static uint32_t vk_append_dust_motes(const refdef_t *fd,
                                      const vec3_t viewaxis[3],
                                      uint32_t vertex_count)
@@ -12986,6 +13050,122 @@ static uint32_t vk_append_lava_embers(const refdef_t *fd,
         float scale = 3.5f + strength * 3.0f + variation * 1.5f + age;
         vk_append_particle_quad(&vertex_count, origin, scale, color, viewaxis);
         ember_count++;
+    }
+    return vertex_count;
+}
+
+typedef struct {
+    const entity_t *entity;
+    float phase;
+    float distance;
+} vk_shockwave_candidate_t;
+
+static void vk_shockwave_color(const refdef_t *fd, const vec3_t origin,
+                               float color[4])
+{
+    const dlight_t *best = NULL;
+    float best_distance = 96.0f;
+
+    for (int i = 0; fd->dlights && i < fd->num_dlights; i++) {
+        const dlight_t *light = &fd->dlights[i];
+        float distance = Distance(origin, light->origin);
+        float peak = max(light->color[0],
+                         max(light->color[1], light->color[2]));
+        if (distance < best_distance && peak > 0.05f) {
+            best = light;
+            best_distance = distance;
+        }
+    }
+
+    if (!best) {
+        Vector4Set(color, 1.0f, 0.35f, 0.08f, 1.0f);
+        return;
+    }
+
+    float peak = max(best->color[0], max(best->color[1], best->color[2]));
+    for (int i = 0; i < 3; i++)
+        color[i] = Q_clipf(best->color[i] / peak * 0.85f + 0.15f,
+                           0.0f, 1.0f);
+    color[3] = 1.0f;
+}
+
+static uint32_t vk_append_shockwaves(const refdef_t *fd,
+                                     const vec3_t viewaxis[3],
+                                     uint32_t vertex_count)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_shockwaves ||
+        !vk.shockwave_texture.descriptor_set || !fd->entities ||
+        fd->num_entities <= 0 || (fd->rdflags & RDF_NOWORLDMODEL) ||
+        !vk.world.cache || !vk.world.cache->nodes)
+        return vertex_count;
+
+    float strength = Cvar_ClampValue(vk_rt_shockwaves, 0.0f, 1.0f);
+    uint32_t available = min((VK_MAX_PARTICLE_VERTICES - vertex_count) / 6,
+                             (uint32_t)VK_MAX_SHOCKWAVES);
+    if (strength <= 0.0f || !available)
+        return vertex_count;
+
+    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                             fd->vieworg);
+    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
+    vk_shockwave_candidate_t candidates[VK_MAX_SHOCKWAVES] = { 0 };
+    uint32_t count = 0;
+
+    for (int i = 0; i < fd->num_entities; i++) {
+        const entity_t *entity = &fd->entities[i];
+        if (!(entity->flags & RF_EXPLOSION))
+            continue;
+
+        float frame = entity->oldframe % 15u +
+            (1.0f - Q_clipf(entity->backlerp, 0.0f, 1.0f));
+        float phase = frame * 0.25f;
+        if (phase < 0.0f || phase >= 1.0f)
+            continue;
+
+        float distance = Distance(entity->origin, fd->vieworg);
+        if (distance < 8.0f || distance >= 1024.0f)
+            continue;
+
+        const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                            entity->origin);
+        if (!leaf || leaf->visframe != vk.world.visframe ||
+            (leaf->contents[0] & CONTENTS_SOLID) ||
+            (leaf->contents[0] & MASK_WATER) != view_medium ||
+            (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+            continue;
+
+        uint32_t slot = min(count, available - 1);
+        if (count >= available && distance >= candidates[slot].distance)
+            continue;
+        while (slot > 0 && distance < candidates[slot - 1].distance) {
+            candidates[slot] = candidates[slot - 1];
+            slot--;
+        }
+        candidates[slot].entity = entity;
+        candidates[slot].phase = phase;
+        candidates[slot].distance = distance;
+        if (count < available)
+            count++;
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        const vk_shockwave_candidate_t *candidate = &candidates[i];
+        float birth = Q_clipf(candidate->phase / 0.12f, 0.0f, 1.0f);
+        birth = birth * birth * (3.0f - 2.0f * birth);
+        float fade = 1.0f - candidate->phase;
+        fade *= fade;
+        float far_fade = Q_clipf((1024.0f - candidate->distance) / 256.0f,
+                                 0.0f, 1.0f);
+        float near_fade = Q_clipf((candidate->distance - 8.0f) / 24.0f,
+                                  0.0f, 1.0f);
+        float color[4];
+        vk_shockwave_color(fd, candidate->entity->origin, color);
+        color[3] = min((0.28f + strength * 0.30f) * birth * fade *
+                       far_fade * near_fade, 0.58f);
+        float radius = (16.0f + candidate->phase * 96.0f) *
+            (0.90f + strength * 0.15f);
+        vk_append_effect_quad(&vertex_count, candidate->entity->origin,
+                              radius, color, viewaxis);
     }
     return vertex_count;
 }
@@ -13245,6 +13425,15 @@ static uint32_t vk_append_emissive_motes(const refdef_t *fd,
     return vertex_count;
 }
 #else
+static uint32_t vk_append_shockwaves(const refdef_t *fd,
+                                     const vec3_t viewaxis[3],
+                                     uint32_t vertex_count)
+{
+    (void)fd;
+    (void)viewaxis;
+    return vertex_count;
+}
+
 static uint32_t vk_append_lava_embers(const refdef_t *fd,
                                       const vec3_t viewaxis[3],
                                       uint32_t vertex_count)
@@ -13335,6 +13524,8 @@ static void vk_draw_particles(const refdef_t *fd)
     vertex_count = vk_append_light_coronas(fd, viewaxis, vertex_count);
     vertex_count = vk_append_emissive_motes(fd, viewaxis, vertex_count);
     vertex_count = vk_append_lava_embers(fd, viewaxis, vertex_count);
+    uint32_t shockwave_first_vertex = vertex_count;
+    vertex_count = vk_append_shockwaves(fd, viewaxis, vertex_count);
 
     if (!vertex_count) {
         vk.draw_scope = old_scope;
@@ -13365,13 +13556,23 @@ static void vk_draw_particles(const refdef_t *fd)
         c.trisDrawn += (dust_vertex_count - particle_vertex_count) / 3;
         vk_count_batch3d();
     }
-    if (vertex_count > dust_vertex_count) {
+    if (shockwave_first_vertex > dust_vertex_count) {
         vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                          vk.particle_add_pipeline ?
                             vk.particle_add_pipeline : vk.sprite_pipeline);
-        vk.CmdDraw(cmd, vertex_count - dust_vertex_count, 1,
+        vk.CmdDraw(cmd, shockwave_first_vertex - dust_vertex_count, 1,
                    dust_vertex_count, 0);
-        c.trisDrawn += (vertex_count - dust_vertex_count) / 3;
+        c.trisDrawn += (shockwave_first_vertex - dust_vertex_count) / 3;
+        vk_count_batch3d();
+    }
+    if (vertex_count > shockwave_first_vertex) {
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                         vk.particle_add_pipeline ?
+                            vk.particle_add_pipeline : vk.sprite_pipeline);
+        vk_bind_texture_descriptor(cmd, vk.shockwave_texture.descriptor_set);
+        vk.CmdDraw(cmd, vertex_count - shockwave_first_vertex, 1,
+                   shockwave_first_vertex, 0);
+        c.trisDrawn += (vertex_count - shockwave_first_vertex) / 3;
         vk_count_batch3d();
     }
     vk.draw_scope = old_scope;
@@ -16469,6 +16670,7 @@ bool VKR_Init(bool total)
     vk_rt_light_trails = Cvar_Get("vk_rt_light_trails", "0.55", CVAR_ARCHIVE);
     vk_rt_light_coronas = Cvar_Get("vk_rt_light_coronas", "0.6", CVAR_ARCHIVE);
     vk_rt_lava_embers = Cvar_Get("vk_rt_lava_embers", "0.65", CVAR_ARCHIVE);
+    vk_rt_shockwaves = Cvar_Get("vk_rt_shockwaves", "0.7", CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
@@ -16553,6 +16755,9 @@ bool VKR_Init(bool total)
         Com_WPrintf("Couldn't create Vulkan particle texture: %s\n", Com_GetLastError());
     if (!vk_create_beam_texture())
         Com_WPrintf("Couldn't create Vulkan beam texture: %s\n", Com_GetLastError());
+    if (!vk_create_shockwave_texture())
+        Com_WPrintf("Couldn't create Vulkan shockwave texture: %s\n",
+                    Com_GetLastError());
 
     r_registration_sequence = 1;
     IMG_Init();
@@ -16642,6 +16847,7 @@ void VKR_Shutdown(bool total)
     vk_destroy_texture_resource(&vk.raw_texture);
     vk_destroy_texture_resource(&vk.particle_texture);
     vk_destroy_texture_resource(&vk.beam_texture);
+    vk_destroy_texture_resource(&vk.shockwave_texture);
 
     vk_destroy_swapchain();
 

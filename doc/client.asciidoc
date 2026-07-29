@@ -1084,6 +1084,22 @@ vk_rt_light_ripples::
     4-bit caustic, fringe, and ripple controls. Changes apply immediately.
     Default value is 0.6; value 0 disables the effect.
 
+vk_rt_shockwaves::
+    Controls expanding colored energy rings around polygon explosions while
+    Vulkan ray tracing is active, clamped between 0 and 1. Rocket, grenade,
+    BFG, and custom-model explosions are tagged by the client rather than
+    inferred from dynamic-light intensity. During the opening animation
+    frames, one camera-facing ring expands from 16 to roughly 112 world units
+    and fades smoothly. Its color follows the colocated explosion light, with
+    warm orange used as a fallback. Rings are depth tested, restricted to the
+    current BSP visibility and liquid medium, and capped to the nearest eight
+    explosions. A procedural ring texture and the existing additive particle
+    pipeline limit the effect to 16 triangles and at most one additional draw,
+    with no ray queries, new shaders, render passes, or per-frame allocations.
+    Bright rings use the existing bloom output when ‘gl_bloom’ is enabled but
+    remain visible without bloom. Changes apply immediately. Default value is
+    0.7; value 0 disables the effect.
+
 vk_rt_light_trails::
     Controls short colored trails behind strong moving dynamic lights while
     Vulkan ray tracing is active, clamped between 0 and 1. Lights with at
