@@ -134,3 +134,881 @@ textures/tlava1_3:
 textures/slime:
 	reflect 0.0
 	roughness 1.0
+
++// Smooth windows and glass
+textures/e1u1/wndow1_2:
+	reflect 0.67
+	roughness 0.20
+
+// Floors and stairs
+textures/e1u1/floor3_1:
+	reflect 0.47
+	roughness 0.67
+
+textures/e1u1/florr1_5:
+	reflect 0.47
+	roughness 0.67
+
+textures/e1u1/stairs1_1:
+	reflect 0.47
+	roughness 0.67
+
+textures/e1u3/stairs1_3:
+	reflect 0.47
+	roughness 0.67
+
+textures/e1u3/stflr1_5:
+	reflect 0.47
+	roughness 0.67
+
+textures/e2u1/florr1_5:
+	reflect 0.47
+	roughness 0.67
+
+textures/e2u1/florr2_7:
+	reflect 0.47
+	roughness 0.67
+
+textures/e2u1/flr1_1:
+	reflect 0.47
+	roughness 0.67
+
+textures/e2u3/florr1_5:
+	reflect 0.47
+	roughness 0.67
+
+textures/e2u3/florr2_4:
+	reflect 0.47
+	roughness 0.67
+
+textures/e3u1/floor2_5:
+	reflect 0.47
+	roughness 0.67
+
+textures/e3u1/florr1_8:
+	reflect 0.47
+	roughness 0.67
+
+textures/e3u1/florr2_5:
+	reflect 0.47
+	roughness 0.67
+
+textures/e3u1/florr2_6:
+	reflect 0.47
+	roughness 0.67
+
+textures/e3u2/stflr1_3:
+	reflect 0.47
+	roughness 0.67
+
+textures/e3u2/stflr1_4:
+	reflect 0.47
+	roughness 0.67
+
+// Grates and steel plates
+textures/e1u1/ggrat12_2:
+	reflect 0.33
+	roughness 0.60
+
+textures/e1u1/grate1_5:
+	reflect 0.33
+	roughness 0.60
+
+textures/e1u1/grate2_7:
+	reflect 0.33
+	roughness 0.60
+
+textures/e1u2/grate1_1:
+	reflect 0.33
+	roughness 0.60
+
+textures/e1u2/plate1_5:
+	reflect 0.33
+	roughness 0.60
+
+textures/e1u2/troof4_4:
+	reflect 0.33
+	roughness 0.60
+
+textures/e2u3/grate1_1:
+	reflect 0.33
+	roughness 0.60
+
+textures/e2u3/grate1_4:
+	reflect 0.33
+	roughness 0.60
+
+textures/e2u3/wplat1_2:
+	reflect 0.33
+	roughness 0.60
+
+textures/e3u2/troof4_2:
+	reflect 0.33
+	roughness 0.60
+
+textures/e3u2/troof4_5:
+	reflect 0.33
+	roughness 0.60
+
+// Exposed metal
+textures/e1u2/metal1_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e1u2/metal1_3:
+	reflect 0.40
+	roughness 0.53
+
+textures/e1u2/metal1_4:
+	reflect 0.40
+	roughness 0.53
+
+textures/e1u2/metal1_5:
+	reflect 0.40
+	roughness 0.53
+
+textures/e1u2/metal1_7:
+	reflect 0.40
+	roughness 0.53
+
+textures/e1u2/metal2_3:
+	reflect 0.40
+	roughness 0.53
+
+textures/e1u2/metal3_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e1u2/metal3_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e1u2/metal4_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e1u2/metal4_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e1u2/metal5_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e1u2/metal5_3:
+	reflect 0.40
+	roughness 0.53
+
+textures/e1u2/metal5_4:
+	reflect 0.40
+	roughness 0.53
+
+textures/e1u2/metal6_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e1u2/metal9_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e1u2/metals_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e2u1/fmet3_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e2u1/wmetl6_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e2u3/bmetl2_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e2u3/metal14_3:
+	reflect 0.40
+	roughness 0.53
+
+textures/e2u3/metal15_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e2u3/metal15_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e2u3/metal17_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e2u3/metal1_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e2u3/metal1_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e2u3/metl12_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e2u3/ometal2_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e2u3/rmetal6_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u1/palmet10_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u1/palmet11_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u1/palmet13_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u1/palmet14_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u1/palmet14_3:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u1/palmet2_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u1/palmet5_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u1/palmet5_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u2/fmet1_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u2/fmet2_3:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u2/fmet3_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u2/fmet3_5:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u2/tcmet5_4:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u3/metal13_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u3/metal14_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u3/metal15_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u3/metal16_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u3/metal17_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u3/metal17_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u3/metal19_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u3/metal20_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u3/metal20_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u3/metal21_1:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u3/metal21_2:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u3/metal23_3:
+	reflect 0.40
+	roughness 0.53
+
+textures/e3u3/metal2_1:
+	reflect 0.40
+	roughness 0.53
+
+// Lead and dull metal
+textures/e2u3/lead1_1:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/lead1_2:
+	reflect 0.27
+	roughness 0.73
+
+// Painted machinery and panels
+textures/e1u1/btactmach0:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u1/btactmach1:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u1/btactmach2:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u1/btactmach3:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u1/caution1_1:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u1/color1_1:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u1/color1_2:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u1/color1_3:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u1/doorbot:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u1/dr01_2:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u1/yellow1_6:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/angle1_1:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/angle1_2:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/basic1_7:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/subdr2_1:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/subdr2_2:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/subdr3_1:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/subdr3_2:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/support1_1:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/support1_10:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/support1_14:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/support1_2:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/support1_6:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/support1_7:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/wslt1_5:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/wslt1_6:
+	reflect 0.27
+	roughness 0.73
+
+textures/e1u2/yellow1_4:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/bossdr2:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/btactmach0:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/btactmach1:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/btactmach2:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/btactmach3:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/green0_1:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/green0_2:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/green2_1:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/green2_2:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/green3_1:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/green3_2:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/green3_3:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/green3_4:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/grnx2_1:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/grnx2_2:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/grnx2_3:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/grnx2_5:
+	reflect 0.27
+	roughness 0.73
+
+textures/e2u3/mach1_2:
+	reflect 0.27
+	roughness 0.73
+
+textures/e3u2/yellow1_4:
+	reflect 0.27
+	roughness 0.73
+
+textures/e3u2/yellow1_6:
+	reflect 0.27
+	roughness 0.73
+
+textures/e3u3/yellow1_4:
+	reflect 0.27
+	roughness 0.73
+
+textures/e3u3/yellow1_6:
+	reflect 0.27
+	roughness 0.73
+
+// Emissive fixtures
+textures/e1u2/light1_4:
+	reflect 0.20
+	roughness 0.60
+
+textures/e1u2/light2_1:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u1/baselt_b:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/blum10_2:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/blum11_1:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/blum12_1:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/blum13_1:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/blum14_1:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/blum15_1:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/blum15_2:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/blume4_1:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/blume4_2:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/blume6_1:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/blume7_1:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/blume7_2:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/blume9_2:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/wstlt1_1:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/wstlt1_5:
+	reflect 0.20
+	roughness 0.60
+
+textures/e2u3/wstlt1_8:
+	reflect 0.20
+	roughness 0.60
+
+// Rough structural surfaces
+textures/e1u1/ceil1_4:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u1/flat1_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u1/flat1_2:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/ceil1_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/ceil1_4:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/ceil1_5:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/ceil1_7:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/wall1_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/wall1_2:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/mine02_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/mine02_2:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/mine03_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/mine03_2:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/mine04_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/mine05_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/mine05_2:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/mine06_2:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/mine06_3:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/mine07_2:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/mine07_3:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/mine08_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/mine10_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/mine10_2:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/mine15_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/pilr01_3:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u1/pilr03_3:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u3/ceil1_13:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u3/ceil1_14:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u3/ceil1_4:
+	reflect 0.13
+	roughness 0.87
+
+textures/e3u1/drag2_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e3u1/drag2_3:
+	reflect 0.13
+	roughness 0.87
+
+textures/e3u1/drag3_3:
+	reflect 0.13
+	roughness 0.87
+
+textures/e3u1/drag3_4:
+	reflect 0.13
+	roughness 0.87
+
+textures/e3u1/drag4_2:
+	reflect 0.13
+	roughness 0.87
+
+textures/e3u1/drag4_3:
+	reflect 0.13
+	roughness 0.87
+
+textures/e3u2/ceil1_28:
+	reflect 0.13
+	roughness 0.87
+
+// Crates and debris
+textures/e1u1/box1_3:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/box1_5:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/box1_6:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/box3_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/box3_2:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/box3_3:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/box3_4:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/box3_5:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/box3_6:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/box4_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/box4_3:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/crate1_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/crate1_3:
+	reflect 0.13
+	roughness 0.87
+
+textures/e1u2/crate2_6:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u3/dump1_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u3/dump1_2:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u3/dump3_1:
+	reflect 0.13
+	roughness 0.87
+
+textures/e2u3/dump3_2:
+	reflect 0.13
+	roughness 0.87
+
+textures/e3u2/bed3_3:
+	reflect 0.13
+	roughness 0.87
+
+textures/e3u2/bed4_1:
+	reflect 0.13
+	roughness 0.87
+
+// Natural surfaces
+textures/e2u1/mud1_1:
+	reflect 0.07
+	roughness 0.93
+
+textures/e2u1/rocks17_2:
+	reflect 0.07
+	roughness 0.93
+
+textures/e2u1/rocks19_1:
+	reflect 0.07
+	roughness 0.93
+
+textures/e2u3/grass1_2:
+	reflect 0.07
+	roughness 0.93
+
+textures/e2u3/grass1_7:
+	reflect 0.07
+	roughness 0.93
+
+textures/e2u3/rocks19_1:
+	reflect 0.07
+	roughness 0.93
+
+textures/e3u1/grass1_7:
+	reflect 0.07
+	roughness 0.93
+
+textures/e3u1/rock0_1:
+	reflect 0.07
+	roughness 0.93
+
+textures/e3u1/rocks16_2:
+	reflect 0.07
+	roughness 0.93
