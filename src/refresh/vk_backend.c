@@ -16110,6 +16110,14 @@ bool VKR_Init(bool total)
         return true;
     }
 
+    // Reject non-Vulkan window backends before they create native resources.
+    // In particular, the GLX-only X11 backend must not be initialized while
+    // probing video drivers for Vulkan before falling back to SDL.
+    if (!vid->get_vk_instance_extensions || !vid->create_vk_surface) {
+        Com_SetLastError("Video driver doesn't support Vulkan");
+        return false;
+    }
+
     Com_Printf("------- VKR_Init -------\n");
     Com_Printf("Using video driver: %s\n", vid->name);
 
