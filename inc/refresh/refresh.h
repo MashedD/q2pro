@@ -37,6 +37,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define RF_EXPLOSION        BIT_ULL(37)
 #define RF_EFFECT_ONLY      BIT_ULL(38)
 #define RF_RT_IMPACT        BIT_ULL(39)
+#define RF_RT_SPLASH_RIPPLE BIT_ULL(40)
 
 #define RF_SHELL_MASK       (RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE | \
                              RF_SHELL_DOUBLE | RF_SHELL_HALF_DAM | RF_SHELL_LITE_GREEN)

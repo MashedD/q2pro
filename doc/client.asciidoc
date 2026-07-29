@@ -1116,6 +1116,22 @@ vk_rt_impact_marks::
     remain visible without it. Changes apply immediately. Default value is
     0.75; value 0 disables the effect.
 
+vk_rt_splash_ripples::
+    Controls two staggered expanding rings on liquid surfaces struck by
+    weapon splash events while Vulkan ray tracing is active, clamped between
+    0 and 1. Blue water uses pale cyan, brown water a muted warm neutral,
+    slime acid green, and lava orange-gold. Spark, blood, electric, and
+    unknown splash categories remain unchanged. Ripple size responds modestly
+    to the event's splash count. Rings remain visible for roughly 0.9 seconds,
+    face the viewer from either side of the liquid boundary, and are restricted
+    to the current BSP visibility, area, distance, and liquid medium. The
+    nearest 12 events reuse the procedural shockwave texture and shared
+    additive ring batch, capped at 48 triangles with no new texture, shader,
+    ray query, render pass, draw, or per-frame allocation. This effect is
+    independent of liquid caustics and does not enable slime or lava caustics.
+    Changes apply immediately. Default value is 0.75; value 0 disables the
+    effect.
+
 vk_rt_light_trails::
     Controls short colored trails behind strong moving dynamic lights while
     Vulkan ray tracing is active, clamped between 0 and 1. Lights with at

@@ -337,7 +337,7 @@ typedef struct {
         ex_mflash,
         ex_poly,
         ex_light,
-        ex_rt_impact
+        ex_rt_effect
     } type;
 
     entity_t    ent;
@@ -519,7 +519,7 @@ static void CL_AddExplosions(void)
         switch (ex->type) {
         case ex_misc:
         case ex_light:
-        case ex_rt_impact:
+        case ex_rt_effect:
             if (f >= ex->frames - 1) {
                 ex->type = ex_free;
                 break;
@@ -572,7 +572,7 @@ static void CL_AddExplosions(void)
                        ex->lightcolor[0], ex->lightcolor[1], ex->lightcolor[2]);
 
         if (ex->type != ex_light) {
-            if (ex->type != ex_rt_impact)
+            if (ex->type != ex_rt_effect)
                 VectorCopy(ent->origin, ent->oldorigin);
 
             if (f < 0)
@@ -1275,8 +1275,9 @@ static void dirtoangles(const vec3_t dir, vec3_t angles)
         angles[1] = 0;
 }
 
-static explosion_t *CL_RTImpact(const vec3_t origin, const vec3_t normal,
-                                uint32_t rgba, float scale)
+static explosion_t *CL_RTEffect(const vec3_t origin, const vec3_t normal,
+                                uint64_t effect_flag, uint32_t rgba,
+                                float scale, int frames)
 {
     explosion_t *ex = CL_AllocExplosion();
     vec3_t direction;
@@ -1286,15 +1287,49 @@ static explosion_t *CL_RTImpact(const vec3_t origin, const vec3_t normal,
     if (VectorNormalize(direction) <= 0.0f)
         VectorSet(direction, 0.0f, 0.0f, 1.0f);
     VectorCopy(direction, ex->ent.oldorigin);
-    ex->type = ex_rt_impact;
-    ex->ent.flags = RF_EFFECT_ONLY | RF_RT_IMPACT | RF_TRANSLUCENT;
+    ex->type = ex_rt_effect;
+    ex->ent.flags = RF_EFFECT_ONLY | effect_flag | RF_TRANSLUCENT;
     ex->ent.rgba.u32 = rgba;
     ex->ent.skinnum = -1;
     ex->ent.scale = scale;
     ex->ent.alpha = 1.0f;
     ex->start = cl.servertime - CL_FRAMETIME;
-    ex->frames = 5;
+    ex->frames = frames;
     return ex;
+}
+
+static explosion_t *CL_RTImpact(const vec3_t origin, const vec3_t normal,
+                                uint32_t rgba, float scale)
+{
+    return CL_RTEffect(origin, normal, RF_RT_IMPACT, rgba, scale, 5);
+}
+
+static void CL_RTSplashRipple(const vec3_t origin, const vec3_t normal,
+                              int splash, int count)
+{
+    uint32_t rgba;
+
+    switch (splash) {
+    case SPLASH_BLUE_WATER:
+        rgba = MakeColor(112, 196, 238, 255);
+        break;
+    case SPLASH_BROWN_WATER:
+        rgba = MakeColor(194, 156, 106, 255);
+        break;
+    case SPLASH_SLIME:
+        rgba = MakeColor(104, 226, 76, 255);
+        break;
+    case SPLASH_LAVA:
+        rgba = MakeColor(255, 112, 28, 255);
+        break;
+    default:
+        return;
+    }
+
+    float scale = 0.80f + Q_clipf(count / 16.0f, 0.0f, 1.0f) * 0.40f;
+    explosion_t *ex = CL_RTEffect(origin, normal, RF_RT_SPLASH_RIPPLE,
+                                  rgba, scale, 10);
+    ex->ent.skinnum = splash;
 }
 
 /*
@@ -1373,6 +1408,8 @@ void CL_ParseTEnt(void)
                 r = splash_color[te.color];
             CL_ParticleEffect(te.pos1, te.dir, r, te.count);
         }
+
+        CL_RTSplashRipple(te.pos1, te.dir, te.color, te.count);
 
         if (te.color == SPLASH_SPARKS) {
             r = Q_rand() & 3;

@@ -41,6 +41,7 @@ the Free Software Foundation; either version 2 of the License, or
 #define VK_MAX_LAVA_EMBERS         48
 #define VK_MAX_SHOCKWAVES          8
 #define VK_MAX_IMPACT_MARKS        16
+#define VK_MAX_SPLASH_RIPPLES      12
 #define VK_MAX_LIGHTMAP_EXTENTS    513
 #define VK_MAX_FRAMES_IN_FLIGHT    3
 #define VK_MAX_CUBEMAPS            16
@@ -1020,6 +1021,7 @@ static cvar_t *vk_rt_light_coronas;
 static cvar_t *vk_rt_lava_embers;
 static cvar_t *vk_rt_shockwaves;
 static cvar_t *vk_rt_impact_marks;
+static cvar_t *vk_rt_splash_ripples;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -13244,6 +13246,148 @@ typedef struct {
     vec3_t normal;
     float phase;
     float distance;
+} vk_splash_ripple_candidate_t;
+
+static int vk_splash_ripple_contents(int splash)
+{
+    switch (splash) {
+    case SPLASH_BLUE_WATER:
+    case SPLASH_BROWN_WATER:
+        return CONTENTS_WATER;
+    case SPLASH_SLIME:
+        return CONTENTS_SLIME;
+    case SPLASH_LAVA:
+        return CONTENTS_LAVA;
+    default:
+        return 0;
+    }
+}
+
+static uint32_t vk_append_splash_ripples(const refdef_t *fd,
+                                         uint32_t vertex_count)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_splash_ripples ||
+        !vk.shockwave_texture.descriptor_set || !fd->entities ||
+        fd->num_entities <= 0 || (fd->rdflags & RDF_NOWORLDMODEL) ||
+        !vk.world.cache || !vk.world.cache->nodes)
+        return vertex_count;
+
+    float strength = Cvar_ClampValue(vk_rt_splash_ripples, 0.0f, 1.0f);
+    uint32_t available = min((VK_MAX_PARTICLE_VERTICES - vertex_count) / 12,
+                             (uint32_t)VK_MAX_SPLASH_RIPPLES);
+    if (strength <= 0.0f || !available)
+        return vertex_count;
+
+    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                             fd->vieworg);
+    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
+    vk_splash_ripple_candidate_t candidates[VK_MAX_SPLASH_RIPPLES] = { 0 };
+    uint32_t count = 0;
+
+    for (int i = 0; i < fd->num_entities; i++) {
+        const entity_t *entity = &fd->entities[i];
+        if ((entity->flags & (RF_EFFECT_ONLY | RF_RT_SPLASH_RIPPLE)) !=
+            (RF_EFFECT_ONLY | RF_RT_SPLASH_RIPPLE))
+            continue;
+
+        float phase = (entity->oldframe +
+            1.0f - Q_clipf(entity->backlerp, 0.0f, 1.0f)) / 9.0f;
+        if (phase < 0.0f || phase >= 1.0f)
+            continue;
+
+        float distance = Distance(entity->origin, fd->vieworg);
+        if (distance < 8.0f || distance >= 1024.0f)
+            continue;
+
+        int expected_contents = vk_splash_ripple_contents(entity->skinnum);
+        if (!expected_contents)
+            continue;
+
+        vec3_t normal, to_view, plus_point, minus_point, draw_normal;
+        VectorCopy(entity->oldorigin, normal);
+        if (VectorNormalize(normal) <= 0.0f)
+            continue;
+        VectorSubtract(fd->vieworg, entity->origin, to_view);
+        if (VectorNormalize(to_view) <= 0.0f)
+            continue;
+
+        VectorMA(entity->origin, 4.0f, normal, plus_point);
+        VectorMA(entity->origin, -4.0f, normal, minus_point);
+        const mleaf_t *plus_leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                                 plus_point);
+        const mleaf_t *minus_leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                                  minus_point);
+        if ((!plus_leaf || !(plus_leaf->contents[0] & expected_contents)) &&
+            (!minus_leaf || !(minus_leaf->contents[0] & expected_contents)))
+            continue;
+
+        if (DotProduct(normal, to_view) < 0.0f)
+            VectorNegate(normal, draw_normal);
+        else
+            VectorCopy(normal, draw_normal);
+        VectorMA(entity->origin, 4.0f, draw_normal, plus_point);
+        const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, plus_point);
+        if (!leaf || leaf->visframe != vk.world.visframe ||
+            (leaf->contents[0] & CONTENTS_SOLID) ||
+            (leaf->contents[0] & MASK_WATER) != view_medium ||
+            (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+            continue;
+
+        uint32_t slot = min(count, available - 1);
+        if (count >= available && distance >= candidates[slot].distance)
+            continue;
+        while (slot > 0 && distance < candidates[slot - 1].distance) {
+            candidates[slot] = candidates[slot - 1];
+            slot--;
+        }
+        candidates[slot].entity = entity;
+        VectorCopy(draw_normal, candidates[slot].normal);
+        candidates[slot].phase = phase;
+        candidates[slot].distance = distance;
+        if (count < available)
+            count++;
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        const vk_splash_ripple_candidate_t *candidate = &candidates[i];
+        const entity_t *entity = candidate->entity;
+        float far_fade = Q_clipf((1024.0f - candidate->distance) / 256.0f,
+                                 0.0f, 1.0f);
+        float near_fade = Q_clipf((candidate->distance - 8.0f) / 24.0f,
+                                  0.0f, 1.0f);
+        float event_scale = Q_clipf(entity->scale, 0.75f, 1.25f);
+
+        for (int ring = 0; ring < 2; ring++) {
+            float phase = candidate->phase - ring * 0.20f;
+            if (phase < 0.0f)
+                continue;
+            phase /= 1.0f - ring * 0.20f;
+            float birth = Q_clipf(phase / 0.10f, 0.0f, 1.0f);
+            birth = birth * birth * (3.0f - 2.0f * birth);
+            float fade = 1.0f - phase;
+            fade *= sqrtf(max(fade, 0.0f));
+            float color[4] = {
+                entity->rgba.u8[0] / 255.0f,
+                entity->rgba.u8[1] / 255.0f,
+                entity->rgba.u8[2] / 255.0f,
+                min((0.13f + 0.23f * strength) *
+                    (ring ? 0.72f : 1.0f) * birth * fade *
+                    far_fade * near_fade, 0.36f),
+            };
+            float radius = (8.0f + phase * 72.0f) * event_scale *
+                (0.92f + strength * 0.12f);
+            vk_append_oriented_effect_quad(&vertex_count, entity->origin,
+                                           candidate->normal, radius, color);
+        }
+    }
+    return vertex_count;
+}
+
+typedef struct {
+    const entity_t *entity;
+    vec3_t normal;
+    float phase;
+    float distance;
     float facing;
 } vk_impact_candidate_t;
 
@@ -13605,6 +13749,13 @@ static uint32_t vk_append_emissive_motes(const refdef_t *fd,
     return vertex_count;
 }
 #else
+static uint32_t vk_append_splash_ripples(const refdef_t *fd,
+                                         uint32_t vertex_count)
+{
+    (void)fd;
+    return vertex_count;
+}
+
 static uint32_t vk_append_impact_marks(const refdef_t *fd,
                                        uint32_t vertex_count)
 {
@@ -13713,6 +13864,7 @@ static void vk_draw_particles(const refdef_t *fd)
     vertex_count = vk_append_lava_embers(fd, viewaxis, vertex_count);
     uint32_t shockwave_first_vertex = vertex_count;
     vertex_count = vk_append_shockwaves(fd, viewaxis, vertex_count);
+    vertex_count = vk_append_splash_ripples(fd, vertex_count);
     uint32_t impact_first_vertex = vertex_count;
     vertex_count = vk_append_impact_marks(fd, vertex_count);
 
@@ -16874,6 +17026,8 @@ bool VKR_Init(bool total)
     vk_rt_lava_embers = Cvar_Get("vk_rt_lava_embers", "0.65", CVAR_ARCHIVE);
     vk_rt_shockwaves = Cvar_Get("vk_rt_shockwaves", "0.7", CVAR_ARCHIVE);
     vk_rt_impact_marks = Cvar_Get("vk_rt_impact_marks", "0.75", CVAR_ARCHIVE);
+    vk_rt_splash_ripples = Cvar_Get("vk_rt_splash_ripples", "0.75",
+                                    CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
