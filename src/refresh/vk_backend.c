@@ -44,6 +44,7 @@ the Free Software Foundation; either version 2 of the License, or
 #define VK_MAX_SPLASH_RIPPLES      12
 #define VK_MAX_TELEPORT_VORTICES   4
 #define VK_MAX_ITEM_RESPAWNS       8
+#define VK_MAX_ELECTRIC_FILAMENTS  8
 #define VK_MAX_LIGHTMAP_EXTENTS    513
 #define VK_MAX_FRAMES_IN_FLIGHT    3
 #define VK_MAX_CUBEMAPS            16
@@ -1026,6 +1027,7 @@ static cvar_t *vk_rt_impact_marks;
 static cvar_t *vk_rt_splash_ripples;
 static cvar_t *vk_rt_teleport_vortex;
 static cvar_t *vk_rt_item_respawn;
+static cvar_t *vk_rt_electric_filaments;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -12894,6 +12896,44 @@ static void vk_append_particle_quad(uint32_t *vertex_count,
     }
 }
 
+static bool vk_append_effect_segment(uint32_t *vertex_count,
+                                     const vec3_t start, const vec3_t end,
+                                     const vec3_t vieworg, float width,
+                                     const float color[4])
+{
+    vec3_t direction, midpoint, to_view, side, fallback, corners[4];
+    VectorSubtract(end, start, direction);
+    if (VectorNormalize(direction) <= 0.1f)
+        return false;
+
+    VectorAvg(start, end, midpoint);
+    VectorSubtract(vieworg, midpoint, to_view);
+    CrossProduct(direction, to_view, side);
+    if (VectorNormalize(side) <= 0.1f)
+        MakeNormalVectors(direction, side, fallback);
+    VectorScale(side, width, side);
+
+    VectorSubtract(start, side, corners[0]);
+    VectorAdd(start, side, corners[1]);
+    VectorSubtract(end, side, corners[2]);
+    VectorAdd(end, side, corners[3]);
+
+    static const int order[6] = { 0, 2, 1, 1, 2, 3 };
+    static const float uv[4][2] = {
+        { 0.0f, 0.0f }, { 0.0f, 1.0f },
+        { 1.0f, 0.0f }, { 1.0f, 1.0f },
+    };
+    for (int i = 0; i < 6; i++) {
+        int index = order[i];
+        vk_vertex_t *vertex = &vk.particle_batch[(*vertex_count)++];
+        VectorCopy(corners[index], vertex->position);
+        vertex->uv[0] = uv[index][0];
+        vertex->uv[1] = uv[index][1];
+        Vector4Copy(color, vertex->color);
+    }
+    return true;
+}
+
 static void vk_append_effect_quad(uint32_t *vertex_count,
                                   const vec3_t origin, float radius,
                                   const float color[4],
@@ -13708,6 +13748,173 @@ typedef struct {
     float phase;
     float distance;
     float facing;
+    uint32_t seed;
+} vk_electric_filament_candidate_t;
+
+static uint32_t vk_append_electric_filaments(const refdef_t *fd,
+                                             uint32_t vertex_count)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_electric_filaments ||
+        !vk.beam_texture.descriptor_set || !fd->entities ||
+        fd->num_entities <= 0 || (fd->rdflags & RDF_NOWORLDMODEL) ||
+        !vk.world.cache || !vk.world.cache->nodes)
+        return vertex_count;
+
+    float strength = Cvar_ClampValue(vk_rt_electric_filaments, 0.0f, 1.0f);
+    uint32_t available = min((VK_MAX_PARTICLE_VERTICES - vertex_count) / 36,
+                             (uint32_t)VK_MAX_ELECTRIC_FILAMENTS);
+    if (strength <= 0.0f || !available)
+        return vertex_count;
+
+    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                             fd->vieworg);
+    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
+    vk_electric_filament_candidate_t
+        candidates[VK_MAX_ELECTRIC_FILAMENTS] = { 0 };
+    uint32_t count = 0;
+
+    for (int i = 0; i < fd->num_entities; i++) {
+        const entity_t *entity = &fd->entities[i];
+        if ((entity->flags & (RF_EFFECT_ONLY | RF_RT_ELECTRIC)) !=
+            (RF_EFFECT_ONLY | RF_RT_ELECTRIC))
+            continue;
+
+        float duration = max(entity->angles[0], 1.0f);
+        float phase = (entity->oldframe +
+            1.0f - Q_clipf(entity->backlerp, 0.0f, 1.0f)) / duration;
+        if (phase < 0.0f || phase >= 1.0f)
+            continue;
+
+        float distance = Distance(entity->origin, fd->vieworg);
+        if (distance < 8.0f || distance >= 768.0f)
+            continue;
+
+        vec3_t normal, to_view, leaf_point;
+        VectorCopy(entity->oldorigin, normal);
+        if (VectorNormalize(normal) <= 0.0f)
+            continue;
+        VectorSubtract(fd->vieworg, entity->origin, to_view);
+        if (VectorNormalize(to_view) <= 0.0f)
+            continue;
+        float facing = DotProduct(normal, to_view);
+        if (facing <= 0.02f)
+            continue;
+
+        VectorMA(entity->origin, 2.0f, normal, leaf_point);
+        const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                            leaf_point);
+        if (!leaf || leaf->visframe != vk.world.visframe ||
+            (leaf->contents[0] & CONTENTS_SOLID) ||
+            (leaf->contents[0] & MASK_WATER) != view_medium ||
+            (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+            continue;
+
+        uint32_t slot = min(count, available - 1);
+        if (count >= available && distance >= candidates[slot].distance)
+            continue;
+        while (slot > 0 && distance < candidates[slot - 1].distance) {
+            candidates[slot] = candidates[slot - 1];
+            slot--;
+        }
+        candidates[slot].entity = entity;
+        VectorCopy(normal, candidates[slot].normal);
+        candidates[slot].phase = phase;
+        candidates[slot].distance = distance;
+        candidates[slot].facing = facing;
+        candidates[slot].seed = vk_dust_hash(
+            (int)floorf(entity->origin[0] * 0.125f) ^
+                (int)entity->angles[1],
+            (int)floorf(entity->origin[1] * 0.125f),
+            (int)floorf(entity->origin[2] * 0.125f));
+        if (count < available)
+            count++;
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        const vk_electric_filament_candidate_t *candidate = &candidates[i];
+        const entity_t *entity = candidate->entity;
+        float birth = Q_clipf(candidate->phase / 0.08f, 0.0f, 1.0f);
+        birth = birth * birth * (3.0f - 2.0f * birth);
+        float fade = 1.0f - candidate->phase;
+        fade *= sqrtf(max(fade, 0.0f));
+        float far_fade = Q_clipf((768.0f - candidate->distance) / 192.0f,
+                                 0.0f, 1.0f);
+        float near_fade = Q_clipf((candidate->distance - 8.0f) / 24.0f,
+                                  0.0f, 1.0f);
+        float facing_fade = Q_clipf((candidate->facing - 0.02f) / 0.28f,
+                                    0.0f, 1.0f);
+        float envelope = birth * fade * far_fade * near_fade * facing_fade;
+        float event_scale = Q_clipf(entity->scale, 0.75f, 1.25f);
+        float base_color[3] = {
+            entity->rgba.u8[0] / 255.0f,
+            entity->rgba.u8[1] / 255.0f,
+            entity->rgba.u8[2] / 255.0f,
+        };
+        float accent_color[3];
+        for (int channel = 0; channel < 3; channel++)
+            accent_color[channel] = min(base_color[channel] * 0.52f +
+                                        0.48f, 1.0f);
+
+        vec3_t tangent, bitangent, start;
+        MakeNormalVectors(candidate->normal, tangent, bitangent);
+        VectorMA(entity->origin, 2.2f, candidate->normal, start);
+
+        for (int branch = 0; branch < 3; branch++) {
+            uint32_t hash = vk_dust_hash((int)candidate->seed, branch,
+                                         (int)(candidate->seed >> 16));
+            float angle = vk_dust_random(hash) * (2.0f * M_PIf);
+            vec3_t surface_direction, side_direction;
+            VectorScale(tangent, cosf(angle), surface_direction);
+            VectorMA(surface_direction, sinf(angle), bitangent,
+                     surface_direction);
+            VectorScale(tangent, -sinf(angle), side_direction);
+            VectorMA(side_direction, cosf(angle), bitangent, side_direction);
+
+            float length = event_scale *
+                (18.0f + vk_dust_random(hash >> 7) * 18.0f) *
+                (0.88f + strength * 0.24f);
+            vec3_t midpoint, end;
+            VectorMA(start, length *
+                     (0.42f + vk_dust_random(hash >> 11) * 0.16f),
+                     surface_direction, midpoint);
+            VectorMA(midpoint,
+                     (vk_dust_random(hash >> 15) - 0.5f) * length * 0.34f,
+                     side_direction, midpoint);
+            VectorMA(midpoint, 1.5f + vk_dust_random(hash >> 3) * 2.5f,
+                     candidate->normal, midpoint);
+            VectorMA(start, length, surface_direction, end);
+            VectorMA(end,
+                     (vk_dust_random(hash >> 20) - 0.5f) * length * 0.22f,
+                     side_direction, end);
+            VectorMA(end, 0.8f + vk_dust_random(hash >> 23) * 2.2f,
+                     candidate->normal, end);
+
+            float pulse = 0.76f + 0.24f * sinf(
+                candidate->phase * (7.0f + branch) * M_PIf +
+                vk_dust_random(hash >> 5) * (2.0f * M_PIf));
+            const float *branch_color = branch ? base_color : accent_color;
+            float color[4] = {
+                branch_color[0], branch_color[1], branch_color[2],
+                min((0.32f + strength * 0.40f) * envelope * pulse,
+                    0.72f),
+            };
+            float width = event_scale * (0.65f + strength * 1.05f) *
+                (branch ? 0.82f : 1.0f);
+            vk_append_effect_segment(&vertex_count, start, midpoint,
+                                     fd->vieworg, width, color);
+            vk_append_effect_segment(&vertex_count, midpoint, end,
+                                     fd->vieworg, width * 0.78f, color);
+        }
+    }
+    return vertex_count;
+}
+
+typedef struct {
+    const entity_t *entity;
+    vec3_t normal;
+    float phase;
+    float distance;
+    float facing;
 } vk_impact_candidate_t;
 
 static uint32_t vk_append_impact_marks(const refdef_t *fd,
@@ -14084,6 +14291,13 @@ static uint32_t vk_append_item_materializations(const refdef_t *fd,
     return vertex_count;
 }
 
+static uint32_t vk_append_electric_filaments(const refdef_t *fd,
+                                             uint32_t vertex_count)
+{
+    (void)fd;
+    return vertex_count;
+}
+
 static uint32_t vk_append_splash_ripples(const refdef_t *fd,
                                          uint32_t vertex_count)
 {
@@ -14204,6 +14418,8 @@ static void vk_draw_particles(const refdef_t *fd)
     vertex_count = vk_append_item_materializations(fd, vertex_count);
     uint32_t impact_first_vertex = vertex_count;
     vertex_count = vk_append_impact_marks(fd, vertex_count);
+    uint32_t electric_first_vertex = vertex_count;
+    vertex_count = vk_append_electric_filaments(fd, vertex_count);
 
     if (!vertex_count) {
         vk.draw_scope = old_scope;
@@ -14253,14 +14469,24 @@ static void vk_draw_particles(const refdef_t *fd)
         c.trisDrawn += (impact_first_vertex - shockwave_first_vertex) / 3;
         vk_count_batch3d();
     }
-    if (vertex_count > impact_first_vertex) {
+    if (electric_first_vertex > impact_first_vertex) {
         vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                          vk.particle_add_pipeline ?
                             vk.particle_add_pipeline : vk.sprite_pipeline);
         vk_bind_texture_descriptor(cmd, vk.impact_texture.descriptor_set);
-        vk.CmdDraw(cmd, vertex_count - impact_first_vertex, 1,
+        vk.CmdDraw(cmd, electric_first_vertex - impact_first_vertex, 1,
                    impact_first_vertex, 0);
-        c.trisDrawn += (vertex_count - impact_first_vertex) / 3;
+        c.trisDrawn += (electric_first_vertex - impact_first_vertex) / 3;
+        vk_count_batch3d();
+    }
+    if (vertex_count > electric_first_vertex) {
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                         vk.particle_add_pipeline ?
+                            vk.particle_add_pipeline : vk.sprite_pipeline);
+        vk_bind_texture_descriptor(cmd, vk.beam_texture.descriptor_set);
+        vk.CmdDraw(cmd, vertex_count - electric_first_vertex, 1,
+                   electric_first_vertex, 0);
+        c.trisDrawn += (vertex_count - electric_first_vertex) / 3;
         vk_count_batch3d();
     }
     vk.draw_scope = old_scope;
@@ -17369,6 +17595,8 @@ bool VKR_Init(bool total)
                                      CVAR_ARCHIVE);
     vk_rt_item_respawn = Cvar_Get("vk_rt_item_respawn", "0.8",
                                   CVAR_ARCHIVE);
+    vk_rt_electric_filaments = Cvar_Get("vk_rt_electric_filaments", "0.75",
+                                        CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);

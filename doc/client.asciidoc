@@ -1163,6 +1163,22 @@ vk_rt_item_respawn::
     remain visible without it. Changes apply immediately. Default value is
     0.8; value 0 disables the effect.
 
+vk_rt_electric_filaments::
+    Controls short branching filaments at electrical impact events while
+    Vulkan ray tracing is active, clamped between 0 and 1. Electric sparks use
+    blue-white energy, shield sparks blue-violet, screen sparks orange-red,
+    and heat-beam sparks a slightly larger orange-white variant. Each impact
+    produces three stable surface-crawling branches with two tapered segments;
+    their brightness pulses and fades over roughly 0.4 seconds. Existing
+    particles, sounds, impact marks, and continuous lightning beams remain
+    unchanged. Filaments are depth tested and restricted by surface facing,
+    BSP visibility, area, distance, and liquid medium. The nearest eight
+    events reuse the beam texture, additive pipeline, particle vertex buffer,
+    fog, and bloom output, adding at most 96 triangles and one draw while
+    active with no new texture, shader, descriptor, render pass, ray query, or
+    per-frame allocation. Changes apply immediately. Default value is 0.75;
+    value 0 disables the effect.
+
 vk_rt_light_trails::
     Controls short colored trails behind strong moving dynamic lights while
     Vulkan ray tracing is active, clamped between 0 and 1. Lights with at

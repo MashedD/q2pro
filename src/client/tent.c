@@ -1304,6 +1304,15 @@ static explosion_t *CL_RTImpact(const vec3_t origin, const vec3_t normal,
     return CL_RTEffect(origin, normal, RF_RT_IMPACT, rgba, scale, 5);
 }
 
+static void CL_RTElectricFilaments(const vec3_t origin, const vec3_t normal,
+                                   uint32_t rgba, float scale)
+{
+    explosion_t *ex = CL_RTEffect(origin, normal, RF_RT_ELECTRIC, rgba,
+                                  scale, 5);
+    ex->ent.angles[0] = 4.0f;
+    ex->ent.angles[1] = Q_rand() & 255;
+}
+
 static void CL_RTSplashRipple(const vec3_t origin, const vec3_t normal,
                               int splash, int count)
 {
@@ -1426,6 +1435,11 @@ void CL_ParseTEnt(void)
                     te.type == TE_SCREEN_SPARKS ?
                         MakeColor(255, 90, 62, 255) :
                         MakeColor(90, 130, 255, 255),
+                    1.0f);
+        CL_RTElectricFilaments(te.pos1, te.dir,
+                    te.type == TE_SCREEN_SPARKS ?
+                        MakeColor(255, 104, 64, 255) :
+                        MakeColor(104, 132, 255, 255),
                     1.0f);
         //FIXME : replace or remove this sound
         S_StartSound(te.pos1, 0, 257, cl_sfx_lashit, 1, ATTN_NORM, 0);
@@ -1688,6 +1702,8 @@ void CL_ParseTEnt(void)
 
     case TE_HEATBEAM_SPARKS:
         CL_ParticleSteamEffect(te.pos1, te.dir, 0x8, 50, 60);
+        CL_RTElectricFilaments(te.pos1, te.dir,
+                              MakeColor(255, 172, 84, 255), 1.15f);
         S_StartSound(te.pos1,  0, 0, cl_sfx_lashit, 1, ATTN_NORM, 0);
         break;
 
@@ -1716,6 +1732,8 @@ void CL_ParseTEnt(void)
 
     case TE_ELECTRIC_SPARKS:
         CL_ParticleEffect(te.pos1, te.dir, 0x75, 40);
+        CL_RTElectricFilaments(te.pos1, te.dir,
+                              MakeColor(104, 176, 255, 255), 1.05f);
         //FIXME : replace or remove this sound
         S_StartSound(te.pos1, 0, 0, cl_sfx_lashit, 1, ATTN_NORM, 0);
         break;
