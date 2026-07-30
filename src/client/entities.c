@@ -240,12 +240,15 @@ static void parse_entity_event(int number)
         break;
     case EV_FALLSHORT:
         S_StartSound(NULL, number, CHAN_AUTO, S_RegisterSound("player/land1.wav"), 1, ATTN_NORM, 0);
+        CL_RTLandingDust(number, RT_LANDING_SHORT);
         break;
     case EV_FALL:
         S_StartSound(NULL, number, CHAN_AUTO, S_RegisterSound("*fall2.wav"), 1, ATTN_NORM, 0);
+        CL_RTLandingDust(number, RT_LANDING_NORMAL);
         break;
     case EV_FALLFAR:
         S_StartSound(NULL, number, CHAN_AUTO, S_RegisterSound("*fall1.wav"), 1, ATTN_NORM, 0);
+        CL_RTLandingDust(number, RT_LANDING_FAR);
         break;
     }
 }
@@ -717,6 +720,43 @@ static bool CL_GetWeaponHighlight(int weapon, item_highlight_t *highlight)
     default:
         return false;
     }
+}
+
+static int CL_RTProjectileWakeType(unsigned effects)
+{
+    if (effects & EF_BFG)
+        return RT_PROJECTILE_BFG;
+    if (effects & EF_ROCKET)
+        return RT_PROJECTILE_ROCKET;
+    if (effects & EF_GRENADE)
+        return RT_PROJECTILE_GRENADE;
+    if (effects & (EF_BLASTER | EF_HYPERBLASTER))
+        return effects & EF_TRACKER ?
+            RT_PROJECTILE_TRACKER : RT_PROJECTILE_BLASTER;
+    if (effects & EF_BLUEHYPERBLASTER)
+        return RT_PROJECTILE_BLUE;
+    if (effects & (EF_IONRIPPER | EF_PLASMA))
+        return RT_PROJECTILE_PLASMA;
+    if (effects & EF_TRACKER)
+        return RT_PROJECTILE_TRACKER;
+    return -1;
+}
+
+static void CL_AddRTProjectileWake(int number, const vec3_t origin,
+                                   const vec3_t oldorigin, unsigned effects)
+{
+    int type = CL_RTProjectileWakeType(effects);
+    if (type < 0)
+        return;
+
+    entity_t wake = { 0 };
+    VectorCopy(origin, wake.origin);
+    VectorCopy(oldorigin, wake.oldorigin);
+    wake.flags = RF_EFFECT_ONLY | RF_RT_PROJECTILE_WAKE | RF_TRANSLUCENT;
+    wake.alpha = 1.0f;
+    wake.skinnum = type;
+    wake.frame = number;
+    V_AddEntity(&wake);
 }
 
 /*
@@ -1251,6 +1291,9 @@ static void CL_AddPacketEntities(void)
         if (!(effects & EF_TRAIL_MASK))
             goto skip;
 
+        CL_AddRTProjectileWake(s1->number, ent.origin, cent->lerp_origin,
+                               effects);
+
         if (effects & EF_ROCKET) {
             if (cl.csr.extended && effects & EF_GIB) {
                 CL_DiminishingTrail(cent, ent.origin, DT_FIREBALL);
@@ -1479,6 +1522,28 @@ static void CL_AddViewWeapon(void)
         gun.alpha *= 0.30f;
         gun.flags |= flags | RF_TRANSLUCENT;
         V_AddEntity(&gun);
+    }
+
+    int rt_muzzle_delta = cl.time - cl.weapon.muzzle.rt_time;
+    if (cl.weapon.muzzle.rt_scale > 0.0f && rt_muzzle_delta >= 0 &&
+        rt_muzzle_delta <= 50) {
+        entity_t plume = { 0 };
+        vec3_t forward, right, up;
+        AngleVectors(gun.angles, forward, right, up);
+        VectorCopy(gun.origin, plume.origin);
+        VectorMA(plume.origin, cl.weapon.muzzle.rt_offset[0], forward,
+                 plume.origin);
+        VectorMA(plume.origin, cl.weapon.muzzle.rt_offset[1], right,
+                 plume.origin);
+        VectorMA(plume.origin, cl.weapon.muzzle.rt_offset[2], up,
+                 plume.origin);
+        VectorCopy(gun.angles, plume.angles);
+        plume.flags = RF_EFFECT_ONLY | RF_RT_MUZZLE_PLUME | RF_TRANSLUCENT |
+                      RF_DEPTHHACK | RF_WEAPONMODEL;
+        plume.alpha = 1.0f;
+        plume.rgba = cl.weapon.muzzle.rt_color;
+        plume.scale = cl.weapon.muzzle.rt_scale;
+        V_AddEntity(&plume);
     }
 
     // add muzzle flash

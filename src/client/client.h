@@ -312,6 +312,10 @@ typedef struct {
             int         time;
             float       roll, scale;
             vec3_t      offset;
+            int         rt_time;
+            float       rt_scale;
+            vec3_t      rt_offset;
+            color_t     rt_color;
         } muzzle;
     } weapon;
 
@@ -828,11 +832,16 @@ typedef enum {
 
 void CL_AddWeaponMuzzleFX(cl_muzzlefx_t fx, const vec3_t offset, float scale);
 void CL_AddMuzzleFX(const vec3_t origin, const vec3_t angles, cl_muzzlefx_t fx, int skin, float scale);
+void CL_AddPlayerMuzzleRTFX(const vec3_t origin, const vec3_t angles,
+                            int weapon);
 
 void CL_SmokeAndFlash(const vec3_t origin);
 
 void CL_RTTeleportVortex(const vec3_t origin, rt_teleport_type_t type);
 void CL_RTItemRespawn(const vec3_t origin);
+void CL_RTLandingDust(int entnum, rt_landing_type_t type);
+void CL_RTEnergyCollapse(const vec3_t origin,
+                         rt_energy_collapse_type_t type);
 void CL_DrawBeam(const vec3_t org, const vec3_t end, qhandle_t model);
 void CL_PlayFootstepSfx(int step_id, int entnum, float volume, float attenuation);
 

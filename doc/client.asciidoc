@@ -1179,6 +1179,73 @@ vk_rt_electric_filaments::
     per-frame allocation. Changes apply immediately. Default value is 0.75;
     value 0 disables the effect.
 
+vk_rt_landing_dust::
+    Controls brief surface-aware dust puffs when players land while Vulkan ray
+    tracing is active, clamped between 0 and 1. Short, normal, and hard landing
+    events emit four, six, or eight deterministic motes respectively. Motes
+    spread outward from a single client-side floor trace, rise slightly, expand,
+    and fade over roughly 0.6 seconds; local-player puffs are restrained near
+    the camera. Existing landing sounds and particles remain unchanged. Dust is
+    rejected on unsupported or steep surfaces and in water, slime, and lava,
+    while BSP visibility, area, and distance restrictions prevent it appearing
+    through the world. The nearest six active events reuse the particle texture,
+    mapped particle buffer, and depth-tested sprite batch, adding at most 96
+    triangles and one draw while active with no new shader, texture, descriptor,
+    render pass, ray query, dynamic light, or per-frame allocation. Changes apply
+    immediately. Default value is 0.7; value 0 disables the effect.
+
+vk_rt_muzzle_plumes::
+    Controls brief directional fire and energy plumes at player and monster
+    muzzles while Vulkan ray tracing is active, clamped between 0 and 1.
+    Ballistic, explosive, rail, beam, blaster, BFG, disruptor, and expansion
+    weapons retain distinct colors. Each plume combines a tapered two-segment
+    core with two short outward filaments and lasts only for the existing 50 ms
+    muzzle-flash interval. First-person plumes use reduced length, width, and
+    brightness to avoid obscuring the view; other players and monsters follow
+    BSP visibility, area, distance, and liquid-medium restrictions. Weapons
+    without a muzzle-flash model receive an effect-only marker, while existing
+    flash models, skins, lights, sounds, and animations remain unchanged. The
+    nearest 12 active plumes reuse the beam texture, additive pipeline, mapped
+    particle buffer, fog, and shared beam batch, adding at most 96 triangles
+    and one draw while active with no new shader, texture, descriptor, render
+    pass, ray query, persistent marker, or per-frame allocation. The effect
+    also respects `cl_muzzleflashes`. Changes apply immediately. Default value
+    is 0.75; value 0 disables the effect.
+
+vk_rt_energy_collapse::
+    Controls inward-collapse effects at BFG and tracker detonations while
+    Vulkan ray tracing is active, clamped between 0 and 1. Main BFG impacts use
+    a large green-mint collapse, BFG damage events use restrained half-size
+    green collapses, and tracker explosions use a medium violet-magenta
+    variant. Three mutually perpendicular rings contract around four spiraling
+    nodes before a compact final core pulse. The main BFG effect lasts roughly
+    0.8 seconds; secondary and tracker effects last roughly 0.6 seconds.
+    Existing explosion models, particles, lights, sounds, damage, and outward
+    shockwaves remain unchanged. Effects are restricted by BSP visibility,
+    area, distance, near-camera fading, and liquid medium. The nearest five
+    active events reuse the procedural shockwave texture, additive pipeline,
+    mapped particle buffer, fog, and shared shockwave batch, adding at most 80
+    triangles and one draw while active with no new shader, texture, descriptor,
+    render pass, ray query, or per-frame allocation. Changes apply immediately.
+    Default value is 0.8; value 0 disables the effect.
+
+vk_rt_projectile_wakes::
+    Controls compact energy rings behind moving projectiles while Vulkan ray
+    tracing is active, clamped between 0 and 1. Rockets, grenades, blaster and
+    hyperblaster bolts, ion and plasma bolts, tracker projectiles, and BFG balls
+    use distinct colors and sizes. Two clearly visible rings follow each
+    projectile perpendicular to its interpolated travel direction, with a
+    restrained animated pulse. Existing projectile models, particles, trails,
+    lights, sounds, and gameplay remain unchanged. Initial, stationary, and
+    teleport-sized movements are rejected, while near-camera and distance fades,
+    BSP visibility, area, and liquid-medium restrictions prevent distracting or
+    misplaced rings. The nearest eight projectiles reuse the procedural
+    shockwave texture, additive pipeline, mapped particle buffer, fog, and
+    shared shockwave batch, adding at most 32 triangles and one draw while active
+    with no new shader, texture, descriptor, render pass, ray query, persistent
+    history, or per-frame allocation. Changes apply immediately. Default value
+    is 0.75; value 0 disables the effect.
+
 vk_rt_light_trails::
     Controls short colored trails behind strong moving dynamic lights while
     Vulkan ray tracing is active, clamped between 0 and 1. Lights with at

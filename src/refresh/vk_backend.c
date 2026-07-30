@@ -45,6 +45,10 @@ the Free Software Foundation; either version 2 of the License, or
 #define VK_MAX_TELEPORT_VORTICES   4
 #define VK_MAX_ITEM_RESPAWNS       8
 #define VK_MAX_ELECTRIC_FILAMENTS  8
+#define VK_MAX_LANDING_DUST        6
+#define VK_MAX_MUZZLE_PLUMES       12
+#define VK_MAX_ENERGY_COLLAPSES    5
+#define VK_MAX_PROJECTILE_WAKES    8
 #define VK_MAX_LIGHTMAP_EXTENTS    513
 #define VK_MAX_FRAMES_IN_FLIGHT    3
 #define VK_MAX_CUBEMAPS            16
@@ -1028,6 +1032,10 @@ static cvar_t *vk_rt_splash_ripples;
 static cvar_t *vk_rt_teleport_vortex;
 static cvar_t *vk_rt_item_respawn;
 static cvar_t *vk_rt_electric_filaments;
+static cvar_t *vk_rt_landing_dust;
+static cvar_t *vk_rt_muzzle_plumes;
+static cvar_t *vk_rt_energy_collapse;
+static cvar_t *vk_rt_projectile_wakes;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -13608,6 +13616,167 @@ typedef struct {
     const entity_t *entity;
     float phase;
     float distance;
+    float seed;
+    int type;
+} vk_energy_collapse_candidate_t;
+
+static uint32_t vk_append_energy_collapses(const refdef_t *fd,
+                                            const vec3_t viewaxis[3],
+                                            uint32_t vertex_count)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_energy_collapse ||
+        !vk.shockwave_texture.descriptor_set || !fd->entities ||
+        fd->num_entities <= 0 || (fd->rdflags & RDF_NOWORLDMODEL) ||
+        !vk.world.cache || !vk.world.cache->nodes)
+        return vertex_count;
+
+    float strength = Cvar_ClampValue(vk_rt_energy_collapse, 0.0f, 1.0f);
+    uint32_t available = min((VK_MAX_PARTICLE_VERTICES - vertex_count) / 48,
+                             (uint32_t)VK_MAX_ENERGY_COLLAPSES);
+    if (strength <= 0.0f || !available)
+        return vertex_count;
+
+    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                             fd->vieworg);
+    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
+    vk_energy_collapse_candidate_t
+        candidates[VK_MAX_ENERGY_COLLAPSES] = { 0 };
+    uint32_t count = 0;
+
+    for (int i = 0; i < fd->num_entities; i++) {
+        const entity_t *entity = &fd->entities[i];
+        if ((entity->flags & (RF_EFFECT_ONLY | RF_RT_ENERGY_COLLAPSE)) !=
+            (RF_EFFECT_ONLY | RF_RT_ENERGY_COLLAPSE))
+            continue;
+        if (entity->skinnum < RT_ENERGY_BFG_CORE ||
+            entity->skinnum > RT_ENERGY_TRACKER)
+            continue;
+
+        float duration = max(entity->angles[0], 1.0f);
+        float phase = (entity->oldframe +
+            1.0f - Q_clipf(entity->backlerp, 0.0f, 1.0f)) / duration;
+        if (phase < 0.0f || phase >= 1.0f)
+            continue;
+
+        float distance = Distance(entity->origin, fd->vieworg);
+        if (distance >= 1536.0f)
+            continue;
+
+        const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                            entity->origin);
+        if (!leaf || leaf->visframe != vk.world.visframe ||
+            (leaf->contents[0] & CONTENTS_SOLID) ||
+            (leaf->contents[0] & MASK_WATER) != view_medium ||
+            (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+            continue;
+
+        uint32_t slot = min(count, available - 1);
+        if (count >= available && distance >= candidates[slot].distance)
+            continue;
+        while (slot > 0 && distance < candidates[slot - 1].distance) {
+            candidates[slot] = candidates[slot - 1];
+            slot--;
+        }
+        candidates[slot].entity = entity;
+        candidates[slot].phase = phase;
+        candidates[slot].distance = distance;
+        candidates[slot].type = entity->skinnum;
+        candidates[slot].seed = vk_dust_random(vk_dust_hash(
+            (int)floorf(entity->origin[0] * 0.0625f) ^
+                (int)entity->angles[1],
+            (int)floorf(entity->origin[1] * 0.0625f),
+            (int)floorf(entity->origin[2] * 0.0625f)));
+        if (count < available)
+            count++;
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        const vk_energy_collapse_candidate_t *candidate = &candidates[i];
+        const entity_t *entity = candidate->entity;
+        float birth = Q_clipf(candidate->phase / 0.08f, 0.0f, 1.0f);
+        birth = birth * birth * (3.0f - 2.0f * birth);
+        float fade = Q_clipf((1.0f - candidate->phase) / 0.22f,
+                             0.0f, 1.0f);
+        fade = fade * fade * (3.0f - 2.0f * fade);
+        float far_fade = Q_clipf((1536.0f - candidate->distance) / 384.0f,
+                                 0.0f, 1.0f);
+        float near_fade = Q_clipf(candidate->distance / 40.0f,
+                                  0.0f, 1.0f);
+        float envelope = birth * fade * far_fade * near_fade;
+        float event_scale = Q_clipf(entity->scale, 0.7f, 1.6f);
+        float smooth = candidate->phase * candidate->phase *
+            (3.0f - 2.0f * candidate->phase);
+        float base_color[3] = {
+            entity->rgba.u8[0] / 255.0f,
+            entity->rgba.u8[1] / 255.0f,
+            entity->rgba.u8[2] / 255.0f,
+        };
+        float accent_color[3];
+        for (int channel = 0; channel < 3; channel++)
+            accent_color[channel] = min(base_color[channel] * 0.62f +
+                                        0.38f, 1.0f);
+
+        vec3_t rotation = {
+            candidate->seed * 180.0f + candidate->phase * 210.0f,
+            candidate->seed * 270.0f - candidate->phase * 170.0f,
+            candidate->phase * 120.0f,
+        };
+        vec3_t axes[3];
+        AnglesToAxis(rotation, axes);
+        float radius = event_scale * (8.0f + (1.0f - smooth) * 50.0f);
+        for (int ring = 0; ring < 3; ring++) {
+            const float *ring_color = ring == 1 ?
+                accent_color : base_color;
+            float color[4] = {
+                ring_color[0], ring_color[1], ring_color[2],
+                min((0.18f + strength * 0.28f) * envelope *
+                    (1.0f - ring * 0.10f), 0.46f),
+            };
+            vk_append_oriented_effect_quad(&vertex_count, entity->origin,
+                                           axes[ring],
+                                           radius * (0.88f + ring * 0.12f),
+                                           color);
+        }
+
+        float seed_angle = candidate->seed * (2.0f * M_PIf);
+        float orbit = event_scale * (5.0f + (1.0f - smooth) * 58.0f);
+        for (int node = 0; node < 4; node++) {
+            float angle = seed_angle + node * (0.5f * M_PIf) +
+                candidate->phase * (5.8f + node * 0.22f);
+            vec3_t origin;
+            VectorCopy(entity->origin, origin);
+            VectorMA(origin, cosf(angle) * orbit, axes[1], origin);
+            VectorMA(origin, sinf(angle) * orbit, axes[2], origin);
+            VectorMA(origin, sinf(angle * 1.7f) * orbit * 0.18f,
+                     axes[0], origin);
+            float color[4] = {
+                accent_color[0], accent_color[1], accent_color[2],
+                min((0.15f + strength * 0.25f) * envelope, 0.40f),
+            };
+            float node_radius = event_scale * (3.0f + strength * 1.8f);
+            vk_append_effect_quad(&vertex_count, origin, node_radius,
+                                  color, viewaxis);
+        }
+
+        float final_phase = Q_clipf((candidate->phase - 0.62f) / 0.38f,
+                                    0.0f, 1.0f);
+        float final_energy = sinf(final_phase * M_PIf);
+        float core_color[4] = {
+            accent_color[0], accent_color[1], accent_color[2],
+            min((0.22f + strength * 0.34f) * final_energy * envelope,
+                0.56f),
+        };
+        float core_radius = event_scale * (6.0f + final_phase * 12.0f);
+        vk_append_effect_quad(&vertex_count, entity->origin, core_radius,
+                              core_color, viewaxis);
+    }
+    return vertex_count;
+}
+
+typedef struct {
+    const entity_t *entity;
+    float phase;
+    float distance;
 } vk_item_respawn_candidate_t;
 
 static uint32_t vk_append_item_materializations(const refdef_t *fd,
@@ -13737,6 +13906,149 @@ static uint32_t vk_append_item_materializations(const refdef_t *fd,
             float radius = event_scale * (28.0f - smooth * 12.0f);
             vk_append_oriented_effect_quad(&vertex_count, origin, up,
                                            radius, color);
+        }
+    }
+    return vertex_count;
+}
+
+typedef struct {
+    const entity_t *entity;
+    vec3_t normal;
+    float phase;
+    float distance;
+    uint32_t seed;
+    int severity;
+} vk_landing_dust_candidate_t;
+
+static uint32_t vk_append_landing_dust(const refdef_t *fd,
+                                       const vec3_t viewaxis[3],
+                                       uint32_t vertex_count)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_landing_dust ||
+        !vk.particle_texture.descriptor_set || !fd->entities ||
+        fd->num_entities <= 0 || (fd->rdflags & RDF_NOWORLDMODEL) ||
+        !vk.world.cache || !vk.world.cache->nodes)
+        return vertex_count;
+
+    float strength = Cvar_ClampValue(vk_rt_landing_dust, 0.0f, 1.0f);
+    uint32_t available = min((VK_MAX_PARTICLE_VERTICES - vertex_count) / 48,
+                             (uint32_t)VK_MAX_LANDING_DUST);
+    if (strength <= 0.0f || !available)
+        return vertex_count;
+
+    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                             fd->vieworg);
+    if (!view_leaf || (view_leaf->contents[0] & MASK_WATER))
+        return vertex_count;
+
+    vk_landing_dust_candidate_t
+        candidates[VK_MAX_LANDING_DUST] = { 0 };
+    uint32_t count = 0;
+
+    for (int i = 0; i < fd->num_entities; i++) {
+        const entity_t *entity = &fd->entities[i];
+        if ((entity->flags & (RF_EFFECT_ONLY | RF_RT_LANDING_DUST)) !=
+            (RF_EFFECT_ONLY | RF_RT_LANDING_DUST))
+            continue;
+
+        int severity = entity->skinnum & RT_LANDING_SEVERITY_MASK;
+        if (severity < RT_LANDING_SHORT || severity > RT_LANDING_FAR)
+            continue;
+
+        float duration = max(entity->angles[0], 1.0f);
+        float phase = (entity->oldframe +
+            1.0f - Q_clipf(entity->backlerp, 0.0f, 1.0f)) / duration;
+        if (phase < 0.0f || phase >= 1.0f)
+            continue;
+
+        float distance = Distance(entity->origin, fd->vieworg);
+        if (distance < 8.0f || distance >= 768.0f)
+            continue;
+
+        vec3_t normal, leaf_point;
+        VectorCopy(entity->oldorigin, normal);
+        if (VectorNormalize(normal) <= 0.0f || normal[2] < 0.45f)
+            continue;
+        VectorMA(entity->origin, 2.0f, normal, leaf_point);
+        const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                            leaf_point);
+        if (!leaf || leaf->visframe != vk.world.visframe ||
+            (leaf->contents[0] & (CONTENTS_SOLID | MASK_WATER)) ||
+            (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+            continue;
+
+        uint32_t slot = min(count, available - 1);
+        if (count >= available && distance >= candidates[slot].distance)
+            continue;
+        while (slot > 0 && distance < candidates[slot - 1].distance) {
+            candidates[slot] = candidates[slot - 1];
+            slot--;
+        }
+        candidates[slot].entity = entity;
+        VectorCopy(normal, candidates[slot].normal);
+        candidates[slot].phase = phase;
+        candidates[slot].distance = distance;
+        candidates[slot].severity = severity;
+        candidates[slot].seed = vk_dust_hash(
+            (int)floorf(entity->origin[0] * 0.125f) ^
+                (int)entity->angles[1],
+            (int)floorf(entity->origin[1] * 0.125f),
+            (int)floorf(entity->origin[2] * 0.125f));
+        if (count < available)
+            count++;
+    }
+
+    static const int mote_counts[] = { 4, 6, 8 };
+    for (uint32_t i = 0; i < count; i++) {
+        const vk_landing_dust_candidate_t *candidate = &candidates[i];
+        const entity_t *entity = candidate->entity;
+        float birth = Q_clipf(candidate->phase / 0.10f, 0.0f, 1.0f);
+        birth = birth * birth * (3.0f - 2.0f * birth);
+        float fade = 1.0f - candidate->phase;
+        fade *= sqrtf(max(fade, 0.0f));
+        float far_fade = Q_clipf((768.0f - candidate->distance) / 192.0f,
+                                 0.0f, 1.0f);
+        float near_fade = Q_clipf((candidate->distance - 8.0f) / 24.0f,
+                                  0.0f, 1.0f);
+        float local_fade = (entity->skinnum & RT_LANDING_LOCAL) ? 0.68f : 1.0f;
+        float envelope = birth * fade * far_fade * near_fade * local_fade;
+        float event_scale = Q_clipf(entity->scale, 0.65f, 1.35f);
+        float travel_phase = candidate->phase * (2.0f - candidate->phase);
+        vec3_t tangent, bitangent;
+        MakeNormalVectors(candidate->normal, tangent, bitangent);
+
+        for (int mote = 0; mote < mote_counts[candidate->severity]; mote++) {
+            uint32_t hash = vk_dust_hash((int)candidate->seed, mote,
+                                         candidate->severity);
+            float random = vk_dust_random(hash >> 7);
+            float angle = vk_dust_random(hash) * (2.0f * M_PIf) +
+                candidate->phase * (random - 0.5f) * 0.32f;
+            vec3_t direction, origin;
+            VectorScale(tangent, cosf(angle), direction);
+            VectorMA(direction, sinf(angle), bitangent, direction);
+            float travel = event_scale * (13.0f + random * 15.0f) *
+                travel_phase;
+            VectorMA(entity->origin, travel, direction, origin);
+            float arc = event_scale *
+                (2.0f + sinf(candidate->phase * M_PIf) *
+                 (5.0f + vk_dust_random(hash >> 15) * 7.0f));
+            VectorMA(origin, arc, candidate->normal, origin);
+
+            float tint = 0.82f + vk_dust_random(hash >> 20) * 0.18f;
+            float color[4] = {
+                entity->rgba.u8[0] / 255.0f * tint,
+                entity->rgba.u8[1] / 255.0f * tint,
+                entity->rgba.u8[2] / 255.0f * tint,
+                min((0.14f + strength * 0.27f) * envelope *
+                    (0.85f + random * 0.15f), 0.40f),
+            };
+            float scale = event_scale *
+                (2.0f + vk_dust_random(hash >> 11) * 1.35f) *
+                (0.72f + candidate->phase * 0.72f);
+            if (entity->skinnum & RT_LANDING_LOCAL)
+                scale *= 0.88f;
+            vk_append_particle_quad(&vertex_count, origin, scale,
+                                    color, viewaxis);
         }
     }
     return vertex_count;
@@ -13904,6 +14216,297 @@ static uint32_t vk_append_electric_filaments(const refdef_t *fd,
                                      fd->vieworg, width, color);
             vk_append_effect_segment(&vertex_count, midpoint, end,
                                      fd->vieworg, width * 0.78f, color);
+        }
+    }
+    return vertex_count;
+}
+
+typedef struct {
+    const entity_t *entity;
+    vec3_t forward;
+    float distance;
+    uint32_t seed;
+    bool local;
+} vk_muzzle_plume_candidate_t;
+
+static uint32_t vk_append_muzzle_plumes(const refdef_t *fd,
+                                        uint32_t vertex_count)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_muzzle_plumes ||
+        !vk.beam_texture.descriptor_set || !fd->entities ||
+        fd->num_entities <= 0 || (fd->rdflags & RDF_NOWORLDMODEL) ||
+        !vk.world.cache || !vk.world.cache->nodes)
+        return vertex_count;
+
+    float strength = Cvar_ClampValue(vk_rt_muzzle_plumes, 0.0f, 1.0f);
+    uint32_t available = min((VK_MAX_PARTICLE_VERTICES - vertex_count) / 24,
+                             (uint32_t)VK_MAX_MUZZLE_PLUMES);
+    if (strength <= 0.0f || !available)
+        return vertex_count;
+
+    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                             fd->vieworg);
+    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
+    vk_muzzle_plume_candidate_t
+        candidates[VK_MAX_MUZZLE_PLUMES] = { 0 };
+    uint32_t count = 0;
+
+    for (int i = 0; i < fd->num_entities; i++) {
+        const entity_t *entity = &fd->entities[i];
+        if (!(entity->flags & RF_RT_MUZZLE_PLUME))
+            continue;
+
+        bool local = (entity->flags & RF_WEAPONMODEL) != 0;
+        float distance = Distance(entity->origin, fd->vieworg);
+        if ((!local && distance < 8.0f) || distance >= 1024.0f)
+            continue;
+
+        if (!local) {
+            const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                                entity->origin);
+            if (!leaf || leaf->visframe != vk.world.visframe ||
+                (leaf->contents[0] & CONTENTS_SOLID) ||
+                (leaf->contents[0] & MASK_WATER) != view_medium ||
+                (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+                continue;
+        }
+
+        vec3_t forward;
+        AngleVectors(entity->angles, forward, NULL, NULL);
+        if (VectorNormalize(forward) <= 0.0f)
+            continue;
+
+        uint32_t slot = min(count, available - 1);
+        if (count >= available && distance >= candidates[slot].distance)
+            continue;
+        while (slot > 0 && distance < candidates[slot - 1].distance) {
+            candidates[slot] = candidates[slot - 1];
+            slot--;
+        }
+        candidates[slot].entity = entity;
+        VectorCopy(forward, candidates[slot].forward);
+        candidates[slot].distance = distance;
+        candidates[slot].local = local;
+        candidates[slot].seed = vk_dust_hash(
+            (int)floorf(entity->origin[0] * 0.125f),
+            (int)floorf(entity->origin[1] * 0.125f),
+            (int)floorf(entity->origin[2] * 0.125f) ^
+                (int)entity->angles[2]);
+        if (count < available)
+            count++;
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        const vk_muzzle_plume_candidate_t *candidate = &candidates[i];
+        const entity_t *entity = candidate->entity;
+        float event_scale = Q_clipf(entity->scale / 16.0f, 0.5f, 2.0f);
+        float local_scale = candidate->local ? 0.68f : 1.0f;
+        float far_fade = candidate->local ? 1.0f :
+            Q_clipf((1024.0f - candidate->distance) / 256.0f,
+                    0.0f, 1.0f);
+        float near_fade = candidate->local ? 1.0f :
+            Q_clipf((candidate->distance - 8.0f) / 24.0f,
+                    0.0f, 1.0f);
+        float base_color[3] = {
+            entity->rgba.u8[0] / 255.0f,
+            entity->rgba.u8[1] / 255.0f,
+            entity->rgba.u8[2] / 255.0f,
+        };
+        float accent_color[3];
+        for (int channel = 0; channel < 3; channel++)
+            accent_color[channel] = min(base_color[channel] * 0.68f +
+                                        0.32f, 1.0f);
+
+        float alpha = min((0.30f + strength * 0.42f) * far_fade *
+                          near_fade * (candidate->local ? 0.54f : 1.0f),
+                          candidate->local ? 0.38f : 0.72f);
+        float core_color[4] = {
+            accent_color[0], accent_color[1], accent_color[2], alpha,
+        };
+        float branch_color[4] = {
+            base_color[0], base_color[1], base_color[2], alpha * 0.82f,
+        };
+        float variation = 0.90f +
+            vk_dust_random(candidate->seed >> 5) * 0.20f;
+        float length = event_scale * local_scale *
+            (20.0f + strength * 16.0f) * variation;
+        float width = event_scale * local_scale *
+            (1.35f + strength * 1.85f);
+        vec3_t start, midpoint, end;
+        VectorMA(entity->origin, 1.0f, candidate->forward, start);
+        VectorMA(start, length * 0.52f, candidate->forward, midpoint);
+        VectorMA(start, length, candidate->forward, end);
+        vk_append_effect_segment(&vertex_count, start, midpoint,
+                                 fd->vieworg, width, core_color);
+        vk_append_effect_segment(&vertex_count, midpoint, end,
+                                 fd->vieworg, width * 0.55f, core_color);
+
+        vec3_t right, up;
+        MakeNormalVectors(candidate->forward, right, up);
+        for (int branch = 0; branch < 2; branch++) {
+            uint32_t hash = vk_dust_hash((int)candidate->seed, branch,
+                                         (int)(candidate->seed >> 16));
+            float side = branch ? 1.0f : -1.0f;
+            vec3_t direction, branch_end;
+            VectorCopy(candidate->forward, direction);
+            VectorMA(direction, side *
+                     (0.15f + vk_dust_random(hash) * 0.10f), right,
+                     direction);
+            VectorMA(direction,
+                     (vk_dust_random(hash >> 9) - 0.5f) * 0.22f,
+                     up, direction);
+            VectorNormalize(direction);
+            VectorMA(start, length *
+                     (0.60f + vk_dust_random(hash >> 17) * 0.18f),
+                     direction, branch_end);
+            vk_append_effect_segment(&vertex_count, start, branch_end,
+                                     fd->vieworg, width * 0.48f,
+                                     branch_color);
+        }
+    }
+    return vertex_count;
+}
+
+typedef struct {
+    const entity_t *entity;
+    vec3_t direction;
+    float distance;
+} vk_projectile_wake_candidate_t;
+
+static void vk_projectile_wake_style(int type, vec3_t color, float *radius)
+{
+    switch (type) {
+    case RT_PROJECTILE_ROCKET:
+        VectorSet(color, 1.0f, 0.30f, 0.05f);
+        *radius = 6.0f;
+        break;
+    case RT_PROJECTILE_GRENADE:
+        VectorSet(color, 1.0f, 0.50f, 0.10f);
+        *radius = 5.0f;
+        break;
+    case RT_PROJECTILE_BLASTER:
+        VectorSet(color, 1.0f, 0.68f, 0.16f);
+        *radius = 4.5f;
+        break;
+    case RT_PROJECTILE_BLUE:
+        VectorSet(color, 0.20f, 0.48f, 1.0f);
+        *radius = 4.5f;
+        break;
+    case RT_PROJECTILE_PLASMA:
+        VectorSet(color, 1.0f, 0.25f, 0.42f);
+        *radius = 5.5f;
+        break;
+    case RT_PROJECTILE_TRACKER:
+        VectorSet(color, 0.72f, 0.20f, 1.0f);
+        *radius = 5.5f;
+        break;
+    case RT_PROJECTILE_BFG:
+        VectorSet(color, 0.18f, 1.0f, 0.32f);
+        *radius = 13.0f;
+        break;
+    default:
+        VectorClear(color);
+        *radius = 0.0f;
+        break;
+    }
+}
+
+static uint32_t vk_append_projectile_wakes(const refdef_t *fd,
+                                           uint32_t vertex_count)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_projectile_wakes ||
+        !vk.shockwave_texture.descriptor_set || !fd->entities ||
+        fd->num_entities <= 0 || (fd->rdflags & RDF_NOWORLDMODEL) ||
+        !vk.world.cache || !vk.world.cache->nodes)
+        return vertex_count;
+
+    float strength = Cvar_ClampValue(vk_rt_projectile_wakes, 0.0f, 1.0f);
+    uint32_t available = min((VK_MAX_PARTICLE_VERTICES - vertex_count) / 12,
+                             (uint32_t)VK_MAX_PROJECTILE_WAKES);
+    if (strength <= 0.0f || !available)
+        return vertex_count;
+
+    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                             fd->vieworg);
+    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
+    vk_projectile_wake_candidate_t candidates[VK_MAX_PROJECTILE_WAKES] = { 0 };
+    uint32_t count = 0;
+
+    for (int i = 0; i < fd->num_entities; i++) {
+        const entity_t *entity = &fd->entities[i];
+        if ((entity->flags & (RF_EFFECT_ONLY | RF_RT_PROJECTILE_WAKE)) !=
+            (RF_EFFECT_ONLY | RF_RT_PROJECTILE_WAKE) ||
+            entity->skinnum < RT_PROJECTILE_ROCKET ||
+            entity->skinnum > RT_PROJECTILE_BFG)
+            continue;
+
+        vec3_t direction;
+        VectorSubtract(entity->origin, entity->oldorigin, direction);
+        float movement = VectorNormalize(direction);
+        if (movement < 0.5f || movement > 128.0f)
+            continue;
+
+        float distance = Distance(entity->origin, fd->vieworg);
+        if (distance < 12.0f || distance >= 1200.0f)
+            continue;
+
+        const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                            entity->origin);
+        if (!leaf || leaf->visframe != vk.world.visframe ||
+            (leaf->contents[0] & CONTENTS_SOLID) ||
+            (leaf->contents[0] & MASK_WATER) != view_medium ||
+            (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+            continue;
+
+        uint32_t slot = min(count, available - 1);
+        if (count >= available && distance >= candidates[slot].distance)
+            continue;
+        while (slot > 0 && distance < candidates[slot - 1].distance) {
+            candidates[slot] = candidates[slot - 1];
+            slot--;
+        }
+        candidates[slot].entity = entity;
+        VectorCopy(direction, candidates[slot].direction);
+        candidates[slot].distance = distance;
+        if (count < available)
+            count++;
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        const vk_projectile_wake_candidate_t *candidate = &candidates[i];
+        const entity_t *entity = candidate->entity;
+        vec3_t base_color;
+        float base_radius;
+        vk_projectile_wake_style(entity->skinnum, base_color, &base_radius);
+        if (base_radius <= 0.0f)
+            continue;
+
+        float near_fade = Q_clipf((candidate->distance - 12.0f) / 24.0f,
+                                  0.0f, 1.0f);
+        float far_fade = Q_clipf((1200.0f - candidate->distance) / 300.0f,
+                                 0.0f, 1.0f);
+        float visibility = near_fade * far_fade;
+        float phase = fd->time * 8.0f + (entity->frame & 255u) * 0.37f;
+
+        for (int ring = 0; ring < 2; ring++) {
+            float offset = base_radius * (ring ? 2.15f : 0.95f);
+            float pulse = 0.94f + 0.10f *
+                sinf(phase + ring * (0.75f * M_PIf));
+            float radius = base_radius * (ring ? 1.12f : 0.78f) * pulse *
+                (0.92f + strength * 0.16f);
+            vec3_t origin;
+            VectorMA(entity->origin, -offset, candidate->direction, origin);
+            float brighten = ring ? 0.20f : 0.38f;
+            float color[4];
+            for (int channel = 0; channel < 3; channel++)
+                color[channel] = min(base_color[channel] *
+                    (1.0f - brighten) + brighten, 1.0f);
+            color[3] = min((ring ? 0.24f + strength * 0.26f :
+                                  0.32f + strength * 0.34f) * visibility,
+                           ring ? 0.50f : 0.66f);
+            vk_append_oriented_effect_quad(&vertex_count, origin,
+                                            candidate->direction, radius,
+                                            color);
         }
     }
     return vertex_count;
@@ -14284,6 +14887,15 @@ static uint32_t vk_append_teleport_vortices(const refdef_t *fd,
     return vertex_count;
 }
 
+static uint32_t vk_append_energy_collapses(const refdef_t *fd,
+                                            const vec3_t viewaxis[3],
+                                            uint32_t vertex_count)
+{
+    (void)fd;
+    (void)viewaxis;
+    return vertex_count;
+}
+
 static uint32_t vk_append_item_materializations(const refdef_t *fd,
                                                 uint32_t vertex_count)
 {
@@ -14291,8 +14903,31 @@ static uint32_t vk_append_item_materializations(const refdef_t *fd,
     return vertex_count;
 }
 
+static uint32_t vk_append_landing_dust(const refdef_t *fd,
+                                       const vec3_t viewaxis[3],
+                                       uint32_t vertex_count)
+{
+    (void)fd;
+    (void)viewaxis;
+    return vertex_count;
+}
+
 static uint32_t vk_append_electric_filaments(const refdef_t *fd,
                                              uint32_t vertex_count)
+{
+    (void)fd;
+    return vertex_count;
+}
+
+static uint32_t vk_append_muzzle_plumes(const refdef_t *fd,
+                                        uint32_t vertex_count)
+{
+    (void)fd;
+    return vertex_count;
+}
+
+static uint32_t vk_append_projectile_wakes(const refdef_t *fd,
+                                           uint32_t vertex_count)
 {
     (void)fd;
     return vertex_count;
@@ -14407,19 +15042,23 @@ static void vk_draw_particles(const refdef_t *fd)
 
     uint32_t particle_vertex_count = vertex_count;
     vertex_count = vk_append_dust_motes(fd, viewaxis, vertex_count);
+    vertex_count = vk_append_landing_dust(fd, viewaxis, vertex_count);
     uint32_t dust_vertex_count = vertex_count;
     vertex_count = vk_append_light_coronas(fd, viewaxis, vertex_count);
     vertex_count = vk_append_emissive_motes(fd, viewaxis, vertex_count);
     vertex_count = vk_append_lava_embers(fd, viewaxis, vertex_count);
     uint32_t shockwave_first_vertex = vertex_count;
     vertex_count = vk_append_shockwaves(fd, viewaxis, vertex_count);
+    vertex_count = vk_append_projectile_wakes(fd, vertex_count);
     vertex_count = vk_append_splash_ripples(fd, vertex_count);
     vertex_count = vk_append_teleport_vortices(fd, viewaxis, vertex_count);
+    vertex_count = vk_append_energy_collapses(fd, viewaxis, vertex_count);
     vertex_count = vk_append_item_materializations(fd, vertex_count);
     uint32_t impact_first_vertex = vertex_count;
     vertex_count = vk_append_impact_marks(fd, vertex_count);
     uint32_t electric_first_vertex = vertex_count;
     vertex_count = vk_append_electric_filaments(fd, vertex_count);
+    vertex_count = vk_append_muzzle_plumes(fd, vertex_count);
 
     if (!vertex_count) {
         vk.draw_scope = old_scope;
@@ -17597,6 +18236,13 @@ bool VKR_Init(bool total)
                                   CVAR_ARCHIVE);
     vk_rt_electric_filaments = Cvar_Get("vk_rt_electric_filaments", "0.75",
                                         CVAR_ARCHIVE);
+    vk_rt_landing_dust = Cvar_Get("vk_rt_landing_dust", "0.7", CVAR_ARCHIVE);
+    vk_rt_muzzle_plumes = Cvar_Get("vk_rt_muzzle_plumes", "0.75",
+                                   CVAR_ARCHIVE);
+    vk_rt_energy_collapse = Cvar_Get("vk_rt_energy_collapse", "0.8",
+                                     CVAR_ARCHIVE);
+    vk_rt_projectile_wakes = Cvar_Get("vk_rt_projectile_wakes", "0.75",
+                                      CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);

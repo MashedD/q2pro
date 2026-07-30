@@ -417,6 +417,163 @@ static void CL_BFGExplosion(const vec3_t pos)
     ex->frames = 4;
 }
 
+static uint32_t CL_MuzzlePlumeColor(cl_muzzlefx_t fx, int skin)
+{
+    switch (fx) {
+    case MFLASH_MACHN:
+    case MFLASH_SHOTG2:
+    case MFLASH_SHOTG:
+        return MakeColor(255, 196, 92, 255);
+    case MFLASH_ROCKET:
+        return MakeColor(255, 120, 36, 255);
+    case MFLASH_RAIL:
+        return MakeColor(92, 174, 255, 255);
+    case MFLASH_LAUNCH:
+        return MakeColor(255, 154, 48, 255);
+    case MFLASH_ETF_RIFLE:
+        return MakeColor(255, 210, 72, 255);
+    case MFLASH_DIST:
+        return MakeColor(190, 96, 255, 255);
+    case MFLASH_BOOMER:
+        return MakeColor(255, 118, 112, 255);
+    case MFLASH_BLAST:
+        if (skin == 1)
+            return MakeColor(84, 146, 255, 255);
+        if (skin == 2)
+            return MakeColor(88, 255, 116, 255);
+        return MakeColor(255, 174, 58, 255);
+    case MFLASH_BFG:
+        return MakeColor(76, 255, 92, 255);
+    case MFLASH_BEAMER:
+        return MakeColor(142, 224, 255, 255);
+    default:
+        return U32_WHITE;
+    }
+}
+
+static void CL_AddWorldMuzzleRTFX(const vec3_t origin, const vec3_t angles,
+                                  uint32_t rgba, float scale)
+{
+    explosion_t *ex = CL_AllocExplosion();
+    VectorCopy(origin, ex->ent.origin);
+    VectorCopy(angles, ex->ent.angles);
+    ex->type = ex_mflash;
+    ex->ent.flags = RF_EFFECT_ONLY | RF_RT_MUZZLE_PLUME | RF_TRANSLUCENT;
+    ex->ent.alpha = 1.0f;
+    ex->ent.rgba.u32 = rgba;
+    ex->ent.scale = scale;
+    ex->start = cl.servertime - CL_FRAMETIME;
+}
+
+void CL_AddPlayerMuzzleRTFX(const vec3_t origin, const vec3_t angles,
+                            int weapon)
+{
+    cl_muzzlefx_t fx;
+    int skin = 0;
+    float scale;
+
+    if (!cl_muzzleflashes->integer)
+        return;
+
+    switch (weapon) {
+    case MZ_BLASTER:
+    case MZ_HYPERBLASTER:
+        fx = MFLASH_BLAST;
+        scale = 9.0f;
+        break;
+    case MZ_BLUEHYPERBLASTER:
+        fx = MFLASH_BLAST;
+        skin = 1;
+        scale = 9.0f;
+        break;
+    case MZ_MACHINEGUN:
+        fx = MFLASH_MACHN;
+        scale = 12.0f;
+        break;
+    case MZ_CHAINGUN1:
+        fx = MFLASH_MACHN;
+        scale = 12.0f;
+        break;
+    case MZ_CHAINGUN2:
+        fx = MFLASH_MACHN;
+        scale = 16.0f;
+        break;
+    case MZ_CHAINGUN3:
+        fx = MFLASH_MACHN;
+        scale = 20.0f;
+        break;
+    case MZ_SHOTGUN:
+        fx = MFLASH_SHOTG;
+        scale = 12.0f;
+        break;
+    case MZ_SSHOTGUN:
+        fx = MFLASH_SHOTG2;
+        scale = 12.0f;
+        break;
+    case MZ_RAILGUN:
+        fx = MFLASH_RAIL;
+        scale = 12.0f;
+        break;
+    case MZ_ROCKET:
+    case MZ_PHALANX2:
+        fx = MFLASH_ROCKET;
+        scale = 10.0f;
+        break;
+    case MZ_GRENADE:
+    case MZ_PROX:
+        fx = MFLASH_LAUNCH;
+        scale = 9.0f;
+        break;
+    case MZ_BFG:
+    case MZ_BFG2:
+        fx = MFLASH_BFG;
+        scale = 16.0f;
+        break;
+    case MZ_PHALANX:
+    case MZ_IONRIPPER:
+        fx = MFLASH_BOOMER;
+        scale = 15.0f;
+        break;
+    case MZ_ETF_RIFLE:
+    case MZ_SHOTGUN2:
+        fx = MFLASH_ETF_RIFLE;
+        scale = 6.0f;
+        break;
+    case MZ_HEATBEAM:
+        fx = MFLASH_BEAMER;
+        scale = 16.0f;
+        break;
+    case MZ_BLASTER2:
+        fx = MFLASH_BLAST;
+        skin = 2;
+        scale = 9.0f;
+        break;
+    case MZ_TRACKER:
+        fx = MFLASH_DIST;
+        scale = 10.0f;
+        break;
+    default:
+        return;
+    }
+
+    uint32_t rgba = CL_MuzzlePlumeColor(fx, skin);
+    int start = cl.servertime - CL_FRAMETIME;
+    if (mz.entity == cl.frame.clientNum + 1 && !cl.thirdPersonView) {
+        cl.weapon.muzzle.rt_time = start;
+        cl.weapon.muzzle.rt_color.u32 = rgba;
+        if (cl.weapon.muzzle.model && cl.weapon.muzzle.time == start) {
+            VectorCopy(cl.weapon.muzzle.offset, cl.weapon.muzzle.rt_offset);
+            cl.weapon.muzzle.rt_scale = cl.weapon.muzzle.scale;
+        } else {
+            VectorSet(cl.weapon.muzzle.rt_offset, 22.0f, 7.0f, -7.0f);
+            cl.weapon.muzzle.rt_scale = scale;
+        }
+        return;
+    }
+
+    CL_AddWorldMuzzleRTFX(origin, angles, rgba, scale);
+}
+
 void CL_AddWeaponMuzzleFX(cl_muzzlefx_t fx, const vec3_t offset, float scale)
 {
     if (!cl_muzzleflashes->integer)
@@ -448,19 +605,20 @@ void CL_AddMuzzleFX(const vec3_t origin, const vec3_t angles, cl_muzzlefx_t fx, 
 
     Q_assert(fx < q_countof(cl_mod_muzzles));
 
-    if (!cl_mod_muzzles[fx])
-        return;
-
     ex = CL_AllocExplosion();
     VectorCopy(origin, ex->ent.origin);
     VectorCopy(angles, ex->ent.angles);
     ex->type = ex_mflash;
-    ex->ent.flags = RF_TRANSLUCENT | RF_NOSHADOW | RF_FULLBRIGHT;
+    ex->ent.flags = RF_TRANSLUCENT | RF_NOSHADOW | RF_FULLBRIGHT |
+                    RF_RT_MUZZLE_PLUME;
     ex->ent.alpha = 1.0f;
     ex->start = cl.servertime - CL_FRAMETIME;
     ex->ent.model = cl_mod_muzzles[fx];
     ex->ent.skinnum = skin;
+    ex->ent.rgba.u32 = CL_MuzzlePlumeColor(fx, skin);
     ex->ent.scale = scale;
+    if (!ex->ent.model)
+        ex->ent.flags |= RF_EFFECT_ONLY;
     if (fx != MFLASH_BOOMER)
         ex->ent.angles[2] = Q_rand() % 360;
 }
@@ -1382,6 +1540,80 @@ void CL_RTItemRespawn(const vec3_t origin)
     ex->ent.angles[0] = 10.0f;
 }
 
+void CL_RTLandingDust(int entnum, rt_landing_type_t type)
+{
+    if ((unsigned)entnum >= MAX_EDICTS || !cl.bsp)
+        return;
+
+    const centity_t *cent = &cl_entities[entnum];
+    const vec3_t trace_mins = { cent->mins[0], cent->mins[1], 0.0f };
+    const vec3_t trace_maxs = { cent->maxs[0], cent->maxs[1], 0.0f };
+    vec3_t start, end;
+
+    VectorCopy(cent->current.origin, start);
+    start[2] += 1.0f;
+    VectorCopy(start, end);
+    end[2] -= 9.0f;
+    if (cent->current.solid && cent->current.solid != PACKED_BSP)
+        end[2] += cent->mins[2];
+    else
+        end[2] -= 66.0f;
+
+    trace_t trace;
+    CL_Trace(&trace, start, end, trace_mins, trace_maxs, MASK_SOLID);
+    if (trace.allsolid || trace.startsolid || trace.fraction == 1.0f ||
+        trace.plane.normal[2] < 0.45f)
+        return;
+
+    vec3_t origin;
+    VectorMA(trace.endpos, 1.5f, trace.plane.normal, origin);
+    float scale = type == RT_LANDING_FAR ? 1.3f :
+                  type == RT_LANDING_NORMAL ? 1.0f : 0.7f;
+    explosion_t *ex = CL_RTEffect(origin, trace.plane.normal,
+                                  RF_RT_LANDING_DUST,
+                                  MakeColor(154, 144, 126, 255), scale, 7);
+    ex->ent.skinnum = type & RT_LANDING_SEVERITY_MASK;
+    if (entnum == cl.frame.clientNum + 1)
+        ex->ent.skinnum |= RT_LANDING_LOCAL;
+    ex->ent.angles[0] = 6.0f;
+    ex->ent.angles[1] = Q_rand() & 255;
+}
+
+void CL_RTEnergyCollapse(const vec3_t origin,
+                         rt_energy_collapse_type_t type)
+{
+    static const vec3_t up = { 0.0f, 0.0f, 1.0f };
+    uint32_t rgba;
+    float scale;
+    int frames;
+
+    switch (type) {
+    case RT_ENERGY_BFG_CORE:
+        rgba = MakeColor(76, 255, 104, 255);
+        scale = 1.5f;
+        frames = 9;
+        break;
+    case RT_ENERGY_BFG_SECONDARY:
+        rgba = MakeColor(104, 230, 116, 255);
+        scale = 0.75f;
+        frames = 7;
+        break;
+    case RT_ENERGY_TRACKER:
+        rgba = MakeColor(192, 82, 255, 255);
+        scale = 1.0f;
+        frames = 7;
+        break;
+    default:
+        return;
+    }
+
+    explosion_t *ex = CL_RTEffect(origin, up, RF_RT_ENERGY_COLLAPSE,
+                                  rgba, scale, frames);
+    ex->ent.skinnum = type;
+    ex->ent.angles[0] = frames - 1;
+    ex->ent.angles[1] = Q_rand() & 255;
+}
+
 /*
 =================
 CL_ParseTEnt
@@ -1607,10 +1839,12 @@ void CL_ParseTEnt(void)
 
     case TE_BFG_EXPLOSION:
         CL_BFGExplosion(te.pos1);
+        CL_RTEnergyCollapse(te.pos1, RT_ENERGY_BFG_SECONDARY);
         break;
 
     case TE_BFG_BIGEXPLOSION:
         CL_BFGExplosionParticles(te.pos1);
+        CL_RTEnergyCollapse(te.pos1, RT_ENERGY_BFG_CORE);
         break;
 
     case TE_BFG_LASER:
@@ -1620,6 +1854,7 @@ void CL_ParseTEnt(void)
     case TE_BFG_ZAP:
         CL_ParseLaser(0xd0d1d2d3);
         CL_BFGExplosion(te.pos2);
+        CL_RTEnergyCollapse(te.pos2, RT_ENERGY_BFG_SECONDARY);
         break;
 
     case TE_BUBBLETRAIL:
@@ -1741,6 +1976,7 @@ void CL_ParseTEnt(void)
     case TE_TRACKER_EXPLOSION:
         CL_ColorFlash(te.pos1, 0, 150, -1, -1, -1);
         CL_ColorExplosionParticles(te.pos1, 0, 1);
+        CL_RTEnergyCollapse(te.pos1, RT_ENERGY_TRACKER);
         S_StartSound(te.pos1, 0, 0, cl_sfx_disrexp, 1, ATTN_NORM, 0);
         break;
 
