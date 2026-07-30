@@ -1132,6 +1132,23 @@ vk_rt_splash_ripples::
     Changes apply immediately. Default value is 0.75; value 0 disables the
     effect.
 
+vk_rt_teleport_vortex::
+    Controls layered energy vortices at discrete teleport events while Vulkan
+    ray tracing is active, clamped between 0 and 1. Player and scripted
+    teleports use cyan-blue energy, disc-ball goals violet-magenta, and boss
+    teleports a larger orange-violet variant. Each vortex combines two
+    oppositely rotating tilted rings, four smaller rings rising through a
+    vertical column, and four orbiting camera-facing nodes. Existing teleport
+    particles and sounds remain unchanged, while continuous teleporter-pad
+    particles do not create vortices. The effect fades near the camera and at
+    distance, follows BSP visibility, area, and liquid-medium restrictions,
+    and is capped to the nearest four active events. It reuses the procedural
+    shockwave texture and shared additive ring batch, adding at most 80
+    triangles with no new texture, shader, render pass, ray query, draw, or
+    per-frame allocation. Bright elements use existing bloom when enabled.
+    Changes apply immediately. Default value is 0.8; value 0 disables the
+    effect.
+
 vk_rt_light_trails::
     Controls short colored trails behind strong moving dynamic lights while
     Vulkan ray tracing is active, clamped between 0 and 1. Lights with at

@@ -1332,6 +1332,39 @@ static void CL_RTSplashRipple(const vec3_t origin, const vec3_t normal,
     ex->ent.skinnum = splash;
 }
 
+void CL_RTTeleportVortex(const vec3_t origin, rt_teleport_type_t type)
+{
+    static const vec3_t up = { 0.0f, 0.0f, 1.0f };
+    uint32_t rgba;
+    float scale;
+    int frames;
+
+    switch (type) {
+    case RT_TELEPORT_STANDARD:
+        rgba = MakeColor(78, 188, 255, 255);
+        scale = 1.0f;
+        frames = 12;
+        break;
+    case RT_TELEPORT_DBALL:
+        rgba = MakeColor(190, 78, 255, 255);
+        scale = 1.15f;
+        frames = 13;
+        break;
+    case RT_TELEPORT_BOSS:
+        rgba = MakeColor(255, 112, 92, 255);
+        scale = 1.8f;
+        frames = 16;
+        break;
+    default:
+        return;
+    }
+
+    explosion_t *ex = CL_RTEffect(origin, up, RF_RT_TELEPORT, rgba,
+                                  scale, frames);
+    ex->ent.skinnum = type;
+    ex->ent.angles[0] = frames - 1;
+}
+
 /*
 =================
 CL_ParseTEnt
@@ -1580,6 +1613,7 @@ void CL_ParseTEnt(void)
 
     case TE_BOSSTPORT:          // boss teleporting to station
         CL_BigTeleportParticles(te.pos1);
+        CL_RTTeleportVortex(te.pos1, RT_TELEPORT_BOSS);
         S_StartSound(te.pos1, 0, 0, S_RegisterSound("misc/bigtele.wav"), 1, ATTN_NONE, 0);
         break;
 
@@ -1685,8 +1719,13 @@ void CL_ParseTEnt(void)
         break;
 
     case TE_TELEPORT_EFFECT:
+        CL_TeleportParticles(te.pos1);
+        CL_RTTeleportVortex(te.pos1, RT_TELEPORT_STANDARD);
+        break;
+
     case TE_DBALL_GOAL:
         CL_TeleportParticles(te.pos1);
+        CL_RTTeleportVortex(te.pos1, RT_TELEPORT_DBALL);
         break;
 
     case TE_WIDOWBEAMOUT:

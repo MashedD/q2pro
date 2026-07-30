@@ -223,6 +223,7 @@ static void parse_entity_event(int number)
     case EV_PLAYER_TELEPORT:
         S_StartSound(NULL, number, CHAN_WEAPON, S_RegisterSound("misc/tele1.wav"), 1, ATTN_IDLE, 0);
         CL_TeleportParticles(cent->current.origin);
+        CL_RTTeleportVortex(cent->current.origin, RT_TELEPORT_STANDARD);
         break;
     case EV_FOOTSTEP:
         if (cl_footsteps->integer)
