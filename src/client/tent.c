@@ -1365,6 +1365,14 @@ void CL_RTTeleportVortex(const vec3_t origin, rt_teleport_type_t type)
     ex->ent.angles[0] = frames - 1;
 }
 
+void CL_RTItemRespawn(const vec3_t origin)
+{
+    static const vec3_t up = { 0.0f, 0.0f, 1.0f };
+    explosion_t *ex = CL_RTEffect(origin, up, RF_RT_ITEM_RESPAWN,
+                                  MakeColor(88, 255, 132, 255), 1.0f, 11);
+    ex->ent.angles[0] = 10.0f;
+}
+
 /*
 =================
 CL_ParseTEnt

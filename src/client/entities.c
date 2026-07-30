@@ -219,6 +219,7 @@ static void parse_entity_event(int number)
     case EV_ITEM_RESPAWN:
         S_StartSound(NULL, number, CHAN_WEAPON, S_RegisterSound("items/respawn1.wav"), 1, ATTN_IDLE, 0);
         CL_ItemRespawnParticles(cent->current.origin);
+        CL_RTItemRespawn(cent->current.origin);
         break;
     case EV_PLAYER_TELEPORT:
         S_StartSound(NULL, number, CHAN_WEAPON, S_RegisterSound("misc/tele1.wav"), 1, ATTN_IDLE, 0);

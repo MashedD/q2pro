@@ -39,6 +39,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define RF_RT_IMPACT        BIT_ULL(39)
 #define RF_RT_SPLASH_RIPPLE BIT_ULL(40)
 #define RF_RT_TELEPORT      BIT_ULL(41)
+#define RF_RT_ITEM_RESPAWN   BIT_ULL(42)
 
 typedef enum {
     RT_TELEPORT_STANDARD,

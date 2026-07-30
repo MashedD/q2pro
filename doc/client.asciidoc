@@ -1149,6 +1149,20 @@ vk_rt_teleport_vortex::
     Changes apply immediately. Default value is 0.8; value 0 disables the
     effect.
 
+vk_rt_item_respawn::
+    Controls an emerald-mint materialization effect when map items respawn
+    while Vulkan ray tracing is active, clamped between 0 and 1. Each event
+    combines an expanding base ring, a scanning ring that rises through the
+    item, and a delayed contracting upper ring. Existing respawn particles
+    and sounds remain unchanged. Rings are depth tested, restricted to the
+    current BSP visibility, area, distance, and liquid medium, and fade near
+    the camera. The nearest eight active events reuse the procedural
+    shockwave texture and shared additive ring batch, adding at most 48
+    triangles with no new texture, shader, render pass, ray query, draw, or
+    per-frame allocation. Bright rings use existing bloom when enabled but
+    remain visible without it. Changes apply immediately. Default value is
+    0.8; value 0 disables the effect.
+
 vk_rt_light_trails::
     Controls short colored trails behind strong moving dynamic lights while
     Vulkan ray tracing is active, clamped between 0 and 1. Lights with at
