@@ -49,6 +49,7 @@ the Free Software Foundation; either version 2 of the License, or
 #define VK_MAX_LANDING_DUST        6
 #define VK_MAX_ENERGY_COLLAPSES    5
 #define VK_MAX_RAIL_IONIZATIONS    6
+#define VK_MAX_RT_GLARE_SOURCES    32
 #define VK_MAX_LIGHTMAP_EXTENTS    513
 #define VK_MAX_FRAMES_IN_FLIGHT    3
 #define VK_MAX_CUBEMAPS            16
@@ -15289,6 +15290,12 @@ static void vk_draw_glare(const refdef_t *fd)
     VkDeviceSize offset = 0;
     uint32_t query_base = vk.frame_index * MAX_GLARE_SOURCES;
     bool issue_queries = com_eventTime - vk.glare_query_time > 33;
+#if USE_VULKAN_RAYTRACING
+    bool rt_emissive_active = vk.raytracing_active && vk_rt_emissive &&
+        Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f) > 0.0f;
+#else
+    bool rt_emissive_active = false;
+#endif
 
     AnglesToAxis(fd->viewangles, viewaxis);
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
@@ -15306,22 +15313,24 @@ static void vk_draw_glare(const refdef_t *fd)
     for (int i = 0; i < glr.num_glare_sources; i++) {
         glare_source_t *gs = &glr.glare_sources[i];
         vec3_t to_src, view_dir, to_viewer;
-        bool test = true;
+        bool test = !gs->rt_emissive || rt_emissive_active;
 
-        for (int j = 0; j < 4; j++) {
-            if (PlaneDiff(gs->origin, &vk.world.frustum[j]) < -2.5f) {
-                test = false;
-                break;
+        if (test) {
+            for (int j = 0; j < 4; j++) {
+                if (PlaneDiff(gs->origin, &vk.world.frustum[j]) < -2.5f) {
+                    test = false;
+                    break;
+                }
             }
         }
 
         VectorSubtract(gs->origin, fd->vieworg, to_src);
         float dist = VectorNormalize2(to_src, view_dir);
-        if (dist < 1.0f)
+        if (test && dist < 1.0f)
             test = false;
         VectorNegate(view_dir, to_viewer);
         float view_angle = DotProduct(to_viewer, gs->normal);
-        if (view_angle < 0.01f)
+        if (test && view_angle < 0.01f)
             test = false;
 
         distances[i] = dist;
@@ -17888,6 +17897,98 @@ static bool vk_glare_lightmap_color(const bsp_t *bsp, const mface_t *surf,
     return true;
 }
 
+#if USE_VULKAN_RAYTRACING
+typedef struct {
+    uint32_t index;
+    float score;
+    float brightness;
+} vk_rt_glare_candidate_t;
+
+static bool vk_rt_glare_source_matches(const glare_source_t *source,
+                                       const vk_surface_light_t *light)
+{
+    vec3_t delta;
+    VectorSubtract(source->origin, light->origin, delta);
+    return DotProduct(delta, delta) <= 36.0f &&
+        DotProduct(source->normal, light->normal) >= 0.98f;
+}
+
+static void vk_append_rt_emissive_glare_sources(void)
+{
+    if (!vk.raytracing_active || !vk.world.surface_lights_ready ||
+        !vk.world.surface_light_count ||
+        glr.num_glare_sources >= MAX_GLARE_SOURCES)
+        return;
+
+    uint32_t limit = min((uint32_t)VK_MAX_RT_GLARE_SOURCES,
+                         (uint32_t)(MAX_GLARE_SOURCES -
+                                    glr.num_glare_sources));
+    float threshold = vk_glare_threshold ?
+        Cvar_ClampValue(vk_glare_threshold, 0.0f, 1.0f) : 0.3f;
+    vk_rt_glare_candidate_t candidates[VK_MAX_RT_GLARE_SOURCES] = { 0 };
+    uint32_t count = 0;
+
+    for (uint32_t i = 0; i < vk.world.surface_light_count; i++) {
+        const vk_surface_light_t *light = &vk.world.surface_lights[i];
+        float brightness = Q_clipf((light->strength - 96.0f) / 192.0f,
+                                   0.0f, 1.0f);
+        if (brightness < threshold)
+            continue;
+
+        bool duplicate = false;
+        for (int j = 0; j < glr.num_glare_sources; j++) {
+            if (vk_rt_glare_source_matches(&glr.glare_sources[j], light)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate)
+            continue;
+        for (uint32_t j = 0; j < count; j++) {
+            const vk_surface_light_t *other =
+                &vk.world.surface_lights[candidates[j].index];
+            vec3_t delta;
+            VectorSubtract(other->origin, light->origin, delta);
+            if (DotProduct(delta, delta) <= 36.0f &&
+                DotProduct(other->normal, light->normal) >= 0.98f) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate)
+            continue;
+
+        float score = brightness * (0.5f + 0.5f *
+            Q_clipf(light->radius / 48.0f, 0.0f, 1.0f));
+        uint32_t slot = min(count, limit - 1);
+        if (count >= limit && score <= candidates[slot].score)
+            continue;
+        while (slot > 0 && score > candidates[slot - 1].score) {
+            candidates[slot] = candidates[slot - 1];
+            slot--;
+        }
+        candidates[slot].index = i;
+        candidates[slot].score = score;
+        candidates[slot].brightness = brightness;
+        if (count < limit)
+            count++;
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        const vk_surface_light_t *light =
+            &vk.world.surface_lights[candidates[i].index];
+        glare_source_t *source = &glr.glare_sources[glr.num_glare_sources++];
+
+        memset(source, 0, sizeof(*source));
+        VectorCopy(light->origin, source->origin);
+        VectorCopy(light->normal, source->normal);
+        VectorCopy(light->color, source->lightcolor);
+        source->brightness = candidates[i].brightness;
+        source->rt_emissive = true;
+    }
+}
+#endif
+
 static void vk_build_glare_list(bsp_t *bsp)
 {
     glr.num_glare_sources = 0;
@@ -17939,13 +18040,17 @@ static void vk_build_glare_list(bsp_t *bsp)
             VectorNegate(normal, normal);
 
         glare_source_t *gs = &glr.glare_sources[glr.num_glare_sources++];
+        memset(gs, 0, sizeof(*gs));
         VectorMA(center, 2.0f, normal, gs->origin);
         VectorCopy(normal, gs->normal);
         VectorCopy(lightcolor, gs->lightcolor);
         gs->brightness = brightness;
-        gs->visibility = 0.0f;
-        gs->visible = false;
+        gs->rt_emissive = false;
     }
+
+#if USE_VULKAN_RAYTRACING
+    vk_append_rt_emissive_glare_sources();
+#endif
 }
 
 static void vk_load_world(const char *name)

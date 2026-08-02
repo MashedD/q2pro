@@ -1128,6 +1128,7 @@ void GL_BuildGlareList(void)
         VectorCopy(normal, gs->normal);
         VectorSet(gs->lightcolor, r, g, b);
         gs->brightness = brightness;
+        gs->rt_emissive = false;
         qglGenQueries(1, &gs->query);
         if (!gs->query) {
             glr.num_glare_sources--;

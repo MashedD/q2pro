@@ -176,6 +176,7 @@ typedef struct {
     unsigned timestamp;
     bool pending;
     bool visible;
+    bool rt_emissive;
 } glare_source_t;
 
 typedef struct {

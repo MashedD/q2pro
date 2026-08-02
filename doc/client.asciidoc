@@ -1426,13 +1426,17 @@ as RT lighting, specular highlights, enhanced liquids, beams, or particles.
 Enabling it when a scene has no contributing source is a waste of resources.
 
 gl_glare::
-    Enables lens glare sprites on bright glowmapped world surfaces. Visibility
-    is checked against the rendered scene and fades smoothly using
-    ‘gl_flarespeed’. Default value is 0.
+    Enables lens glare sprites on bright glowmapped world surfaces. With
+    Vulkan ray tracing active, configured emissive surface lights also use the
+    same colored, occlusion-tested sprites. Visibility is checked against the
+    rendered scene and fades smoothly using ‘gl_flarespeed’; RT sources fade
+    out when `vk_rt_emissive` is 0. Default value is 0.
 
 gl_glare_threshold::
     Minimum lightmap brightness required for a glowmapped surface to emit glare.
-    Higher values reduce the number of glare sources. Default value is 0.3.
+    With Vulkan ray tracing active, it also filters normalized emissive-source
+    strength. Higher values reduce the number of glare sources. Default value
+    is 0.3.
 
 gl_glare_size::
     Base size of surface glare sprites. Glare size also scales with source
