@@ -1514,6 +1514,52 @@ static int shell_effect_hack(const centity_t *ent)
     return flags;
 }
 
+static bool CL_RTHeldWeaponGlowEnabled(void)
+{
+    static cvar_t *weapon_glow;
+    static cvar_t *raytracing;
+    static cvar_t *renderer;
+
+    if (!weapon_glow)
+        weapon_glow = Cvar_FindVar("vk_rt_weapon_glow");
+    if (!raytracing)
+        raytracing = Cvar_FindVar("vk_raytracing");
+    if (!renderer)
+        renderer = Cvar_FindVar("vid_ref");
+
+    return weapon_glow && weapon_glow->value > 0.0f && raytracing &&
+           raytracing->integer && renderer && !strcmp(renderer->string, "vk");
+}
+
+static bool CL_GetRTHeldWeaponGlowColor(const player_state_t *ps,
+                                        color_t *color)
+{
+    int index = ps->gunindex & GUNINDEX_MASK;
+    const char *model = cl.configstrings[cl.csr.models + index];
+
+    if (!model[0])
+        return false;
+
+    if (!Q_stricmp(model, "models/weapons/v_blast/tris.md2")) {
+        color->u32 = MakeColor(255, 176, 64, 255);
+        return true;
+    }
+    if (!Q_stricmp(model, "models/weapons/v_hyperb/tris.md2")) {
+        color->u32 = MakeColor(84, 184, 255, 255);
+        return true;
+    }
+    if (!Q_stricmp(model, "models/weapons/v_rail/tris.md2")) {
+        color->u32 = MakeColor(166, 104, 255, 255);
+        return true;
+    }
+    if (!Q_stricmp(model, "models/weapons/v_bfg/tris.md2")) {
+        color->u32 = MakeColor(74, 255, 106, 255);
+        return true;
+    }
+
+    return false;
+}
+
 /*
 ==============
 CL_AddViewWeapon
@@ -1597,12 +1643,17 @@ static void CL_AddViewWeapon(void)
     if (gun.alpha != 1.0f)
         gun.flags |= RF_TRANSLUCENT;
 
+    if (!gun_model && CL_RTHeldWeaponGlowEnabled() &&
+        CL_GetRTHeldWeaponGlowColor(ps, &gun.rgba))
+        gun.flags |= RF_RT_WEAPON_GLOW;
+
     V_AddEntity(&gun);
 
     // add shell effect from player entity
     if (ent && (flags = shell_effect_hack(ent))) {
         gun.alpha *= 0.30f;
-        gun.flags |= flags | RF_TRANSLUCENT;
+        gun.flags = (gun.flags & ~RF_RT_WEAPON_GLOW) |
+                    flags | RF_TRANSLUCENT;
         V_AddEntity(&gun);
     }
 

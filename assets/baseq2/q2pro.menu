@@ -146,6 +146,8 @@ begin raytracing
         "dynamic light ripples" vk_rt_light_ripples 0 1 0.05
     range --status "Compact ionization pulse where railgun shots land" \
         "rail impact" vk_rt_rail_impact 0 1 0.05
+    range --status "Slow colored glow on local energy weapon viewmodels" \
+        "energy weapon glow" vk_rt_weapon_glow 0 1 0.05
     range --status "Fade time for bright transient ray-traced lights" \
         "dynamic light afterglow" vk_rt_afterglow 0 1 0.05
     blank

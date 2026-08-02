@@ -1241,6 +1241,20 @@ vk_rt_rail_impact::
     or per-frame allocation is required. Changes apply immediately. Default
     value is 0.65; value 0 disables the effect.
 
+vk_rt_weapon_glow::
+    Controls a slow colored contour glow on the local first-person energy
+    weapon while Vulkan ray tracing is active, clamped between 0 and 1. The
+    base-game Blaster uses warm amber, HyperBlaster cyan-blue, Railgun violet,
+    and BFG mint-green; conventional, custom, and unrecognized weapons remain
+    unchanged. The overlay uses the weapon's depth-hacked projection, so it
+    does not produce a world-space light or affect other players or monsters.
+    It reuses the existing white shell texture and additive alias pipelines,
+    adds one draw per viewmodel batch, and contributes a reduced matching pass
+    to existing bloom when enabled. No shader, texture, descriptor, render
+    pass, ray query, protocol field, or persistent allocation is required.
+    Changes apply immediately. Default value is 0.65; value 0 disables the
+    effect.
+
 vk_rt_light_coronas::
     Controls compact colored halos around strong live combat lights while
     Vulkan ray tracing is active, clamped between 0 and 1. At most six nearby

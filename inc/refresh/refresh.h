@@ -45,6 +45,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define RF_RT_WATER_WAKE     BIT_ULL(45)
 #define RF_RT_ENERGY_COLLAPSE BIT_ULL(46)
 #define RF_RT_RAIL_IONIZATION BIT_ULL(47)
+#define RF_RT_WEAPON_GLOW    BIT_ULL(48)
 
 typedef enum {
     RT_TELEPORT_STANDARD,
