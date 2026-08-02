@@ -82,6 +82,15 @@ typedef struct {
     int             trailcount;         // for diminishing grenade trails
     vec3_t          lerp_origin;        // for trails (variable hz)
 
+    vec3_t          rt_water_wake_sample_origin;
+    vec3_t          rt_water_wake_origin;
+    vec3_t          rt_water_wake_normal;
+    vec3_t          rt_water_wake_direction;
+    int             rt_water_wake_sample_time;
+    int             rt_water_wake_seen_time;
+    float           rt_water_wake_scale;
+    bool            rt_water_wake_valid;
+
 #if USE_FPS
     int             prev_frame;
     int             anim_start;
@@ -312,10 +321,6 @@ typedef struct {
             int         time;
             float       roll, scale;
             vec3_t      offset;
-            int         rt_time;
-            float       rt_scale;
-            vec3_t      rt_offset;
-            color_t     rt_color;
         } muzzle;
     } weapon;
 
@@ -832,8 +837,6 @@ typedef enum {
 
 void CL_AddWeaponMuzzleFX(cl_muzzlefx_t fx, const vec3_t offset, float scale);
 void CL_AddMuzzleFX(const vec3_t origin, const vec3_t angles, cl_muzzlefx_t fx, int skin, float scale);
-void CL_AddPlayerMuzzleRTFX(const vec3_t origin, const vec3_t angles,
-                            int weapon);
 
 void CL_SmokeAndFlash(const vec3_t origin);
 

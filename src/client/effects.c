@@ -373,8 +373,6 @@ void CL_MuzzleFlash(void)
         break;
     }
 
-    CL_AddPlayerMuzzleRTFX(dl->origin, pl->current.angles, mz.weapon);
-
     if (cl_dlight_hacks->integer & DLHACK_NO_MUZZLEFLASH) {
         switch (mz.weapon) {
         case MZ_MACHINEGUN:

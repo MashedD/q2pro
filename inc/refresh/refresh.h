@@ -42,9 +42,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define RF_RT_ITEM_RESPAWN   BIT_ULL(42)
 #define RF_RT_ELECTRIC       BIT_ULL(43)
 #define RF_RT_LANDING_DUST   BIT_ULL(44)
-#define RF_RT_MUZZLE_PLUME   BIT_ULL(45)
+#define RF_RT_WATER_WAKE     BIT_ULL(45)
 #define RF_RT_ENERGY_COLLAPSE BIT_ULL(46)
-#define RF_RT_PROJECTILE_WAKE BIT_ULL(47)
+#define RF_RT_RAIL_IONIZATION BIT_ULL(47)
 
 typedef enum {
     RT_TELEPORT_STANDARD,
@@ -65,16 +65,6 @@ typedef enum {
     RT_ENERGY_BFG_SECONDARY,
     RT_ENERGY_TRACKER,
 } rt_energy_collapse_type_t;
-
-typedef enum {
-    RT_PROJECTILE_ROCKET,
-    RT_PROJECTILE_GRENADE,
-    RT_PROJECTILE_BLASTER,
-    RT_PROJECTILE_BLUE,
-    RT_PROJECTILE_PLASMA,
-    RT_PROJECTILE_TRACKER,
-    RT_PROJECTILE_BFG,
-} rt_projectile_wake_type_t;
 
 #define RF_SHELL_MASK       (RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE | \
                              RF_SHELL_DOUBLE | RF_SHELL_HALF_DAM | RF_SHELL_LITE_GREEN)

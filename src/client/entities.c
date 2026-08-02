@@ -45,11 +45,25 @@ static inline bool entity_is_optimized(const centity_state_t *state)
         && cl.frame.ps.pmove.pm_type < PM_DEAD;
 }
 
+static inline void entity_reset_water_wake(centity_t *ent,
+                                           const vec_t *origin)
+{
+    VectorCopy(origin, ent->rt_water_wake_sample_origin);
+    VectorCopy(origin, ent->rt_water_wake_origin);
+    VectorClear(ent->rt_water_wake_normal);
+    VectorClear(ent->rt_water_wake_direction);
+    ent->rt_water_wake_sample_time = cl.time;
+    ent->rt_water_wake_seen_time = 0;
+    ent->rt_water_wake_scale = 0.0f;
+    ent->rt_water_wake_valid = false;
+}
+
 static inline void
 entity_update_new(centity_t *ent, const centity_state_t *state, const vec_t *origin)
 {
     ent->trailcount = 1024;     // for diminishing rocket / grenade trails
     ent->flashlightfrac = 1.0f;
+    entity_reset_water_wake(ent, origin);
 
     // duplicate the current state so lerping doesn't hurt anything
     ent->prev = *state;
@@ -100,6 +114,7 @@ entity_update_old(centity_t *ent, const centity_state_t *state, const vec_t *ori
         // some data changes will force no lerping
         ent->trailcount = 1024;     // for diminishing rocket / grenade trails
         ent->flashlightfrac = 1.0f;
+        entity_reset_water_wake(ent, origin);
 
         // duplicate the current state so lerping doesn't hurt anything
         ent->prev = *state;
@@ -722,40 +737,107 @@ static bool CL_GetWeaponHighlight(int weapon, item_highlight_t *highlight)
     }
 }
 
-static int CL_RTProjectileWakeType(unsigned effects)
+#define RT_WATER_WAKE_SAMPLE_MSEC 100
+#define RT_WATER_WAKE_HOLD_MSEC   150
+
+static bool CL_RTWaterWakesEnabled(void)
 {
-    if (effects & EF_BFG)
-        return RT_PROJECTILE_BFG;
-    if (effects & EF_ROCKET)
-        return RT_PROJECTILE_ROCKET;
-    if (effects & EF_GRENADE)
-        return RT_PROJECTILE_GRENADE;
-    if (effects & (EF_BLASTER | EF_HYPERBLASTER))
-        return effects & EF_TRACKER ?
-            RT_PROJECTILE_TRACKER : RT_PROJECTILE_BLASTER;
-    if (effects & EF_BLUEHYPERBLASTER)
-        return RT_PROJECTILE_BLUE;
-    if (effects & (EF_IONRIPPER | EF_PLASMA))
-        return RT_PROJECTILE_PLASMA;
-    if (effects & EF_TRACKER)
-        return RT_PROJECTILE_TRACKER;
-    return -1;
+    static cvar_t *water_wakes;
+    static cvar_t *raytracing;
+    static cvar_t *renderer;
+
+    if (!water_wakes)
+        water_wakes = Cvar_FindVar("vk_rt_water_wakes");
+    if (!raytracing)
+        raytracing = Cvar_FindVar("vk_raytracing");
+    if (!renderer)
+        renderer = Cvar_FindVar("vid_ref");
+
+    return water_wakes && water_wakes->value > 0.0f &&
+           raytracing && raytracing->integer && renderer &&
+           !strcmp(renderer->string, "vk");
 }
 
-static void CL_AddRTProjectileWake(int number, const vec3_t origin,
-                                   const vec3_t oldorigin, unsigned effects)
+static void CL_AddRTWaterWake(centity_t *cent, const vec3_t origin,
+                              int entity_number)
 {
-    int type = CL_RTProjectileWakeType(effects);
-    if (type < 0)
+    if (!cl.bsp || !CL_RTWaterWakesEnabled()) {
+        entity_reset_water_wake(cent, origin);
+        return;
+    }
+
+    int elapsed = cl.time - cent->rt_water_wake_sample_time;
+    if (elapsed < 0) {
+        entity_reset_water_wake(cent, origin);
+        return;
+    }
+
+    if (elapsed >= RT_WATER_WAKE_SAMPLE_MSEC) {
+        vec3_t movement;
+        VectorSubtract(origin, cent->rt_water_wake_sample_origin, movement);
+        movement[2] = 0.0f;
+        float distance = VectorLength(movement);
+
+        VectorCopy(origin, cent->rt_water_wake_sample_origin);
+        cent->rt_water_wake_sample_time = cl.time;
+
+        if (distance > 96.0f) {
+            cent->rt_water_wake_valid = false;
+        } else if (distance >= 4.0f) {
+            vec3_t start, end;
+            trace_t trace;
+            VectorCopy(origin, start);
+            VectorCopy(origin, end);
+            start[2] += max(cent->maxs[2], 32.0f) + 12.0f;
+            end[2] += min(cent->mins[2], -24.0f) - 12.0f;
+
+            CL_Trace(&trace, start, end, vec3_origin, vec3_origin,
+                     CONTENTS_WATER);
+            if (!trace.startsolid && !trace.allsolid &&
+                trace.fraction > 0.0f && trace.fraction < 1.0f &&
+                trace.plane.normal[2] >= 0.7f) {
+                vec3_t above, below;
+                VectorMA(trace.endpos, 3.0f, trace.plane.normal, above);
+                VectorMA(trace.endpos, -3.0f, trace.plane.normal, below);
+                int above_contents = CM_PointContents(above, cl.bsp->nodes,
+                                                       cl.csr.extended);
+                int below_contents = CM_PointContents(below, cl.bsp->nodes,
+                                                       cl.csr.extended);
+
+                if (!(above_contents & MASK_WATER) &&
+                    (below_contents & CONTENTS_WATER)) {
+                    VectorMA(trace.endpos, 0.75f, trace.plane.normal,
+                             cent->rt_water_wake_origin);
+                    VectorCopy(trace.plane.normal,
+                               cent->rt_water_wake_normal);
+                    VectorNormalize(movement);
+                    VectorCopy(movement, cent->rt_water_wake_direction);
+                    cent->rt_water_wake_scale =
+                        Q_clipf(distance / 12.0f, 0.8f, 1.25f);
+                    cent->rt_water_wake_seen_time = cl.time;
+                    cent->rt_water_wake_valid = true;
+                } else {
+                    cent->rt_water_wake_valid = false;
+                }
+            } else {
+                cent->rt_water_wake_valid = false;
+            }
+        }
+    }
+
+    if (!cent->rt_water_wake_valid ||
+        cl.time - cent->rt_water_wake_seen_time > RT_WATER_WAKE_HOLD_MSEC)
         return;
 
     entity_t wake = { 0 };
-    VectorCopy(origin, wake.origin);
-    VectorCopy(oldorigin, wake.oldorigin);
-    wake.flags = RF_EFFECT_ONLY | RF_RT_PROJECTILE_WAKE | RF_TRANSLUCENT;
+    VectorCopy(cent->rt_water_wake_origin, wake.origin);
+    VectorCopy(cent->rt_water_wake_direction, wake.oldorigin);
+    VectorCopy(cent->rt_water_wake_normal, wake.angles);
+    wake.frame = entity_number;
+    wake.rgba.u32 = MakeColor(112, 196, 238, 255);
+    wake.flags = RF_EFFECT_ONLY | RF_RT_WATER_WAKE | RF_TRANSLUCENT;
     wake.alpha = 1.0f;
-    wake.skinnum = type;
-    wake.frame = number;
+    wake.scale = cent->rt_water_wake_scale;
     V_AddEntity(&wake);
 }
 
@@ -908,6 +990,9 @@ static void CL_AddPacketEntities(void)
             }
 #endif
         }
+
+        if (s1->modelindex == MODELINDEX_PLAYER && !(renderfx & RF_BEAM))
+            CL_AddRTWaterWake(cent, ent.origin, s1->number);
 
         if (effects & EF_BOB && !cl_nobob->integer) {
             ent.origin[2] += autobob;
@@ -1291,9 +1376,6 @@ static void CL_AddPacketEntities(void)
         if (!(effects & EF_TRAIL_MASK))
             goto skip;
 
-        CL_AddRTProjectileWake(s1->number, ent.origin, cent->lerp_origin,
-                               effects);
-
         if (effects & EF_ROCKET) {
             if (cl.csr.extended && effects & EF_GIB) {
                 CL_DiminishingTrail(cent, ent.origin, DT_FIREBALL);
@@ -1522,28 +1604,6 @@ static void CL_AddViewWeapon(void)
         gun.alpha *= 0.30f;
         gun.flags |= flags | RF_TRANSLUCENT;
         V_AddEntity(&gun);
-    }
-
-    int rt_muzzle_delta = cl.time - cl.weapon.muzzle.rt_time;
-    if (cl.weapon.muzzle.rt_scale > 0.0f && rt_muzzle_delta >= 0 &&
-        rt_muzzle_delta <= 50) {
-        entity_t plume = { 0 };
-        vec3_t forward, right, up;
-        AngleVectors(gun.angles, forward, right, up);
-        VectorCopy(gun.origin, plume.origin);
-        VectorMA(plume.origin, cl.weapon.muzzle.rt_offset[0], forward,
-                 plume.origin);
-        VectorMA(plume.origin, cl.weapon.muzzle.rt_offset[1], right,
-                 plume.origin);
-        VectorMA(plume.origin, cl.weapon.muzzle.rt_offset[2], up,
-                 plume.origin);
-        VectorCopy(gun.angles, plume.angles);
-        plume.flags = RF_EFFECT_ONLY | RF_RT_MUZZLE_PLUME | RF_TRANSLUCENT |
-                      RF_DEPTHHACK | RF_WEAPONMODEL;
-        plume.alpha = 1.0f;
-        plume.rgba = cl.weapon.muzzle.rt_color;
-        plume.scale = cl.weapon.muzzle.rt_scale;
-        V_AddEntity(&plume);
     }
 
     // add muzzle flash

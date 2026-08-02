@@ -1132,6 +1132,21 @@ vk_rt_splash_ripples::
     Changes apply immediately. Default value is 0.75; value 0 disables the
     effect.
 
+vk_rt_water_wakes::
+    Controls paired V-shaped surface wakes behind moving players while Vulkan
+    ray tracing is active, clamped between 0 and 1. The local player and other
+    players produce three progressively wider pairs of pale-blue elliptical
+    crests only while moving at the air/water boundary; dry ground, deep water,
+    slime, lava, stationary players, and teleport-sized movement do not create
+    wakes. Surface traces are cached for 100 milliseconds and expire after 150
+    milliseconds. The renderer validates both sides of the liquid boundary and
+    restricts wakes to the current BSP visibility, area, distance, and viewing
+    medium. The nearest six wakes reuse the procedural shockwave texture and
+    shared additive batch, capped at 72 triangles with no new texture, shader,
+    ray query, render pass, persistent effect allocation, or extra draw when
+    the shockwave batch is already active. Changes apply immediately. Default
+    value is 0.75; value 0 disables the effect.
+
 vk_rt_teleport_vortex::
     Controls layered energy vortices at discrete teleport events while Vulkan
     ray tracing is active, clamped between 0 and 1. Player and scripted
@@ -1194,24 +1209,6 @@ vk_rt_landing_dust::
     render pass, ray query, dynamic light, or per-frame allocation. Changes apply
     immediately. Default value is 0.7; value 0 disables the effect.
 
-vk_rt_muzzle_plumes::
-    Controls brief directional fire and energy plumes at player and monster
-    muzzles while Vulkan ray tracing is active, clamped between 0 and 1.
-    Ballistic, explosive, rail, beam, blaster, BFG, disruptor, and expansion
-    weapons retain distinct colors. Each plume combines a tapered two-segment
-    core with two short outward filaments and lasts only for the existing 50 ms
-    muzzle-flash interval. First-person plumes use reduced length, width, and
-    brightness to avoid obscuring the view; other players and monsters follow
-    BSP visibility, area, distance, and liquid-medium restrictions. Weapons
-    without a muzzle-flash model receive an effect-only marker, while existing
-    flash models, skins, lights, sounds, and animations remain unchanged. The
-    nearest 12 active plumes reuse the beam texture, additive pipeline, mapped
-    particle buffer, fog, and shared beam batch, adding at most 96 triangles
-    and one draw while active with no new shader, texture, descriptor, render
-    pass, ray query, persistent marker, or per-frame allocation. The effect
-    also respects `cl_muzzleflashes`. Changes apply immediately. Default value
-    is 0.75; value 0 disables the effect.
-
 vk_rt_energy_collapse::
     Controls inward-collapse effects at BFG and tracker detonations while
     Vulkan ray tracing is active, clamped between 0 and 1. Main BFG impacts use
@@ -1229,35 +1226,20 @@ vk_rt_energy_collapse::
     render pass, ray query, or per-frame allocation. Changes apply immediately.
     Default value is 0.8; value 0 disables the effect.
 
-vk_rt_projectile_wakes::
-    Controls compact energy rings behind moving projectiles while Vulkan ray
-    tracing is active, clamped between 0 and 1. Rockets, grenades, blaster and
-    hyperblaster bolts, ion and plasma bolts, tracker projectiles, and BFG balls
-    use distinct colors and sizes. Two clearly visible rings follow each
-    projectile perpendicular to its interpolated travel direction, with a
-    restrained animated pulse. Existing projectile models, particles, trails,
-    lights, sounds, and gameplay remain unchanged. Initial, stationary, and
-    teleport-sized movements are rejected, while near-camera and distance fades,
-    BSP visibility, area, and liquid-medium restrictions prevent distracting or
-    misplaced rings. The nearest eight projectiles reuse the procedural
-    shockwave texture, additive pipeline, mapped particle buffer, fog, and
-    shared shockwave batch, adding at most 32 triangles and one draw while active
-    with no new shader, texture, descriptor, render pass, ray query, persistent
-    history, or per-frame allocation. Changes apply immediately. Default value
-    is 0.75; value 0 disables the effect.
-
-vk_rt_light_trails::
-    Controls short colored trails behind strong moving dynamic lights while
-    Vulkan ray tracing is active, clamped between 0 and 1. Lights with at
-    least 160 intensity reuse the existing eight-entry transient-light tracker
-    and retain one smoothly lagged segment. Movement below 6 units is rejected,
-    teleport-like changes are reset, visible length is capped at 96 units, and
-    the segment fades for 0.10 seconds after its source disappears. Trails use
-    the existing depth-tested beam geometry and add at most eight normal draws;
-    bloom adds at most eight matching lower-energy draws when enabled. No new
-    shaders, ray queries, texture samples, or render passes are required.
-    Changes apply immediately and remain independent of `vk_rt_afterglow`.
-    Default value is 0.55; value 0 disables the effect.
+vk_rt_rail_impact::
+    Controls compact ionization effects where railgun shots land while Vulkan
+    ray tracing is active, clamped between 0 and 1. A short client-side trace
+    recovers the impact normal; trace misses fall back to the reversed shot
+    direction. Each impact combines one small surface-aligned
+    pulse with three short filaments and inherits the configured rail core and
+    spiral colors. Effects last roughly 0.3 seconds and are restricted by BSP
+    visibility, area, distance, facing, near-camera fading, and the viewing
+    liquid medium. The nearest six impacts reuse the impact and beam textures,
+    additive pipelines, mapped particle buffer, fog, and shared batches, adding
+    at most 48 triangles and two draws when both batches are otherwise empty.
+    No new shader, texture, descriptor, render pass, ray query, protocol field,
+    or per-frame allocation is required. Changes apply immediately. Default
+    value is 0.65; value 0 disables the effect.
 
 vk_rt_light_coronas::
     Controls compact colored halos around strong live combat lights while
