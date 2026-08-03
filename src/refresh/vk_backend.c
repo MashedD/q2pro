@@ -15854,7 +15854,8 @@ static void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass)
     for (int i = fd->num_entities - 1; i >= 0; i--) {
         const entity_t *ent = &fd->entities[i];
 
-        if (vk_entity_in_pass(ent, pass))
+        if (R_EntityVisibleAcrossLiquids(vk.world.cache, fd, ent) &&
+            vk_entity_in_pass(ent, pass))
             vk_draw_entity(ent, fd, pass);
     }
 

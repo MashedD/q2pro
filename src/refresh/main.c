@@ -521,6 +521,116 @@ static void GL_OccludeFlares(void)
         qglColorMask(1, 1, 1, 1);
 }
 
+#define LIQUID_PLANE_EPSILON    0.125f
+#define LIQUID_FRACTION_EPSILON 0.00001f
+
+static bool R_LiquidBoundaryTranslucent(const mleaf_t *leaf, int medium,
+                                        const vec3_t liquid_origin,
+                                        const vec3_t other_origin)
+{
+    const mbrushside_t *outer_side = NULL;
+    float outer_fraction = -1.0f;
+    bool outer_translucent = false;
+
+    if (!leaf || !medium)
+        return false;
+
+    for (int i = 0; i < leaf->numleafbrushes; i++) {
+        const mbrush_t *brush = leaf->firstleafbrush[i];
+        const mbrushside_t *exit_side = NULL;
+        float exit_fraction = 2.0f;
+        bool inside = true;
+
+        if (!brush || !(brush->contents & medium))
+            continue;
+
+        for (int j = 0; j < brush->numsides; j++) {
+            const mbrushside_t *side = brush->firstbrushside + j;
+            float d1 = PlaneDiff(liquid_origin, side->plane);
+            float d2 = PlaneDiff(other_origin, side->plane);
+
+            if (d1 > LIQUID_PLANE_EPSILON) {
+                inside = false;
+                break;
+            }
+            if (d2 <= LIQUID_PLANE_EPSILON)
+                continue;
+
+            float fraction = d1 / (d1 - d2);
+            if (fraction < exit_fraction) {
+                exit_fraction = fraction;
+                exit_side = side;
+            }
+        }
+
+        if (!inside || !exit_side)
+            continue;
+
+        bool translucent = exit_side->texinfo &&
+            (exit_side->texinfo->c.flags & SURF_TRANS_MASK);
+        if (!outer_side ||
+            exit_fraction > outer_fraction + LIQUID_FRACTION_EPSILON) {
+            outer_side = exit_side;
+            outer_fraction = exit_fraction;
+            outer_translucent = translucent;
+        } else if (fabsf(exit_fraction - outer_fraction) <=
+                   LIQUID_FRACTION_EPSILON) {
+            // Coincident boundaries are visible only when all authored sides
+            // at the outer edge are translucent.
+            outer_translucent = outer_translucent && translucent;
+        }
+    }
+
+    // If BSP brush metadata cannot identify the crossed boundary, avoid
+    // leaking entities through an effectively opaque liquid surface.
+    return outer_side && outer_translucent;
+}
+
+static bool R_PointVisibleAcrossLiquids(const bsp_t *bsp,
+                                        const vec3_t view_origin,
+                                        const vec3_t point)
+{
+    const mleaf_t *view_leaf, *point_leaf;
+    int view_medium, point_medium;
+
+    if (!bsp || !bsp->nodes)
+        return true;
+
+    view_leaf = BSP_PointLeaf(bsp->nodes, view_origin);
+    point_leaf = BSP_PointLeaf(bsp->nodes, point);
+    view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
+    point_medium = point_leaf ? point_leaf->contents[0] & MASK_WATER : 0;
+
+    if (view_medium == point_medium)
+        return true;
+
+    if (view_medium &&
+        !R_LiquidBoundaryTranslucent(view_leaf, view_medium,
+                                     view_origin, point))
+        return false;
+    if (point_medium &&
+        !R_LiquidBoundaryTranslucent(point_leaf, point_medium,
+                                     point, view_origin))
+        return false;
+
+    return true;
+}
+
+bool R_EntityVisibleAcrossLiquids(const bsp_t *bsp, const refdef_t *fd,
+                                  const entity_t *ent)
+{
+    if (!fd || !ent ||
+        (ent->flags & (RF_WEAPONMODEL | RF_DEPTHHACK)) ||
+        (ent->model & BIT(31)))
+        return true;
+
+    if (R_PointVisibleAcrossLiquids(bsp, fd->vieworg, ent->origin))
+        return true;
+
+    return (ent->flags & RF_BEAM) &&
+        R_PointVisibleAcrossLiquids(bsp, fd->vieworg, ent->oldorigin);
+}
+
 static void GL_ClassifyEntities(void)
 {
     entity_t *ent;
@@ -533,6 +643,9 @@ static void GL_ClassifyEntities(void)
 
     for (i = 0, ent = glr.fd.entities; i < glr.fd.num_entities; i++, ent++) {
         if (ent->flags & RF_EFFECT_ONLY)
+            continue;
+
+        if (!R_EntityVisibleAcrossLiquids(gl_static.world.cache, &glr.fd, ent))
             continue;
 
         if (ent->flags & RF_BEAM) {

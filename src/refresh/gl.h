@@ -1016,6 +1016,8 @@ void GL_DrawBspModel(mmodel_t *model);
 void GL_DrawWorld(void);
 void GL_SampleLightPoint(vec3_t color);
 void GL_LightPoint(const vec3_t origin, vec3_t color);
+bool R_EntityVisibleAcrossLiquids(const bsp_t *bsp, const refdef_t *fd,
+                                  const entity_t *ent);
 
 /*
  * gl_sky.c
