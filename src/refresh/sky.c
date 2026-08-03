@@ -327,9 +327,12 @@ R_DrawSkyBox
 */
 void R_DrawSkyBox(void)
 {
-    // An underwater translucent surface must not reveal the global sky when
-    // the world above the liquid is outside the current PVS.
-    if (glr.fd.rdflags & RDF_UNDERWATER)
+    // A translucent liquid surface does not occlude the skybox. Derive the
+    // camera medium directly from the BSP to avoid near-surface flag lag.
+    const bsp_t *bsp = gl_static.world.cache;
+    const mleaf_t *leaf = bsp && bsp->nodes ?
+        BSP_PointLeaf(bsp->nodes, glr.fd.vieworg) : NULL;
+    if (leaf && (leaf->contents[0] & MASK_WATER))
         return;
 
     // check for no sky at all

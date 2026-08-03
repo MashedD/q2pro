@@ -10108,10 +10108,6 @@ static float vk_world_face_alpha(const mface_t *face)
         return 0.33f;
     if (face->drawflags & SURF_TRANS66)
         return 0.66f;
-    // Warp liquids are opaque textures by default, but their surface is
-    // meant to be viewed as a translucent volume (water/lava/slime).
-    if (face->drawflags & SURF_WARP)
-        return 0.66f;
     return 1.0f;
 }
 
@@ -10127,7 +10123,7 @@ static bool vk_world_face_backfacing(const mface_t *face, const vec3_t vieworg)
 
 static bool vk_world_face_in_pass(const mface_t *face, vk_world_pass_t pass)
 {
-    bool translucent = face->drawflags & (SURF_TRANS_MASK | SURF_WARP);
+    bool translucent = face->drawflags & SURF_TRANS_MASK;
 
     if (pass == VK_WORLD_ENTITY_ALPHA)
         return true;
@@ -11400,10 +11396,11 @@ static void vk_draw_skybox(const refdef_t *fd)
 {
     if (vk_drawsky && !vk_drawsky->integer)
         return;
-    // The water surface is translucent, but the above-water PVS can be
-    // intentionally absent from an underwater view. Do not let that surface
-    // reveal the global sky background by itself.
-    if (fd && (fd->rdflags & RDF_UNDERWATER))
+    // The water surface is translucent, so derive this directly from BSP
+    // contents rather than a potentially stale underwater view flag.
+    const mleaf_t *leaf = fd && vk.world.cache && vk.world.cache->nodes ?
+        BSP_PointLeaf(vk.world.cache->nodes, fd->vieworg) : NULL;
+    if (leaf && (leaf->contents[0] & MASK_WATER))
         return;
     if (!vk.world.sky_visible)
         return;
@@ -11550,9 +11547,8 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
 {
     bsp_t *bsp = vk.world.cache;
     const mleaf_t *leaf;
-    visrow_t vis1, vis2;
-    int cluster1, cluster2;
-    vec3_t tmp;
+    visrow_t vis1;
+    int cluster1;
 
     if (!bsp || !bsp->nodes || !bsp->leafs)
         return;
@@ -11565,21 +11561,7 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
     leaf = BSP_PointLeaf(bsp->nodes, fd->vieworg);
     if (!leaf)
         return;
-    cluster1 = cluster2 = leaf->cluster;
-    // Preserve cross-boundary visibility from air into liquid, but never
-    // import the above-water PVS while the camera is still underwater.
-    if (!(fd->rdflags & RDF_UNDERWATER)) {
-        VectorCopy(fd->vieworg, tmp);
-        if (!leaf->contents[0])
-            tmp[2] -= 16;
-        else
-            tmp[2] += 16;
-        leaf = BSP_PointLeaf(bsp->nodes, tmp);
-        if (!leaf)
-            return;
-        if (!(leaf->contents[0] & CONTENTS_SOLID))
-            cluster2 = leaf->cluster;
-    }
+    cluster1 = leaf->cluster;
 
     if (!bsp->vis || (vk_novis && vk_novis->integer) || cluster1 == -1) {
         for (int i = 0; i < bsp->numleafs; i++)
@@ -11591,12 +11573,6 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
     }
 
     BSP_ClusterVis(bsp, &vis1, cluster1, DVIS_PVS);
-    if (cluster2 != -1 && cluster1 != cluster2) {
-        BSP_ClusterVis(bsp, &vis2, cluster2, DVIS_PVS);
-        int longs = VIS_FAST_LONGS(bsp->visrowsize);
-        for (int i = 0; i < longs; i++)
-            vis1.l[i] |= vis2.l[i];
-    }
 
     for (int i = 0; i < bsp->numleafs; i++) {
         leaf = &bsp->leafs[i];
@@ -13174,9 +13150,6 @@ static uint32_t vk_select_rail_ionizations(
         !vk.world.cache || !vk.world.cache->nodes)
         return 0;
 
-    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
-                                             fd->vieworg);
-    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
     uint32_t count = 0;
     for (int i = 0; i < fd->num_entities; i++) {
         const entity_t *entity = &fd->entities[i];
@@ -13208,7 +13181,6 @@ static uint32_t vk_select_rail_ionizations(
         const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, leaf_point);
         if (!leaf || leaf->visframe != vk.world.visframe ||
             (leaf->contents[0] & CONTENTS_SOLID) ||
-            (leaf->contents[0] & MASK_WATER) != view_medium ||
             (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
             continue;
 
@@ -13462,9 +13434,6 @@ static uint32_t vk_append_shockwaves(const refdef_t *fd,
     if (strength <= 0.0f || !available)
         return vertex_count;
 
-    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
-                                             fd->vieworg);
-    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
     vk_shockwave_candidate_t candidates[VK_MAX_SHOCKWAVES] = { 0 };
     uint32_t count = 0;
 
@@ -13487,7 +13456,6 @@ static uint32_t vk_append_shockwaves(const refdef_t *fd,
                                             entity->origin);
         if (!leaf || leaf->visframe != vk.world.visframe ||
             (leaf->contents[0] & CONTENTS_SOLID) ||
-            (leaf->contents[0] & MASK_WATER) != view_medium ||
             (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
             continue;
 
@@ -13564,9 +13532,6 @@ static uint32_t vk_append_splash_ripples(const refdef_t *fd,
     if (strength <= 0.0f || !available)
         return vertex_count;
 
-    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
-                                             fd->vieworg);
-    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
     vk_splash_ripple_candidate_t candidates[VK_MAX_SPLASH_RIPPLES] = { 0 };
     uint32_t count = 0;
 
@@ -13615,7 +13580,6 @@ static uint32_t vk_append_splash_ripples(const refdef_t *fd,
         const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, plus_point);
         if (!leaf || leaf->visframe != vk.world.visframe ||
             (leaf->contents[0] & CONTENTS_SOLID) ||
-            (leaf->contents[0] & MASK_WATER) != view_medium ||
             (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
             continue;
 
@@ -13691,9 +13655,6 @@ static uint32_t vk_append_water_wakes(const refdef_t *fd,
     if (strength <= 0.0f || !available)
         return vertex_count;
 
-    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
-                                             fd->vieworg);
-    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
     vk_water_wake_candidate_t candidates[VK_MAX_WATER_WAKES] = { 0 };
     uint32_t count = 0;
 
@@ -13740,7 +13701,6 @@ static uint32_t vk_append_water_wakes(const refdef_t *fd,
         const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, plus_point);
         if (!leaf || leaf->visframe != vk.world.visframe ||
             (leaf->contents[0] & CONTENTS_SOLID) ||
-            (leaf->contents[0] & MASK_WATER) != view_medium ||
             (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
             continue;
 
@@ -13831,9 +13791,6 @@ static uint32_t vk_append_teleport_vortices(const refdef_t *fd,
     if (strength <= 0.0f || !available)
         return vertex_count;
 
-    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
-                                             fd->vieworg);
-    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
     vk_teleport_vortex_candidate_t candidates[VK_MAX_TELEPORT_VORTICES] = { 0 };
     uint32_t count = 0;
 
@@ -13860,7 +13817,6 @@ static uint32_t vk_append_teleport_vortices(const refdef_t *fd,
                                             entity->origin);
         if (!leaf || leaf->visframe != vk.world.visframe ||
             (leaf->contents[0] & CONTENTS_SOLID) ||
-            (leaf->contents[0] & MASK_WATER) != view_medium ||
             (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
             continue;
 
@@ -14009,9 +13965,6 @@ static uint32_t vk_append_energy_collapses(const refdef_t *fd,
     if (strength <= 0.0f || !available)
         return vertex_count;
 
-    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
-                                             fd->vieworg);
-    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
     vk_energy_collapse_candidate_t
         candidates[VK_MAX_ENERGY_COLLAPSES] = { 0 };
     uint32_t count = 0;
@@ -14039,7 +13992,6 @@ static uint32_t vk_append_energy_collapses(const refdef_t *fd,
                                             entity->origin);
         if (!leaf || leaf->visframe != vk.world.visframe ||
             (leaf->contents[0] & CONTENTS_SOLID) ||
-            (leaf->contents[0] & MASK_WATER) != view_medium ||
             (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
             continue;
 
@@ -14167,9 +14119,6 @@ static uint32_t vk_append_item_materializations(const refdef_t *fd,
     if (strength <= 0.0f || !available)
         return vertex_count;
 
-    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
-                                             fd->vieworg);
-    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
     vk_item_respawn_candidate_t candidates[VK_MAX_ITEM_RESPAWNS] = { 0 };
     uint32_t count = 0;
 
@@ -14193,7 +14142,6 @@ static uint32_t vk_append_item_materializations(const refdef_t *fd,
                                             entity->origin);
         if (!leaf || leaf->visframe != vk.world.visframe ||
             (leaf->contents[0] & CONTENTS_SOLID) ||
-            (leaf->contents[0] & MASK_WATER) != view_medium ||
             (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
             continue;
 
@@ -14451,9 +14399,6 @@ static uint32_t vk_append_electric_filaments(const refdef_t *fd,
     if (strength <= 0.0f || !available)
         return vertex_count;
 
-    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
-                                             fd->vieworg);
-    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
     vk_electric_filament_candidate_t
         candidates[VK_MAX_ELECTRIC_FILAMENTS] = { 0 };
     uint32_t count = 0;
@@ -14490,7 +14435,6 @@ static uint32_t vk_append_electric_filaments(const refdef_t *fd,
                                             leaf_point);
         if (!leaf || leaf->visframe != vk.world.visframe ||
             (leaf->contents[0] & CONTENTS_SOLID) ||
-            (leaf->contents[0] & MASK_WATER) != view_medium ||
             (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
             continue;
 
@@ -14618,9 +14562,6 @@ static uint32_t vk_append_impact_marks(const refdef_t *fd,
     if (strength <= 0.0f || !available)
         return vertex_count;
 
-    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
-                                             fd->vieworg);
-    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
     vk_impact_candidate_t candidates[VK_MAX_IMPACT_MARKS] = { 0 };
     uint32_t count = 0;
 
@@ -14654,7 +14595,6 @@ static uint32_t vk_append_impact_marks(const refdef_t *fd,
         const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, leaf_point);
         if (!leaf || leaf->visframe != vk.world.visframe ||
             (leaf->contents[0] & CONTENTS_SOLID) ||
-            (leaf->contents[0] & MASK_WATER) != view_medium ||
             (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
             continue;
 
@@ -14721,9 +14661,6 @@ static uint32_t vk_select_corona_lights(const refdef_t *fd,
         !vk.world.cache || !vk.world.cache->nodes)
         return 0;
 
-    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
-                                             fd->vieworg);
-    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
     uint32_t count = 0;
 
     for (int i = 0; i < fd->num_dlights; i++) {
@@ -14748,7 +14685,6 @@ static uint32_t vk_select_corona_lights(const refdef_t *fd,
                                             light->origin);
         if (!leaf || leaf->visframe != vk.world.visframe ||
             (leaf->contents[0] & CONTENTS_SOLID) ||
-            (leaf->contents[0] & MASK_WATER) != view_medium ||
             (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
             continue;
 
@@ -15270,23 +15206,6 @@ static void vk_glare_quad_mvp(mat4_t mvp, const vec3_t origin, float scale,
     vk_model_mvp(mvp, fd, model_matrix);
 }
 
-static bool vk_glare_in_view_medium(const glare_source_t *source,
-                                    const refdef_t *fd)
-{
-    if (!fd || !vk.world.cache || !vk.world.cache->nodes)
-        return true;
-
-    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
-                                             fd->vieworg);
-    const mleaf_t *source_leaf = BSP_PointLeaf(vk.world.cache->nodes,
-                                               source->origin);
-    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
-    int source_medium = source_leaf ?
-        source_leaf->contents[0] & MASK_WATER : 0;
-
-    return view_medium == source_medium;
-}
-
 static void vk_draw_glare(const refdef_t *fd)
 {
     if (!vk_glare || !vk_glare->integer || !glr.num_glare_sources || !fd ||
@@ -15330,14 +15249,7 @@ static void vk_draw_glare(const refdef_t *fd)
     for (int i = 0; i < glr.num_glare_sources; i++) {
         glare_source_t *gs = &glr.glare_sources[i];
         vec3_t to_src, view_dir, to_viewer;
-        bool in_view_medium = vk_glare_in_view_medium(gs, fd);
-        bool test = in_view_medium &&
-            (!gs->rt_emissive || rt_emissive_active);
-
-        if (!in_view_medium) {
-            gs->visibility = 0.0f;
-            gs->visible = false;
-        }
+        bool test = !gs->rt_emissive || rt_emissive_active;
 
         if (test) {
             for (int j = 0; j < 4; j++) {
@@ -15392,12 +15304,6 @@ static void vk_draw_glare(const refdef_t *fd)
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.glare_pipeline);
     for (int i = 0; i < glr.num_glare_sources; i++) {
         glare_source_t *gs = &glr.glare_sources[i];
-
-        if (!vk_glare_in_view_medium(gs, fd)) {
-            gs->visibility = 0.0f;
-            gs->visible = false;
-            continue;
-        }
 
         bool visible = eligible[i] && gs->visible;
 
@@ -15845,31 +15751,6 @@ typedef enum {
     VK_ENTITY_BLOOM_SOURCE,
 } vk_entity_pass_t;
 
-static bool vk_entity_in_view_medium(const entity_t *ent,
-                                     const refdef_t *fd)
-{
-    if (!(fd->rdflags & RDF_UNDERWATER) ||
-        (ent->flags & (RF_WEAPONMODEL | RF_DEPTHHACK)) ||
-        (ent->model & BIT(31)) || !vk.world.cache || !vk.world.cache->nodes)
-        return true;
-
-    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
-                                             fd->vieworg);
-    const mleaf_t *entity_leaf = BSP_PointLeaf(vk.world.cache->nodes,
-                                               ent->origin);
-    int medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
-    bool same_medium = medium && entity_leaf &&
-        (entity_leaf->contents[0] & medium);
-
-    if (!same_medium && (ent->flags & RF_BEAM)) {
-        entity_leaf = BSP_PointLeaf(vk.world.cache->nodes, ent->oldorigin);
-        same_medium = medium && entity_leaf &&
-            (entity_leaf->contents[0] & medium);
-    }
-
-    return !medium || same_medium;
-}
-
 static bool vk_entity_in_pass(const entity_t *ent, vk_entity_pass_t pass)
 {
     if (ent->flags & RF_EFFECT_ONLY)
@@ -15973,8 +15854,7 @@ static void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass)
     for (int i = fd->num_entities - 1; i >= 0; i--) {
         const entity_t *ent = &fd->entities[i];
 
-        if (vk_entity_in_view_medium(ent, fd) &&
-            vk_entity_in_pass(ent, pass))
+        if (vk_entity_in_pass(ent, pass))
             vk_draw_entity(ent, fd, pass);
     }
 
