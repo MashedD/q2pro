@@ -1075,16 +1075,18 @@ void GL_BuildGlareList(void)
     if (!bsp || !qglBeginQuery)
         return;
 
-    // no need to check r_glowmaps: if glowmaps not loaded,
-    // texnum2 will be 0 and no sources will match
-
     for (i = 0, surf = bsp->faces; i < bsp->numfaces; i++, surf++) {
         if ((surf->drawflags & SURF_NODRAW) || !surf->texinfo ||
             !surf->texinfo->image || !surf->plane || !surf->firstsurfedge ||
             surf->numsurfedges <= 0 || surf->lm_width <= 0 || surf->lm_height <= 0)
             continue;
 
-        if (!surf->texinfo->image->texnum2)
+        bool glowmap_source = surf->texinfo->image->texnum2 != 0;
+        bool static_light_source = !glowmap_source &&
+            !(surf->drawflags & (SURF_TRANS_MASK | SURF_WARP | SURF_SKY)) &&
+            !(surf->texinfo->c.flags & (SURF_SKY | SURF_NODRAW)) &&
+            (surf->texinfo->c.flags & SURF_LIGHT);
+        if (!glowmap_source && !static_light_source)
             continue;
 
         if (!surf->light_m || !surf->light_m->buffer)
@@ -1111,6 +1113,23 @@ void GL_BuildGlareList(void)
         float g = pixel[1] / 255.0f;
         float b = pixel[2] / 255.0f;
         float brightness = (r + g + b) * (1.0f / 3.0f);
+
+        if (static_light_source) {
+            float peak = max(r, max(g, b));
+            float base = surf->texinfo->c.value > 0 ?
+                surf->texinfo->c.value : 200.0f;
+
+            // Preserve the lightmap tint while making static lamp glare
+            // independent of optional glowmap assets.
+            if (peak > 0.0f) {
+                r /= peak;
+                g /= peak;
+                b /= peak;
+            } else {
+                r = g = b = 1.0f;
+            }
+            brightness = Q_clipf(base / 200.0f, 0.0f, 1.0f);
+        }
 
         if (brightness < Cvar_ClampValue(gl_glare_threshold, 0, 1))
             continue;

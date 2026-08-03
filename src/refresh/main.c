@@ -839,6 +839,24 @@ static void make_glare_quad(const vec3_t origin, float scale)
     VectorAdd3(origin, up,   right, tess.vertices + 9);
 }
 
+static bool GL_GlareInViewMedium(const glare_source_t *source)
+{
+    const bsp_t *bsp = gl_static.world.cache;
+
+    if (!bsp || !bsp->nodes)
+        return true;
+
+    const mleaf_t *view_leaf = BSP_PointLeaf(bsp->nodes, glr.fd.vieworg);
+    const mleaf_t *source_leaf = BSP_PointLeaf(bsp->nodes, source->origin);
+    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
+    int source_medium = source_leaf ?
+        source_leaf->contents[0] & MASK_WATER : 0;
+
+    // Liquid surfaces are translucent and do not occlude the depth query.
+    // Keep lens glare within the camera's BSP medium instead.
+    return view_medium == source_medium;
+}
+
 static void GL_OccludeGlare(void)
 {
     vec3_t to_src, to_viewer;
@@ -853,6 +871,12 @@ static void GL_OccludeGlare(void)
     for (i = 0; i < glr.num_glare_sources; i++) {
         glare_source_t *gs = &glr.glare_sources[i];
         int j;
+
+        if (!GL_GlareInViewMedium(gs)) {
+            gs->visibility = 0.0f;
+            gs->pending = gs->visible = false;
+            continue;
+        }
 
         for (j = 0; j < 4; j++)
             if (PlaneDiff(gs->origin, &glr.frustumPlanes[j]) < -2.5f)
@@ -931,6 +955,12 @@ void GL_DrawGlare(void)
     for (i = 0; i < glr.num_glare_sources; i++) {
         glare_source_t *gs = &glr.glare_sources[i];
         vec3_t to_src;
+
+        if (!GL_GlareInViewMedium(gs)) {
+            gs->visibility = 0.0f;
+            gs->pending = gs->visible = false;
+            continue;
+        }
 
         if (gs->pending && gs->timestamp != com_eventTime) {
             GLuint result;

@@ -49,7 +49,7 @@ the Free Software Foundation; either version 2 of the License, or
 #define VK_MAX_LANDING_DUST        6
 #define VK_MAX_ENERGY_COLLAPSES    5
 #define VK_MAX_RAIL_IONIZATIONS    6
-#define VK_MAX_RT_GLARE_SOURCES    32
+#define VK_MAX_RT_GLARE_COLORS     128
 #define VK_MAX_LIGHTMAP_EXTENTS    513
 #define VK_MAX_FRAMES_IN_FLIGHT    3
 #define VK_MAX_CUBEMAPS            16
@@ -15270,6 +15270,23 @@ static void vk_glare_quad_mvp(mat4_t mvp, const vec3_t origin, float scale,
     vk_model_mvp(mvp, fd, model_matrix);
 }
 
+static bool vk_glare_in_view_medium(const glare_source_t *source,
+                                    const refdef_t *fd)
+{
+    if (!fd || !vk.world.cache || !vk.world.cache->nodes)
+        return true;
+
+    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                             fd->vieworg);
+    const mleaf_t *source_leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                               source->origin);
+    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
+    int source_medium = source_leaf ?
+        source_leaf->contents[0] & MASK_WATER : 0;
+
+    return view_medium == source_medium;
+}
+
 static void vk_draw_glare(const refdef_t *fd)
 {
     if (!vk_glare || !vk_glare->integer || !glr.num_glare_sources || !fd ||
@@ -15313,7 +15330,14 @@ static void vk_draw_glare(const refdef_t *fd)
     for (int i = 0; i < glr.num_glare_sources; i++) {
         glare_source_t *gs = &glr.glare_sources[i];
         vec3_t to_src, view_dir, to_viewer;
-        bool test = !gs->rt_emissive || rt_emissive_active;
+        bool in_view_medium = vk_glare_in_view_medium(gs, fd);
+        bool test = in_view_medium &&
+            (!gs->rt_emissive || rt_emissive_active);
+
+        if (!in_view_medium) {
+            gs->visibility = 0.0f;
+            gs->visible = false;
+        }
 
         if (test) {
             for (int j = 0; j < 4; j++) {
@@ -15368,6 +15392,13 @@ static void vk_draw_glare(const refdef_t *fd)
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.glare_pipeline);
     for (int i = 0; i < glr.num_glare_sources; i++) {
         glare_source_t *gs = &glr.glare_sources[i];
+
+        if (!vk_glare_in_view_medium(gs, fd)) {
+            gs->visibility = 0.0f;
+            gs->visible = false;
+            continue;
+        }
+
         bool visible = eligible[i] && gs->visible;
 
         float speed = vk_flarespeed ? vk_flarespeed->value : 8.0f;
@@ -17899,92 +17930,165 @@ static bool vk_glare_lightmap_color(const bsp_t *bsp, const mface_t *surf,
 
 #if USE_VULKAN_RAYTRACING
 typedef struct {
-    uint32_t index;
+    glare_source_t source;
     float score;
-    float brightness;
 } vk_rt_glare_candidate_t;
 
 static bool vk_rt_glare_source_matches(const glare_source_t *source,
-                                       const vk_surface_light_t *light)
+                                       const glare_source_t *other)
 {
     vec3_t delta;
-    VectorSubtract(source->origin, light->origin, delta);
+    VectorSubtract(source->origin, other->origin, delta);
     return DotProduct(delta, delta) <= 36.0f &&
-        DotProduct(source->normal, light->normal) >= 0.98f;
+        DotProduct(source->normal, other->normal) >= 0.98f;
 }
 
-static void vk_append_rt_emissive_glare_sources(void)
+static void vk_rt_glare_face_center(const bsp_t *bsp, const mface_t *face,
+                                    vec3_t center, vec3_t normal)
 {
-    if (!vk.raytracing_active || !vk.world.surface_lights_ready ||
-        !vk.world.surface_light_count ||
-        glr.num_glare_sources >= MAX_GLARE_SOURCES)
-        return;
+    VectorClear(center);
+    const msurfedge_t *src_surfedge = face->firstsurfedge;
+    for (int i = 0; i < face->numsurfedges; i++) {
+        const medge_t *src_edge = bsp->edges + src_surfedge->edge;
+        const mvertex_t *src_vert =
+            bsp->vertices + src_edge->v[src_surfedge->vert];
+        VectorAdd(center, src_vert->point, center);
+        src_surfedge++;
+    }
+    VectorScale(center, 1.0f / face->numsurfedges, center);
 
-    uint32_t limit = min((uint32_t)VK_MAX_RT_GLARE_SOURCES,
-                         (uint32_t)(MAX_GLARE_SOURCES -
-                                    glr.num_glare_sources));
+    VectorCopy(face->plane->normal, normal);
+    if (face->drawflags & DSURF_PLANEBACK)
+        VectorNegate(normal, normal);
+}
+
+static void vk_rt_glare_color(const mface_t *face,
+                              vk_surface_light_color_t cache[],
+                              uint32_t *cache_count, vec3_t color)
+{
+    char path[MAX_QPATH];
+
+    Q_concat(path, sizeof(path), "textures/", face->texinfo->name, ".wal");
+    for (uint32_t i = 0; i < *cache_count; i++) {
+        if (!Q_stricmp(cache[i].name, path)) {
+            VectorCopy(cache[i].color, color);
+            return;
+        }
+    }
+
+    if (*cache_count >= VK_MAX_RT_GLARE_COLORS) {
+        VectorSet(color, 1.0f, 1.0f, 1.0f);
+        return;
+    }
+
+    vk_surface_light_color_t *entry = &cache[(*cache_count)++];
+    Q_strlcpy(entry->name, path, sizeof(entry->name));
+    bool has_glow = face->texinfo->image && face->texinfo->image->texnum2 &&
+        face->texinfo->image->texnum2 < MAX_RIMAGES;
+    vk_surface_light_texture_color(path, has_glow, entry->color);
+    VectorCopy(entry->color, color);
+}
+
+static void vk_rt_insert_glare_candidate(
+    vk_rt_glare_candidate_t candidates[MAX_GLARE_SOURCES], uint32_t *count,
+    const glare_source_t *source, float score)
+{
+    for (uint32_t i = 0; i < *count; i++) {
+        if (!vk_rt_glare_source_matches(&candidates[i].source, source))
+            continue;
+
+        // Ordinary glowmap glare remains available even if vk_rt_emissive is
+        // disabled, so it wins when a face provides both source types.
+        if (!candidates[i].source.rt_emissive || source->rt_emissive)
+            return;
+        candidates[i].source = *source;
+        candidates[i].score = score;
+        return;
+    }
+
+    uint32_t slot = min(*count, (uint32_t)MAX_GLARE_SOURCES - 1);
+    if (*count >= MAX_GLARE_SOURCES && score <= candidates[slot].score)
+        return;
+    while (slot > 0 && score > candidates[slot - 1].score) {
+        candidates[slot] = candidates[slot - 1];
+        slot--;
+    }
+    candidates[slot].source = *source;
+    candidates[slot].score = score;
+    if (*count < MAX_GLARE_SOURCES)
+        (*count)++;
+}
+
+static void vk_build_rt_glare_list(bsp_t *bsp)
+{
+    vk_rt_glare_candidate_t candidates[MAX_GLARE_SOURCES] = { 0 };
+    vk_surface_light_color_t color_cache[VK_MAX_RT_GLARE_COLORS];
+    uint32_t count = 0;
+    uint32_t color_count = 0;
     float threshold = vk_glare_threshold ?
         Cvar_ClampValue(vk_glare_threshold, 0.0f, 1.0f) : 0.3f;
-    vk_rt_glare_candidate_t candidates[VK_MAX_RT_GLARE_SOURCES] = { 0 };
-    uint32_t count = 0;
 
-    for (uint32_t i = 0; i < vk.world.surface_light_count; i++) {
-        const vk_surface_light_t *light = &vk.world.surface_lights[i];
-        float brightness = Q_clipf((light->strength - 96.0f) / 192.0f,
-                                   0.0f, 1.0f);
-        if (brightness < threshold)
+    for (int i = 0; i < bsp->numfaces; i++) {
+        mface_t *face = &bsp->faces[i];
+        bool glowmap_source = !(face->drawflags & SURF_NODRAW) &&
+            face->texinfo && face->texinfo->image &&
+            face->texinfo->image->texnum2 && face->lightmap && face->plane &&
+            face->firstsurfedge && !(face->drawflags & vk.world.nolm_mask) &&
+            face->numsurfedges > 0 && face->lm_width > 0 && face->lm_height > 0 &&
+            face->lm_width <= VK_MAX_LIGHTMAP_EXTENTS &&
+            face->lm_height <= VK_MAX_LIGHTMAP_EXTENTS;
+        bool emissive_source = face->texinfo && face->texinfo->image &&
+            face->plane && face->firstsurfedge && face->numsurfedges > 0 &&
+            !(face->drawflags & (SURF_NODRAW | SURF_TRANS_MASK | SURF_WARP |
+                                 SURF_SKY)) &&
+            !(face->texinfo->c.flags & (SURF_SKY | SURF_NODRAW)) &&
+            (face->texinfo->c.flags & SURF_LIGHT);
+
+        if (!glowmap_source && !emissive_source)
+            continue;
+        if (!vk_face_edges_are_valid(bsp, face))
             continue;
 
-        bool duplicate = false;
-        for (int j = 0; j < glr.num_glare_sources; j++) {
-            if (vk_rt_glare_source_matches(&glr.glare_sources[j], light)) {
-                duplicate = true;
-                break;
+        vec3_t center, normal;
+        vk_rt_glare_face_center(bsp, face, center, normal);
+
+        if (glowmap_source) {
+            vec3_t lightcolor;
+            if (vk_glare_lightmap_color(bsp, face, lightcolor)) {
+                float brightness = (lightcolor[0] + lightcolor[1] +
+                                    lightcolor[2]) * (1.0f / 3.0f);
+                if (brightness >= threshold) {
+                    glare_source_t source = { 0 };
+                    VectorMA(center, 2.0f, normal, source.origin);
+                    VectorCopy(normal, source.normal);
+                    VectorCopy(lightcolor, source.lightcolor);
+                    source.brightness = brightness;
+                    vk_rt_insert_glare_candidate(candidates, &count, &source,
+                                                 brightness);
+                }
             }
         }
-        if (duplicate)
-            continue;
-        for (uint32_t j = 0; j < count; j++) {
-            const vk_surface_light_t *other =
-                &vk.world.surface_lights[candidates[j].index];
-            vec3_t delta;
-            VectorSubtract(other->origin, light->origin, delta);
-            if (DotProduct(delta, delta) <= 36.0f &&
-                DotProduct(other->normal, light->normal) >= 0.98f) {
-                duplicate = true;
-                break;
+
+        if (emissive_source) {
+            float base = face->texinfo->c.value > 0 ?
+                face->texinfo->c.value : 200.0f;
+            float brightness = Q_clipf(sqrtf(base / 200.0f), 0.0f, 1.0f);
+            if (brightness >= threshold) {
+                glare_source_t source = { 0 };
+                VectorMA(center, 2.0f, normal, source.origin);
+                VectorCopy(normal, source.normal);
+                vk_rt_glare_color(face, color_cache, &color_count,
+                                  source.lightcolor);
+                source.brightness = brightness;
+                source.rt_emissive = true;
+                vk_rt_insert_glare_candidate(candidates, &count, &source,
+                                             brightness);
             }
         }
-        if (duplicate)
-            continue;
-
-        float score = brightness * (0.5f + 0.5f *
-            Q_clipf(light->radius / 48.0f, 0.0f, 1.0f));
-        uint32_t slot = min(count, limit - 1);
-        if (count >= limit && score <= candidates[slot].score)
-            continue;
-        while (slot > 0 && score > candidates[slot - 1].score) {
-            candidates[slot] = candidates[slot - 1];
-            slot--;
-        }
-        candidates[slot].index = i;
-        candidates[slot].score = score;
-        candidates[slot].brightness = brightness;
-        if (count < limit)
-            count++;
     }
 
     for (uint32_t i = 0; i < count; i++) {
-        const vk_surface_light_t *light =
-            &vk.world.surface_lights[candidates[i].index];
-        glare_source_t *source = &glr.glare_sources[glr.num_glare_sources++];
-
-        memset(source, 0, sizeof(*source));
-        VectorCopy(light->origin, source->origin);
-        VectorCopy(light->normal, source->normal);
-        VectorCopy(light->color, source->lightcolor);
-        source->brightness = candidates[i].brightness;
-        source->rt_emissive = true;
+        glr.glare_sources[glr.num_glare_sources++] = candidates[i].source;
     }
 }
 #endif
@@ -17997,17 +18101,32 @@ static void vk_build_glare_list(bsp_t *bsp)
     if (!bsp || !bsp->faces)
         return;
 
+#if USE_VULKAN_RAYTRACING
+    if (vk.raytracing_active) {
+        vk_build_rt_glare_list(bsp);
+        return;
+    }
+#endif
+
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *surf = &bsp->faces[i];
 
         if ((surf->drawflags & SURF_NODRAW) || !surf->texinfo ||
-            !surf->texinfo->image || !surf->texinfo->image->texnum2 ||
+            !surf->texinfo->image ||
             !surf->lightmap || !surf->plane || !surf->firstsurfedge ||
             (surf->drawflags & vk.world.nolm_mask) ||
             surf->numsurfedges <= 0 || surf->lm_width <= 0 ||
             surf->lm_height <= 0 ||
             surf->lm_width > VK_MAX_LIGHTMAP_EXTENTS ||
             surf->lm_height > VK_MAX_LIGHTMAP_EXTENTS)
+            continue;
+
+        bool glowmap_source = surf->texinfo->image->texnum2 != 0;
+        bool static_light_source = !glowmap_source &&
+            !(surf->drawflags & (SURF_TRANS_MASK | SURF_WARP | SURF_SKY)) &&
+            !(surf->texinfo->c.flags & (SURF_SKY | SURF_NODRAW)) &&
+            (surf->texinfo->c.flags & SURF_LIGHT);
+        if (!glowmap_source && !static_light_source)
             continue;
         if (!vk_face_edges_are_valid(bsp, surf))
             continue;
@@ -18018,6 +18137,18 @@ static void vk_build_glare_list(bsp_t *bsp)
 
         float brightness = (lightcolor[0] + lightcolor[1] + lightcolor[2]) *
             (1.0f / 3.0f);
+
+        if (static_light_source) {
+            float peak = max(lightcolor[0], max(lightcolor[1], lightcolor[2]));
+            float base = surf->texinfo->c.value > 0 ?
+                surf->texinfo->c.value : 200.0f;
+
+            if (peak > 0.0f)
+                VectorScale(lightcolor, 1.0f / peak, lightcolor);
+            else
+                VectorSet(lightcolor, 1.0f, 1.0f, 1.0f);
+            brightness = Q_clipf(base / 200.0f, 0.0f, 1.0f);
+        }
 
         if (brightness < (vk_glare_threshold ? vk_glare_threshold->value : 0.3f))
             continue;
@@ -18048,9 +18179,6 @@ static void vk_build_glare_list(bsp_t *bsp)
         gs->rt_emissive = false;
     }
 
-#if USE_VULKAN_RAYTRACING
-    vk_append_rt_emissive_glare_sources();
-#endif
 }
 
 static void vk_load_world(const char *name)
