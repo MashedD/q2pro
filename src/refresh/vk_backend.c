@@ -18865,6 +18865,7 @@ void VKR_RenderFrame(const refdef_t *fd)
         return;
 
     vk.fd = *fd;
+    R_SyncUnderwaterFlag(vk.world.cache, &vk.fd);
     vk.fd_valid = true;
 #if USE_VULKAN_RAYTRACING
     vk.view_liquid_kind = vk.raytracing_active ? vk_view_liquid_kind(&vk.fd) : 0;

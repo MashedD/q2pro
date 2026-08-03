@@ -616,6 +616,20 @@ static bool R_PointVisibleAcrossLiquids(const bsp_t *bsp,
     return true;
 }
 
+void R_SyncUnderwaterFlag(const bsp_t *bsp, refdef_t *fd)
+{
+    const mleaf_t *leaf;
+
+    if (!fd || !bsp || !bsp->nodes)
+        return;
+
+    leaf = BSP_PointLeaf(bsp->nodes, fd->vieworg);
+    if (leaf && (leaf->contents[0] & MASK_WATER))
+        fd->rdflags |= RDF_UNDERWATER;
+    else
+        fd->rdflags &= ~RDF_UNDERWATER;
+}
+
 bool R_EntityVisibleAcrossLiquids(const bsp_t *bsp, const refdef_t *fd,
                                   const entity_t *ent)
 {
@@ -1138,6 +1152,7 @@ void R_RenderFrame(const refdef_t *fd)
     glr.drawframe++;
 
     glr.fd = *fd;
+    R_SyncUnderwaterFlag(gl_static.world.cache, &glr.fd);
 
     if (gl_dynamic->integer != 1 || gl_vertexlight->integer)
         glr.fd.num_dlights = 0;
