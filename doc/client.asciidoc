@@ -1315,7 +1315,7 @@ vk_rt_debug::
 Ray tracing preserves glowmap bloom and contributes bright dynamic and baked
 RT lighting to bloom when ‘gl_bloom’ is enabled. For a restrained
 performance-friendly effect, use ‘gl_bloom 1’ with ‘vk_bloom_downsample 4’.
-Bloom remains disabled by default and adds no work while ‘gl_bloom’ is 0.
+Bloom is enabled by default and adds no work while ‘gl_bloom’ is 0.
 
 Only opaque static BSP world geometry currently participates in ray queries;
 other geometry continues to use the normal raster path. The acceleration
@@ -1386,7 +1386,7 @@ gl_fog::
 
 gl_bloom::
     Enable re-release bloom effect. Only effective when using GLSL backend.
-    The setting is archived. Default value is 0 (disabled). Higher values
+    The setting is archived. Default value is 1 (enabled). Higher values
     specify number of blurring filter iterations (typical value is 1).
 
 gl_bloom_sigma::
@@ -1424,29 +1424,6 @@ vk_bloom_shafts::
 NOTE: Bloom requires glowmaps or another renderer-generated bloom source, such
 as RT lighting, specular highlights, enhanced liquids, beams, or particles.
 Enabling it when a scene has no contributing source is a waste of resources.
-
-gl_glare::
-    Enables lens glare sprites on bright glowmapped world surfaces and opaque
-    static BSP faces marked `SURF_LIGHT`. The latter provide a lightmap-tinted
-    fallback when a glowmap asset is unavailable, so the effect works in
-    OpenGL and raster Vulkan with `r_glowmaps` disabled. Visibility is checked
-    against the rendered scene and remains within the viewer's water, slime,
-    lava, or air medium to avoid leaking through translucent liquid surfaces.
-    It fades smoothly using ‘gl_flarespeed’; RT-only sources fade out when
-    `vk_rt_emissive` is 0. Default value is 0.
-
-gl_glare_threshold::
-    Minimum lightmap brightness required for a glowmapped surface to emit glare.
-    Static `SURF_LIGHT` fallback sources use their normalized map light value
-    instead. Higher values reduce the number of glare sources. Default value
-    is 0.3.
-
-gl_glare_size::
-    Base size of surface glare sprites. Glare size also scales with source
-    brightness and distance from the viewer. Default value is 24.
-
-gl_glare_intensity::
-    Intensity factor for surface glare sprites. Default value is 0.5.
 
 gl_flarespeed::
     Specifies flare fading effect speed. Default value is 8. Set this to 0

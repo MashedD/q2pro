@@ -155,6 +155,16 @@ float material_output(float packed)
     return mod(floor(max(packed, 0.0) + 0.5), 256.0) / 255.0;
 }
 
+vec3 static_lamp_bloom(vec3 color)
+{
+    if (fract(v_mode) < 0.0625)
+        return vec3(0.0);
+
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    float mask = smoothstep(0.14, 0.45, luma);
+    return color * mask * (0.75 * max(pc.intensity, 0.0));
+}
+
 float rt_emissive_control(float packed)
 {
     return mod(max(packed, 0.0), 4.0);
@@ -1046,6 +1056,7 @@ void main()
 #ifdef RT_GLOWMAP
         bloom += texel.rgb * glow.a * pc.intensity;
 #endif
+        bloom += static_lamp_bloom(texel.rgb);
         float dynamic_luma = dot(dynamic_lighting,
                                  vec3(0.2126, 0.7152, 0.0722));
         float dynamic_bloom = smoothstep(0.22, 0.55, dynamic_luma) * 0.18;

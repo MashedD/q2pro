@@ -614,6 +614,13 @@ static glStateBits_t statebits_for_surface(const mface_t *surf)
     if (surf->drawflags & SURF_N64_SCROLL_FLIP)
         statebits |= GLS_SCROLL_FLIP;
 
+    // Static light faces have no glowmap to seed bloom. Their lit texture is
+    // still a compact, surface-shaped source, so let the bloom pass use it.
+    if (!(surf->drawflags & (SURF_TRANS_MASK | SURF_WARP | SURF_NODRAW)) &&
+        (surf->texinfo->c.flags & SURF_LIGHT) &&
+        !surf->texinfo->image->texnum2)
+        statebits |= GLS_BLOOM_SHELL;
+
     return statebits;
 }
 
@@ -980,8 +987,6 @@ void GL_RebuildLighting(void)
 
 void GL_FreeWorld(void)
 {
-    GL_ClearGlareList();
-
     if (!gl_static.world.cache)
         return;
 
@@ -1064,108 +1069,6 @@ static void remove_fake_sky_faces(const bsp_t *bsp)
         Com_DPrintf("Removed %d fake sky faces\n", count);
 }
 
-void GL_BuildGlareList(void)
-{
-    const bsp_t *bsp = gl_static.world.cache;
-    mface_t *surf;
-    int i;
-
-    GL_ClearGlareList();
-
-    if (!bsp || !qglBeginQuery)
-        return;
-
-    for (i = 0, surf = bsp->faces; i < bsp->numfaces; i++, surf++) {
-        if ((surf->drawflags & SURF_NODRAW) || !surf->texinfo ||
-            !surf->texinfo->image || !surf->plane || !surf->firstsurfedge ||
-            surf->numsurfedges <= 0 || surf->lm_width <= 0 || surf->lm_height <= 0)
-            continue;
-
-        bool glowmap_source = surf->texinfo->image->texnum2 != 0;
-        bool static_light_source = !glowmap_source &&
-            !(surf->drawflags & (SURF_TRANS_MASK | SURF_WARP | SURF_SKY)) &&
-            !(surf->texinfo->c.flags & (SURF_SKY | SURF_NODRAW)) &&
-            (surf->texinfo->c.flags & SURF_LIGHT);
-        if (!glowmap_source && !static_light_source)
-            continue;
-
-        if (!surf->light_m || !surf->light_m->buffer)
-            continue;
-
-        // compute face center
-        vec3_t center = { 0, 0, 0 };
-        const msurfedge_t *src_surfedge = surf->firstsurfedge;
-        for (int j = 0; j < surf->numsurfedges; j++) {
-            const medge_t *src_edge = bsp->edges + src_surfedge->edge;
-            const mvertex_t *src_vert = bsp->vertices + src_edge->v[src_surfedge->vert];
-            VectorAdd(center, src_vert->point, center);
-            src_surfedge++;
-        }
-        VectorScale(center, 1.0f / surf->numsurfedges, center);
-
-        // sample lightmap brightness at center
-        int sc = surf->lm_width / 2;
-        int tc = surf->lm_height / 2;
-        int offset = (surf->light_t + tc) * lm.block_size * 4 + (surf->light_s + sc) * 4;
-        byte *pixel = surf->light_m->buffer + offset;
-
-        float r = pixel[0] / 255.0f;
-        float g = pixel[1] / 255.0f;
-        float b = pixel[2] / 255.0f;
-        float brightness = (r + g + b) * (1.0f / 3.0f);
-
-        if (static_light_source) {
-            float peak = max(r, max(g, b));
-            float base = surf->texinfo->c.value > 0 ?
-                surf->texinfo->c.value : 200.0f;
-
-            // Preserve the lightmap tint while making static lamp glare
-            // independent of optional glowmap assets.
-            if (peak > 0.0f) {
-                r /= peak;
-                g /= peak;
-                b /= peak;
-            } else {
-                r = g = b = 1.0f;
-            }
-            brightness = Q_clipf(base / 200.0f, 0.0f, 1.0f);
-        }
-
-        if (brightness < Cvar_ClampValue(gl_glare_threshold, 0, 1))
-            continue;
-
-        if (glr.num_glare_sources >= MAX_GLARE_SOURCES)
-            break;
-
-        vec3_t normal;
-        VectorCopy(surf->plane->normal, normal);
-        if (surf->drawflags & DSURF_PLANEBACK)
-            VectorNegate(normal, normal);
-
-        glare_source_t *gs = &glr.glare_sources[glr.num_glare_sources++];
-        VectorMA(center, 2.0f, normal, gs->origin);
-        VectorCopy(normal, gs->normal);
-        VectorSet(gs->lightcolor, r, g, b);
-        gs->brightness = brightness;
-        gs->rt_emissive = false;
-        qglGenQueries(1, &gs->query);
-        if (!gs->query) {
-            glr.num_glare_sources--;
-            break;
-        }
-    }
-}
-
-void GL_ClearGlareList(void)
-{
-    for (int i = 0; i < glr.num_glare_sources; i++) {
-        if (glr.glare_sources[i].query)
-            qglDeleteQueries(1, &glr.glare_sources[i].query);
-    }
-
-    glr.num_glare_sources = 0;
-}
-
 void GL_LoadWorld(const char *name)
 {
     char buffer[MAX_QPATH];
@@ -1194,8 +1097,6 @@ void GL_LoadWorld(const char *name)
 
         for (i = 0; i < bsp->numleafs; i++)
             bsp->leafs[i].visframe = 0;
-
-        GL_BuildGlareList();
 
         Com_DPrintf("%s: reused old world model\n", __func__);
         bsp->refcount--;
@@ -1298,9 +1199,6 @@ void GL_LoadWorld(const char *name)
     upload_world_surfaces();
 
     glr.fd.lightstyles = NULL;
-
-    // build glare source list from bright glowmapped surfaces
-    GL_BuildGlareList();
 
     GL_ShowErrors(__func__);
 }

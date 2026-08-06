@@ -43,6 +43,16 @@ vec3 dynamic_light()
     return light;
 }
 
+vec3 static_lamp_bloom(vec3 color)
+{
+    if (fract(v_mode) < 0.0625)
+        return vec3(0.0);
+
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    float mask = smoothstep(0.14, 0.45, luma);
+    return color * mask * (0.75 * max(pc.intensity, 0.0));
+}
+
 void main()
 {
     out_bloom = vec4(0.0);
@@ -80,4 +90,5 @@ void main()
         float fog = 1.0 - exp(-(d * d));
         out_color.rgb = mix(out_color.rgb, pc.fog.rgb, fog);
     }
+    out_bloom = vec4(static_lamp_bloom(out_color.rgb), out_color.a);
 }
