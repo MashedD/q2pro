@@ -250,6 +250,16 @@ begin effects
     toggle "screen warping" gl_waterwarp
     toggle "grenade explosions" cl_disable_explosions ~0
     toggle "rocket explosions" cl_disable_explosions ~1
+    pairs "rocket/grenade trail color" cl_projectiletrail_color \
+        default none \
+        black black \
+        red red \
+        green green \
+        yellow yellow \
+        blue blue \
+        cyan cyan \
+        magenta magenta \
+        white white
     toggle --status "Hide blood particles only for impacts on your player" \
         "blood particles when hit" cl_disable_self_blood ~
     blank
