@@ -1,4 +1,4 @@
-project('q2pro', 'c',
+project('q2pro', 'c', 'cpp',
   license: 'GPL-2.0-or-later',
   version: run_command(find_program('python3'), 'version.py', check: true).stdout().strip(),
   meson_version: '>= 0.59.0',
@@ -451,6 +451,13 @@ if vulkan.found()
       )
     endforeach
   endif
+  fsr2 = subproject('fidelityfx-fsr2')
+  common_deps += fsr2.get_variable('fsr2_dep')
+  add_project_arguments('-DFFX_GCC', '-include',
+                        meson.project_source_root() / 'src/refresh/vk_fsr2_compat.h',
+                        language: 'cpp')
+  refresh_src += fsr2.get_variable('fsr2_sources')
+  refresh_src += 'src/refresh/vk_fsr2.cpp'
   common_deps += vulkan.partial_dependency(compile_args: true, includes: true)
   refresh_src += ['src/refresh/vk_backend.c', vk_shader_headers]
   config.set10('USE_VULKAN', true)

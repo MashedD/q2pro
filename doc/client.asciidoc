@@ -755,6 +755,18 @@ sys_exitonerror::
 Vulkan Renderer
 ~~~~~~~~~~~~~~~
 
+r_fsr::
+    Enables AMD FidelityFX Super Resolution 2 temporal upscaling in the
+    Vulkan renderer. The scene is rendered at a reduced resolution and
+    reconstructed to the display resolution before the 2D interface is drawn.
+    This is available on compatible Vulkan devices, including AMD cards;
+    OpenGL ignores it and reports that FSR is Vulkan-only. Default value is 0.
+
+r_fsr_quality::
+    Selects the FSR2 render scale: ‘quality’ (1.5x), ‘balanced’ (1.7x),
+    ‘performance’ (2x), or ‘ultra_performance’ (3x). Changes take effect after
+    the Vulkan swapchain is recreated. Default value is ‘quality’.
+
 vk_raytracing::
     Enables the optional Vulkan ray-query path. The renderer preserves Vulkan
     pixel lightmaps, glow maps, and bloom while using ray queries for

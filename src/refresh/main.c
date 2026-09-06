@@ -1238,6 +1238,9 @@ static void GL_Register(void)
     gl_waterwarp = Cvar_Get("gl_waterwarp", "0", 0);
     gl_fog = Cvar_Get("gl_fog", "1", 0);
     gl_bloom = Cvar_Get("gl_bloom", "1", CVAR_ARCHIVE);
+    if (Cvar_Get("r_fsr", "0", CVAR_ARCHIVE)->integer)
+        Com_WPrintf("r_fsr is Vulkan-only; FSR is disabled by the OpenGL renderer\n");
+    Cvar_Get("r_fsr_quality", "quality", CVAR_ARCHIVE);
     r_lava_glowmaps = Cvar_Get("r_lava_glowmaps", "1", 0);
     gl_swapinterval = Cvar_Get("gl_swapinterval", "1", CVAR_ARCHIVE);
     gl_swapinterval->changed = gl_swapinterval_changed;

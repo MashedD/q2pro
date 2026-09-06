@@ -27,6 +27,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include "refresh/refresh.h"
 #include "system/system.h"
 #include "vk_backend.h"
+#include "vk_fsr2.h"
 
 #if USE_VULKAN
 
@@ -677,6 +678,7 @@ typedef struct {
     PFN_vkCmdBeginRenderPass CmdBeginRenderPass;
     PFN_vkCmdEndRenderPass CmdEndRenderPass;
     PFN_vkCmdClearAttachments CmdClearAttachments;
+    PFN_vkCmdClearColorImage CmdClearColorImage;
     PFN_vkCmdBindPipeline CmdBindPipeline;
     PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets;
     PFN_vkCmdBindVertexBuffers CmdBindVertexBuffers;
@@ -817,6 +819,7 @@ typedef struct {
     VkFormat depth_format;
     VkSampleCountFlagBits sample_count;
     VkExtent2D swapchain_extent;
+    VkExtent2D render_extent;
     VkImage multisample_image;
     VkDeviceMemory multisample_memory;
     VkImageView multisample_view;
@@ -845,6 +848,8 @@ typedef struct {
     VkImageLayout depth_layout;
     VkImageLayout ssr_layout;
     VkImageLayout ssr_resolve_layout;
+    VkImageLayout fsr_output_layout;
+    VkImageLayout fsr_motion_layout;
     VkCommandBuffer *command_buffers;
     uint32_t swapchain_image_count;
     unsigned swapchain_retry_time;
@@ -866,6 +871,11 @@ typedef struct {
     bool frame_bloom;
     bool frame_waterwarp;
     bool frame_ssr;
+    bool frame_fsr;
+    bool fsr_reset;
+    bool fsr_warned;
+    bool fsr_motion_initialized;
+    q2_fsr2_context_t *fsr2;
     bool ssr_ready;
     float scale;
     color_t color;
@@ -880,6 +890,8 @@ typedef struct {
     vk_texture_t blur_texture;
     vk_texture_t ssr_texture;
     vk_texture_t ssr_resolve_texture;
+    vk_texture_t fsr_output_texture;
+    vk_texture_t fsr_motion_texture;
     vk_texture_t particle_texture;
     vk_texture_t beam_texture;
     vk_texture_t shockwave_texture;
@@ -980,6 +992,8 @@ static cvar_t *vk_showbloom;
 static cvar_t *vk_waterwarp;
 static cvar_t *vk_bloom_sigma;
 static cvar_t *vk_bloom_downsample;
+static cvar_t *r_fsr;
+static cvar_t *r_fsr_quality;
 static cvar_t *vk_perf_stats;
 static cvar_t *vk_frames_in_flight;
 static cvar_t *vk_device;
@@ -1056,6 +1070,41 @@ static cvar_t *vk_debug_linewidth;
 #endif
 static byte vk_gammatable[256];
 static bool vk_pixel_lightmaps_warned;
+
+static bool vk_fsr_requested(void)
+{
+    return r_fsr && r_fsr->integer != 0;
+}
+
+static float vk_fsr_quality_scale(void)
+{
+    const char *quality = r_fsr_quality ? r_fsr_quality->string : "quality";
+
+    if (!Q_stricmp(quality, "ultra_performance"))
+        return 3.0f;
+    if (!Q_stricmp(quality, "performance"))
+        return 2.0f;
+    if (!Q_stricmp(quality, "balanced"))
+        return 1.7f;
+    return 1.5f;
+}
+
+static VkExtent2D vk_fsr_render_extent(void)
+{
+    if (!vk_fsr_requested())
+        return vk.swapchain_extent;
+
+    float scale = vk_fsr_quality_scale();
+    VkExtent2D extent = {
+        max((uint32_t)(vk.swapchain_extent.width / scale), 1),
+        max((uint32_t)(vk.swapchain_extent.height / scale), 1),
+    };
+    /* Keep compute and attachment dimensions well behaved on odd display
+     * sizes, while never allowing the reduced target to become zero. */
+    extent.width = max((extent.width / 2) * 2, 1);
+    extent.height = max((extent.height / 2) * 2, 1);
+    return extent;
+}
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static bool vk_upload_cubemap(image_t *image, const byte *pic);
@@ -3202,6 +3251,74 @@ fail:
     return false;
 }
 
+static void vk_destroy_fsr_resources(void)
+{
+    if (vk.fsr2) {
+        Q2_FSR2_Destroy(vk.fsr2);
+        vk.fsr2 = NULL;
+    }
+    vk_destroy_texture_resource(&vk.fsr_output_texture);
+    vk_destroy_texture_resource(&vk.fsr_motion_texture);
+    vk.fsr_output_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.fsr_motion_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.fsr_motion_initialized = false;
+    vk.render_extent = vk.swapchain_extent;
+}
+
+static bool vk_create_fsr_resources(void)
+{
+    vk.render_extent = vk_fsr_render_extent();
+    if (!vk_fsr_requested() ||
+        (vk.render_extent.width == vk.swapchain_extent.width &&
+         vk.render_extent.height == vk.swapchain_extent.height))
+        return true;
+
+    vk.fsr2 = Q2_FSR2_Create(vk.physical_device, vk.device,
+                             vk.GetInstanceProcAddr, vk.GetDeviceProcAddr,
+                             vk.render_extent.width, vk.render_extent.height,
+                             vk.swapchain_extent.width, vk.swapchain_extent.height);
+    if (!vk.fsr2) {
+        if (!vk.fsr_warned) {
+            Com_WPrintf("Vulkan FSR2 is unavailable on this device; rendering at native resolution\n");
+            vk.fsr_warned = true;
+        }
+        vk.render_extent = vk.swapchain_extent;
+        return true;
+    }
+
+    if (!vk_create_color_target(&vk.fsr_output_texture,
+                                vk.swapchain_extent.width,
+                                vk.swapchain_extent.height,
+                                VK_FORMAT_R8G8B8A8_UNORM,
+                                VK_IMAGE_USAGE_STORAGE_BIT)) {
+        Com_WPrintf("Couldn't create Vulkan FSR2 output target: %s; rendering at native resolution\n",
+                    Com_GetLastError());
+        vk_destroy_fsr_resources();
+        return true;
+    }
+    if (!vk_create_color_target(&vk.fsr_motion_texture,
+                                vk.render_extent.width,
+                                vk.render_extent.height,
+                                VK_FORMAT_R8G8B8A8_UNORM,
+                                VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+        Com_WPrintf("Couldn't create Vulkan FSR2 motion target: %s; rendering at native resolution\n",
+                    Com_GetLastError());
+        vk_destroy_fsr_resources();
+        return true;
+    }
+    vk_update_texture_descriptor_with_sampler(&vk.fsr_output_texture,
+                                              vk.postprocess_sampler);
+    vk.fsr_output_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.fsr_motion_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.fsr_motion_initialized = false;
+    vk.fsr_reset = true;
+    Com_Printf("Vulkan FSR2: %ux%u -> %ux%u (%s)\n",
+               vk.render_extent.width, vk.render_extent.height,
+               vk.swapchain_extent.width, vk.swapchain_extent.height,
+               r_fsr_quality ? r_fsr_quality->string : "quality");
+    return true;
+}
+
 #if USE_VULKAN_RAYTRACING
 typedef struct {
     uint32_t ao_samples;
@@ -4511,6 +4628,7 @@ static bool vk_load_device(void)
     LOAD(CmdBeginRenderPass);
     LOAD(CmdEndRenderPass);
     LOAD(CmdClearAttachments);
+    LOAD(CmdClearColorImage);
     LOAD(CmdBindPipeline);
     LOAD(CmdBindDescriptorSets);
     LOAD(CmdBindVertexBuffers);
@@ -6001,6 +6119,7 @@ static void vk_destroy_swapchain(void)
     vk_destroy_texture_resource(&vk.ssr_texture);
     vk_destroy_texture_resource(&vk.ssr_resolve_texture);
     vk_destroy_texture_resource(&vk.blur_texture);
+    vk_destroy_fsr_resources();
     vk.scene_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.bloom_source_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.bloom_layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -6376,8 +6495,8 @@ static bool vk_create_multisample_resources(void)
         .imageType = VK_IMAGE_TYPE_2D,
         .format = vk.swapchain_format,
         .extent = {
-            .width = vk.swapchain_extent.width,
-            .height = vk.swapchain_extent.height,
+            .width = vk.render_extent.width,
+            .height = vk.render_extent.height,
             .depth = 1,
         },
         .mipLevels = 1,
@@ -6528,20 +6647,20 @@ static bool vk_create_scene_target(void)
         uint32_t height;
     } targets[] = {
         { &vk.scene_texture, &vk.scene_layout,
-          vk.swapchain_extent.width, vk.swapchain_extent.height },
+          vk.render_extent.width, vk.render_extent.height },
         { &vk.bloom_source_texture, &vk.bloom_source_layout,
-          vk.swapchain_extent.width, vk.swapchain_extent.height },
+          vk.render_extent.width, vk.render_extent.height },
         { &vk.bloom_texture, &vk.bloom_layout,
-          max(vk.swapchain_extent.width / bloom_downsample, 1),
-          max(vk.swapchain_extent.height / bloom_downsample, 1) },
+          max(vk.render_extent.width / bloom_downsample, 1),
+          max(vk.render_extent.height / bloom_downsample, 1) },
         { &vk.blur_texture, &vk.blur_layout,
-          max(vk.swapchain_extent.width / bloom_downsample, 1),
-          max(vk.swapchain_extent.height / bloom_downsample, 1) },
+          max(vk.render_extent.width / bloom_downsample, 1),
+          max(vk.render_extent.height / bloom_downsample, 1) },
         { &vk.ssr_texture, &vk.ssr_layout,
-          max(vk.swapchain_extent.width / 2, 1),
-          max(vk.swapchain_extent.height / 2, 1) },
+          max(vk.render_extent.width / 2, 1),
+          max(vk.render_extent.height / 2, 1) },
         { &vk.ssr_resolve_texture, &vk.ssr_resolve_layout,
-          vk.swapchain_extent.width, vk.swapchain_extent.height },
+          vk.render_extent.width, vk.render_extent.height },
     };
 
     for (size_t i = 0; i < q_countof(targets); i++) {
@@ -6582,8 +6701,8 @@ static bool vk_create_scene_target(void)
         .renderPass = vk.render_pass,
         .attachmentCount = scene_attachment_count,
         .pAttachments = scene_attachments,
-        .width = vk.swapchain_extent.width,
-        .height = vk.swapchain_extent.height,
+        .width = vk.render_extent.width,
+        .height = vk.render_extent.height,
         .layers = 1,
     };
     VkResult result = vk.CreateFramebuffer(vk.device, &create_info, NULL,
@@ -8032,7 +8151,11 @@ static bool vk_create_swapchain(int width, int height)
 
     vk.swapchain_format = surface_format.format;
     vk.present_mode = present_mode;
-    vk.sample_count = vk_choose_sample_count();
+    /* FSR owns the reduced-resolution scene target. Keep the legacy MSAA/MRT
+     * display attachments at matching dimensions and let FSR provide the
+     * reconstruction step. */
+    vk.sample_count = vk_fsr_requested() ? VK_SAMPLE_COUNT_1_BIT :
+        vk_choose_sample_count();
     vk.depth_format = vk_choose_depth_format(vk_shadow_stencil_requested());
     if (vk.depth_format == VK_FORMAT_UNDEFINED) {
         Com_SetLastError("No supported Vulkan depth format");
@@ -8094,9 +8217,9 @@ static bool vk_create_swapchain(int width, int height)
         max(vk.swapchain_extent.width / vk_bloom_downsample_value(), 1),
         max(vk.swapchain_extent.height / vk_bloom_downsample_value(), 1),
     };
-    vk.mrt_bloom = (gl_bloom && gl_bloom->integer > 0) ||
+    vk.mrt_bloom = !vk_fsr_requested() && ((gl_bloom && gl_bloom->integer > 0) ||
         (vk_raytracing && vk_raytracing->integer && vk_rt_reflections &&
-         vk_rt_reflections->value > 0.001f);
+         vk_rt_reflections->value > 0.001f));
 
     VkPipelineDepthStencilStateCreateInfo shadow_depth_stencil =
         vk_shadow_depth_stencil_state();
@@ -8185,6 +8308,7 @@ static bool vk_create_swapchain(int width, int height)
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
+        !vk_create_fsr_resources() ||
         !vk_create_depth_resources() ||
         !vk_create_multisample_resources() ||
         !vk_create_scene_target() ||
@@ -8316,6 +8440,12 @@ static void vk_transition_color_target(VkCommandBuffer cmd, vk_texture_t *textur
     } else if (*layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         src_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
         src_access = VK_ACCESS_SHADER_READ_BIT;
+    } else if (*layout == VK_IMAGE_LAYOUT_GENERAL) {
+        src_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        src_access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    } else if (*layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
     } else {
         src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         src_access = 0;
@@ -8579,10 +8709,16 @@ static void vk_set_3d_viewport(const refdef_t *fd)
 
     int width = max(fd->width, 1);
     int height = max(fd->height, 1);
-    int x = Q_clip(fd->x, 0, (int)vk.swapchain_extent.width);
-    int y = Q_clip(fd->y, 0, (int)vk.swapchain_extent.height);
-    int x2 = Q_clip(fd->x + width, x, (int)vk.swapchain_extent.width);
-    int y2 = Q_clip(fd->y + height, y, (int)vk.swapchain_extent.height);
+    float scale_x = (float)vk.render_extent.width /
+        max((float)vk.swapchain_extent.width, 1.0f);
+    float scale_y = (float)vk.render_extent.height /
+        max((float)vk.swapchain_extent.height, 1.0f);
+    int x = Q_clip(Q_rint(fd->x * scale_x), 0, (int)vk.render_extent.width);
+    int y = Q_clip(Q_rint(fd->y * scale_y), 0, (int)vk.render_extent.height);
+    int x2 = Q_clip(Q_rint((fd->x + width) * scale_x), x,
+                    (int)vk.render_extent.width);
+    int y2 = Q_clip(Q_rint((fd->y + height) * scale_y), y,
+                    (int)vk.render_extent.height);
 
     VkViewport viewport = {
         .x = x,
@@ -17722,6 +17858,8 @@ bool VKR_Init(bool total)
     vk_waterwarp = Cvar_Get("gl_waterwarp", "0", 0);
     vk_bloom_sigma = Cvar_Get("gl_bloom_sigma", "4", 0);
     vk_bloom_downsample = Cvar_Get("vk_bloom_downsample", "4", 0);
+    r_fsr = Cvar_Get("r_fsr", "0", CVAR_ARCHIVE);
+    r_fsr_quality = Cvar_Get("r_fsr_quality", "quality", CVAR_ARCHIVE);
     vk_perf_stats = Cvar_Get("vk_perf_stats", "0", 0);
     vk_frames_in_flight = Cvar_Get("vk_frames_in_flight", "2", CVAR_ARCHIVE);
     vk_device = Cvar_Get("vk_device", "", CVAR_ARCHIVE | CVAR_REFRESH);
@@ -18897,8 +19035,103 @@ static void vk_composite_ssr(void)
                           &vk.ssr_resolve_texture, white);
 }
 
+static bool vk_dispatch_fsr(void)
+{
+    if (!vk.frame_fsr || !vk.fsr2 || !vk.fsr_output_texture.image)
+        return false;
+
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    if (vk.render_pass_active) {
+        vk.CmdEndRenderPass(cmd);
+        vk.render_pass_active = false;
+        vk_reset_bind_cache();
+    }
+
+    vk_transition_scene(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    vk_transition_depth(cmd, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    if (!vk.fsr_motion_initialized) {
+        VkImageSubresourceRange range = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .levelCount = 1,
+            .layerCount = 1,
+        };
+        VkClearColorValue zero = { .float32 = { 0, 0, 0, 0 } };
+        vk_transition_color_target(cmd, &vk.fsr_motion_texture,
+                                   &vk.fsr_motion_layout,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                   VK_ACCESS_TRANSFER_WRITE_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT);
+        vk.CmdClearColorImage(cmd, vk.fsr_motion_texture.image,
+                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                              &zero, 1, &range);
+        vk_transition_color_target(cmd, &vk.fsr_motion_texture,
+                                   &vk.fsr_motion_layout,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_ACCESS_SHADER_READ_BIT,
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        vk.fsr_motion_initialized = true;
+    }
+    vk_transition_color_target(cmd, &vk.fsr_output_texture,
+                               &vk.fsr_output_layout,
+                               VK_IMAGE_LAYOUT_GENERAL,
+                               VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+    float frame_time_ms = vk.fd_valid ? vk.fd.frametime * 1000.0f : 16.0f;
+    float fov_y = vk.fd_valid ? DEG2RAD(vk.fd.fov_y) : DEG2RAD(75.0f);
+    bool dispatched = Q2_FSR2_Dispatch(
+        vk.fsr2, cmd,
+        vk.scene_texture.image, vk.scene_texture.view,
+        VK_FORMAT_R8G8B8A8_UNORM,
+        vk.depth_image, vk.depth_sample_view, vk.depth_format,
+        vk.fsr_motion_texture.image, vk.fsr_motion_texture.view,
+        VK_FORMAT_R8G8B8A8_UNORM,
+        vk.fsr_output_texture.image, vk.fsr_output_texture.view,
+        VK_FORMAT_R8G8B8A8_UNORM,
+        frame_time_ms, fov_y, vk.fsr_reset);
+    if (!dispatched) {
+        if (!vk.fsr_warned) {
+            Com_WPrintf("Vulkan FSR2 dispatch failed; using native scene output\n");
+            vk.fsr_warned = true;
+        }
+        vk.fsr_reset = true;
+        vk_transition_scene(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_ACCESS_SHADER_READ_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        vk_begin_render_pass(vk.render_pass, vk.framebuffers[vk.current_image],
+                             vk_frame_clear_color());
+        vk_composite_scene_texture();
+        return false;
+    }
+
+    vk.fsr_reset = false;
+    vk_transition_color_target(cmd, &vk.fsr_output_texture,
+                               &vk.fsr_output_layout,
+                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                               VK_ACCESS_SHADER_READ_BIT,
+                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    vk_begin_render_pass(vk.render_pass, vk.framebuffers[vk.current_image],
+                         vk_frame_clear_color());
+    const vec4_t white = { 1, 1, 1, 1 };
+    vk_draw_refdef_texture(vk.texture_pipeline, &vk.fsr_output_texture, white);
+    return true;
+}
+
 static void vk_finish_postprocess_scene(void)
 {
+    if (vk.frame_fsr) {
+        vk_dispatch_fsr();
+        vk.frame_fsr = false;
+        vk.frame_bloom = false;
+        vk.frame_waterwarp = false;
+        vk.frame_ssr = false;
+        return;
+    }
+
     if (!vk.frame_bloom && !vk.frame_waterwarp && !vk.frame_ssr)
         return;
 
@@ -19075,6 +19308,17 @@ void VKR_BeginFrame(void)
             return;
     }
 
+    if ((r_fsr && r_fsr->modified) ||
+        (r_fsr_quality && r_fsr_quality->modified)) {
+        if (r_fsr)
+            r_fsr->modified = false;
+        if (r_fsr_quality)
+            r_fsr_quality->modified = false;
+        if (!vk_recreate_swapchain("FSR configuration change"))
+            return;
+        vk.fsr_reset = true;
+    }
+
     if (gl_bloom && gl_bloom->modified) {
         bool enable_mrt = gl_bloom->integer > 0 ||
             (vk_raytracing && vk_raytracing->integer && vk_rt_reflections &&
@@ -19192,7 +19436,17 @@ void VKR_BeginFrame(void)
     vk.frame_bloom = vk_bloom_enabled_for_frame();
     vk.frame_waterwarp = vk_waterwarp_enabled_for_frame();
     vk.frame_ssr = vk_ssr_enabled_for_frame();
-    bool postprocess = vk.frame_bloom || vk.frame_waterwarp || vk.frame_ssr;
+    vk.frame_fsr = vk.fsr2 != NULL && vk_fsr_requested();
+    if (vk.frame_fsr) {
+        /* FSR2 consumes the scene before the legacy display-resolution
+         * postprocess chain. Keep the first integration deterministic and
+         * avoid feeding a second display-sized composite into the upscaler. */
+        vk.frame_bloom = false;
+        vk.frame_waterwarp = false;
+        vk.frame_ssr = false;
+    }
+    bool postprocess = vk.frame_bloom || vk.frame_waterwarp || vk.frame_ssr ||
+        vk.frame_fsr;
 
     // The postprocess target is selected from the previous refdef before the
     // client submits this frame. Do not otherwise reuse that refdef: menu-only
@@ -19231,7 +19485,7 @@ void VKR_BeginFrame(void)
         .framebuffer = postprocess ? vk.scene_framebuffer : vk.framebuffers[vk.current_image],
         .renderArea = {
             .offset = { 0, 0 },
-            .extent = vk.swapchain_extent,
+            .extent = postprocess ? vk.render_extent : vk.swapchain_extent,
         },
         .clearValueCount = clear_count,
         .pClearValues = clear,

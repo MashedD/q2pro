@@ -1,0 +1,6 @@
+[wrap-file]
+directory = FidelityFX-FSR2-2.2.1
+source_url = https://github.com/GPUOpen-Effects/FidelityFX-FSR2/archive/refs/tags/v2.2.1.tar.gz
+source_filename = fidelityfx-fsr2-v2.2.1.tar.gz
+source_hash = 4d7261ef054b071de83c7d201f6850c274226bd3025f4a2274ef4968343bd534
+patch_directory = fidelityfx-fsr2
