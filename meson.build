@@ -495,7 +495,9 @@ else
 endif
 if openal.found()
   client_src += [ 'src/client/sound/al.c', 'src/client/sound/qal.c' ]
-  client_deps += openal.partial_dependency(compile_args: true, includes: true)
+  if not (win32 and get_option('qal-hard-linked'))
+    client_deps += openal.partial_dependency(compile_args: true, includes: true)
+  endif
   config.set10('USE_OPENAL', true)
   if web
     config.set('QAL_HARD_LINKED', true)
@@ -506,9 +508,18 @@ if get_option('qal-hard-linked')
   config.set('QAL_HARD_LINKED', true)
 
   if win32
+    qal_static_prefix = get_option('qal-static-prefix')
+    if qal_static_prefix == ''
+      error('qal-hard-linked on Windows requires qal-static-prefix; use build-win32.sh or build-win64.sh')
+    endif
+
     client_deps += declare_dependency(
-      compile_args: ['-DAL_LIBTYPE_STATIC'],
+      compile_args: [
+        '-DAL_LIBTYPE_STATIC',
+        '-I' + join_paths(qal_static_prefix, 'include'),
+      ],
       link_args: [
+        '-L' + join_paths(qal_static_prefix, 'lib'),
         '-l:libOpenAL32.a',
         '-lstdc++',
         '-lavrt',

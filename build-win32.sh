@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+openal_prefix="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/build-win32/openal"
+bash "$(dirname -- "${BASH_SOURCE[0]}")/build-openal-win.sh" \
+    i686-w64-mingw32 "$openal_prefix"
+
 meson setup build-win32 \
     --cross-file cross-mingw32.txt \
     --buildtype=release \
     -Ddefault_library=static \
     -Dc_link_args='-static -static-libgcc -D_WIN32_WINNT=0x0501 -DNTDDI_VERSION=0x05010200' \
     --force-fallback-for=libcurl,zlib,libjpeg,libpng \
+    -Dqal-static-prefix="$openal_prefix" \
     -Dqal-hard-linked=true \
     -Danticheat-server=true \
     -Dvulkan=enabled

@@ -205,3 +205,8 @@ option('qal-hard-linked',
   type: 'boolean',
   value: false,
   description: 'Hard link OpenAL library')
+
+option('qal-static-prefix',
+  type: 'string',
+  value: '',
+  description: 'Prefix containing a toolchain-matched static OpenAL build')
