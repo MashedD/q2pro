@@ -1494,6 +1494,31 @@ CL_ParseTEnt
 */
 static const byte splash_color[] = {0x00, 0xe0, 0xb0, 0x50, 0xd0, 0xe0, 0xe8};
 
+static bool CL_IsSelfBloodImpact(const vec3_t origin)
+{
+    const centity_t *ent;
+    vec3_t player_origin;
+    int entnum, i;
+
+    if (!VALIDATE_CLIENTNUM(&cl.csr, cl.frame.clientNum))
+        return false;
+
+    entnum = cl.frame.clientNum + 1;
+    ent = &cl_entities[entnum];
+    if (!ent->current.solid || ent->current.solid == PACKED_BSP)
+        return false;
+
+    VectorScale(cl.frame.ps.pmove.origin, 0.125f, player_origin);
+    for (i = 0; i < 3; i++) {
+        // Network positions are quantized to 1/8th of a unit.
+        if (origin[i] < player_origin[i] + ent->mins[i] - 0.125f ||
+            origin[i] > player_origin[i] + ent->maxs[i] + 0.125f)
+            return false;
+    }
+
+    return true;
+}
+
 void CL_ParseTEnt(void)
 {
     explosion_t *ex;
@@ -1501,7 +1526,8 @@ void CL_ParseTEnt(void)
 
     switch (te.type) {
     case TE_BLOOD:          // bullet hitting flesh
-        if (!(cl_disable_particles->integer & NOPART_BLOOD))
+        if (!(cl_disable_particles->integer & NOPART_BLOOD) &&
+            !(cl_disable_self_blood->integer && CL_IsSelfBloodImpact(te.pos1)))
             CL_ParticleEffect(te.pos1, te.dir, 0xe8, 60);
         break;
 

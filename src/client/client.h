@@ -586,6 +586,7 @@ extern cvar_t   *cl_showclamp;
 extern cvar_t   *cl_vwep;
 
 extern cvar_t   *cl_disable_particles;
+extern cvar_t   *cl_disable_self_blood;
 extern cvar_t   *cl_disable_explosions;
 extern cvar_t   *cl_dlight_hacks;
 extern cvar_t   *cl_smooth_explosions;

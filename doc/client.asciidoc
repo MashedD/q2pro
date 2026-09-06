@@ -269,6 +269,18 @@ cl_disable_particles::
       - 16 — blood splashes
       - 32 — blaster trails
 
+cl_disable_self_blood::
+    Hides ordinary blood particles only when their impact point is inside the
+    local player's bounding box. Blood particles from hits on other players and
+    monsters remain visible. This setting does not affect damage blending,
+    gibs, or the `cl_disable_particles` bitmask. Default value is 0.
+
+cl_projectiletrail_color::
+    Overrides the particle color of flying rocket and grenade trails. The
+    setting accepts the named colors `black`, `red`, `green`, `yellow`,
+    `blue`, `cyan`, `magenta`, and `white`. Set it to `none` to preserve the
+    default trail colors. Changes apply immediately. Default value is `none`.
+
 .Bitmasks
 TIP: Bitmask cvars allow multiple features to be enabled. To enable the needed
 set of features, their values need to be summed.
@@ -1241,20 +1253,6 @@ vk_rt_rail_impact::
     or per-frame allocation is required. Changes apply immediately. Default
     value is 0.65; value 0 disables the effect.
 
-vk_rt_weapon_glow::
-    Controls a slow colored contour glow on the local first-person energy
-    weapon while Vulkan ray tracing is active, clamped between 0 and 1. The
-    base-game Blaster uses warm amber, HyperBlaster cyan-blue, Railgun violet,
-    and BFG mint-green; conventional, custom, and unrecognized weapons remain
-    unchanged. The overlay uses the weapon's depth-hacked projection, so it
-    does not produce a world-space light or affect other players or monsters.
-    It reuses the existing white shell texture and additive alias pipelines,
-    adds one draw per viewmodel batch, and contributes a reduced matching pass
-    to existing bloom when enabled. No shader, texture, descriptor, render
-    pass, ray query, protocol field, or persistent allocation is required.
-    Changes apply immediately. Default value is 0.65; value 0 disables the
-    effect.
-
 vk_rt_light_coronas::
     Controls compact colored halos around strong live combat lights while
     Vulkan ray tracing is active, clamped between 0 and 1. At most six nearby
@@ -1392,34 +1390,6 @@ gl_bloom::
 gl_bloom_sigma::
     Specifies strength parameter of gaussian blur filter used for the bloom
     effect. Default value is 4.
-
-vk_bloom_streaks::
-    Controls horizontal anamorphic streaks from Vulkan bloom sources, clamped
-    between 0 and 1. The effect stretches the complete horizontal Gaussian
-    radius from 1x to 4x without adding samples or passes, while preserving
-    normalized bloom energy. Value 0 restores ordinary Gaussian bloom. Default
-    value is 0.45 (2.35x); the setting has no effect while ‘gl_bloom’ is 0.
-
-vk_bloom_ghosts::
-    Controls Vulkan bloom lens ghosts and their soft halo, clamped between 0
-    and 1. Three brightness-gated images of bloom sources are distributed
-    across the screen center; the strongest has mild red/blue edge separation.
-    Source energy and screen edges are capped so bright lamps do not wash out
-    the frame or form clamped bars. The effect runs in the existing
-    low-resolution bloom downscale and adds no images, descriptors, draws, or
-    passes. It works with raster and ray-traced bloom sources. Default value is
-    0.5; value 0 restores the previous bloom exactly. The setting has no effect
-    while ‘gl_bloom’ is 0.
-
-vk_bloom_shafts::
-    Controls radial light shafts from bright Vulkan bloom sources, clamped
-    between 0 and 1. Four brightness-gated samples extend each source toward
-    the optical center in the existing low-resolution bloom downscale pass.
-    Center and screen-edge fades plus a separate luminance cap prevent broad
-    scene washout. The effect adds no images, descriptors, draws, render
-    passes, or ray queries, and works with raster and ray-traced bloom sources.
-    Default value is 0.4; value 0 skips the extra samples and restores the
-    previous bloom exactly. The setting has no effect while ‘gl_bloom’ is 0.
 
 NOTE: Bloom requires glowmaps or another renderer-generated bloom source, such
 as RT lighting, specular highlights, enhanced liquids, beams, or particles.

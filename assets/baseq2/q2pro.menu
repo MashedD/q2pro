@@ -98,8 +98,6 @@ begin video
     range "modulate world" gl_modulate_world 1 5
     range "modulate entities"  gl_modulate_entities 1 5
     toggle "bloom" gl_bloom
-    range --status "Radial rays from bright Vulkan bloom sources" \
-        "light shafts" vk_bloom_shafts 0 1 0.05
     range "glowmap intensity" gl_glowmap_intensity 0 1
     toggle "lava glowmaps" r_lava_glowmaps
 end
@@ -118,32 +116,66 @@ begin raytracing
         "emissive lighting" vk_rt_emissive 0 2 0.05
     range --status "Colored edge glow on emissive world textures" \
         "emissive edge halos" vk_rt_emissive_halo 0 1 0.05
+    range --status "Irregular variation in emissive lamp cores and halos" \
+        "emissive flicker" vk_rt_emissive_flicker 0 1 0.05
+    range --status "Additive energy motes around emissive world surfaces" \
+        "emissive motes" vk_rt_emissive_motes 0 1 0.05
     range --status "Screen-space reflections on configured materials" \
         "reflections" vk_rt_reflections 0 1 0.05
     range --status "Compact colored highlights around bright reflections" \
         "reflection glints" vk_rt_reflection_glints 0 1 0.05
+    range --status "Red-blue spectral separation around bright reflections" \
+        "reflection dispersion" vk_rt_reflection_dispersion 0 1 0.05
     range --status "Material highlights from dynamic and emissive lights" \
         "specular highlights" vk_rt_specular 0 1 0.05
     range --status "Ambient sheen on reflective world materials" \
         "environment sheen" vk_rt_environment 0 1 0.05
     range --status "Blue-gray distance haze on maps without authored fog" \
         "atmospheric haze" vk_rt_atmosphere 0 1 0.05
+    range --status "Blue-green distance attenuation while underwater" \
+        "underwater absorption" vk_rt_underwater_absorption 0 1 0.05
+    range --status "Colored combat-light scattering inside distance fog" \
+        "fog light scattering" vk_rt_light_scattering 0 1 0.05
+    range --status "Slow world-space motion in active distance fog" \
+        "fog turbulence" vk_rt_fog_turbulence 0 1 0.05
     range --status "World-space ambient dust motes in ray-traced scenes" \
         "ambient dust" vk_rt_dust 0 1 0.05
+    range --status "Colored dynamic lighting on ambient dust motes" \
+        "ambient dust lighting" vk_rt_dust_lighting 0 1 0.05
     range --status "Ripples, sheen, highlights, and glow on liquids" \
         "liquid effects" vk_rt_liquids 0 1 0.05
     range --status "Animated lighting on nearby surfaces while underwater" \
         "underwater caustics" vk_rt_caustics 0 1 0.05
+    range --status "Warm additive embers rising from visible lava" \
+        "lava embers" vk_rt_lava_embers 0 1 0.05
     range --status "Colored penumbrae from nearby dynamic lights" \
         "shadow fringes" vk_rt_shadow_fringe 0 1 0.05
     range --status "Localized color spill from explosions and projectiles" \
         "dynamic color bounce" vk_rt_bounce 0 1 0.05
     range --status "Animated shadow-aware rings from strong dynamic lights" \
         "dynamic light ripples" vk_rt_light_ripples 0 1 0.05
+    range --status "Expanding rings from explosions and other impact events" \
+        "combat shockwaves" vk_rt_shockwaves 0 1 0.05
+    range --status "Persistent darkened marks at weapon impact sites" \
+        "impact marks" vk_rt_impact_marks 0 1 0.05
+    range --status "Expanding ripples at weapon splash events" \
+        "splash ripples" vk_rt_splash_ripples 0 1 0.05
+    range --status "V-shaped surface wakes behind moving players" \
+        "water wakes" vk_rt_water_wakes 0 1 0.05
+    range --status "Layered energy vortices at teleport events" \
+        "teleport vortices" vk_rt_teleport_vortex 0 1 0.05
+    range --status "Emerald energy rings when map items respawn" \
+        "item respawn effects" vk_rt_item_respawn 0 1 0.05
+    range --status "Branching filaments at electrical impact events" \
+        "electric filaments" vk_rt_electric_filaments 0 1 0.05
+    range --status "Brief surface-aware dust puffs when players land" \
+        "landing dust" vk_rt_landing_dust 0 1 0.05
+    range --status "Inward energy collapses at BFG and tracker detonations" \
+        "energy collapse" vk_rt_energy_collapse 0 1 0.05
     range --status "Compact ionization pulse where railgun shots land" \
         "rail impact" vk_rt_rail_impact 0 1 0.05
-    range --status "Slow colored glow on local energy weapon viewmodels" \
-        "energy weapon glow" vk_rt_weapon_glow 0 1 0.05
+    range --status "Compact colored halos around strong combat lights" \
+        "light coronas" vk_rt_light_coronas 0 1 0.05
     range --status "Fade time for bright transient ray-traced lights" \
         "dynamic light afterglow" vk_rt_afterglow 0 1 0.05
     blank
@@ -210,6 +242,8 @@ begin effects
     toggle "screen warping" gl_waterwarp
     toggle "grenade explosions" cl_disable_explosions ~0
     toggle "rocket explosions" cl_disable_explosions ~1
+    toggle --status "Hide blood particles only for impacts on your player" \
+        "blood particles when hit" cl_disable_self_blood ~
     blank
     action --align "railgun trail setup..." pushmenu railtrail
 end

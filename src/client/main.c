@@ -61,6 +61,7 @@ cvar_t  *cl_thirdperson_angle;
 cvar_t  *cl_thirdperson_range;
 
 cvar_t  *cl_disable_particles;
+cvar_t  *cl_disable_self_blood;
 cvar_t  *cl_disable_explosions;
 cvar_t  *cl_dlight_hacks;
 cvar_t  *cl_smooth_explosions;
@@ -2803,6 +2804,7 @@ static void CL_InitLocal(void)
     cl_thirdperson_range = Cvar_Get("cl_thirdperson_range", "60", 0);
 
     cl_disable_particles = Cvar_Get("cl_disable_particles", "0", 0);
+    cl_disable_self_blood = Cvar_Get("cl_disable_self_blood", "0", CVAR_ARCHIVE);
     cl_disable_explosions = Cvar_Get("cl_disable_explosions", "0", 0);
     cl_dlight_hacks = Cvar_Get("cl_dlight_hacks", "0", 0);
     cl_smooth_explosions = Cvar_Get("cl_smooth_explosions", "1", 0);

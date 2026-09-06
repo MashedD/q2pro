@@ -26,6 +26,33 @@ static vec3_t avelocities[NUMVERTEXNORMALS];
 
 static cvar_t *cl_lerp_lightstyles;
 static cvar_t *cl_muzzlelight_time;
+static cvar_t *cl_projectiletrail_color;
+
+static color_t projectiletrail_color;
+static bool    projectiletrail_color_override;
+
+static void cl_projectiletrail_color_changed(cvar_t *self)
+{
+    if (!Q_strcasecmp(self->string, "none")) {
+        projectiletrail_color_override = false;
+        return;
+    }
+
+    if (!SCR_ParseColor(self->string, &projectiletrail_color)) {
+        Com_WPrintf("Invalid value '%s' for '%s'\n", self->string, self->name);
+        Cvar_Reset(self);
+        projectiletrail_color_override = false;
+        return;
+    }
+
+    projectiletrail_color_override = true;
+}
+
+static void cl_projectiletrail_color_g(genctx_t *ctx)
+{
+    Prompt_AddMatch(ctx, "none");
+    Com_Color_g(ctx);
+}
 
 /*
 ==============================================================
@@ -1322,6 +1349,8 @@ void CL_DiminishingTrail(centity_t *ent, const vec3_t end, diminishing_trail_t t
     const float dec = 0.5f;
     float       orgscale;
     float       velscale;
+    bool        color_override = projectiletrail_color_override &&
+        (type == DT_ROCKET || type == DT_GRENADE);
 
     VectorSubtract(end, ent->lerp_origin, vec);
     count = VectorNormalize(vec) / dec;
@@ -1365,7 +1394,10 @@ void CL_DiminishingTrail(centity_t *ent, const vec3_t end, diminishing_trail_t t
             else
                 p->vel[2] -= PARTICLE_GRAVITY;
 
-            if (type == DT_FIREBALL)
+            if (color_override) {
+                p->color = -1;
+                p->rgba = projectiletrail_color;
+            } else if (type == DT_FIREBALL)
                 p->color = colors[type] + (1024 - ent->trailcount) / 64;
             else
                 p->color = colors[type] + (Q_rand() & 7);
@@ -1382,7 +1414,12 @@ void CL_DiminishingTrail(centity_t *ent, const vec3_t end, diminishing_trail_t t
 
             p->alpha = 1.0f;
             p->alphavel = -1.0f / (1 + frand() * 0.2f);
-            p->color = 0xdc + (Q_rand() & 3);
+            if (color_override) {
+                p->color = -1;
+                p->rgba = projectiletrail_color;
+            } else {
+                p->color = 0xdc + (Q_rand() & 3);
+            }
             for (j = 0; j < 3; j++) {
                 p->org[j] = move[j] + crand() * 5;
                 p->vel[j] = crand() * 20;
@@ -1824,4 +1861,8 @@ void CL_InitEffects(void)
 
     cl_lerp_lightstyles = Cvar_Get("cl_lerp_lightstyles", "0", 0);
     cl_muzzlelight_time = Cvar_Get("cl_muzzlelight_time", "16", 0);
+    cl_projectiletrail_color = Cvar_Get("cl_projectiletrail_color", "none", 0);
+    cl_projectiletrail_color->changed = cl_projectiletrail_color_changed;
+    cl_projectiletrail_color->generator = cl_projectiletrail_color_g;
+    cl_projectiletrail_color_changed(cl_projectiletrail_color);
 }

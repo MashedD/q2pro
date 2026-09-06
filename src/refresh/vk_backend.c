@@ -980,9 +980,6 @@ static cvar_t *vk_showbloom;
 static cvar_t *vk_waterwarp;
 static cvar_t *vk_bloom_sigma;
 static cvar_t *vk_bloom_downsample;
-static cvar_t *vk_bloom_streaks;
-static cvar_t *vk_bloom_ghosts;
-static cvar_t *vk_bloom_shafts;
 static cvar_t *vk_perf_stats;
 static cvar_t *vk_frames_in_flight;
 static cvar_t *vk_device;
@@ -1013,7 +1010,6 @@ static cvar_t *vk_rt_caustics;
 static cvar_t *vk_rt_shadow_fringe;
 static cvar_t *vk_rt_light_ripples;
 static cvar_t *vk_rt_rail_impact;
-static cvar_t *vk_rt_weapon_glow;
 static cvar_t *vk_rt_light_coronas;
 static cvar_t *vk_rt_lava_embers;
 static cvar_t *vk_rt_shockwaves;
@@ -12246,10 +12242,6 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     bool translucent = ent->flags & RF_TRANSLUCENT;
     bool bloom_only = ent->flags & RF_BLOOM_ONLY;
     bool bloom_shell = (ent->flags & RF_SHELL_MASK) && !(ent->flags & RF_NOBLOOM);
-    bool weapon_glow = vk.raytracing_active && vk_rt_weapon_glow &&
-        Cvar_ClampValue(vk_rt_weapon_glow, 0.0f, 1.0f) > 0.0f &&
-        (ent->flags & (RF_WEAPONMODEL | RF_RT_WEAPON_GLOW)) ==
-            (RF_WEAPONMODEL | RF_RT_WEAPON_GLOW);
     bool draw_model = !bloom_only || vk.drawing_bloom;
 
     if (!model || model->type != VK_MODEL_ALIAS ||
@@ -12281,7 +12273,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     }
 #endif
 
-    if (vk.drawing_bloom && !bloom_only && !bloom_shell && !weapon_glow &&
+    if (vk.drawing_bloom && !bloom_only && !bloom_shell &&
         !vk_alias_model_has_glowmap(model))
         return;
 
@@ -12366,31 +12358,6 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
                 vk_draw_alias_pass(cmd, vk.drawing_bloom ? vk.alias_bloom_pipeline :
                                    vk.alias_blend_pipeline, buffers, offsets,
                                    model, batch, glow, &glow_push);
-            }
-        }
-        if (weapon_glow) {
-            const vk_texture_t *shell = vk_texture_for_index(
-                R_SHELLTEXTURE->texnum, true);
-            if (shell && vk.alias_blend_pipeline) {
-                float strength = Cvar_ClampValue(vk_rt_weapon_glow,
-                                                 0.0f, 1.0f);
-                float pulse = 0.75f + 0.25f * sinf(fd->time *
-                                                    (2.0f * M_PIf / 1.5f));
-                float alpha = (0.12f + strength * 0.20f) * pulse;
-                vk_alias_push_t glow_push = push;
-
-                Vector4Set(glow_push.color,
-                           ent->rgba.u8[0] / 255.0f,
-                           ent->rgba.u8[1] / 255.0f,
-                           ent->rgba.u8[2] / 255.0f,
-                           vk.drawing_bloom ? alpha * 0.45f : alpha);
-                Vector4Clear(glow_push.shadedir);
-                glow_push.shellscale = 0.08f + strength * 0.12f;
-                glow_push.intensity = 1.0f;
-                vk_draw_alias_pass(cmd, vk.drawing_bloom ?
-                                   vk.alias_bloom_pipeline :
-                                   vk.alias_blend_pipeline, buffers, offsets,
-                                   model, batch, shell, &glow_push);
             }
         }
         if (!vk.drawing_bloom)
@@ -15525,10 +15492,6 @@ static bool vk_entity_in_pass(const entity_t *ent, vk_entity_pass_t pass)
             return false;
 
         return ((ent->flags & RF_SHELL_MASK) && !(ent->flags & RF_NOBLOOM)) ||
-            ((ent->flags & (RF_WEAPONMODEL | RF_RT_WEAPON_GLOW)) ==
-                (RF_WEAPONMODEL | RF_RT_WEAPON_GLOW) &&
-             vk.raytracing_active && vk_rt_weapon_glow &&
-             Cvar_ClampValue(vk_rt_weapon_glow, 0.0f, 1.0f) > 0.0f) ||
             vk_alias_model_has_glowmap(model);
     }
 
@@ -17759,9 +17722,6 @@ bool VKR_Init(bool total)
     vk_waterwarp = Cvar_Get("gl_waterwarp", "0", 0);
     vk_bloom_sigma = Cvar_Get("gl_bloom_sigma", "4", 0);
     vk_bloom_downsample = Cvar_Get("vk_bloom_downsample", "4", 0);
-    vk_bloom_streaks = Cvar_Get("vk_bloom_streaks", "0.45", CVAR_ARCHIVE);
-    vk_bloom_ghosts = Cvar_Get("vk_bloom_ghosts", "0.5", CVAR_ARCHIVE);
-    vk_bloom_shafts = Cvar_Get("vk_bloom_shafts", "0.4", CVAR_ARCHIVE);
     vk_perf_stats = Cvar_Get("vk_perf_stats", "0", 0);
     vk_frames_in_flight = Cvar_Get("vk_frames_in_flight", "2", CVAR_ARCHIVE);
     vk_device = Cvar_Get("vk_device", "", CVAR_ARCHIVE | CVAR_REFRESH);
@@ -17801,7 +17761,6 @@ bool VKR_Init(bool total)
     vk_rt_shadow_fringe = Cvar_Get("vk_rt_shadow_fringe", "0.6", CVAR_ARCHIVE);
     vk_rt_light_ripples = Cvar_Get("vk_rt_light_ripples", "0.6", CVAR_ARCHIVE);
     vk_rt_rail_impact = Cvar_Get("vk_rt_rail_impact", "0.65", CVAR_ARCHIVE);
-    vk_rt_weapon_glow = Cvar_Get("vk_rt_weapon_glow", "0.65", CVAR_ARCHIVE);
     vk_rt_light_coronas = Cvar_Get("vk_rt_light_coronas", "0.6", CVAR_ARCHIVE);
     vk_rt_lava_embers = Cvar_Get("vk_rt_lava_embers", "0.65", CVAR_ARCHIVE);
     vk_rt_shockwaves = Cvar_Get("vk_rt_shockwaves", "0.7", CVAR_ARCHIVE);
@@ -18957,10 +18916,8 @@ static void vk_finish_postprocess_scene(void)
         vec4_t downscale_step = {
             1.0f / (float)max(vk.bloom_source_texture.width, 1),
             1.0f / (float)max(vk.bloom_source_texture.height, 1),
-            vk_bloom_ghosts ?
-                Cvar_ClampValue(vk_bloom_ghosts, 0.0f, 1.0f) : 0.5f,
-            vk_bloom_shafts ?
-                Cvar_ClampValue(vk_bloom_shafts, 0.0f, 1.0f) : 0.4f,
+            0.0f,
+            1.0f,
         };
         float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
         sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
@@ -18972,11 +18929,8 @@ static void vk_finish_postprocess_scene(void)
             (float)vk_bloom_downsample_value();
         int iterations = (vk_showbloom && vk_showbloom->integer >= 2) ? 0 :
             (gl_bloom ? Cvar_ClampInteger(gl_bloom, 1, 8) : 1);
-        float streaks = vk_bloom_streaks ?
-            Cvar_ClampValue(vk_bloom_streaks, 0.0f, 1.0f) : 0.45f;
-        float horizontal_stretch = 1.0f + 3.0f * streaks;
         vec4_t blur_x = {
-            sigma * horizontal_stretch / (float)bloom_w,
+            sigma / (float)bloom_w,
             0.0f,
             0.0f,
             1.0f,
@@ -19347,10 +19301,8 @@ void VKR_EndFrame(void)
         vec4_t downscale_step = {
             1.0f / (float)max(vk.bloom_source_texture.width, 1),
             1.0f / (float)max(vk.bloom_source_texture.height, 1),
-            vk_bloom_ghosts ?
-                Cvar_ClampValue(vk_bloom_ghosts, 0.0f, 1.0f) : 0.5f,
-            vk_bloom_shafts ?
-                Cvar_ClampValue(vk_bloom_shafts, 0.0f, 1.0f) : 0.4f,
+            0.0f,
+            1.0f,
         };
         float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
         sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
@@ -19358,11 +19310,8 @@ void VKR_EndFrame(void)
             (float)vk_bloom_downsample_value();
         int iterations = (vk_showbloom && vk_showbloom->integer >= 2) ? 0 :
             (gl_bloom ? Cvar_ClampInteger(gl_bloom, 1, 8) : 1);
-        float streaks = vk_bloom_streaks ?
-            Cvar_ClampValue(vk_bloom_streaks, 0.0f, 1.0f) : 0.45f;
-        float horizontal_stretch = 1.0f + 3.0f * streaks;
         vec4_t blur_x = {
-            sigma * horizontal_stretch / (float)bloom_w,
+            sigma / (float)bloom_w,
             0.0f,
             0.0f,
             1.0f,
