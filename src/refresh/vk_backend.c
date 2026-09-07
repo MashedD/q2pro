@@ -286,6 +286,13 @@ typedef enum {
     VK_FSR_AUTO_REJECTED,
 } vk_fsr_auto_phase_t;
 
+typedef enum {
+    VK_FSR_QUALITY,
+    VK_FSR_BALANCED,
+    VK_FSR_PERFORMANCE,
+    VK_FSR_ULTRA_PERFORMANCE,
+} vk_fsr_quality_t;
+
 
 typedef struct {
     vk_buffer_t vertices;
@@ -1033,10 +1040,15 @@ typedef struct {
     unsigned fsr_gpu_frame_generation_usec;
     unsigned fsr_gpu_presentation_usec;
     vk_fsr_auto_phase_t fsr_auto_phase;
+    vk_fsr_quality_t fsr_auto_quality;
+    vk_fsr_quality_t fsr_auto_best_quality;
     uint32_t fsr_auto_samples;
+    uint32_t fsr_auto_trial_index;
     uint64_t fsr_auto_native_usec;
     uint64_t fsr_auto_fsr_usec;
+    uint64_t fsr_auto_best_usec;
     bool fsr_auto_recreate;
+    bool fsr_presentation_copy;
     bool timestamp_valid[VK_MAX_FRAMES_IN_FLIGHT];
     uint16_t timestamp_scope_mask[VK_MAX_FRAMES_IN_FLIGHT];
     VkPipeline bound_pipeline;
@@ -1189,6 +1201,45 @@ static bool vk_fsr_auto_enabled(void)
     return r_fsr_auto && r_fsr_auto->integer != 0;
 }
 
+static vk_fsr_quality_t vk_fsr_quality_from_string(const char *quality)
+{
+    if (quality && !Q_stricmp(quality, "ultra_performance"))
+        return VK_FSR_ULTRA_PERFORMANCE;
+    if (quality && !Q_stricmp(quality, "performance"))
+        return VK_FSR_PERFORMANCE;
+    if (quality && !Q_stricmp(quality, "balanced"))
+        return VK_FSR_BALANCED;
+    return VK_FSR_QUALITY;
+}
+
+static const char *vk_fsr_quality_name(vk_fsr_quality_t quality)
+{
+    switch (quality) {
+    case VK_FSR_BALANCED:
+        return "balanced";
+    case VK_FSR_PERFORMANCE:
+        return "performance";
+    case VK_FSR_ULTRA_PERFORMANCE:
+        return "ultra_performance";
+    default:
+        return "quality";
+    }
+}
+
+static float vk_fsr_quality_scale_for(vk_fsr_quality_t quality)
+{
+    switch (quality) {
+    case VK_FSR_BALANCED:
+        return 1.7f;
+    case VK_FSR_PERFORMANCE:
+        return 2.0f;
+    case VK_FSR_ULTRA_PERFORMANCE:
+        return 3.0f;
+    default:
+        return 1.5f;
+    }
+}
+
 static bool vk_fsr_motion_fast_requested(void)
 {
     const char *mode = r_fsr_motion ? r_fsr_motion->string : "auto";
@@ -1242,9 +1293,14 @@ static void vk_fsr_auto_reset(void)
 {
     vk.fsr_auto_phase = vk_fsr_auto_enabled() && vk_fsr_user_requested() ?
         VK_FSR_AUTO_WARMUP : VK_FSR_AUTO_ACCEPTED;
+    vk.fsr_auto_quality = vk_fsr_quality_from_string(
+        r_fsr_quality ? r_fsr_quality->string : "quality");
+    vk.fsr_auto_best_quality = vk.fsr_auto_quality;
     vk.fsr_auto_samples = 0;
+    vk.fsr_auto_trial_index = (uint32_t)vk.fsr_auto_quality;
     vk.fsr_auto_native_usec = 0;
     vk.fsr_auto_fsr_usec = 0;
+    vk.fsr_auto_best_usec = 0;
     vk.fsr_auto_recreate = false;
 }
 
@@ -1255,7 +1311,8 @@ static void vk_fsr_auto_update(unsigned record_usec)
 
     uint64_t gpu_usec = vk.gpu_frame_usec;
     uint64_t frame_usec = max((uint64_t)record_usec, gpu_usec);
-    if (!frame_usec)
+    if (!frame_usec || !vk.fd_valid || vk.fsr_pause_reuse ||
+        vk.fsr_paused_last_frame)
         return;
 
     if (vk.fsr_auto_phase == VK_FSR_AUTO_WARMUP) {
@@ -1264,10 +1321,16 @@ static void vk_fsr_auto_update(unsigned record_usec)
             return;
 
         vk.fsr_auto_phase = VK_FSR_AUTO_TRIAL;
+        vk.fsr_auto_trial_index = (uint32_t)vk_fsr_quality_from_string(
+            r_fsr_quality ? r_fsr_quality->string : "quality");
+        vk.fsr_auto_quality = (vk_fsr_quality_t)vk.fsr_auto_trial_index;
         vk.fsr_auto_samples = 0;
         vk.fsr_auto_fsr_usec = 0;
+        vk.fsr_auto_best_usec = 0;
         vk.fsr_auto_recreate = true;
-        Com_Printf("Vulkan FSR3 auto mode: native baseline complete; starting FSR trial\n");
+        Com_Printf("Vulkan FSR3 auto mode: native baseline complete; "
+                   "testing FSR quality profiles from %s\n",
+                   vk_fsr_quality_name(vk.fsr_auto_quality));
     } else if (vk.fsr_auto_phase == VK_FSR_AUTO_TRIAL) {
         vk.fsr_auto_fsr_usec += frame_usec;
         if (++vk.fsr_auto_samples < 90)
@@ -1275,19 +1338,43 @@ static void vk_fsr_auto_update(unsigned record_usec)
 
         uint64_t native_avg = vk.fsr_auto_native_usec / 90;
         uint64_t fsr_avg = vk.fsr_auto_fsr_usec / 90;
-        if (fsr_avg > native_avg + native_avg / 20) {
+        if (!vk.fsr_auto_best_usec || fsr_avg < vk.fsr_auto_best_usec) {
+            vk.fsr_auto_best_usec = fsr_avg;
+            vk.fsr_auto_best_quality = vk.fsr_auto_quality;
+        }
+
+        if (vk.fsr_auto_trial_index < VK_FSR_ULTRA_PERFORMANCE) {
+            vk.fsr_auto_trial_index++;
+            vk.fsr_auto_quality = (vk_fsr_quality_t)vk.fsr_auto_trial_index;
+            vk.fsr_auto_samples = 0;
+            vk.fsr_auto_fsr_usec = 0;
+            vk.fsr_auto_recreate = true;
+            Com_Printf("Vulkan FSR3 auto mode: %s=%lluus; testing %s\n",
+                       vk_fsr_quality_name(vk.fsr_auto_quality - 1),
+                       (unsigned long long)fsr_avg,
+                       vk_fsr_quality_name(vk.fsr_auto_quality));
+            return;
+        }
+
+        if (vk.fsr_auto_best_usec > native_avg + native_avg / 20) {
             vk.fsr_auto_phase = VK_FSR_AUTO_REJECTED;
             vk.fsr_auto_recreate = true;
             Com_WPrintf("Vulkan FSR3 auto mode: %lluus native vs %lluus FSR; "
                         "FSR is slower and will be disabled for this session\n",
                         (unsigned long long)native_avg,
-                        (unsigned long long)fsr_avg);
+                        (unsigned long long)vk.fsr_auto_best_usec);
         } else {
             vk.fsr_auto_phase = VK_FSR_AUTO_ACCEPTED;
+            bool quality_changed = vk.fsr_auto_quality !=
+                vk.fsr_auto_best_quality;
+            vk.fsr_auto_quality = vk.fsr_auto_best_quality;
+            if (quality_changed)
+                vk.fsr_auto_recreate = true;
             Com_Printf("Vulkan FSR3 auto mode: %lluus native vs %lluus FSR; "
-                       "keeping FSR enabled\n",
+                       "using %s\n",
                        (unsigned long long)native_avg,
-                       (unsigned long long)fsr_avg);
+                       (unsigned long long)vk.fsr_auto_best_usec,
+                       vk_fsr_quality_name(vk.fsr_auto_quality));
         }
         vk.fsr_auto_samples = 0;
     }
@@ -1324,15 +1411,10 @@ static bool vk_fsr_scene_paused(void)
 
 static float vk_fsr_quality_scale(void)
 {
-    const char *quality = r_fsr_quality ? r_fsr_quality->string : "quality";
-
-    if (!Q_stricmp(quality, "ultra_performance"))
-        return 3.0f;
-    if (!Q_stricmp(quality, "performance"))
-        return 2.0f;
-    if (!Q_stricmp(quality, "balanced"))
-        return 1.7f;
-    return 1.5f;
+    if (vk_fsr_auto_enabled() && vk.fsr_auto_phase != VK_FSR_AUTO_WARMUP)
+        return vk_fsr_quality_scale_for(vk.fsr_auto_quality);
+    return vk_fsr_quality_scale_for(vk_fsr_quality_from_string(
+        r_fsr_quality ? r_fsr_quality->string : "quality"));
 }
 
 static VkExtent2D vk_fsr_render_extent(void)
@@ -3556,6 +3638,7 @@ static void vk_destroy_fsr_resources(void)
     vk.fsr_pause_reuse = false;
     vk.fsr_paused_last_frame = false;
     vk.fsr_presentation_logged = false;
+    vk.fsr_presentation_copy = false;
     vk.render_extent = vk.swapchain_extent;
 }
 
@@ -3592,7 +3675,8 @@ static bool vk_create_fsr_resources(void)
                                 vk.swapchain_extent.height,
                                 vk.fsr_output_format,
                                 VK_IMAGE_USAGE_SAMPLED_BIT |
-                                VK_IMAGE_USAGE_STORAGE_BIT)) {
+                                VK_IMAGE_USAGE_STORAGE_BIT |
+                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
         Com_WPrintf("Couldn't create Vulkan FSR3 output target: %s; rendering at native resolution\n",
                     Com_GetLastError());
         vk_destroy_fsr_resources();
@@ -3604,7 +3688,8 @@ static bool vk_create_fsr_resources(void)
                                 vk.swapchain_extent.height,
                                 vk.fsr_output_format,
                                 VK_IMAGE_USAGE_SAMPLED_BIT |
-                                VK_IMAGE_USAGE_STORAGE_BIT)) {
+                                VK_IMAGE_USAGE_STORAGE_BIT |
+                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
         Com_WPrintf("Couldn't create Vulkan FSR3 frame-generation target: %s; rendering without frame generation\n",
                     Com_GetLastError());
         vk_destroy_fsr_resources();
@@ -3625,7 +3710,8 @@ static bool vk_create_fsr_resources(void)
                                     vk.swapchain_extent.height,
                                     vk.fsr_output_format,
                                     VK_IMAGE_USAGE_SAMPLED_BIT |
-                                    VK_IMAGE_USAGE_STORAGE_BIT)) {
+                                    VK_IMAGE_USAGE_STORAGE_BIT |
+                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
             vk_destroy_fsr_resources();
             return true;
         }
@@ -3671,6 +3757,7 @@ static bool vk_create_fsr_resources(void)
     vk.fsr_pause_reuse = false;
     vk.fsr_paused_last_frame = false;
     vk.fsr_presentation_logged = false;
+    vk.fsr_presentation_copy = false;
     Com_Printf("Vulkan FSR3: %ux%u -> %ux%u (%s)\n",
                vk.render_extent.width, vk.render_extent.height,
                vk.swapchain_extent.width, vk.swapchain_extent.height,
@@ -10066,6 +10153,54 @@ static void vk_composite_presentation_texture(const vk_texture_t *texture)
         vk.presentation_pipeline : vk.texture_pipeline;
 
     vk_draw_refdef_texture(pipeline, texture, white);
+}
+
+static bool vk_copy_presentation_texture(VkCommandBuffer cmd,
+                                          vk_texture_t *texture,
+                                          VkImageLayout *texture_layout)
+{
+    if (!texture || !texture_layout || !texture->image ||
+        *texture_layout == VK_IMAGE_LAYOUT_UNDEFINED ||
+        vk.fsr_output_format != vk.swapchain_format ||
+        texture->width != vk.swapchain_extent.width ||
+        texture->height != vk.swapchain_extent.height)
+        return false;
+
+    vk_transition_color_target(cmd, texture, texture_layout,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               VK_ACCESS_TRANSFER_READ_BIT,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT);
+    vk_transition_image(cmd, vk.current_image,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_ACCESS_TRANSFER_WRITE_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+    VkImageCopy copy = {
+        .srcSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .layerCount = 1,
+        },
+        .dstSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .layerCount = 1,
+        },
+        .extent = {
+            .width = vk.swapchain_extent.width,
+            .height = vk.swapchain_extent.height,
+            .depth = 1,
+        },
+    };
+    vk.CmdCopyImage(cmd, texture->image,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    vk.swapchain_images[vk.current_image],
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    1, &copy);
+    vk_transition_image(cmd, vk.current_image,
+                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    vk.fsr_presentation_copy = true;
+    return true;
 }
 
 static void vk_composite_scene_texture_sized(uint32_t width, uint32_t height)
@@ -18783,28 +18918,33 @@ static void vk_log_perf_stats(void)
                vk.wait_usec, vk.acquire_usec, vk.record_usec,
                vk.submit_usec, vk.present_usec);
     if (vk.separate_presentation) {
-        Com_Printf("VK FSR3 record: motion=%lluus dispatch=%lluus paused=%s history=%s target=%s clear=%s\n",
+        Com_Printf("VK FSR3 record: motion=%lluus dispatch=%lluus paused=%s history=%s target=%s present=%s clear=%s\n",
                    (unsigned long long)vk.fsr_motion_record_usec,
                    (unsigned long long)vk.fsr_dispatch_record_usec,
                    vk.fsr_pause_reuse ? "yes" : "no",
                    vk.fsr_output_valid ? "valid" : "invalid",
                    vk.fsr_swapchain_direct ? "swapchain" : "intermediate",
+                   vk.fsr_swapchain_direct ? "direct" :
+                   (vk.fsr_presentation_copy ? "copy" : "shader"),
                    vk.fsr_motion_cleared ? "yes" : "no");
         Com_Printf("VK FSR3 GPU: motion=%uus upscale=%uus framegen=%uus presentation=%uus\n",
                    vk.fsr_gpu_motion_usec,
                    vk.fsr_gpu_upscale_usec,
                    vk.fsr_gpu_frame_generation_usec,
                    vk.fsr_gpu_presentation_usec);
-        Com_Printf("VK FSR3 perf: auto=%s phase=%d motion=%s native=%lluus fsr=%lluus\n",
+        Com_Printf("VK FSR3 perf: auto=%s phase=%d quality=%s motion=%s native=%lluus fsr=%lluus best=%lluus samples=%u\n",
                    vk_fsr_auto_enabled() ? "yes" : "no",
                    vk.fsr_auto_phase,
+                   vk_fsr_quality_name(vk.fsr_auto_quality),
                    vk.fsr_motion_fast ? "fast" : "full",
                    (unsigned long long)(vk.fsr_auto_samples &&
                                         vk.fsr_auto_phase == VK_FSR_AUTO_WARMUP ?
                                         vk.fsr_auto_native_usec / vk.fsr_auto_samples : 0),
                    (unsigned long long)(vk.fsr_auto_samples &&
                                         vk.fsr_auto_phase == VK_FSR_AUTO_TRIAL ?
-                                        vk.fsr_auto_fsr_usec / vk.fsr_auto_samples : 0));
+                                        vk.fsr_auto_fsr_usec / vk.fsr_auto_samples : 0),
+                   (unsigned long long)vk.fsr_auto_best_usec,
+                   vk.fsr_auto_samples);
     }
 }
 
@@ -20688,11 +20828,6 @@ static bool vk_dispatch_fsr(void)
         vk_write_fsr_timestamp(VK_TIMESTAMP_FRAMEGEN_END);
         if (!generated_frame)
             vk_disable_frame_generation("frame-generation dispatch failed");
-        vk_transition_color_target(cmd, &vk.fsr_frame_generation_texture,
-                                   &vk.fsr_frame_generation_layout,
-                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                   VK_ACCESS_SHADER_READ_BIT,
-                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     }
     if (direct_output) {
         vk_transition_image(cmd, vk.current_image,
@@ -20707,16 +20842,30 @@ static bool vk_dispatch_fsr(void)
         vk.fsr_composited = true;
         return true;
     }
-    vk_transition_color_target(cmd, &vk.fsr_output_texture,
-                               &vk.fsr_output_layout,
-                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                               VK_ACCESS_SHADER_READ_BIT,
-                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    vk_begin_presentation(false);
+    vk_texture_t *presentation_texture = generated_frame ?
+        &vk.fsr_frame_generation_texture : &vk.fsr_output_texture;
+    VkImageLayout *presentation_layout = generated_frame ?
+        &vk.fsr_frame_generation_layout : &vk.fsr_output_layout;
     vk_write_fsr_timestamp(VK_TIMESTAMP_PRESENT_BEGIN);
-    vk_composite_presentation_texture(generated_frame ?
-                                      &vk.fsr_frame_generation_texture :
-                                      &vk.fsr_output_texture);
+    bool presentation_copy = vk_copy_presentation_texture(
+        cmd, presentation_texture, presentation_layout);
+    /* The non-generated FSR output is also retained for pause reuse. The
+     * frame-generation output is only the current presentation image. */
+    if (generated_frame)
+        vk_transition_color_target(cmd, &vk.fsr_output_texture,
+                                   &vk.fsr_output_layout,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_ACCESS_SHADER_READ_BIT,
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    if (!presentation_copy)
+        vk_transition_color_target(cmd, presentation_texture,
+                                   presentation_layout,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_ACCESS_SHADER_READ_BIT,
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    vk_begin_presentation(false);
+    if (!presentation_copy)
+        vk_composite_presentation_texture(presentation_texture);
     vk_write_fsr_timestamp(VK_TIMESTAMP_PRESENT_END);
     vk.fsr_composited = true;
     return true;
@@ -21194,6 +21343,7 @@ void VKR_BeginFrame(void)
     vk.frame_ssr = vk_ssr_enabled_for_frame();
     vk.fsr_motion_fast = vk_fsr_motion_fast_requested();
     vk.fsr_motion_cleared = false;
+    vk.fsr_presentation_copy = false;
     if (vk.fsr_motion_fast != vk.fsr_motion_fast_last) {
         vk.fsr_motion_fast_last = vk.fsr_motion_fast;
         vk.fsr_reset = true;
@@ -21228,6 +21378,12 @@ void VKR_BeginFrame(void)
         vk.frame_bloom = false;
         vk.frame_waterwarp = false;
         vk.frame_ssr = false;
+        if (paused && !vk.fsr_swapchain_direct && vk.fsr_output_valid)
+            vk_transition_color_target(cmd, &vk.fsr_output_texture,
+                                       &vk.fsr_output_layout,
+                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                       VK_ACCESS_SHADER_READ_BIT,
+                                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         if (paused && vk.fsr_swapchain_direct && vk.fsr_output_valid)
             vk_prepare_direct_pause_cache(cmd);
         vk_begin_presentation(true);

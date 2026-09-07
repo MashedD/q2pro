@@ -773,10 +773,13 @@ r_fsr_sharpness::
     sharpening pass. The default value is 0.
 
 r_fsr_auto::
-    Enables the Vulkan FSR3 performance guard. When enabled, the renderer
-    measures a native-resolution warm-up and an FSR trial, keeps FSR only when
-    its measured frame cost is not more than 5% slower, and otherwise falls
-    back for the current session. Default value is 1.
+    Enables the Vulkan FSR3 automatic performance mode. When enabled, the
+    renderer measures a native-resolution baseline, tests progressively lower
+    quality profiles, and keeps the profile with the lowest measured frame
+    cost when it is at least 5% faster than native rendering. If no profile
+    improves frame time, FSR is disabled for the current session. The selected
+    r_fsr_quality value is the highest quality profile that automatic mode may
+    test. Set this to 0 to keep r_fsr_quality fixed. Default value is 1.
 
 r_fsr_motion::
     Selects the FSR motion-vector path: ‘full’ renders the additional scene

@@ -110,7 +110,7 @@ begin video
         "ultra performance" ultra_performance
     range --status "Requires the Vulkan renderer; changing this refreshes the renderer" \
         "FSR3 sharpness" r_fsr_sharpness 0 1
-    toggle --status "Automatically keeps FSR only when measured frame time improves" \
+    toggle --status "Tests lower quality profiles and keeps the fastest one" \
         "FSR3 automatic performance" r_fsr_auto
     pairs --status "Fast and auto skip an extra motion-vector scene pass" \
         "FSR3 motion vectors" r_fsr_motion \
