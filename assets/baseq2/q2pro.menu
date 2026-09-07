@@ -101,9 +101,9 @@ begin video
     range "glowmap intensity" gl_glowmap_intensity 0 1
     toggle "lava glowmaps" r_lava_glowmaps
     toggle --status "Requires the Vulkan renderer; changing this refreshes the renderer" \
-        "FSR2 upscaling" r_fsr
+        "FSR3 upscaling" r_fsr
     pairs --status "Requires the Vulkan renderer; changing this refreshes the renderer" \
-        "FSR2 quality" r_fsr_quality \
+        "FSR3 quality" r_fsr_quality \
         quality quality \
         balanced balanced \
         performance performance \

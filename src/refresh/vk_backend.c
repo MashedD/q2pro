@@ -27,7 +27,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include "refresh/refresh.h"
 #include "system/system.h"
 #include "vk_backend.h"
-#include "vk_fsr2.h"
+#include "vk_fsr3.h"
 
 #if USE_VULKAN
 
@@ -792,6 +792,7 @@ typedef struct {
     VkPipeline rect_pipeline;
     VkPipeline vignette_pipeline;
     VkPipeline texture_pipeline;
+    VkPipeline presentation_pipeline;
     VkPipeline scene_pipeline;
     VkPipeline waterwarp_pipeline;
     VkPipeline bloom_downscale_pipeline;
@@ -842,8 +843,10 @@ typedef struct {
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
     VkRenderPass bloom_render_pass;
+    VkRenderPass presentation_load_pass;
     VkRenderPass fsr_motion_render_pass;
     VkFormat swapchain_format;
+    VkFormat fsr_output_format;
     VkFormat depth_format;
     VkSampleCountFlagBits sample_count;
     VkExtent2D swapchain_extent;
@@ -897,6 +900,9 @@ typedef struct {
     bool image_acquired;
     bool frame_active;
     bool render_pass_active;
+    bool separate_presentation;
+    VkRenderPass active_render_pass;
+    VkExtent2D active_target_extent;
     bool mrt_bloom;
     bool drawing_bloom;
     vk_draw_scope_t draw_scope;
@@ -905,6 +911,8 @@ typedef struct {
     bool frame_ssr;
     bool frame_fsr;
     bool fsr_reset;
+    bool fsr_composited;
+    bool fsr_presentation_logged;
     bool fsr_warned;
     bool fsr_motion_initialized;
     bool fsr_jitter_ready;
@@ -913,7 +921,7 @@ typedef struct {
     bool fsr_previous_viewproj_valid;
     refdef_t fsr_previous_fd;
     bool fsr_previous_fd_valid;
-    q2_fsr2_context_t *fsr2;
+    q2_fsr3_context_t *fsr3;
     bool ssr_ready;
     float scale;
     color_t color;
@@ -1160,7 +1168,10 @@ static uint32_t *vk_build_line_indices(const uint32_t *indices,
 static void vk_begin_render_pass(VkRenderPass render_pass,
                                  VkFramebuffer framebuffer,
                                  VkClearColorValue color);
+static void vk_set_target_viewport(uint32_t width, uint32_t height);
 static void vk_finish_postprocess_scene(void);
+static void vk_begin_scene_view(void);
+static void vk_begin_presentation(bool clear);
 static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, const void *pixels,
                                    bool mipmaps);
@@ -1180,6 +1191,7 @@ static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
                           const entity_t *ent, const vec3_t axis[3]);
 static bool vk_create_swapchain(int width, int height);
 static bool vk_recreate_swapchain(const char *reason);
+static VkFormat vk_fsr_output_format(VkFormat format);
 static const char *vk_device_type_string(VkPhysicalDeviceType type);
 static void vk_destroy_mesh(vk_mesh_t *mesh);
 #if USE_VULKAN_RAYTRACING
@@ -3297,19 +3309,22 @@ fail:
 
 static void vk_destroy_fsr_resources(void)
 {
-    if (vk.fsr2) {
-        Q2_FSR2_Destroy(vk.fsr2);
-        vk.fsr2 = NULL;
+    if (vk.fsr3) {
+        Q2_FSR3_Destroy(vk.fsr3);
+        vk.fsr3 = NULL;
     }
     vk_destroy_texture_resource(&vk.fsr_output_texture);
     vk_destroy_texture_resource(&vk.fsr_motion_texture);
     vk_destroy_texture_resource(&vk.fsr_reactive_texture);
+    vk.fsr_output_format = VK_FORMAT_UNDEFINED;
     vk.fsr_output_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_motion_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_reactive_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_motion_initialized = false;
     vk.fsr_previous_viewproj_valid = false;
     vk.fsr_previous_fd_valid = false;
+    vk.fsr_composited = false;
+    vk.fsr_presentation_logged = false;
     vk.render_extent = vk.swapchain_extent;
 }
 
@@ -3322,25 +3337,26 @@ static bool vk_create_fsr_resources(void)
          vk.render_extent.height == vk.swapchain_extent.height))
         return true;
 
-    vk.fsr2 = Q2_FSR2_Create(vk.physical_device, vk.device,
+    vk.fsr3 = Q2_FSR3_Create(vk.physical_device, vk.device, vk.instance,
                              vk.GetInstanceProcAddr, vk.GetDeviceProcAddr,
                              vk.render_extent.width, vk.render_extent.height,
                              vk.swapchain_extent.width, vk.swapchain_extent.height);
-    if (!vk.fsr2) {
+    if (!vk.fsr3) {
         if (!vk.fsr_warned) {
-            Com_WPrintf("Vulkan FSR2 is unavailable on this device; rendering at native resolution\n");
+            Com_WPrintf("Vulkan FSR3 is unavailable on this device; rendering at native resolution\n");
             vk.fsr_warned = true;
         }
         vk.render_extent = vk.swapchain_extent;
         return true;
     }
 
+    vk.fsr_output_format = vk_fsr_output_format(vk.swapchain_format);
     if (!vk_create_color_target(&vk.fsr_output_texture,
                                 vk.swapchain_extent.width,
                                 vk.swapchain_extent.height,
-                                vk.swapchain_format,
+                                vk.fsr_output_format,
                                 VK_IMAGE_USAGE_STORAGE_BIT)) {
-        Com_WPrintf("Couldn't create Vulkan FSR2 output target: %s; rendering at native resolution\n",
+        Com_WPrintf("Couldn't create Vulkan FSR3 output target: %s; rendering at native resolution\n",
                     Com_GetLastError());
         vk_destroy_fsr_resources();
         return true;
@@ -3349,8 +3365,8 @@ static bool vk_create_fsr_resources(void)
                                 vk.render_extent.width,
                                 vk.render_extent.height,
                                 VK_FORMAT_R16G16_SFLOAT,
-                                0)) {
-        Com_WPrintf("Couldn't create Vulkan FSR2 motion target: %s; rendering at native resolution\n",
+                                VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+        Com_WPrintf("Couldn't create Vulkan FSR3 motion target: %s; rendering at native resolution\n",
                     Com_GetLastError());
         vk_destroy_fsr_resources();
         return true;
@@ -3359,8 +3375,8 @@ static bool vk_create_fsr_resources(void)
                                 vk.render_extent.width,
                                 vk.render_extent.height,
                                 VK_FORMAT_R8_UNORM,
-                                0)) {
-        Com_WPrintf("Couldn't create Vulkan FSR2 reactive target: %s; rendering at native resolution\n",
+                                VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+        Com_WPrintf("Couldn't create Vulkan FSR3 reactive target: %s; rendering at native resolution\n",
                     Com_GetLastError());
         vk_destroy_fsr_resources();
         return true;
@@ -3374,7 +3390,9 @@ static bool vk_create_fsr_resources(void)
     vk.fsr_previous_viewproj_valid = false;
     vk.fsr_previous_fd_valid = false;
     vk.fsr_reset = true;
-    Com_Printf("Vulkan FSR2: %ux%u -> %ux%u (%s)\n",
+    vk.fsr_composited = false;
+    vk.fsr_presentation_logged = false;
+    Com_Printf("Vulkan FSR3: %ux%u -> %ux%u (%s)\n",
                vk.render_extent.width, vk.render_extent.height,
                vk.swapchain_extent.width, vk.swapchain_extent.height,
                r_fsr_quality ? r_fsr_quality->string : "quality");
@@ -5837,6 +5855,22 @@ static VkSurfaceFormatKHR vk_choose_surface_format(const VkSurfaceFormatKHR *for
     return formats[0];
 }
 
+/* FSR writes the presentation image through a storage-image view. Keep that
+ * view linear even when the WSI selected an sRGB swapchain format; the final
+ * fullscreen pass performs the linear-to-sRGB conversion in the swapchain
+ * attachment. */
+static VkFormat vk_fsr_output_format(VkFormat format)
+{
+    switch (format) {
+    case VK_FORMAT_B8G8R8A8_SRGB:
+        return VK_FORMAT_B8G8R8A8_UNORM;
+    case VK_FORMAT_R8G8B8A8_SRGB:
+        return VK_FORMAT_R8G8B8A8_UNORM;
+    default:
+        return format;
+    }
+}
+
 static VkPresentModeKHR vk_choose_present_mode(const VkPresentModeKHR *modes,
                                                uint32_t count)
 {
@@ -5915,6 +5949,8 @@ static void vk_destroy_swapchain(void)
         vk.DeviceWaitIdle(vk.device);
 
     vk.render_pass_active = false;
+    vk.active_render_pass = VK_NULL_HANDLE;
+    vk.active_target_extent = (VkExtent2D) { 0, 0 };
     vk.frame_active = false;
     vk.image_acquired = false;
 
@@ -5938,6 +5974,10 @@ static void vk_destroy_swapchain(void)
     if (vk.texture_pipeline) {
         vk.DestroyPipeline(vk.device, vk.texture_pipeline, NULL);
         vk.texture_pipeline = VK_NULL_HANDLE;
+    }
+    if (vk.presentation_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.presentation_pipeline, NULL);
+        vk.presentation_pipeline = VK_NULL_HANDLE;
     }
     if (vk.scene_pipeline) {
         vk.DestroyPipeline(vk.device, vk.scene_pipeline, NULL);
@@ -6276,6 +6316,10 @@ static void vk_destroy_swapchain(void)
         vk.DestroyRenderPass(vk.device, vk.bloom_render_pass, NULL);
         vk.bloom_render_pass = VK_NULL_HANDLE;
     }
+    if (vk.presentation_load_pass) {
+        vk.DestroyRenderPass(vk.device, vk.presentation_load_pass, NULL);
+        vk.presentation_load_pass = VK_NULL_HANDLE;
+    }
 
     if (vk.fsr_motion_render_pass) {
         vk.DestroyRenderPass(vk.device, vk.fsr_motion_render_pass, NULL);
@@ -6488,9 +6532,30 @@ static bool vk_create_render_pass(void)
     bloom_info.attachmentCount = 1;
     bloom_info.pAttachments = &bloom_attachment;
     bloom_info.pSubpasses = &bloom_subpass;
+    VkSubpassDependency dependency = {
+        .srcSubpass = VK_SUBPASS_EXTERNAL,
+        .dstSubpass = 0,
+        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+    };
+    bloom_info.dependencyCount = 1;
+    bloom_info.pDependencies = &dependency;
     result = vk.CreateRenderPass(vk.device, &bloom_info, NULL, &vk.bloom_render_pass);
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreateRenderPass", result);
+
+    if (vk.separate_presentation) {
+        /* Compatible with the color-only clear pass, but preserves UI drawn
+         * before a world view or a menu player preview. */
+        bloom_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        result = vk.CreateRenderPass(vk.device, &bloom_info, NULL,
+                                     &vk.presentation_load_pass);
+        if (result != VK_SUCCESS)
+            return vk_fail_result("vkCreateRenderPass(presentation)", result);
+    }
 
     /* The existing scene depth image is multisampled when MSAA is enabled.
      * Keep the motion pass disabled in that configuration until it has a
@@ -6545,12 +6610,35 @@ static bool vk_create_render_pass(void)
         .pColorAttachments = motion_colors,
         .pDepthStencilAttachment = &motion_depth,
     };
+    VkSubpassDependency motion_dependencies[] = {
+        {
+            .srcSubpass = VK_SUBPASS_EXTERNAL,
+            .dstSubpass = 0,
+            .srcStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+        },
+        {
+            .srcSubpass = 0,
+            .dstSubpass = VK_SUBPASS_EXTERNAL,
+            .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        },
+    };
     VkRenderPassCreateInfo motion_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
         .attachmentCount = q_countof(motion_attachments),
         .pAttachments = motion_attachments,
         .subpassCount = 1,
         .pSubpasses = &motion_subpass,
+        .dependencyCount = q_countof(motion_dependencies),
+        .pDependencies = motion_dependencies,
     };
     result = vk.CreateRenderPass(vk.device, &motion_info, NULL,
                                  &vk.fsr_motion_render_pass);
@@ -6572,8 +6660,8 @@ static bool vk_create_depth_resources(void)
         .imageType = VK_IMAGE_TYPE_2D,
         .format = vk.depth_format,
         .extent = {
-            .width = vk.swapchain_extent.width,
-            .height = vk.swapchain_extent.height,
+            .width = vk.render_extent.width,
+            .height = vk.render_extent.height,
             .depth = 1,
         },
         .mipLevels = 1,
@@ -6755,13 +6843,34 @@ static bool vk_create_multisample_resources(void)
 
 static bool vk_create_framebuffers(void)
 {
+    if (vk.separate_presentation && vk.sample_count != VK_SAMPLE_COUNT_1_BIT) {
+        Com_SetLastError("Vulkan FSR presentation requires single-sample scene targets");
+        return false;
+    }
+    /* Legacy MRT display framebuffers require display-sized attachments.
+     * Reduced scene attachments must never be attached to the swapchain. */
+    if (!vk.separate_presentation &&
+        (vk.render_extent.width < vk.swapchain_extent.width ||
+         vk.render_extent.height < vk.swapchain_extent.height)) {
+        Com_SetLastError("Vulkan display framebuffer exceeds scene attachments");
+        return false;
+    }
+    if (vk.mrt_bloom &&
+        (vk.bloom_source_texture.width < vk.render_extent.width ||
+         vk.bloom_source_texture.height < vk.render_extent.height)) {
+        Com_SetLastError("Vulkan scene framebuffer exceeds bloom attachment");
+        return false;
+    }
     vk.framebuffers = Z_Mallocz(sizeof(*vk.framebuffers) * vk.swapchain_image_count);
 
     for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
         bool multisampled = vk.sample_count != VK_SAMPLE_COUNT_1_BIT;
         VkImageView attachments[5];
         uint32_t attachment_count;
-        if (vk.mrt_bloom) {
+        if (vk.separate_presentation) {
+            attachments[0] = vk.swapchain_views[i];
+            attachment_count = 1;
+        } else if (vk.mrt_bloom) {
             attachments[0] = multisampled ? vk.multisample_view : vk.swapchain_views[i];
             attachments[1] = multisampled ? vk.bloom_multisample_view :
                                              vk.bloom_source_texture.view;
@@ -6780,7 +6889,7 @@ static bool vk_create_framebuffers(void)
         }
         VkFramebufferCreateInfo create_info = {
             .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            .renderPass = vk.render_pass,
+            .renderPass = vk.separate_presentation ? vk.bloom_render_pass : vk.render_pass,
             .attachmentCount = attachment_count,
             .pAttachments = attachments,
             .width = vk.swapchain_extent.width,
@@ -6793,7 +6902,7 @@ static bool vk_create_framebuffers(void)
             return vk_fail_result("vkCreateFramebuffer", result);
     }
 
-    if (vk.sample_count == VK_SAMPLE_COUNT_1_BIT && vk.fsr2 &&
+    if (vk.sample_count == VK_SAMPLE_COUNT_1_BIT && vk.fsr3 &&
         vk.fsr_motion_render_pass &&
         vk.fsr_motion_texture.view && vk.fsr_reactive_texture.view &&
         vk.depth_view) {
@@ -6817,6 +6926,13 @@ static bool vk_create_framebuffers(void)
             return vk_fail_result("vkCreateFramebuffer(FSR motion)", result);
     }
 
+    if (vk.separate_presentation) {
+        Com_Printf("Vulkan framebuffers: display=%ux%u (color only), "
+                   "scene/depth=%ux%u bloom=%ux%u\n",
+                   vk.swapchain_extent.width, vk.swapchain_extent.height,
+                   vk.render_extent.width, vk.render_extent.height,
+                   vk.bloom_source_texture.width, vk.bloom_source_texture.height);
+    }
     return true;
 }
 
@@ -6917,7 +7033,7 @@ static bool vk_create_scene_target(void)
             return vk_fail_result("vkCreateFramebuffer(bloom postprocess)", result);
     }
 
-    if (vk.fsr2) {
+    if (vk.separate_presentation) {
         VkImageView attachment = vk.fsr_input_texture.view;
         create_info.renderPass = vk.bloom_render_pass;
         create_info.attachmentCount = 1;
@@ -7170,7 +7286,7 @@ static bool vk_create_fsr_motion_pipelines(void)
         !vk_create_fsr_motion_pipeline(&vk.fsr_motion_color_pipeline,
                                        vk_motion_color_vert_spv,
                                        sizeof(vk_motion_color_vert_spv), false)) {
-        Com_SetLastError("Couldn't create Vulkan FSR2 motion pipeline");
+        Com_SetLastError("Couldn't create Vulkan FSR3 motion pipeline");
         return false;
     }
     return true;
@@ -7266,6 +7382,17 @@ static const VkPipelineDynamicStateCreateInfo vk_3d_dynamic_state = {
     .pDynamicStates = vk_3d_dynamic_states,
 };
 
+static const VkDynamicState vk_texture_dynamic_states[] = {
+    VK_DYNAMIC_STATE_VIEWPORT,
+    VK_DYNAMIC_STATE_SCISSOR,
+};
+
+static const VkPipelineDynamicStateCreateInfo vk_texture_dynamic_state = {
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+    .dynamicStateCount = q_countof(vk_texture_dynamic_states),
+    .pDynamicStates = vk_texture_dynamic_states,
+};
+
 static bool vk_create_rect_pipeline_ex(VkPipeline *pipeline,
                                        const uint32_t *vert_spv,
                                        size_t vert_size)
@@ -7345,7 +7472,7 @@ static bool vk_create_rect_pipeline_ex(VkPipeline *pipeline,
     } };
     VkPipelineColorBlendStateCreateInfo color_blend = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = vk.mrt_bloom ? 2 : 1,
+        .attachmentCount = !vk.separate_presentation && vk.mrt_bloom ? 2 : 1,
         .pAttachments = color_blend_attachment,
     };
     VkPipelineDepthStencilStateCreateInfo depth_stencil = {
@@ -7366,7 +7493,7 @@ static bool vk_create_rect_pipeline_ex(VkPipeline *pipeline,
         .pDepthStencilState = &depth_stencil,
         .pColorBlendState = &color_blend,
         .layout = vk.rect_pipeline_layout,
-        .renderPass = vk.render_pass,
+        .renderPass = vk.separate_presentation ? vk.bloom_render_pass : vk.render_pass,
         .subpass = 0,
     };
 
@@ -7388,12 +7515,19 @@ static bool vk_create_rect_pipeline(void)
                                       sizeof(vk_rect_vert_spv));
 }
 
+typedef enum {
+    VK_TEXTURE_ALPHA,
+    VK_TEXTURE_ADDITIVE,
+    VK_TEXTURE_OPAQUE,
+} vk_texture_blend_t;
+
 static bool vk_create_texture_pipeline_ex(VkPipeline *pipeline,
                                           const uint32_t *frag_spv,
                                           size_t frag_size,
-                                          bool additive,
+                                          vk_texture_blend_t blend,
                                           VkExtent2D extent,
-                                          bool postprocess)
+                                          bool postprocess,
+                                          bool dynamic_viewport)
 {
     VkShaderModule vert = vk_create_shader_module(vk_tex_vert_spv,
                                                   sizeof(vk_tex_vert_spv));
@@ -7458,12 +7592,12 @@ static bool vk_create_texture_pipeline_ex(VkPipeline *pipeline,
         .rasterizationSamples = postprocess ? VK_SAMPLE_COUNT_1_BIT : vk.sample_count,
     };
     VkPipelineColorBlendAttachmentState color_blend_attachment[2] = { [0] = {
-        .blendEnable = VK_TRUE,
-        .srcColorBlendFactor = additive ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_SRC_ALPHA,
-        .dstColorBlendFactor = additive ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .blendEnable = blend != VK_TEXTURE_OPAQUE,
+        .srcColorBlendFactor = blend == VK_TEXTURE_ADDITIVE ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = blend == VK_TEXTURE_ADDITIVE ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .colorBlendOp = VK_BLEND_OP_ADD,
         .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-        .dstAlphaBlendFactor = additive ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .dstAlphaBlendFactor = blend == VK_TEXTURE_ADDITIVE ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .alphaBlendOp = VK_BLEND_OP_ADD,
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
@@ -7490,6 +7624,7 @@ static bool vk_create_texture_pipeline_ex(VkPipeline *pipeline,
         .pMultisampleState = &multisample,
         .pDepthStencilState = &depth_stencil,
         .pColorBlendState = &color_blend,
+        .pDynamicState = dynamic_viewport ? &vk_texture_dynamic_state : NULL,
         .layout = vk.rect_pipeline_layout,
         .renderPass = postprocess ? vk.bloom_render_pass : vk.render_pass,
         .subpass = 0,
@@ -7512,9 +7647,10 @@ static bool vk_create_texture_pipeline(void)
     return vk_create_texture_pipeline_ex(&vk.texture_pipeline,
                                           vk_tex_frag_spv,
                                           sizeof(vk_tex_frag_spv),
-                                          false,
+                                          VK_TEXTURE_ALPHA,
                                           vk.swapchain_extent,
-                                          false);
+                                          vk.separate_presentation,
+                                          true);
 }
 
 static bool vk_create_ssr_pipeline(void)
@@ -7583,6 +7719,7 @@ static bool vk_create_ssr_pipeline(void)
         .pViewportState = &viewport_state, .pRasterizationState = &raster,
         .pMultisampleState = &multisample, .pDepthStencilState = &depth,
         .pColorBlendState = &blend, .layout = vk.ssr_pipeline_layout,
+        .pDynamicState = &vk_texture_dynamic_state,
         .renderPass = vk.bloom_render_pass,
     };
     VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
@@ -8519,10 +8656,10 @@ static bool vk_create_swapchain(int width, int height)
 
     vk.swapchain_format = surface_format.format;
     vk.present_mode = present_mode;
-    /* FSR owns the reduced-resolution scene target. Keep the legacy MSAA/MRT
-     * display attachments at matching dimensions and let FSR provide the
-     * reconstruction step. */
-    vk.sample_count = vk_fsr_requested() ? VK_SAMPLE_COUNT_1_BIT :
+    /* Keep presentation independent of FSR context creation: if the SDK
+     * fails, the same color-only display path presents the native scene. */
+    vk.separate_presentation = vk_fsr_requested();
+    vk.sample_count = vk.separate_presentation ? VK_SAMPLE_COUNT_1_BIT :
         vk_choose_sample_count();
     vk.depth_format = vk_choose_depth_format(vk_shadow_stencil_requested());
     if (vk.depth_format == VK_FORMAT_UNDEFINED) {
@@ -8600,36 +8737,48 @@ static bool vk_create_swapchain(int width, int height)
                                     vk_vignette_vert_spv,
                                     sizeof(vk_vignette_vert_spv)) ||
         !vk_create_texture_pipeline() ||
+        !vk_create_texture_pipeline_ex(&vk.presentation_pipeline,
+                                       vk_tex_frag_spv,
+                                       sizeof(vk_tex_frag_spv),
+                                       VK_TEXTURE_OPAQUE,
+                                       vk.swapchain_extent,
+                                       vk.separate_presentation,
+                                       false) ||
         !vk_create_texture_pipeline_ex(&vk.scene_pipeline,
                                        vk_scene_frag_spv,
                                        sizeof(vk_scene_frag_spv),
-                                       false,
+                                       VK_TEXTURE_ALPHA,
                                        vk.swapchain_extent,
-                                       false) ||
+                                       vk.separate_presentation,
+                                       true) ||
         !vk_create_texture_pipeline_ex(&vk.waterwarp_pipeline,
                                        vk_waterwarp_frag_spv,
                                        sizeof(vk_waterwarp_frag_spv),
-                                       false,
+                                       VK_TEXTURE_ALPHA,
                                        vk.swapchain_extent,
-                                       false) ||
+                                       vk.separate_presentation,
+                                       true) ||
         !vk_create_texture_pipeline_ex(&vk.bloom_downscale_pipeline,
                                        vk_bloom_downscale_frag_spv,
                                        sizeof(vk_bloom_downscale_frag_spv),
-                                       false,
+                                       VK_TEXTURE_ALPHA,
                                        bloom_extent,
+                                       true,
                                        true) ||
         !vk_create_texture_pipeline_ex(&vk.bloom_blur_pipeline,
                                        vk_bloom_blur_frag_spv,
                                        sizeof(vk_bloom_blur_frag_spv),
-                                       false,
+                                       VK_TEXTURE_ALPHA,
                                        bloom_extent,
+                                       true,
                                        true) ||
         !vk_create_texture_pipeline_ex(&vk.bloom_add_pipeline,
                                        vk_tex_frag_spv,
                                        sizeof(vk_tex_frag_spv),
-                                       true,
+                                       VK_TEXTURE_ADDITIVE,
                                        vk.swapchain_extent,
-                                       false) ||
+                                       vk.separate_presentation,
+                                       true) ||
         !vk_create_color3d_pipeline(&vk.color3d_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE,
                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
         !vk_create_color3d_pipeline(&vk.line3d_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE,
@@ -8802,12 +8951,15 @@ static void vk_transition_color_target(VkCommandBuffer cmd, vk_texture_t *textur
 
     VkPipelineStageFlags src_stage;
     VkAccessFlags src_access;
+    VkPipelineStageFlags shader_stages = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    if (vk.separate_presentation)
+        shader_stages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
     if (*layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
         src_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         src_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     } else if (*layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        src_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        src_stage = shader_stages;
         src_access = VK_ACCESS_SHADER_READ_BIT;
     } else if (*layout == VK_IMAGE_LAYOUT_GENERAL) {
         src_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
@@ -8820,6 +8972,10 @@ static void vk_transition_color_target(VkCommandBuffer cmd, vk_texture_t *textur
         src_access = 0;
     }
 
+    /* Scene inputs can be sampled by both postprocessing and FSR, including
+     * a fragment fallback after a failed compute dispatch. */
+    if (new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        dst_stage |= shader_stages;
     vk_texture_barrier(cmd, texture->image,
                        *layout, new_layout,
                        src_access, dst_access,
@@ -8844,13 +9000,19 @@ static void vk_transition_depth(VkCommandBuffer cmd, VkImageLayout new_layout,
 
     VkAccessFlags src_access = 0;
     VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkPipelineStageFlags shader_stages = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    if (vk.separate_presentation)
+        shader_stages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     if (vk.depth_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
         src_access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         src_stage = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
     } else if (vk.depth_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) {
         src_access = VK_ACCESS_SHADER_READ_BIT;
-        src_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        src_stage = shader_stages;
     }
+
+    if (new_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+        dst_stage |= shader_stages;
 
     VkImageMemoryBarrier barrier = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -9335,6 +9497,8 @@ static void vk_draw_texture_resource(int x, int y, int w, int h,
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
 
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.texture_pipeline);
+    vk_set_target_viewport(vk.active_target_extent.width,
+                           vk.active_target_extent.height);
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDraw(cmd, 6, 1, 0, 0);
@@ -9494,6 +9658,11 @@ static void vk_draw_fullscreen_texture_sized(VkPipeline pipeline,
     if (!vk.render_pass_active || !pipeline || !texture->descriptor_set)
         return;
 
+    /* The viewport is state carried across render passes. Set it from the
+     * draw target here so reduced-resolution postprocess passes cannot leak
+     * their viewport into the presentation pass, or vice versa. */
+    vk_set_target_viewport(width, height);
+
     vk_draw_push_t push = {
         .rect = { 0, 0, width, height },
         .color = { color[0], color[1], color[2], color[3] },
@@ -9509,6 +9678,15 @@ static void vk_draw_fullscreen_texture_sized(VkPipeline pipeline,
     c.trisDrawn += 2;
     c.batchesDrawn2D++;
     c.picsDrawn2D++;
+}
+
+static void vk_composite_presentation_texture(const vk_texture_t *texture)
+{
+    const vec4_t white = { 1.0f, 1.0f, 1.0f, 1.0f };
+    VkPipeline pipeline = vk.presentation_pipeline ?
+        vk.presentation_pipeline : vk.texture_pipeline;
+
+    vk_draw_refdef_texture(pipeline, texture, white);
 }
 
 static void vk_composite_scene_texture_sized(uint32_t width, uint32_t height)
@@ -9559,7 +9737,7 @@ static void vk_projection_matrix_internal(mat4_t m, float fov_x, float fov_y,
     m[14] = (znear * zfar) / (znear - zfar);
 
     if (jittered && vk.frame_fsr && vk.render_extent.width && vk.render_extent.height) {
-        /* FSR2 supplies jitter in render-resolution pixel space. Convert it
+        /* FSR3 supplies jitter in render-resolution pixel space. Convert it
          * to the Vulkan projection offsets used by the scene pass. */
         m[8] += 2.0f * vk.fsr_jitter[0] /
                 (float)vk.render_extent.width;
@@ -18849,6 +19027,19 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk.fd = *fd;
     R_SyncUnderwaterFlag(vk.world.cache, &vk.fd);
     vk.fd_valid = true;
+    if (vk.separate_presentation) {
+        vk.frame_fsr = vk.fsr3 && vk_fsr_requested() &&
+            !(fd->rdflags & RDF_NOWORLDMODEL);
+        if (!vk.frame_fsr) {
+            vk.fsr_reset = true;
+            vk.fsr_previous_fd_valid = false;
+            vk.fsr_previous_viewproj_valid = false;
+        }
+        vk.frame_bloom = vk_bloom_enabled_for_frame();
+        vk.frame_waterwarp = vk_waterwarp_enabled_for_frame();
+        vk.frame_ssr = vk_ssr_enabled_for_frame();
+        vk_begin_scene_view();
+    }
     if (vk.frame_fsr && vk.fsr_previous_fd_valid) {
         bool camera_cut = Distance(vk.fd.vieworg, vk.fsr_previous_fd.vieworg) > 128.0f ||
             fabsf(vk.fd.viewangles[0] - vk.fsr_previous_fd.viewangles[0]) > 45.0f ||
@@ -18865,8 +19056,8 @@ void VKR_RenderFrame(const refdef_t *fd)
             vk.fsr_previous_viewproj_valid = false;
         }
     }
-    if (vk.frame_fsr && vk.fsr2) {
-        vk.fsr_jitter_ready = Q2_FSR2_GetJitter(vk.fsr2,
+    if (vk.frame_fsr && vk.fsr3) {
+        vk.fsr_jitter_ready = Q2_FSR3_GetJitter(vk.fsr3,
                                                  &vk.fsr_jitter[0],
                                                  &vk.fsr_jitter[1]);
         if (!vk.fsr_jitter_ready) {
@@ -18935,7 +19126,7 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk_draw_debug_texts(fd);
 #endif
 
-    if (vk.frame_fsr && vk.frame_bloom && vk.render_pass_active) {
+    if (vk.separate_presentation && vk.frame_bloom && vk.render_pass_active) {
         vk_draw_bloom_source_entities(fd);
         vk_draw_bloom_beams(fd);
         vk_draw_bloom_only_entities(fd);
@@ -19378,6 +19569,28 @@ out:
     return ret;
 }
 
+static void vk_set_target_viewport(uint32_t width, uint32_t height)
+{
+    if (!width || !height || !vk.CmdSetViewport || !vk.CmdSetScissor ||
+        !vk.command_buffers || vk.current_image >= vk.swapchain_image_count ||
+        !vk.command_buffers[vk.current_image])
+        return;
+
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkViewport viewport = {
+        .width = width,
+        .height = height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    VkRect2D scissor = {
+        .extent = { width, height },
+    };
+
+    vk.CmdSetViewport(cmd, 0, 1, &viewport);
+    vk.CmdSetScissor(cmd, 0, 1, &scissor);
+}
+
 static void vk_begin_render_pass_sized(VkRenderPass render_pass,
                                        VkFramebuffer framebuffer,
                                        VkClearColorValue color,
@@ -19389,7 +19602,8 @@ static void vk_begin_render_pass_sized(VkRenderPass render_pass,
         { .depthStencil = { .depth = 1.0f, .stencil = 0 } },
     };
     uint32_t clear_count;
-    if (render_pass == vk.bloom_render_pass) {
+    if (render_pass == vk.bloom_render_pass ||
+        render_pass == vk.presentation_load_pass) {
         clear_count = 1;
     } else if (vk.mrt_bloom) {
         clear_count = 3;
@@ -19412,6 +19626,10 @@ static void vk_begin_render_pass_sized(VkRenderPass render_pass,
     vk.CmdBeginRenderPass(vk.command_buffers[vk.current_image], &render_pass_info,
                           VK_SUBPASS_CONTENTS_INLINE);
     vk.render_pass_active = true;
+    vk.active_render_pass = render_pass;
+    vk.active_target_extent = (VkExtent2D) { width, height };
+    vk_reset_bind_cache();
+    vk_set_target_viewport(width, height);
 }
 
 static void vk_begin_render_pass(VkRenderPass render_pass, VkFramebuffer framebuffer,
@@ -19420,6 +19638,45 @@ static void vk_begin_render_pass(VkRenderPass render_pass, VkFramebuffer framebu
     vk_begin_render_pass_sized(render_pass, framebuffer, color,
                                vk.swapchain_extent.width,
                                vk.swapchain_extent.height);
+}
+
+static void vk_begin_presentation(bool clear)
+{
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    if (vk.render_pass_active) {
+        vk.CmdEndRenderPass(cmd);
+        vk.render_pass_active = false;
+    }
+    vk_begin_render_pass(clear ? vk.bloom_render_pass : vk.presentation_load_pass,
+                         vk.framebuffers[vk.current_image], vk_frame_clear_color());
+}
+
+static void vk_begin_scene_view(void)
+{
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    if (vk.render_pass_active) {
+        vk.CmdEndRenderPass(cmd);
+        vk.render_pass_active = false;
+    }
+    vk.fsr_composited = false;
+    vk_transition_scene(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    if (vk.mrt_bloom) {
+        vk_transition_color_target(cmd, &vk.bloom_source_texture,
+                                   &vk.bloom_source_layout,
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    }
+    vk_transition_depth(cmd, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+    vk_begin_render_pass_sized(vk.render_pass, vk.scene_framebuffer,
+                               vk_frame_clear_color(),
+                               vk.render_extent.width, vk.render_extent.height);
 }
 
 static void vk_render_ssr(void)
@@ -19685,6 +19942,9 @@ static void vk_render_fsr_motion(const refdef_t *fd)
     };
     vk.CmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
     vk.render_pass_active = true;
+    vk.active_render_pass = vk.fsr_motion_render_pass;
+    vk.active_target_extent = vk.render_extent;
+    vk_set_3d_viewport(fd);
 
     vk_draw_fsr_motion_world(fd);
     vk_draw_fsr_motion_aliases(fd);
@@ -19703,8 +19963,29 @@ static void vk_render_fsr_motion(const refdef_t *fd)
 
 static bool vk_dispatch_fsr(void)
 {
-    if (!vk.frame_fsr || !vk.fsr2 || !vk.fsr_output_texture.image)
+    if (!vk.frame_fsr)
         return false;
+    if (!vk.fsr3 || !vk.fsr_output_texture.image ||
+        !vk.fsr_output_texture.view || !vk.fsr_input_texture.image ||
+        !vk.fsr_input_texture.view || !vk.depth_image ||
+        !vk.depth_sample_view || !vk.fsr_motion_texture.image ||
+        !vk.fsr_motion_texture.view || !vk.fsr_reactive_texture.image ||
+        !vk.fsr_reactive_texture.view ||
+        vk.fsr_output_format == VK_FORMAT_UNDEFINED ||
+        vk.fsr_input_texture.width != vk.render_extent.width ||
+        vk.fsr_input_texture.height != vk.render_extent.height ||
+        vk.fsr_output_texture.width != vk.swapchain_extent.width ||
+        vk.fsr_output_texture.height != vk.swapchain_extent.height) {
+        if (!vk.fsr_warned) {
+            Com_WPrintf("Vulkan FSR3 resources are incomplete; using spatially upscaled scene output "
+                        "(render=%ux%u output=%ux%u swapchain=%ux%u)\n",
+                        vk.render_extent.width, vk.render_extent.height,
+                        vk.fsr_output_texture.width, vk.fsr_output_texture.height,
+                        vk.swapchain_extent.width, vk.swapchain_extent.height);
+            vk.fsr_warned = true;
+        }
+        return false;
+    }
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     if (vk.render_pass_active) {
@@ -19772,8 +20053,8 @@ static bool vk_dispatch_fsr(void)
 
     float frame_time_ms = vk.fd_valid ? vk.fd.frametime * 1000.0f : 16.0f;
     float fov_y = vk.fd_valid ? DEG2RAD(vk.fd.fov_y) : DEG2RAD(75.0f);
-    bool dispatched = Q2_FSR2_Dispatch(
-        vk.fsr2, cmd,
+    bool dispatched = Q2_FSR3_Dispatch(
+        vk.fsr3, cmd,
         vk.fsr_input_texture.image, vk.fsr_input_texture.view,
         vk.swapchain_format,
         vk.depth_image, vk.depth_sample_view, vk.depth_format,
@@ -19782,16 +20063,31 @@ static bool vk_dispatch_fsr(void)
         vk.fsr_reactive_texture.image, vk.fsr_reactive_texture.view,
         VK_FORMAT_R8_UNORM,
         vk.fsr_output_texture.image, vk.fsr_output_texture.view,
-        vk.swapchain_format,
+        vk.fsr_output_format,
         vk.fsr_jitter[0], vk.fsr_jitter[1],
         frame_time_ms, fov_y,
         vk_znear ? Cvar_ClampValue(vk_znear, 0.1f, 4095.0f) : 2.0f,
         max(vk_projection_zfar(vk.fd_valid ? vk.fd.rdflags : 0),
             (vk_znear ? Cvar_ClampValue(vk_znear, 0.1f, 4095.0f) : 2.0f) + 1.0f),
         vk.fsr_reset);
+    if (!vk.fsr_presentation_logged) {
+        Com_Printf("Vulkan FSR3 presentation: render=%ux%u output=%ux%u "
+                   "swapchain=%ux%u view=%d,%d %dx%d result=%s target=color-only\n",
+                   vk.render_extent.width, vk.render_extent.height,
+                   vk.fsr_output_texture.width, vk.fsr_output_texture.height,
+                   vk.swapchain_extent.width, vk.swapchain_extent.height,
+                   vk.fd.x, vk.fd.y, vk.fd.width, vk.fd.height,
+                   dispatched ? "fsr3" : "spatial-fallback");
+        vk.fsr_presentation_logged = true;
+    }
     if (!dispatched) {
         if (!vk.fsr_warned) {
-            Com_WPrintf("Vulkan FSR2 dispatch failed; using native scene output\n");
+            Com_WPrintf("Vulkan FSR3 dispatch failed (error %d); using spatially upscaled scene "
+                        "output (render=%ux%u output=%ux%u swapchain=%ux%u)\n",
+                        Q2_FSR3_GetLastError(vk.fsr3),
+                        vk.render_extent.width, vk.render_extent.height,
+                        vk.fsr_output_texture.width, vk.fsr_output_texture.height,
+                        vk.swapchain_extent.width, vk.swapchain_extent.height);
             vk.fsr_warned = true;
         }
         vk.fsr_reset = true;
@@ -19800,11 +20096,9 @@ static bool vk_dispatch_fsr(void)
                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                    VK_ACCESS_SHADER_READ_BIT,
                                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-        vk_begin_render_pass(vk.render_pass, vk.framebuffers[vk.current_image],
-                             vk_frame_clear_color());
-        const vec4_t white = { 1, 1, 1, 1 };
-        vk_draw_refdef_texture(vk.texture_pipeline, &vk.fsr_input_texture,
-                               white);
+        vk_begin_presentation(false);
+        vk_composite_presentation_texture(&vk.fsr_input_texture);
+        vk.fsr_composited = true;
         return false;
     }
 
@@ -19814,17 +20108,16 @@ static bool vk_dispatch_fsr(void)
                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                VK_ACCESS_SHADER_READ_BIT,
                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    vk_begin_render_pass(vk.render_pass, vk.framebuffers[vk.current_image],
-                         vk_frame_clear_color());
-    const vec4_t white = { 1, 1, 1, 1 };
-    vk_draw_refdef_texture(vk.texture_pipeline, &vk.fsr_output_texture, white);
+    vk_begin_presentation(false);
+    vk_composite_presentation_texture(&vk.fsr_output_texture);
+    vk.fsr_composited = true;
     return true;
 }
 
 static void vk_finish_postprocess_scene(void)
 {
     if (!vk.frame_bloom && !vk.frame_waterwarp && !vk.frame_ssr)
-        if (!vk.frame_fsr)
+        if (!vk.separate_presentation)
             return;
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
@@ -19938,7 +20231,7 @@ static void vk_finish_postprocess_scene(void)
                                    VK_ACCESS_SHADER_READ_BIT,
                                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
-        if (vk.frame_fsr) {
+        if (vk.separate_presentation) {
             vk_transition_color_target(cmd, &vk.fsr_input_texture,
                                        &vk.fsr_input_layout,
                                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -19993,7 +20286,7 @@ static void vk_finish_postprocess_scene(void)
                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                             VK_ACCESS_SHADER_READ_BIT,
                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-        if (vk.frame_fsr) {
+        if (vk.separate_presentation) {
             vk_transition_color_target(cmd, &vk.fsr_input_texture,
                                        &vk.fsr_input_layout,
                                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -20022,7 +20315,7 @@ static void vk_finish_postprocess_scene(void)
         }
     }
 
-    if (vk.frame_fsr && !fsr_input_active) {
+    if (vk.separate_presentation && !fsr_input_active) {
         if (vk.render_pass_active) {
             vk.CmdEndRenderPass(cmd);
             vk.render_pass_active = false;
@@ -20050,6 +20343,24 @@ static void vk_finish_postprocess_scene(void)
         if (fsr_input_active)
             vk.fsr_input_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         vk_dispatch_fsr();
+    }
+
+    if (vk.separate_presentation && !vk.fsr_composited) {
+        /* SDK/resource failures and non-temporal menu previews share the
+         * spatial fallback. Never leave a scene target active for UI. */
+        if (vk.render_pass_active) {
+            vk.CmdEndRenderPass(cmd);
+            vk.render_pass_active = false;
+        }
+        vk_transition_color_target(cmd, &vk.fsr_input_texture,
+                                   &vk.fsr_input_layout,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_ACCESS_SHADER_READ_BIT,
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        vk_begin_presentation(false);
+        vk_composite_presentation_texture(&vk.fsr_input_texture);
+        vk.fsr_composited = true;
+        vk.fsr_reset = true;
     }
 
     vk.frame_bloom = false;
@@ -20206,7 +20517,8 @@ void VKR_BeginFrame(void)
     vk.frame_bloom = vk_bloom_enabled_for_frame();
     vk.frame_waterwarp = vk_waterwarp_enabled_for_frame();
     vk.frame_ssr = vk_ssr_enabled_for_frame();
-    vk.frame_fsr = vk.fsr2 != NULL && vk_fsr_requested();
+    vk.frame_fsr = vk.fsr3 != NULL && vk_fsr_requested();
+    vk.fsr_composited = false;
     vk.fsr_jitter_ready = false;
     bool postprocess = vk.frame_bloom || vk.frame_waterwarp || vk.frame_ssr ||
         vk.frame_fsr;
@@ -20215,6 +20527,16 @@ void VKR_BeginFrame(void)
     // client submits this frame. Do not otherwise reuse that refdef: menu-only
     // frames after a disconnect must not redraw stale bloom entities or blend.
     vk.fd_valid = false;
+
+    if (vk.separate_presentation) {
+        /* UI may precede RenderFrame, or there may be no view at all. */
+        vk.frame_bloom = false;
+        vk.frame_waterwarp = false;
+        vk.frame_ssr = false;
+        vk_begin_presentation(true);
+        vk.frame_active = true;
+        return;
+    }
 
     if (postprocess) {
         vk_transition_scene(cmd,
@@ -20256,6 +20578,10 @@ void VKR_BeginFrame(void)
 
     vk.CmdBeginRenderPass(cmd, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
     vk.render_pass_active = true;
+    vk.active_render_pass = vk.render_pass;
+    vk.active_target_extent = render_pass_info.renderArea.extent;
+    vk_set_target_viewport(vk.active_target_extent.width,
+                           vk.active_target_extent.height);
 
 
     vk.frame_active = true;
@@ -20309,6 +20635,12 @@ void VKR_EndFrame(void)
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     bool bloom = vk.frame_bloom;
     bool waterwarp = vk.frame_waterwarp;
+
+    if (vk.separate_presentation && !vk.fd_valid) {
+        vk.fsr_reset = true;
+        vk.fsr_previous_fd_valid = false;
+        vk.fsr_previous_viewproj_valid = false;
+    }
 
     if (bloom) {
         const vec4_t white = { 1.0f, 1.0f, 1.0f, 1.0f };

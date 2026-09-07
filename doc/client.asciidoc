@@ -763,7 +763,7 @@ r_fsr::
     OpenGL ignores it and reports that FSR is Vulkan-only. Default value is 0.
 
 r_fsr_quality::
-    Selects the FSR2 render scale: ‘quality’ (1.5x), ‘balanced’ (1.7x),
+    Selects the FSR3 render scale: ‘quality’ (1.5x), ‘balanced’ (1.7x),
     ‘performance’ (2x), or ‘ultra_performance’ (3x). Changes take effect after
     the Vulkan swapchain is recreated. Default value is ‘quality’.
 

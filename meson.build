@@ -453,13 +453,13 @@ if vulkan.found()
       )
     endforeach
   endif
-  fsr2 = subproject('fidelityfx-fsr2')
-  common_deps += fsr2.get_variable('fsr2_dep')
+  fsr3 = subproject('fidelityfx-fsr3')
+  common_deps += fsr3.get_variable('fsr3_dep')
   add_project_arguments('-DFFX_GCC', '-include',
-                        meson.project_source_root() / 'src/refresh/vk_fsr2_compat.h',
+                        meson.project_source_root() / 'src/refresh/vk_fsr3_compat.h',
                         language: 'cpp')
-  refresh_src += fsr2.get_variable('fsr2_sources')
-  refresh_src += 'src/refresh/vk_fsr2.cpp'
+  refresh_src += fsr3.get_variable('fsr3_sources')
+  refresh_src += 'src/refresh/vk_fsr3.cpp'
   common_deps += vulkan.partial_dependency(compile_args: true, includes: true)
   refresh_src += ['src/refresh/vk_backend.c', vk_shader_headers]
   config.set10('USE_VULKAN', true)

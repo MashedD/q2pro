@@ -1,0 +1,6 @@
+[wrap-file]
+directory = FidelityFX-SDK-1.1.4
+source_url = https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/archive/refs/tags/v1.1.4.tar.gz
+source_filename = fidelityfx-sdk-v1.1.4.tar.gz
+source_hash = 25c46398a656150397597f78d44bf7cb445e9e177dd116b309bbfdf50d50cc9f
+patch_directory = fidelityfx-fsr3

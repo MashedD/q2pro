@@ -13,7 +13,7 @@ layout(push_constant) uniform Push {
 
 void main()
 {
-    /* FSR2 multiplies this normalized screen-space delta by the render
+    /* FSR3 multiplies this normalized screen-space delta by the render
      * dimensions through motionVectorScale. */
     out_motion = (v_current_ndc - v_previous_ndc) * 0.5;
     out_reactive = pc.reactive;
