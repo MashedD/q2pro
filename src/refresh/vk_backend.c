@@ -948,6 +948,7 @@ typedef struct {
     bool fsr_presentation_logged;
     bool fsr_warned;
     bool fsr_motion_initialized;
+    bool fsr_motion_cleared;
     bool fsr_motion_fast;
     bool fsr_motion_fast_last;
     bool fsr_scene_direct;
@@ -18782,12 +18783,13 @@ static void vk_log_perf_stats(void)
                vk.wait_usec, vk.acquire_usec, vk.record_usec,
                vk.submit_usec, vk.present_usec);
     if (vk.separate_presentation) {
-        Com_Printf("VK FSR3 record: motion=%lluus dispatch=%lluus paused=%s history=%s target=%s\n",
+        Com_Printf("VK FSR3 record: motion=%lluus dispatch=%lluus paused=%s history=%s target=%s clear=%s\n",
                    (unsigned long long)vk.fsr_motion_record_usec,
                    (unsigned long long)vk.fsr_dispatch_record_usec,
                    vk.fsr_pause_reuse ? "yes" : "no",
                    vk.fsr_output_valid ? "valid" : "invalid",
-                   vk.fsr_swapchain_direct ? "swapchain" : "intermediate");
+                   vk.fsr_swapchain_direct ? "swapchain" : "intermediate",
+                   vk.fsr_motion_cleared ? "yes" : "no");
         Com_Printf("VK FSR3 GPU: motion=%uus upscale=%uus framegen=%uus presentation=%uus\n",
                    vk.fsr_gpu_motion_usec,
                    vk.fsr_gpu_upscale_usec,
@@ -20557,8 +20559,10 @@ static bool vk_dispatch_fsr(void)
     vk_transition_depth(cmd, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
                         VK_ACCESS_SHADER_READ_BIT,
                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    if (vk.fsr_motion_fast || !vk.fsr_motion_initialized)
+    if (!vk.fsr_motion_initialized) {
+        vk.fsr_motion_cleared = true;
         vk_clear_fsr_motion_targets(cmd, reactive_required);
+    }
     if (direct_output) {
         vk_transition_image(cmd, vk.current_image,
                             VK_IMAGE_LAYOUT_GENERAL,
@@ -21189,6 +21193,7 @@ void VKR_BeginFrame(void)
     vk.frame_waterwarp = vk_waterwarp_enabled_for_frame();
     vk.frame_ssr = vk_ssr_enabled_for_frame();
     vk.fsr_motion_fast = vk_fsr_motion_fast_requested();
+    vk.fsr_motion_cleared = false;
     if (vk.fsr_motion_fast != vk.fsr_motion_fast_last) {
         vk.fsr_motion_fast_last = vk.fsr_motion_fast;
         vk.fsr_reset = true;
