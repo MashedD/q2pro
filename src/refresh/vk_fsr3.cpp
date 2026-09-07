@@ -378,7 +378,10 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
      * default path so enabling frame generation is the only mode that pays
      * for the additional optical-flow/interpolation resources. */
     if (!frame_generation) {
-        description.flags = FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
+        description.flags = 0;
+#if USE_DEBUG
+        description.flags |= FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
+#endif
         description.maxRenderSize = { render_width, render_height };
         description.maxUpscaleSize = { display_width, display_height };
         description.fpMessage = q2_fsr3_message;
@@ -400,7 +403,10 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
     } else {
         result->shared_interface = result->interface;
         result->frame_interpolation_interface = result->interface;
-        full_description.flags = FFX_FSR3_ENABLE_DEBUG_CHECKING;
+        full_description.flags = 0;
+#if USE_DEBUG
+        full_description.flags |= FFX_FSR3_ENABLE_DEBUG_CHECKING;
+#endif
         full_description.maxRenderSize = { render_width, render_height };
         full_description.maxUpscaleSize = { display_width, display_height };
         full_description.displaySize = { display_width, display_height };

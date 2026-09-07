@@ -751,6 +751,7 @@ typedef struct {
     PFN_vkUnmapMemory UnmapMemory;
     PFN_vkCmdCopyBuffer CmdCopyBuffer;
     PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage;
+    PFN_vkCmdCopyImage CmdCopyImage;
     PFN_vkCmdCopyImageToBuffer CmdCopyImageToBuffer;
     PFN_vkCreateSemaphore CreateSemaphore;
     PFN_vkDestroySemaphore DestroySemaphore;
@@ -905,6 +906,7 @@ typedef struct {
     VkImageLayout ssr_resolve_layout;
     VkImageLayout fsr_output_layout;
     VkImageLayout fsr_frame_generation_layout;
+    VkImageLayout fsr_pause_layout;
     VkImageLayout fsr_motion_layout;
     VkImageLayout fsr_reactive_layout;
     VkImageLayout fsr_input_layout;
@@ -912,6 +914,8 @@ typedef struct {
     uint32_t swapchain_image_count;
     unsigned swapchain_retry_time;
     bool swapchain_transfer_src;
+    bool swapchain_storage;
+    bool swapchain_mutable_format_supported;
     bool swapchain_deferred;
     bool swapchain_recreate_failed;
     vk_queue_families_t queues;
@@ -936,6 +940,7 @@ typedef struct {
     bool fsr_reset;
     bool fsr_composited;
     bool fsr_output_valid;
+    bool fsr_pause_cache_valid;
     bool fsr_pause_reuse;
     bool fsr_paused_last_frame;
     uint64_t fsr_motion_record_usec;
@@ -946,6 +951,9 @@ typedef struct {
     bool fsr_motion_fast;
     bool fsr_motion_fast_last;
     bool fsr_scene_direct;
+    bool fsr_swapchain_direct;
+    bool fsr_direct_source_valid;
+    uint32_t fsr_direct_source_image;
     bool fsr_motion_override_logged;
     bool fsr_jitter_ready;
     float fsr_jitter[2];
@@ -970,6 +978,7 @@ typedef struct {
     vk_texture_t ssr_resolve_texture;
     vk_texture_t fsr_output_texture;
     vk_texture_t fsr_frame_generation_texture;
+    vk_texture_t fsr_pause_texture;
     vk_texture_t fsr_motion_texture;
     vk_texture_t fsr_reactive_texture;
     vk_texture_t fsr_input_texture;
@@ -3414,9 +3423,9 @@ static void vk_update_texture_descriptor(vk_texture_t *texture)
     vk_update_texture_descriptor_with_sampler(texture, vk.sampler);
 }
 
-static bool vk_create_color_target(vk_texture_t *texture, uint32_t width,
+static bool vk_create_image_target(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, VkFormat format,
-                                   VkImageUsageFlags extra_usage)
+                                   VkImageUsageFlags usage)
 {
     vk_texture_t target = { 0 };
     VkImageCreateInfo image_info = {
@@ -3428,8 +3437,7 @@ static bool vk_create_color_target(vk_texture_t *texture, uint32_t width,
         .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                 VK_IMAGE_USAGE_SAMPLED_BIT | extra_usage,
+        .usage = usage,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
@@ -3445,7 +3453,7 @@ static bool vk_create_color_target(vk_texture_t *texture, uint32_t width,
     uint32_t memory_type = vk_find_memory_type(req.memoryTypeBits,
                                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (memory_type == UINT32_MAX) {
-        Com_SetLastError("No suitable Vulkan color target memory type");
+        Com_SetLastError("No suitable Vulkan image target memory type");
         goto fail;
     }
 
@@ -3511,6 +3519,15 @@ fail:
     return false;
 }
 
+static bool vk_create_color_target(vk_texture_t *texture, uint32_t width,
+                                   uint32_t height, VkFormat format,
+                                   VkImageUsageFlags extra_usage)
+{
+    return vk_create_image_target(texture, width, height, format,
+                                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                   VK_IMAGE_USAGE_SAMPLED_BIT | extra_usage);
+}
+
 static void vk_destroy_fsr_resources(void)
 {
     if (vk.fsr3) {
@@ -3519,11 +3536,13 @@ static void vk_destroy_fsr_resources(void)
     }
     vk_destroy_texture_resource(&vk.fsr_output_texture);
     vk_destroy_texture_resource(&vk.fsr_frame_generation_texture);
+    vk_destroy_texture_resource(&vk.fsr_pause_texture);
     vk_destroy_texture_resource(&vk.fsr_motion_texture);
     vk_destroy_texture_resource(&vk.fsr_reactive_texture);
     vk.fsr_output_format = VK_FORMAT_UNDEFINED;
     vk.fsr_output_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_frame_generation_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.fsr_pause_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_motion_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_reactive_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_motion_initialized = false;
@@ -3531,6 +3550,8 @@ static void vk_destroy_fsr_resources(void)
     vk.fsr_previous_fd_valid = false;
     vk.fsr_composited = false;
     vk.fsr_output_valid = false;
+    vk.fsr_pause_cache_valid = false;
+    vk.fsr_direct_source_valid = false;
     vk.fsr_pause_reuse = false;
     vk.fsr_paused_last_frame = false;
     vk.fsr_presentation_logged = false;
@@ -3558,33 +3579,55 @@ static bool vk_create_fsr_resources(void)
             Com_WPrintf("Vulkan FSR3 is unavailable on this device; rendering at native resolution\n");
             vk.fsr_warned = true;
         }
+        vk.fsr_swapchain_direct = false;
         vk.render_extent = vk.swapchain_extent;
         return true;
     }
 
     vk.fsr_output_format = vk_fsr_output_format(vk.swapchain_format);
-    if (!vk_create_color_target(&vk.fsr_output_texture,
+    if (!vk.fsr_swapchain_direct &&
+        !vk_create_image_target(&vk.fsr_output_texture,
                                 vk.swapchain_extent.width,
                                 vk.swapchain_extent.height,
                                 vk.fsr_output_format,
-                                VK_IMAGE_USAGE_STORAGE_BIT |
-                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+                                VK_IMAGE_USAGE_SAMPLED_BIT |
+                                VK_IMAGE_USAGE_STORAGE_BIT)) {
         Com_WPrintf("Couldn't create Vulkan FSR3 output target: %s; rendering at native resolution\n",
                     Com_GetLastError());
         vk_destroy_fsr_resources();
         return true;
     }
     if (vk_fsr_frame_generation_requested() &&
-        !vk_create_color_target(&vk.fsr_frame_generation_texture,
+        !vk_create_image_target(&vk.fsr_frame_generation_texture,
                                 vk.swapchain_extent.width,
                                 vk.swapchain_extent.height,
                                 vk.fsr_output_format,
-                                VK_IMAGE_USAGE_STORAGE_BIT |
-                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+                                VK_IMAGE_USAGE_SAMPLED_BIT |
+                                VK_IMAGE_USAGE_STORAGE_BIT)) {
         Com_WPrintf("Couldn't create Vulkan FSR3 frame-generation target: %s; rendering without frame generation\n",
                     Com_GetLastError());
         vk_destroy_fsr_resources();
         return true;
+    }
+    if (vk.fsr_swapchain_direct &&
+        !vk_create_image_target(&vk.fsr_pause_texture,
+                                vk.swapchain_extent.width,
+                                vk.swapchain_extent.height,
+                                vk.fsr_output_format,
+                                VK_IMAGE_USAGE_SAMPLED_BIT |
+                                VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+        Com_WPrintf("Couldn't create Vulkan FSR3 direct-output pause cache: %s; using intermediate output\n",
+                    Com_GetLastError());
+        vk.fsr_swapchain_direct = false;
+        if (!vk_create_image_target(&vk.fsr_output_texture,
+                                    vk.swapchain_extent.width,
+                                    vk.swapchain_extent.height,
+                                    vk.fsr_output_format,
+                                    VK_IMAGE_USAGE_SAMPLED_BIT |
+                                    VK_IMAGE_USAGE_STORAGE_BIT)) {
+            vk_destroy_fsr_resources();
+            return true;
+        }
     }
     if (!vk_create_color_target(&vk.fsr_motion_texture,
                                 vk.render_extent.width,
@@ -3606,10 +3649,15 @@ static bool vk_create_fsr_resources(void)
         vk_destroy_fsr_resources();
         return true;
     }
-    vk_update_texture_descriptor_with_sampler(&vk.fsr_output_texture,
-                                              vk.postprocess_sampler);
+    if (vk.fsr_output_texture.image)
+        vk_update_texture_descriptor_with_sampler(&vk.fsr_output_texture,
+                                                  vk.postprocess_sampler);
+    if (vk.fsr_pause_texture.image)
+        vk_update_texture_descriptor_with_sampler(&vk.fsr_pause_texture,
+                                                  vk.postprocess_sampler);
     vk.fsr_output_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_frame_generation_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.fsr_pause_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_motion_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_reactive_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_motion_initialized = false;
@@ -3618,6 +3666,7 @@ static bool vk_create_fsr_resources(void)
     vk.fsr_reset = true;
     vk.fsr_composited = false;
     vk.fsr_output_valid = false;
+    vk.fsr_pause_cache_valid = false;
     vk.fsr_pause_reuse = false;
     vk.fsr_paused_last_frame = false;
     vk.fsr_presentation_logged = false;
@@ -4967,6 +5016,7 @@ static bool vk_load_device(void)
     LOAD(UnmapMemory);
     LOAD(CmdCopyBuffer);
     LOAD(CmdCopyBufferToImage);
+    LOAD(CmdCopyImage);
     LOAD(CmdCopyImageToBuffer);
     LOAD(CreateSemaphore);
     LOAD(DestroySemaphore);
@@ -5061,7 +5111,7 @@ static bool vk_create_surface(void)
     return vid->create_vk_surface(vk.instance, &vk.surface);
 }
 
-static bool vk_has_swapchain_extension(VkPhysicalDevice device)
+static bool vk_has_device_extension(VkPhysicalDevice device, const char *name)
 {
     uint32_t count = 0;
     VkResult result;
@@ -5079,7 +5129,7 @@ static bool vk_has_swapchain_extension(VkPhysicalDevice device)
 
     bool found = false;
     for (uint32_t i = 0; i < count; i++) {
-        if (!strcmp(extensions[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+        if (!strcmp(extensions[i].extensionName, name)) {
             found = true;
             break;
         }
@@ -5087,6 +5137,11 @@ static bool vk_has_swapchain_extension(VkPhysicalDevice device)
 
     Z_Free(extensions);
     return found;
+}
+
+static bool vk_has_swapchain_extension(VkPhysicalDevice device)
+{
+    return vk_has_device_extension(device, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 }
 
 static vk_queue_families_t vk_find_queues(VkPhysicalDevice device)
@@ -5247,6 +5302,8 @@ static bool vk_pick_physical_device(void)
                                    &vk.physical_device_properties);
     vk.GetPhysicalDeviceFeatures(vk.physical_device,
                                  &vk.physical_device_features);
+    vk.swapchain_mutable_format_supported = vk_has_device_extension(
+        vk.physical_device, VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME);
     Com_Printf("Using Vulkan device: %s\n",
                vk.physical_device_properties.deviceName);
     return true;
@@ -5436,12 +5493,15 @@ static bool vk_create_device(void)
     VkDeviceQueueCreateInfo queue_infos[2];
     uint32_t queue_info_count = 0;
     uint32_t present_queue_index = 0;
-    const char *extensions[1
+    const char *extensions[2
 #if USE_VULKAN_RAYTRACING
                            + VK_RT_REQUIRED_EXTENSION_COUNT
 #endif
     ] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
     uint32_t extension_count = 1;
+    if (vk.swapchain_mutable_format_supported)
+        extensions[extension_count++] = VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME;
+    const uint32_t raster_extension_count = extension_count;
     VkPhysicalDeviceFeatures features = { 0 };
 #if USE_VULKAN_RAYTRACING
     vk_probe_raytracing();
@@ -5539,7 +5599,7 @@ static bool vk_create_device(void)
         Q_strlcpy(vk.raytracing_reason, "ray-query device creation failed",
                   sizeof(vk.raytracing_reason));
         create_info.pNext = NULL;
-        create_info.enabledExtensionCount = 1;
+        create_info.enabledExtensionCount = raster_extension_count;
         result = vk.CreateDevice(vk.physical_device, &create_info, NULL, &vk.device);
     }
 #endif
@@ -8862,6 +8922,17 @@ static bool vk_create_swapchain(int width, int height)
         return vk_fail_result("vkGetPhysicalDeviceSurfaceFormatsKHR", result);
     }
     VkSurfaceFormatKHR surface_format = vk_choose_surface_format(formats, format_count);
+    VkFormat fsr_format = vk_fsr_output_format(surface_format.format);
+    bool mutable_format_pair = fsr_format == surface_format.format;
+    if (!mutable_format_pair) {
+        for (uint32_t i = 0; i < format_count; i++) {
+            if (formats[i].format == fsr_format &&
+                formats[i].colorSpace == surface_format.colorSpace) {
+                mutable_format_pair = true;
+                break;
+            }
+        }
+    }
     Z_Free(formats);
 
     uint32_t present_count = 0;
@@ -8894,13 +8965,33 @@ static bool vk_create_swapchain(int width, int height)
 
     vk.swapchain_transfer_src =
         (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+    vk.swapchain_storage =
+        (caps.supportedUsageFlags & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
+    bool direct_candidate = vk_fsr_any_requested() &&
+        !vk_fsr_frame_generation_requested() && vk.swapchain_transfer_src &&
+        vk.swapchain_storage && mutable_format_pair &&
+        (fsr_format == surface_format.format ||
+         vk.swapchain_mutable_format_supported);
     VkImageUsageFlags image_usage =
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (vk.swapchain_transfer_src)
         image_usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (direct_candidate)
+        image_usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+
+    VkFormat view_formats[2] = { surface_format.format, fsr_format };
+    VkImageFormatListCreateInfo format_list = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
+        .viewFormatCount = fsr_format == surface_format.format ? 1u : 2u,
+        .pViewFormats = view_formats,
+    };
 
     VkSwapchainCreateInfoKHR create_info = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .pNext = direct_candidate && fsr_format != surface_format.format ?
+            &format_list : NULL,
+        .flags = direct_candidate && fsr_format != surface_format.format ?
+            VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR : 0,
         .surface = vk.surface,
         .minImageCount = image_count,
         .imageFormat = surface_format.format,
@@ -8932,6 +9023,11 @@ static bool vk_create_swapchain(int width, int height)
     /* Keep presentation independent of FSR context creation: if the SDK
      * fails, the same color-only display path presents the native scene. */
     vk.separate_presentation = vk_fsr_any_requested();
+    vk.fsr_swapchain_direct = direct_candidate;
+    if (vk.separate_presentation && !vk.fsr_swapchain_direct &&
+        !vk_fsr_frame_generation_requested() && !vk.fsr_warned) {
+        Com_Printf("Vulkan FSR3 direct swapchain output unavailable; using intermediate output\n");
+    }
     vk.sample_count = vk.separate_presentation ? VK_SAMPLE_COUNT_1_BIT :
         vk_choose_sample_count();
     vk.depth_format = vk_choose_depth_format(vk_shadow_stencil_requested());
@@ -9190,6 +9286,12 @@ static void vk_transition_image(VkCommandBuffer cmd, uint32_t image_index,
     } else if (vk.swapchain_layouts[image_index] == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR) {
         src_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
         src_access = 0;
+    } else if (vk.swapchain_layouts[image_index] == VK_IMAGE_LAYOUT_GENERAL) {
+        src_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        src_access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    } else if (vk.swapchain_layouts[image_index] == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+        src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        src_access = VK_ACCESS_TRANSFER_READ_BIT;
     } else {
         src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         src_access = 0;
@@ -9240,6 +9342,9 @@ static void vk_transition_color_target(VkCommandBuffer cmd, vk_texture_t *textur
     } else if (*layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
         src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
+    } else if (*layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+        src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        src_access = VK_ACCESS_TRANSFER_READ_BIT;
     } else {
         src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         src_access = 0;
@@ -18677,11 +18782,12 @@ static void vk_log_perf_stats(void)
                vk.wait_usec, vk.acquire_usec, vk.record_usec,
                vk.submit_usec, vk.present_usec);
     if (vk.separate_presentation) {
-        Com_Printf("VK FSR3 record: motion=%lluus dispatch=%lluus paused=%s history=%s\n",
+        Com_Printf("VK FSR3 record: motion=%lluus dispatch=%lluus paused=%s history=%s target=%s\n",
                    (unsigned long long)vk.fsr_motion_record_usec,
                    (unsigned long long)vk.fsr_dispatch_record_usec,
                    vk.fsr_pause_reuse ? "yes" : "no",
-                   vk.fsr_output_valid ? "valid" : "invalid");
+                   vk.fsr_output_valid ? "valid" : "invalid",
+                   vk.fsr_swapchain_direct ? "swapchain" : "intermediate");
         Com_Printf("VK FSR3 GPU: motion=%uus upscale=%uus framegen=%uus presentation=%uus\n",
                    vk.fsr_gpu_motion_usec,
                    vk.fsr_gpu_upscale_usec,
@@ -20320,6 +20426,74 @@ static void vk_clear_fsr_motion_targets(VkCommandBuffer cmd, bool clear_reactive
     vk.fsr_motion_initialized = true;
 }
 
+static bool vk_prepare_direct_pause_cache(VkCommandBuffer cmd)
+{
+    if (!vk.fsr_swapchain_direct || !vk.fsr_pause_texture.image ||
+        !vk.fsr_direct_source_valid ||
+        vk.fsr_direct_source_image >= vk.swapchain_image_count)
+        return false;
+
+    uint32_t source_image = vk.fsr_direct_source_image;
+    if (source_image != vk.current_image && vk.image_fences[source_image]) {
+        uint64_t start = vk_time_usec();
+        VkResult result = vk.WaitForFences(vk.device, 1,
+                                           &vk.image_fences[source_image],
+                                           VK_TRUE, UINT64_MAX);
+        vk.wait_usec += vk_time_usec() - start;
+        if (result != VK_SUCCESS) {
+            vk_handle_device_lost("vkWaitForFences", result);
+            Com_EPrintf("vkWaitForFences failed while caching paused FSR3 output: Vulkan error %d\n",
+                        result);
+            return false;
+        }
+    }
+
+    VkImageLayout source_restore_layout = source_image == vk.current_image ?
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    vk_transition_image(cmd, source_image,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_ACCESS_TRANSFER_READ_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT);
+    vk_transition_color_target(cmd, &vk.fsr_pause_texture,
+                               &vk.fsr_pause_layout,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               VK_ACCESS_TRANSFER_WRITE_BIT,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkImageCopy region = {
+        .srcSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .layerCount = 1,
+        },
+        .dstSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .layerCount = 1,
+        },
+        .extent = {
+            .width = vk.swapchain_extent.width,
+            .height = vk.swapchain_extent.height,
+            .depth = 1,
+        },
+    };
+    vk.CmdCopyImage(cmd, vk.swapchain_images[source_image],
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    vk.fsr_pause_texture.image,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    1, &region);
+    vk_transition_color_target(cmd, &vk.fsr_pause_texture,
+                               &vk.fsr_pause_layout,
+                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                               VK_ACCESS_SHADER_READ_BIT,
+                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    vk_transition_image(cmd, source_image, source_restore_layout,
+                        source_restore_layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR ? 0 :
+                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                        source_restore_layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR ?
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT :
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    vk.fsr_pause_cache_valid = true;
+    return true;
+}
+
 static bool vk_dispatch_fsr(void)
 {
     vk_texture_t *input_texture = vk.fsr_scene_direct ?
@@ -20327,11 +20501,21 @@ static bool vk_dispatch_fsr(void)
     VkImageLayout *input_layout = vk.fsr_scene_direct ?
         &vk.scene_layout : &vk.fsr_input_layout;
     bool reactive_required = !vk.fsr_motion_fast;
+    bool direct_output = vk.fsr_swapchain_direct &&
+        !vk_fsr_frame_generation_requested();
+    VkImage output_image = direct_output ? vk.swapchain_images[vk.current_image] :
+        vk.fsr_output_texture.image;
+    VkImageView output_view = direct_output ? VK_NULL_HANDLE :
+        vk.fsr_output_texture.view;
+    uint32_t output_width = direct_output ? vk.swapchain_extent.width :
+        vk.fsr_output_texture.width;
+    uint32_t output_height = direct_output ? vk.swapchain_extent.height :
+        vk.fsr_output_texture.height;
 
     if (!vk.frame_fsr)
         return false;
-    if (!vk.fsr3 || !vk.fsr_output_texture.image ||
-        !vk.fsr_output_texture.view || !input_texture->image ||
+    if (!vk.fsr3 || (!direct_output && (!output_image || !output_view)) ||
+        !input_texture->image ||
         !input_texture->view || !vk.depth_image ||
         !vk.depth_sample_view || !vk.fsr_motion_texture.image ||
         !vk.fsr_motion_texture.view ||
@@ -20340,14 +20524,14 @@ static bool vk_dispatch_fsr(void)
         vk.fsr_output_format == VK_FORMAT_UNDEFINED ||
         input_texture->width != vk.render_extent.width ||
         input_texture->height != vk.render_extent.height ||
-        vk.fsr_output_texture.width != vk.swapchain_extent.width ||
-        vk.fsr_output_texture.height != vk.swapchain_extent.height) {
+        output_width != vk.swapchain_extent.width ||
+        output_height != vk.swapchain_extent.height) {
         vk.fsr_output_valid = false;
         if (!vk.fsr_warned) {
             Com_WPrintf("Vulkan FSR3 resources are incomplete; using spatially upscaled scene output "
                         "(render=%ux%u output=%ux%u swapchain=%ux%u)\n",
                         vk.render_extent.width, vk.render_extent.height,
-                        vk.fsr_output_texture.width, vk.fsr_output_texture.height,
+                        output_width, output_height,
                         vk.swapchain_extent.width, vk.swapchain_extent.height);
             vk.fsr_warned = true;
         }
@@ -20375,11 +20559,18 @@ static bool vk_dispatch_fsr(void)
                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     if (vk.fsr_motion_fast || !vk.fsr_motion_initialized)
         vk_clear_fsr_motion_targets(cmd, reactive_required);
-    vk_transition_color_target(cmd, &vk.fsr_output_texture,
-                               &vk.fsr_output_layout,
-                               VK_IMAGE_LAYOUT_GENERAL,
-                               VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    if (direct_output) {
+        vk_transition_image(cmd, vk.current_image,
+                            VK_IMAGE_LAYOUT_GENERAL,
+                            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    } else {
+        vk_transition_color_target(cmd, &vk.fsr_output_texture,
+                                   &vk.fsr_output_layout,
+                                   VK_IMAGE_LAYOUT_GENERAL,
+                                   VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    }
 
     bool generated_frame = false;
     bool frame_reset = vk.fsr_reset;
@@ -20421,7 +20612,7 @@ static bool vk_dispatch_fsr(void)
         reactive_required ? vk.fsr_reactive_texture.image : VK_NULL_HANDLE,
         reactive_required ? vk.fsr_reactive_texture.view : VK_NULL_HANDLE,
         reactive_required ? VK_FORMAT_R8_UNORM : VK_FORMAT_UNDEFINED,
-        vk.fsr_output_texture.image, vk.fsr_output_texture.view,
+        output_image, output_view,
         vk.fsr_output_format,
         vk.fsr_jitter[0], vk.fsr_jitter[1],
         r_fsr_sharpness ? Cvar_ClampValue(r_fsr_sharpness, 0.0f, 1.0f) : 0.0f,
@@ -20436,7 +20627,7 @@ static bool vk_dispatch_fsr(void)
         Com_Printf("Vulkan FSR3 presentation: render=%ux%u output=%ux%u "
                    "swapchain=%ux%u view=%d,%d %dx%d result=%s target=color-only\n",
                    vk.render_extent.width, vk.render_extent.height,
-                   vk.fsr_output_texture.width, vk.fsr_output_texture.height,
+                   output_width, output_height,
                    vk.swapchain_extent.width, vk.swapchain_extent.height,
                    vk.fd.x, vk.fd.y, vk.fd.width, vk.fd.height,
                    dispatched ? "fsr3" : "spatial-fallback");
@@ -20451,11 +20642,16 @@ static bool vk_dispatch_fsr(void)
                         "output (render=%ux%u output=%ux%u swapchain=%ux%u)\n",
                         Q2_FSR3_GetLastError(vk.fsr3),
                         vk.render_extent.width, vk.render_extent.height,
-                        vk.fsr_output_texture.width, vk.fsr_output_texture.height,
+                        output_width, output_height,
                         vk.swapchain_extent.width, vk.swapchain_extent.height);
             vk.fsr_warned = true;
         }
         vk.fsr_reset = true;
+        if (direct_output)
+            vk_transition_image(cmd, vk.current_image,
+                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
         if (vk.fsr_scene_direct)
             vk_transition_scene(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                 VK_ACCESS_SHADER_READ_BIT,
@@ -20493,6 +20689,19 @@ static bool vk_dispatch_fsr(void)
                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                    VK_ACCESS_SHADER_READ_BIT,
                                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    }
+    if (direct_output) {
+        vk_transition_image(cmd, vk.current_image,
+                            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        vk.fsr_direct_source_image = vk.current_image;
+        vk.fsr_direct_source_valid = true;
+        vk_begin_presentation(false);
+        vk_write_fsr_timestamp(VK_TIMESTAMP_PRESENT_BEGIN);
+        vk_write_fsr_timestamp(VK_TIMESTAMP_PRESENT_END);
+        vk.fsr_composited = true;
+        return true;
     }
     vk_transition_color_target(cmd, &vk.fsr_output_texture,
                                &vk.fsr_output_layout,
@@ -21014,14 +21223,19 @@ void VKR_BeginFrame(void)
         vk.frame_bloom = false;
         vk.frame_waterwarp = false;
         vk.frame_ssr = false;
+        if (paused && vk.fsr_swapchain_direct && vk.fsr_output_valid)
+            vk_prepare_direct_pause_cache(cmd);
         vk_begin_presentation(true);
-        if (paused && vk.fsr_output_valid) {
+        if (paused && vk.fsr_output_valid &&
+            (!vk.fsr_swapchain_direct || vk.fsr_pause_cache_valid)) {
             /* Reuse the last complete upscaled frame. This prevents both
              * camera jitter and animated interpolation from changing the
              * paused scene while keeping menus and HUD live. */
             vk.fsr_pause_reuse = true;
             vk.frame_fsr = false;
-            vk_composite_presentation_texture(&vk.fsr_output_texture);
+            vk_composite_presentation_texture(vk.fsr_swapchain_direct ?
+                                              &vk.fsr_pause_texture :
+                                              &vk.fsr_output_texture);
             vk.fsr_composited = true;
         } else if (paused) {
             vk.fsr_reset = true;
@@ -21302,6 +21516,8 @@ void VKR_EndFrame(void)
     VkFence frame_fence = vk.frame_fence[vk.frame_index];
 
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    if (vk.fsr_swapchain_direct && (vk.frame_fsr || vk.fsr_pause_reuse))
+        wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     VkSubmitInfo submit_info = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = 1,
