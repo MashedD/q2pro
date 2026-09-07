@@ -764,6 +764,7 @@ typedef struct {
     char raytracing_reason[160];
 #endif
     VkDevice device;
+    bool device_lost;
     VkQueue graphics_queue;
     VkQueue present_queue;
     VkCommandPool command_pool;
@@ -882,6 +883,7 @@ typedef struct {
     VkImageLayout ssr_layout;
     VkImageLayout ssr_resolve_layout;
     VkImageLayout fsr_output_layout;
+    VkImageLayout fsr_frame_generation_layout;
     VkImageLayout fsr_motion_layout;
     VkImageLayout fsr_reactive_layout;
     VkImageLayout fsr_input_layout;
@@ -942,6 +944,7 @@ typedef struct {
     vk_texture_t ssr_texture;
     vk_texture_t ssr_resolve_texture;
     vk_texture_t fsr_output_texture;
+    vk_texture_t fsr_frame_generation_texture;
     vk_texture_t fsr_motion_texture;
     vk_texture_t fsr_reactive_texture;
     vk_texture_t fsr_input_texture;
@@ -1002,6 +1005,8 @@ typedef struct {
 } vk_state_t;
 
 static vk_state_t vk;
+static bool vk_session_frame_generation_disabled;
+static bool vk_device_lost_recovery_queued;
 static cvar_t *vk_drawentities;
 static cvar_t *vk_drawsky;
 static cvar_t *vk_swapinterval;
@@ -1048,6 +1053,8 @@ static cvar_t *vk_bloom_sigma;
 static cvar_t *vk_bloom_downsample;
 static cvar_t *r_fsr;
 static cvar_t *r_fsr_quality;
+static cvar_t *r_fsr_sharpness;
+static cvar_t *r_fsr_frame_generation;
 static cvar_t *vk_perf_stats;
 static cvar_t *vk_frames_in_flight;
 static cvar_t *vk_device;
@@ -1128,6 +1135,30 @@ static bool vk_pixel_lightmaps_warned;
 static bool vk_fsr_requested(void)
 {
     return r_fsr && r_fsr->integer != 0;
+}
+
+static bool vk_fsr_frame_generation_requested(void)
+{
+    return !vk_session_frame_generation_disabled &&
+        r_fsr_frame_generation && r_fsr_frame_generation->integer != 0;
+}
+
+static void vk_disable_frame_generation(const char *reason)
+{
+    if (vk_session_frame_generation_disabled)
+        return;
+
+    vk_session_frame_generation_disabled = true;
+    vk.fsr_reset = true;
+    if (r_fsr_frame_generation)
+        r_fsr_frame_generation->modified = true;
+    Com_WPrintf("Vulkan FSR3 frame generation disabled for this session%s%s\n",
+                reason ? ": " : "", reason ? reason : "");
+}
+
+static bool vk_fsr_any_requested(void)
+{
+    return vk_fsr_requested() || vk_fsr_frame_generation_requested();
 }
 
 static bool vk_fsr_scene_paused(void)
@@ -1366,9 +1397,26 @@ static const image_upload_t vk_image_upload = {
     .glowmaps = true,
 };
 
+static void vk_handle_device_lost(const char *what, VkResult result)
+{
+    if (result != VK_ERROR_DEVICE_LOST || vk.device_lost)
+        return;
+
+    vk.device_lost = true;
+    vk_session_frame_generation_disabled = true;
+    Com_EPrintf("Vulkan device lost during %s; disabling FSR3 frame generation "
+                "for this session and restarting the video subsystem\n", what);
+
+    if (!vk_device_lost_recovery_queued) {
+        vk_device_lost_recovery_queued = true;
+        Cbuf_AddText(&cmd_buffer, "vid_restart force\n");
+    }
+}
+
 static bool vk_fail_result(const char *what, VkResult result)
 {
     Com_SetLastError(va("%s failed: Vulkan error %d", what, result));
+    vk_handle_device_lost(what, result);
     return false;
 }
 
@@ -3330,10 +3378,12 @@ static void vk_destroy_fsr_resources(void)
         vk.fsr3 = NULL;
     }
     vk_destroy_texture_resource(&vk.fsr_output_texture);
+    vk_destroy_texture_resource(&vk.fsr_frame_generation_texture);
     vk_destroy_texture_resource(&vk.fsr_motion_texture);
     vk_destroy_texture_resource(&vk.fsr_reactive_texture);
     vk.fsr_output_format = VK_FORMAT_UNDEFINED;
     vk.fsr_output_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.fsr_frame_generation_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_motion_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_reactive_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_motion_initialized = false;
@@ -3350,16 +3400,19 @@ static void vk_destroy_fsr_resources(void)
 static bool vk_create_fsr_resources(void)
 {
     vk.render_extent = vk_fsr_render_extent();
-    if (!vk_fsr_requested() ||
+    if (!vk_fsr_any_requested() ||
         vk.sample_count != VK_SAMPLE_COUNT_1_BIT ||
-        (vk.render_extent.width == vk.swapchain_extent.width &&
+        (!vk_fsr_frame_generation_requested() &&
+         vk.render_extent.width == vk.swapchain_extent.width &&
          vk.render_extent.height == vk.swapchain_extent.height))
         return true;
 
     vk.fsr3 = Q2_FSR3_Create(vk.physical_device, vk.device, vk.instance,
                              vk.GetInstanceProcAddr, vk.GetDeviceProcAddr,
                              vk.render_extent.width, vk.render_extent.height,
-                             vk.swapchain_extent.width, vk.swapchain_extent.height);
+                             vk.swapchain_extent.width, vk.swapchain_extent.height,
+                             vk_fsr_output_format(vk.swapchain_format),
+                             vk_fsr_frame_generation_requested());
     if (!vk.fsr3) {
         if (!vk.fsr_warned) {
             Com_WPrintf("Vulkan FSR3 is unavailable on this device; rendering at native resolution\n");
@@ -3374,8 +3427,21 @@ static bool vk_create_fsr_resources(void)
                                 vk.swapchain_extent.width,
                                 vk.swapchain_extent.height,
                                 vk.fsr_output_format,
-                                VK_IMAGE_USAGE_STORAGE_BIT)) {
+                                VK_IMAGE_USAGE_STORAGE_BIT |
+                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
         Com_WPrintf("Couldn't create Vulkan FSR3 output target: %s; rendering at native resolution\n",
+                    Com_GetLastError());
+        vk_destroy_fsr_resources();
+        return true;
+    }
+    if (vk_fsr_frame_generation_requested() &&
+        !vk_create_color_target(&vk.fsr_frame_generation_texture,
+                                vk.swapchain_extent.width,
+                                vk.swapchain_extent.height,
+                                vk.fsr_output_format,
+                                VK_IMAGE_USAGE_STORAGE_BIT |
+                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+        Com_WPrintf("Couldn't create Vulkan FSR3 frame-generation target: %s; rendering without frame generation\n",
                     Com_GetLastError());
         vk_destroy_fsr_resources();
         return true;
@@ -3403,6 +3469,7 @@ static bool vk_create_fsr_resources(void)
     vk_update_texture_descriptor_with_sampler(&vk.fsr_output_texture,
                                               vk.postprocess_sampler);
     vk.fsr_output_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.fsr_frame_generation_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_motion_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_reactive_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_motion_initialized = false;
@@ -4584,8 +4651,9 @@ static void vk_destroy_texture_resource(vk_texture_t *texture)
         !texture->descriptor_set)
         return;
 
-    if (vk.DeviceWaitIdle)
-        vk.DeviceWaitIdle(vk.device);
+    if (!vk.device_lost && vk.DeviceWaitIdle)
+        vk_handle_device_lost("vkDeviceWaitIdle",
+                              vk.DeviceWaitIdle(vk.device));
 
     if (texture->descriptor_set && vk.descriptor_pool)
         vk.FreeDescriptorSets(vk.device, vk.descriptor_pool, 1,
@@ -5526,8 +5594,9 @@ static void vk_texturemode_changed(cvar_t *self)
         return;
     }
 
-    if (vk.DeviceWaitIdle)
-        vk.DeviceWaitIdle(vk.device);
+    if (!vk.device_lost && vk.DeviceWaitIdle)
+        vk_handle_device_lost("vkDeviceWaitIdle",
+                              vk.DeviceWaitIdle(vk.device));
 
     if (vk.sampler)
         vk.DestroySampler(vk.device, vk.sampler, NULL);
@@ -5967,8 +6036,9 @@ static VkExtent2D vk_choose_extent(const VkSurfaceCapabilitiesKHR *caps,
 
 static void vk_destroy_swapchain(void)
 {
-    if (vk.device && vk.DeviceWaitIdle)
-        vk.DeviceWaitIdle(vk.device);
+    if (vk.device && !vk.device_lost && vk.DeviceWaitIdle)
+        vk_handle_device_lost("vkDeviceWaitIdle",
+                              vk.DeviceWaitIdle(vk.device));
 
     vk.render_pass_active = false;
     vk.active_render_pass = VK_NULL_HANDLE;
@@ -6382,7 +6452,7 @@ static void vk_destroy_swapchain(void)
 
 static bool vk_recreate_swapchain(const char *reason)
 {
-    if (!vk.device)
+    if (!vk.device || vk.device_lost)
         return false;
 
     int width = r_config.width;
@@ -8680,7 +8750,7 @@ static bool vk_create_swapchain(int width, int height)
     vk.present_mode = present_mode;
     /* Keep presentation independent of FSR context creation: if the SDK
      * fails, the same color-only display path presents the native scene. */
-    vk.separate_presentation = vk_fsr_requested();
+    vk.separate_presentation = vk_fsr_any_requested();
     vk.sample_count = vk.separate_presentation ? VK_SAMPLE_COUNT_1_BIT :
         vk_choose_sample_count();
     vk.depth_format = vk_choose_depth_format(vk_shadow_stencil_requested());
@@ -18527,6 +18597,8 @@ bool VKR_Init(bool total)
     vk_bloom_downsample = Cvar_Get("vk_bloom_downsample", "4", 0);
     r_fsr = Cvar_Get("r_fsr", "0", CVAR_ARCHIVE);
     r_fsr_quality = Cvar_Get("r_fsr_quality", "quality", CVAR_ARCHIVE);
+    r_fsr_sharpness = Cvar_Get("r_fsr_sharpness", "0.2", CVAR_ARCHIVE);
+    r_fsr_frame_generation = Cvar_Get("r_fsr_frame_generation", "0", CVAR_ARCHIVE);
     vk_perf_stats = Cvar_Get("vk_perf_stats", "0", 0);
     vk_frames_in_flight = Cvar_Get("vk_frames_in_flight", "2", CVAR_ARCHIVE);
     vk_device = Cvar_Get("vk_device", "", CVAR_ARCHIVE | CVAR_REFRESH);
@@ -18694,6 +18766,7 @@ bool VKR_Init(bool total)
     Cmd_AddMacro("gl_viewleaf", vk_viewleaf_m);
 #endif
 
+    vk_device_lost_recovery_queued = false;
     Com_Printf("------------------------\n");
     return true;
 }
@@ -18701,7 +18774,7 @@ bool VKR_Init(bool total)
 void VKR_Shutdown(bool total)
 {
     if (!total) {
-        if (vk.device && vk.DeviceWaitIdle)
+        if (vk.device && !vk.device_lost && vk.DeviceWaitIdle)
             vk.DeviceWaitIdle(vk.device);
         vk_free_world();
         vk_free_models(true);
@@ -18762,7 +18835,7 @@ void VKR_Shutdown(bool total)
 
     vk_destroy_swapchain();
 
-    if (vk.device && vk.DeviceWaitIdle)
+    if (vk.device && !vk.device_lost && vk.DeviceWaitIdle)
         vk.DeviceWaitIdle(vk.device);
 
     if (vk.timestamp_query_pool) {
@@ -19049,7 +19122,7 @@ static void vk_render_fsr_motion(const refdef_t *fd);
 
 void VKR_RenderFrame(const refdef_t *fd)
 {
-    if (!fd || !vk.frame_active || !vk.render_pass_active ||
+    if (vk.device_lost || !fd || !vk.frame_active || !vk.render_pass_active ||
         !vk.command_buffers || vk.current_image >= vk.swapchain_image_count)
         return;
 
@@ -19066,7 +19139,7 @@ void VKR_RenderFrame(const refdef_t *fd)
         return;
     }
     if (vk.separate_presentation) {
-        vk.frame_fsr = vk.fsr3 && vk_fsr_requested() &&
+        vk.frame_fsr = vk.fsr3 && vk_fsr_any_requested() &&
             !(fd->rdflags & RDF_NOWORLDMODEL);
         if (!vk.frame_fsr) {
             vk.fsr_reset = true;
@@ -19519,8 +19592,13 @@ int VKR_ReadPixels(screenshot_t *s)
                           &readback.buffer, &readback.memory))
         return Q_ERR_FAILURE;
 
-    if (vk.DeviceWaitIdle(vk.device) != VK_SUCCESS)
+    if (vk.device_lost)
         goto out;
+    VkResult idle_result = vk.DeviceWaitIdle(vk.device);
+    if (idle_result != VK_SUCCESS) {
+        vk_handle_device_lost("vkDeviceWaitIdle", idle_result);
+        goto out;
+    }
 
     VkImageLayout old_layout = vk.swapchain_layouts[vk.current_image];
     if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED) {
@@ -20092,6 +20170,32 @@ static bool vk_dispatch_fsr(void)
                                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
+    bool generated_frame = false;
+    bool frame_reset = vk.fsr_reset;
+    bool frame_generation_prepared = false;
+    if (vk_fsr_frame_generation_requested() &&
+        vk.fsr_frame_generation_texture.image &&
+        vk.fsr_frame_generation_texture.view) {
+        frame_generation_prepared = Q2_FSR3_PrepareFrameGeneration(
+            vk.fsr3, cmd, vk.depth_image, vk.depth_format,
+            vk.fsr_motion_texture.image, VK_FORMAT_R16G16_SFLOAT,
+            vk.fsr_jitter[0], vk.fsr_jitter[1],
+            vk.fd_valid ? vk.fd.frametime * 1000.0f : 16.0f,
+            vk.fd_valid ? DEG2RAD(vk.fd.fov_y) : DEG2RAD(75.0f),
+            vk_znear ? Cvar_ClampValue(vk_znear, 0.1f, 4095.0f) : 2.0f,
+            max(vk_projection_zfar(vk.fd_valid ? vk.fd.rdflags : 0),
+                (vk_znear ? Cvar_ClampValue(vk_znear, 0.1f, 4095.0f) : 2.0f) + 1.0f));
+        if (!frame_generation_prepared) {
+            vk_disable_frame_generation("frame-generation preparation failed");
+        } else {
+            vk_transition_color_target(cmd, &vk.fsr_frame_generation_texture,
+                                       &vk.fsr_frame_generation_layout,
+                                       VK_IMAGE_LAYOUT_GENERAL,
+                                       VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        }
+    }
+
     float frame_time_ms = vk.fd_valid ? vk.fd.frametime * 1000.0f : 16.0f;
     float fov_y = vk.fd_valid ? DEG2RAD(vk.fd.fov_y) : DEG2RAD(75.0f);
     uint64_t dispatch_start = vk_time_usec();
@@ -20107,11 +20211,12 @@ static bool vk_dispatch_fsr(void)
         vk.fsr_output_texture.image, vk.fsr_output_texture.view,
         vk.fsr_output_format,
         vk.fsr_jitter[0], vk.fsr_jitter[1],
+        r_fsr_sharpness ? Cvar_ClampValue(r_fsr_sharpness, 0.0f, 1.0f) : 0.2f,
         frame_time_ms, fov_y,
         vk_znear ? Cvar_ClampValue(vk_znear, 0.1f, 4095.0f) : 2.0f,
         max(vk_projection_zfar(vk.fd_valid ? vk.fd.rdflags : 0),
             (vk_znear ? Cvar_ClampValue(vk_znear, 0.1f, 4095.0f) : 2.0f) + 1.0f),
-        vk.fsr_reset);
+        frame_reset);
     vk.fsr_dispatch_record_usec = vk_time_usec() - dispatch_start;
     if (!vk.fsr_presentation_logged) {
         Com_Printf("Vulkan FSR3 presentation: render=%ux%u output=%ux%u "
@@ -20124,6 +20229,8 @@ static bool vk_dispatch_fsr(void)
         vk.fsr_presentation_logged = true;
     }
     if (!dispatched) {
+        if (vk_fsr_frame_generation_requested())
+            vk_disable_frame_generation("FSR3 upscaler dispatch failed");
         vk.fsr_output_valid = false;
         if (!vk.fsr_warned) {
             Com_WPrintf("Vulkan FSR3 dispatch failed (error %d); using spatially upscaled scene "
@@ -20148,13 +20255,32 @@ static bool vk_dispatch_fsr(void)
 
     vk.fsr_reset = false;
     vk.fsr_output_valid = true;
+    if (!frame_reset && frame_generation_prepared &&
+        vk.fsr_frame_generation_texture.image &&
+        vk.fsr_frame_generation_texture.view &&
+        vk.fsr_frame_generation_layout == VK_IMAGE_LAYOUT_GENERAL) {
+        generated_frame = Q2_FSR3_DispatchFrameGeneration(
+            vk.fsr3, cmd,
+            vk.fsr_output_texture.image, vk.fsr_output_format,
+            vk.fsr_frame_generation_texture.image, vk.fsr_output_format,
+            frame_reset);
+        if (!generated_frame)
+            vk_disable_frame_generation("frame-generation dispatch failed");
+        vk_transition_color_target(cmd, &vk.fsr_frame_generation_texture,
+                                   &vk.fsr_frame_generation_layout,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_ACCESS_SHADER_READ_BIT,
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    }
     vk_transition_color_target(cmd, &vk.fsr_output_texture,
                                &vk.fsr_output_layout,
                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                VK_ACCESS_SHADER_READ_BIT,
                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     vk_begin_presentation(false);
-    vk_composite_presentation_texture(&vk.fsr_output_texture);
+    vk_composite_presentation_texture(generated_frame ?
+                                      &vk.fsr_frame_generation_texture :
+                                      &vk.fsr_output_texture);
     vk.fsr_composited = true;
     return true;
 }
@@ -20423,6 +20549,9 @@ void VKR_BeginFrame(void)
     vk.present_usec = 0;
     vk.frame_start_usec = 0;
 
+    if (vk.device_lost)
+        return;
+
     if (!vk.swapchain) {
         unsigned now = Sys_Milliseconds();
 
@@ -20434,12 +20563,21 @@ void VKR_BeginFrame(void)
             return;
     }
 
+    if (vk.separate_presentation != vk_fsr_any_requested()) {
+        if (!vk_recreate_swapchain("FSR runtime fallback"))
+            return;
+        vk.fsr_reset = true;
+    }
+
     if ((r_fsr && r_fsr->modified) ||
-        (r_fsr_quality && r_fsr_quality->modified)) {
+        (r_fsr_quality && r_fsr_quality->modified) ||
+        (r_fsr_frame_generation && r_fsr_frame_generation->modified)) {
         if (r_fsr)
             r_fsr->modified = false;
         if (r_fsr_quality)
             r_fsr_quality->modified = false;
+        if (r_fsr_frame_generation)
+            r_fsr_frame_generation->modified = false;
         if (!vk_recreate_swapchain("FSR configuration change"))
             return;
         vk.fsr_reset = true;
@@ -20481,6 +20619,7 @@ void VKR_BeginFrame(void)
                                        VK_TRUE, UINT64_MAX);
     vk.wait_usec = vk_time_usec() - start;
     if (result != VK_SUCCESS) {
+        vk_handle_device_lost("vkWaitForFences", result);
         Com_EPrintf("vkWaitForFences failed: Vulkan error %d\n", result);
         return;
     }
@@ -20509,6 +20648,7 @@ void VKR_BeginFrame(void)
             return;
         }
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+            vk_handle_device_lost("vkAcquireNextImageKHR", result);
             Com_EPrintf("vkAcquireNextImageKHR failed: Vulkan error %d\n", result);
             return;
         }
@@ -20523,6 +20663,7 @@ void VKR_BeginFrame(void)
                                   VK_TRUE, UINT64_MAX);
         vk.wait_usec += vk_time_usec() - start;
         if (result != VK_SUCCESS) {
+            vk_handle_device_lost("vkWaitForFences", result);
             Com_EPrintf("vkWaitForFences failed: Vulkan error %d\n", result);
             return;
         }
@@ -20531,6 +20672,7 @@ void VKR_BeginFrame(void)
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     result = vk.ResetCommandBuffer(cmd, 0);
     if (result != VK_SUCCESS) {
+        vk_handle_device_lost("vkResetCommandBuffer", result);
         Com_EPrintf("vkResetCommandBuffer failed: Vulkan error %d\n", result);
         return;
     }
@@ -20543,6 +20685,7 @@ void VKR_BeginFrame(void)
 
     result = vk.BeginCommandBuffer(cmd, &begin_info);
     if (result != VK_SUCCESS) {
+        vk_handle_device_lost("vkBeginCommandBuffer", result);
         Com_EPrintf("vkBeginCommandBuffer failed: Vulkan error %d\n", result);
         return;
     }
@@ -20562,7 +20705,7 @@ void VKR_BeginFrame(void)
     vk.frame_bloom = vk_bloom_enabled_for_frame();
     vk.frame_waterwarp = vk_waterwarp_enabled_for_frame();
     vk.frame_ssr = vk_ssr_enabled_for_frame();
-    vk.frame_fsr = vk.fsr3 != NULL && vk_fsr_requested();
+    vk.frame_fsr = vk.fsr3 != NULL && vk_fsr_any_requested();
     vk.fsr_composited = false;
     vk.fsr_jitter_ready = false;
     bool postprocess = vk.frame_bloom || vk.frame_waterwarp || vk.frame_ssr ||
@@ -20696,6 +20839,10 @@ static void vk_record_pixel_lightmap_update(VkCommandBuffer cmd)
 
 void VKR_EndFrame(void)
 {
+    if (vk.device_lost) {
+        vk.frame_active = false;
+        return;
+    }
     if (!vk.frame_active)
         return;
 
@@ -20860,6 +21007,7 @@ void VKR_EndFrame(void)
     VkResult result = vk.EndCommandBuffer(cmd);
     vk.record_usec = vk_time_usec() - vk.frame_start_usec;
     if (result != VK_SUCCESS) {
+        vk_handle_device_lost("vkEndCommandBuffer", result);
         Com_EPrintf("vkEndCommandBuffer failed: Vulkan error %d\n", result);
         vk.frame_active = false;
         return;
@@ -20883,6 +21031,7 @@ void VKR_EndFrame(void)
 
     result = vk.ResetFences(vk.device, 1, &frame_fence);
     if (result != VK_SUCCESS) {
+        vk_handle_device_lost("vkResetFences", result);
         Com_EPrintf("vkResetFences failed: Vulkan error %d\n", result);
         vk.frame_active = false;
         return;
@@ -20892,8 +21041,10 @@ void VKR_EndFrame(void)
     result = vk.QueueSubmit(vk.graphics_queue, 1, &submit_info, frame_fence);
     vk.submit_usec = vk_time_usec() - start;
     if (result != VK_SUCCESS) {
+        vk_handle_device_lost("vkQueueSubmit", result);
         Com_EPrintf("vkQueueSubmit failed: Vulkan error %d\n", result);
-        vk_recreate_signaled_frame_fence();
+        if (!vk.device_lost)
+            vk_recreate_signaled_frame_fence();
         vk.frame_active = false;
         return;
     }
@@ -20918,11 +21069,15 @@ void VKR_EndFrame(void)
                               "presentation out of date" :
                               "presentation suboptimal");
     } else if (result != VK_SUCCESS) {
+        vk_handle_device_lost("vkQueuePresentKHR", result);
         Com_EPrintf("vkQueuePresentKHR failed: Vulkan error %d\n", result);
     }
 
-    if (vk_finish && vk_finish->integer)
-        vk.DeviceWaitIdle(vk.device);
+    if (vk_finish && vk_finish->integer && !vk.device_lost) {
+        result = vk.DeviceWaitIdle(vk.device);
+        if (result != VK_SUCCESS)
+            vk_handle_device_lost("vkDeviceWaitIdle", result);
+    }
 
     vk_log_perf_stats();
 
@@ -20944,6 +21099,9 @@ void VKR_ModeChanged(int width, int height, int flags)
 
 bool VKR_VideoSync(void)
 {
+    if (vk.device_lost)
+        return false;
+
     VkFence frame_fence = vk.frame_fence[vk.frame_index];
     VkSemaphore image_available = vk.image_available[vk.frame_index];
 
@@ -20959,6 +21117,7 @@ bool VKR_VideoSync(void)
     if (result == VK_TIMEOUT)
         return false;
     if (result != VK_SUCCESS) {
+        vk_handle_device_lost("vkWaitForFences", result);
         Com_EPrintf("vkWaitForFences failed: Vulkan error %d\n", result);
         return false;
     }
@@ -20974,6 +21133,7 @@ bool VKR_VideoSync(void)
             return false;
         }
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+            vk_handle_device_lost("vkAcquireNextImageKHR", result);
             Com_EPrintf("vkAcquireNextImageKHR failed: Vulkan error %d\n",
                         result);
             return false;
@@ -20988,6 +21148,7 @@ bool VKR_VideoSync(void)
     if (result == VK_TIMEOUT)
         return false;
     if (result != VK_SUCCESS) {
+        vk_handle_device_lost("vkWaitForFences", result);
         Com_EPrintf("vkWaitForFences failed: Vulkan error %d\n", result);
         return false;
     }

@@ -26,7 +26,9 @@ q2_fsr3_context_t *Q2_FSR3_Create(VkPhysicalDevice physical_device,
                                    uint32_t render_width,
                                    uint32_t render_height,
                                    uint32_t display_width,
-                                   uint32_t display_height);
+                                   uint32_t display_height,
+                                   VkFormat display_format,
+                                   bool frame_generation);
 void Q2_FSR3_Destroy(q2_fsr3_context_t *context);
 bool Q2_FSR3_GetJitter(q2_fsr3_context_t *context, float *x, float *y);
 int Q2_FSR3_GetLastError(const q2_fsr3_context_t *context);
@@ -36,9 +38,23 @@ bool Q2_FSR3_Dispatch(q2_fsr3_context_t *context, VkCommandBuffer command_buffer
                       VkImage motion, VkImageView motion_view, VkFormat motion_format,
                       VkImage reactive, VkImageView reactive_view, VkFormat reactive_format,
                       VkImage output, VkImageView output_view, VkFormat output_format,
-                      float jitter_x, float jitter_y,
+                      float jitter_x, float jitter_y, float sharpness,
                       float frame_time_ms, float vertical_fov_radians,
                       float camera_near, float camera_far, bool reset);
+bool Q2_FSR3_PrepareFrameGeneration(q2_fsr3_context_t *context,
+                                    VkCommandBuffer command_buffer,
+                                    VkImage depth, VkFormat depth_format,
+                                    VkImage motion, VkFormat motion_format,
+                                    float jitter_x, float jitter_y,
+                                    float frame_time_ms,
+                                    float vertical_fov_radians,
+                                    float camera_near, float camera_far);
+bool Q2_FSR3_DispatchFrameGeneration(q2_fsr3_context_t *context,
+                                     VkCommandBuffer command_buffer,
+                                     VkImage present, VkFormat present_format,
+                                     VkImage output, VkFormat output_format,
+                                     bool reset);
+bool Q2_FSR3_FrameGenerationEnabled(const q2_fsr3_context_t *context);
 
 #ifdef __cplusplus
 }

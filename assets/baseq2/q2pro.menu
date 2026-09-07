@@ -108,6 +108,10 @@ begin video
         balanced balanced \
         performance performance \
         "ultra performance" ultra_performance
+    range --status "Requires the Vulkan renderer; changing this refreshes the renderer" \
+        "FSR3 sharpness" r_fsr_sharpness 0 1
+    toggle --status "Requires Vulkan FSR3; experimental; falls back after GPU errors" \
+        "FSR3 frame generation" r_fsr_frame_generation
 end
 
 begin raytracing

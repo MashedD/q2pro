@@ -16,7 +16,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include <cstdlib>
 #include <cstring>
 
-#include <FidelityFX/host/ffx_fsr3upscaler.h>
+#include <FidelityFX/host/ffx_fsr3.h>
 #include <FidelityFX/host/backends/vk/ffx_vk.h>
 
 extern "C" {
@@ -29,7 +29,10 @@ extern "C" {
 
 struct q2_fsr3_context {
     FfxFsr3UpscalerContext context = {};
+    FfxFsr3Context full_context = {};
     FfxInterface interface = {};
+    FfxInterface shared_interface = {};
+    FfxInterface frame_interpolation_interface = {};
     VkDeviceContext device_context = {};
     void *scratch = nullptr;
     size_t scratch_size = 0;
@@ -42,6 +45,8 @@ struct q2_fsr3_context {
     uint32_t display_width = 0;
     uint32_t display_height = 0;
     uint32_t frame_index = 0;
+    bool frame_generation = false;
+    bool full_context_created = false;
     FfxErrorCode last_error = FFX_OK;
 };
 
@@ -313,7 +318,8 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
     PFN_vkGetInstanceProcAddr get_instance_proc_addr,
     PFN_vkGetDeviceProcAddr get_device_proc_addr,
     uint32_t render_width, uint32_t render_height,
-    uint32_t display_width, uint32_t display_height)
+    uint32_t display_width, uint32_t display_height,
+    VkFormat display_format, bool frame_generation)
 {
     if (!physical_device || !device || !instance || !get_instance_proc_addr ||
         !get_device_proc_addr ||
@@ -337,13 +343,17 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
     result->render_height = render_height;
     result->display_width = display_width;
     result->display_height = display_height;
+    result->frame_generation = frame_generation;
     FfxFsr3UpscalerContextDescription description = {};
+    FfxFsr3ContextDescription full_description = {};
     bool context_created = false;
     FfxErrorCode error = FFX_OK;
     result->device_context = {
         device, physical_device, q2_fsr3_get_device_proc
     };
-    result->scratch_size = ffxGetScratchMemorySizeVK(physical_device, 1);
+    const size_t max_contexts = frame_generation ? FFX_FSR3_CONTEXT_COUNT : 1;
+    result->scratch_size = ffxGetScratchMemorySizeVK(physical_device,
+                                                     max_contexts);
     if (!result->scratch_size) {
         Com_WPrintf("Vulkan FSR3 returned an invalid backend scratch size\n");
         goto fail;
@@ -354,7 +364,8 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
 
     error = ffxGetInterfaceVK(&result->interface,
                               ffxGetDeviceVK(&result->device_context),
-                              result->scratch, result->scratch_size, 1);
+                              result->scratch, result->scratch_size,
+                              max_contexts);
     if (error != FFX_OK) {
         Com_WPrintf("Vulkan FSR3 backend interface creation failed (error %d)\n",
                     static_cast<int>(error));
@@ -363,32 +374,68 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
 
     /* Q2Pro supplies already-exposed LDR scene color. Auto exposure adds an
      * extra FSR pass and changes the result compared with the former FSR2
-     * path, which did not enable it. */
-    description.flags = FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
-    description.maxRenderSize = { render_width, render_height };
-    description.maxUpscaleSize = { display_width, display_height };
-    description.fpMessage = q2_fsr3_message;
-    description.backendInterface = result->interface;
-    error = ffxFsr3UpscalerContextCreate(&result->context, &description);
-    if (error != FFX_OK) {
-        Com_WPrintf("Vulkan FSR3 context creation failed (error %d)\n",
-                    static_cast<int>(error));
-        goto fail;
-    }
-    context_created = true;
+     * path, which did not enable it. Keep the upscaling-only context as the
+     * default path so enabling frame generation is the only mode that pays
+     * for the additional optical-flow/interpolation resources. */
+    if (!frame_generation) {
+        description.flags = FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
+        description.maxRenderSize = { render_width, render_height };
+        description.maxUpscaleSize = { display_width, display_height };
+        description.fpMessage = q2_fsr3_message;
+        description.backendInterface = result->interface;
+        error = ffxFsr3UpscalerContextCreate(&result->context, &description);
+        if (error != FFX_OK) {
+            Com_WPrintf("Vulkan FSR3 context creation failed (error %d)\n",
+                        static_cast<int>(error));
+            goto fail;
+        }
+        context_created = true;
 
-    error = q2_fsr3_create_shared_resources(result);
-    if (error != FFX_OK) {
-        Com_WPrintf("Vulkan FSR3 shared-resource creation failed (error %d)\n",
-                    static_cast<int>(error));
-        goto fail;
+        error = q2_fsr3_create_shared_resources(result);
+        if (error != FFX_OK) {
+            Com_WPrintf("Vulkan FSR3 shared-resource creation failed (error %d)\n",
+                        static_cast<int>(error));
+            goto fail;
+        }
+    } else {
+        result->shared_interface = result->interface;
+        result->frame_interpolation_interface = result->interface;
+        full_description.flags = FFX_FSR3_ENABLE_DEBUG_CHECKING;
+        full_description.maxRenderSize = { render_width, render_height };
+        full_description.maxUpscaleSize = { display_width, display_height };
+        full_description.displaySize = { display_width, display_height };
+        full_description.backendInterfaceSharedResources = result->shared_interface;
+        full_description.backendInterfaceUpscaling = result->interface;
+        full_description.backendInterfaceFrameInterpolation = result->frame_interpolation_interface;
+        full_description.fpMessage = q2_fsr3_message;
+        full_description.backBufferFormat = ffxGetSurfaceFormatVK(display_format);
+        error = ffxFsr3ContextCreate(&result->full_context, &full_description);
+        if (error != FFX_OK) {
+            Com_WPrintf("Vulkan FSR3 frame-generation context creation failed (error %d)\n",
+                        static_cast<int>(error));
+            goto fail;
+        }
+        result->full_context_created = true;
+
+        FfxFrameGenerationConfig config = {};
+        config.frameGenerationEnabled = true;
+        config.allowAsyncWorkloads = false;
+        config.frameGenerationCallback = nullptr;
+        error = ffxFsr3ConfigureFrameGeneration(&result->full_context, &config);
+        if (error != FFX_OK) {
+            Com_WPrintf("Vulkan FSR3 frame-generation configuration failed (error %d)\n",
+                        static_cast<int>(error));
+            goto fail;
+        }
     }
     return result;
 
 fail:
     if (result->shared_resources_count)
         q2_fsr3_destroy_shared_resources(result);
-    if (context_created)
+    if (result->full_context_created)
+        ffxFsr3ContextDestroy(&result->full_context);
+    else if (context_created)
         ffxFsr3UpscalerContextDestroy(&result->context);
     std::free(result->scratch);
     delete result;
@@ -402,8 +449,12 @@ extern "C" void Q2_FSR3_Destroy(q2_fsr3_context_t *context)
 {
     if (!context)
         return;
-    q2_fsr3_destroy_shared_resources(context);
-    ffxFsr3UpscalerContextDestroy(&context->context);
+    if (context->full_context_created)
+        ffxFsr3ContextDestroy(&context->full_context);
+    else {
+        q2_fsr3_destroy_shared_resources(context);
+        ffxFsr3UpscalerContextDestroy(&context->context);
+    }
     std::free(context->scratch);
     delete context;
     q2_instance = VK_NULL_HANDLE;
@@ -416,14 +467,14 @@ extern "C" bool Q2_FSR3_GetJitter(q2_fsr3_context_t *context, float *x, float *y
     if (!context || !x || !y)
         return false;
 
-    const int32_t phase_count = ffxFsr3UpscalerGetJitterPhaseCount(
+    const int32_t phase_count = ffxFsr3GetJitterPhaseCount(
         static_cast<int32_t>(context->render_width),
         static_cast<int32_t>(context->display_width));
     if (phase_count <= 0)
         return false;
 
     const int32_t phase = static_cast<int32_t>(context->frame_index % phase_count);
-    return ffxFsr3UpscalerGetJitterOffset(x, y, phase, phase_count) == FFX_OK;
+    return ffxFsr3GetJitterOffset(x, y, phase, phase_count) == FFX_OK;
 }
 
 extern "C" int Q2_FSR3_GetLastError(const q2_fsr3_context_t *context)
@@ -439,7 +490,7 @@ extern "C" bool Q2_FSR3_Dispatch(
     VkImage motion, VkImageView motion_view, VkFormat motion_format,
     VkImage reactive, VkImageView reactive_view, VkFormat reactive_format,
     VkImage output, VkImageView output_view, VkFormat output_format,
-    float jitter_x, float jitter_y,
+    float jitter_x, float jitter_y, float sharpness,
     float frame_time_ms, float vertical_fov_radians,
     float camera_near, float camera_far, bool reset)
 {
@@ -451,58 +502,173 @@ extern "C" bool Q2_FSR3_Dispatch(
     if (!context)
         return false;
     if (!command_buffer || !color || !depth || !motion || !reactive ||
-        !output || !q2_fsr3_has_shared_resources(context)) {
+        !output || (!context->full_context_created &&
+                    !q2_fsr3_has_shared_resources(context))) {
         context->last_error = FFX_ERROR_INVALID_POINTER;
         return false;
     }
 
-    FfxFsr3UpscalerDispatchDescription description = {};
-    description.commandList = ffxGetCommandListVK(command_buffer);
-    description.color = q2_fsr3_resource(
+    FfxCommandList command_list = ffxGetCommandListVK(command_buffer);
+    FfxResource color_resource = q2_fsr3_resource(
         color, color_format, context->render_width, context->render_height,
         FFX_RESOURCE_USAGE_READ_ONLY, FFX_RESOURCE_STATE_COMPUTE_READ);
-    description.depth = q2_fsr3_resource(
+    FfxResource depth_resource = q2_fsr3_resource(
         depth, depth_format, context->render_width, context->render_height,
         FFX_RESOURCE_USAGE_DEPTHTARGET, FFX_RESOURCE_STATE_COMPUTE_READ);
-    description.motionVectors = q2_fsr3_resource(
+    FfxResource motion_resource = q2_fsr3_resource(
         motion, motion_format, context->render_width, context->render_height,
         FFX_RESOURCE_USAGE_READ_ONLY, FFX_RESOURCE_STATE_COMPUTE_READ);
-    description.reactive = q2_fsr3_resource(
+    FfxResource reactive_resource = q2_fsr3_resource(
         reactive, reactive_format, context->render_width, context->render_height,
         FFX_RESOURCE_USAGE_READ_ONLY, FFX_RESOURCE_STATE_COMPUTE_READ);
-    description.dilatedDepth = context->interface.fpGetResource(
-        &context->interface, context->dilated_depth);
-    description.dilatedMotionVectors = context->interface.fpGetResource(
-        &context->interface, context->dilated_motion_vectors);
-    description.reconstructedPrevNearestDepth = context->interface.fpGetResource(
-        &context->interface, context->reconstructed_prev_nearest_depth);
-    description.output = q2_fsr3_resource(
+    FfxResource output_resource = q2_fsr3_resource(
         output, output_format, context->display_width, context->display_height,
         FFX_RESOURCE_USAGE_UAV, FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    if (context->full_context_created) {
+        FfxFsr3DispatchUpscaleDescription description = {};
+        description.commandList = command_list;
+        description.color = color_resource;
+        description.depth = depth_resource;
+        description.motionVectors = motion_resource;
+        description.reactive = reactive_resource;
+        description.upscaleOutput = output_resource;
+        description.jitterOffset = { jitter_x, jitter_y };
+        description.motionVectorScale = {
+            static_cast<float>(context->render_width),
+            static_cast<float>(context->render_height)
+        };
+        description.renderSize = { context->render_width, context->render_height };
+        description.upscaleSize = { context->display_width, context->display_height };
+        description.enableSharpening = sharpness > 0.0f;
+        description.sharpness = std::clamp(sharpness, 0.0f, 1.0f);
+        description.frameTimeDelta = std::max(frame_time_ms, 1.0f);
+        description.preExposure = 1.0f;
+        description.reset = reset;
+        description.cameraNear = camera_near;
+        description.cameraFar = camera_far;
+        description.cameraFovAngleVertical = vertical_fov_radians;
+        description.viewSpaceToMetersFactor = 1.0f;
+        description.frameID = context->frame_index;
+        context->last_error = ffxFsr3ContextDispatchUpscale(
+            &context->full_context, &description);
+    } else {
+        FfxFsr3UpscalerDispatchDescription description = {};
+        description.commandList = command_list;
+        description.color = color_resource;
+        description.depth = depth_resource;
+        description.motionVectors = motion_resource;
+        description.reactive = reactive_resource;
+        description.dilatedDepth = context->interface.fpGetResource(
+            &context->interface, context->dilated_depth);
+        description.dilatedMotionVectors = context->interface.fpGetResource(
+            &context->interface, context->dilated_motion_vectors);
+        description.reconstructedPrevNearestDepth = context->interface.fpGetResource(
+            &context->interface, context->reconstructed_prev_nearest_depth);
+        description.output = output_resource;
+        description.jitterOffset = { jitter_x, jitter_y };
+        description.motionVectorScale = {
+            static_cast<float>(context->render_width),
+            static_cast<float>(context->render_height)
+        };
+        description.renderSize = { context->render_width, context->render_height };
+        description.upscaleSize = { context->display_width, context->display_height };
+        description.enableSharpening = sharpness > 0.0f;
+        description.sharpness = std::clamp(sharpness, 0.0f, 1.0f);
+        description.frameTimeDelta = std::max(frame_time_ms, 1.0f);
+        description.preExposure = 1.0f;
+        description.reset = reset;
+        description.cameraNear = camera_near;
+        description.cameraFar = camera_far;
+        description.cameraFovAngleVertical = vertical_fov_radians;
+        description.viewSpaceToMetersFactor = 1.0f;
+        context->last_error = ffxFsr3UpscalerContextDispatch(
+            &context->context, &description);
+    }
+    if (context->last_error != FFX_OK)
+        return false;
+    if (!context->full_context_created)
+        context->frame_index++;
+    return true;
+}
+
+extern "C" bool Q2_FSR3_PrepareFrameGeneration(
+    q2_fsr3_context_t *context, VkCommandBuffer command_buffer,
+    VkImage depth, VkFormat depth_format, VkImage motion, VkFormat motion_format,
+    float jitter_x, float jitter_y, float frame_time_ms,
+    float vertical_fov_radians, float camera_near, float camera_far)
+{
+    if (!context || !context->full_context_created || !command_buffer ||
+        !depth || !motion)
+        return false;
+
+    FfxFsr3DispatchFrameGenerationPrepareDescription description = {};
+    description.commandList = ffxGetCommandListVK(command_buffer);
+    description.depth = q2_fsr3_resource(depth, depth_format,
+                                         context->render_width,
+                                         context->render_height,
+                                         FFX_RESOURCE_USAGE_DEPTHTARGET,
+                                         FFX_RESOURCE_STATE_COMPUTE_READ);
+    description.motionVectors = q2_fsr3_resource(motion, motion_format,
+                                                 context->render_width,
+                                                 context->render_height,
+                                                 FFX_RESOURCE_USAGE_READ_ONLY,
+                                                 FFX_RESOURCE_STATE_COMPUTE_READ);
     description.jitterOffset = { jitter_x, jitter_y };
     description.motionVectorScale = {
         static_cast<float>(context->render_width),
         static_cast<float>(context->render_height)
     };
     description.renderSize = { context->render_width, context->render_height };
-    description.upscaleSize = { context->display_width, context->display_height };
-    description.enableSharpening = false;
-    description.sharpness = 0.0f;
     description.frameTimeDelta = std::max(frame_time_ms, 1.0f);
-    description.preExposure = 1.0f;
-    description.reset = reset;
     description.cameraNear = camera_near;
     description.cameraFar = camera_far;
     description.cameraFovAngleVertical = vertical_fov_radians;
     description.viewSpaceToMetersFactor = 1.0f;
-
-    const FfxErrorCode error = ffxFsr3UpscalerContextDispatch(
-        &context->context, &description);
+    description.frameID = context->frame_index;
+    const FfxErrorCode error = ffxFsr3ContextDispatchFrameGenerationPrepare(
+        &context->full_context, &description);
     context->last_error = error;
-    if (error != FFX_OK)
+    return error == FFX_OK;
+}
+
+extern "C" bool Q2_FSR3_DispatchFrameGeneration(
+    q2_fsr3_context_t *context, VkCommandBuffer command_buffer,
+    VkImage present, VkFormat present_format, VkImage output,
+    VkFormat output_format, bool reset)
+{
+    if (!context || !context->full_context_created || !command_buffer ||
+        !present || !output)
         return false;
-    context->frame_index++;
-    return true;
+
+    FfxFrameGenerationDispatchDescription description = {};
+    description.commandList = ffxGetCommandListVK(command_buffer);
+    description.presentColor = q2_fsr3_resource(
+        present, present_format, context->display_width, context->display_height,
+        FFX_RESOURCE_USAGE_READ_ONLY, FFX_RESOURCE_STATE_COMPUTE_READ);
+    description.outputs[0] = q2_fsr3_resource(
+        output, output_format, context->display_width, context->display_height,
+        FFX_RESOURCE_USAGE_UAV, FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+    description.numInterpolatedFrames = 1;
+    description.reset = reset;
+    description.backBufferTransferFunction = FFX_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
+    description.minMaxLuminance[0] = 0.0f;
+    description.minMaxLuminance[1] = 1000.0f;
+    description.interpolationRect = { 0, 0,
+                                      static_cast<int32_t>(context->display_width),
+                                      static_cast<int32_t>(context->display_height) };
+    description.frameID = context->frame_index;
+    const FfxErrorCode error = ffxFsr3DispatchFrameGeneration(&description);
+    context->last_error = error;
+    if (error == FFX_OK)
+        context->frame_index++;
+    return error == FFX_OK;
+}
+
+extern "C" bool Q2_FSR3_FrameGenerationEnabled(
+    const q2_fsr3_context_t *context)
+{
+    return context && context->full_context_created;
 }
 
 #endif
