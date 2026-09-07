@@ -8,6 +8,9 @@
 #define HANDLE(type, n) ((type)(uintptr_t)(n))
 
 statCounters_t c;
+cvar_t paused_cvar;
+cvar_t *cl_paused = &paused_cvar;
+cvar_t *sv_paused;
 static char last_error[256];
 static unsigned framebuffer_calls, pass_calls, draw_calls;
 static VkRenderPass last_pass;
@@ -283,6 +286,13 @@ static void check_configuration(uint32_t width, uint32_t height, bool bloom,
 
 int main(void)
 {
+    paused_cvar.integer = 0;
+    assert(!vk_fsr_scene_paused());
+    paused_cvar.integer = 1;
+    assert(vk_fsr_scene_paused());
+    paused_cvar.integer = 2;
+    assert(vk_fsr_scene_paused());
+
     const float scales[] = { 1, 1.5f, 1.7f, 2, 3 };
     for (int bloom = 0; bloom < 2; bloom++) {
         for (size_t i = 0; i < q_countof(scales); i++) {

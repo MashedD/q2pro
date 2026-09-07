@@ -361,8 +361,10 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
         goto fail;
     }
 
-    description.flags = FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE |
-                        FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
+    /* Q2Pro supplies already-exposed LDR scene color. Auto exposure adds an
+     * extra FSR pass and changes the result compared with the former FSR2
+     * path, which did not enable it. */
+    description.flags = FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
     description.maxRenderSize = { render_width, render_height };
     description.maxUpscaleSize = { display_width, display_height };
     description.fpMessage = q2_fsr3_message;

@@ -912,6 +912,11 @@ typedef struct {
     bool frame_fsr;
     bool fsr_reset;
     bool fsr_composited;
+    bool fsr_output_valid;
+    bool fsr_pause_reuse;
+    bool fsr_paused_last_frame;
+    uint64_t fsr_motion_record_usec;
+    uint64_t fsr_dispatch_record_usec;
     bool fsr_presentation_logged;
     bool fsr_warned;
     bool fsr_motion_initialized;
@@ -1123,6 +1128,17 @@ static bool vk_pixel_lightmaps_warned;
 static bool vk_fsr_requested(void)
 {
     return r_fsr && r_fsr->integer != 0;
+}
+
+static bool vk_fsr_scene_paused(void)
+{
+    if (!cl_paused || !cl_paused->integer)
+        return false;
+
+    /* cl_paused is set for manual pause and for the client's automatic
+     * single-player menu/console pause. Non-pausing multiplayer menus leave
+     * it at zero, so they continue rendering normally. */
+    return true;
 }
 
 static float vk_fsr_quality_scale(void)
@@ -3324,6 +3340,9 @@ static void vk_destroy_fsr_resources(void)
     vk.fsr_previous_viewproj_valid = false;
     vk.fsr_previous_fd_valid = false;
     vk.fsr_composited = false;
+    vk.fsr_output_valid = false;
+    vk.fsr_pause_reuse = false;
+    vk.fsr_paused_last_frame = false;
     vk.fsr_presentation_logged = false;
     vk.render_extent = vk.swapchain_extent;
 }
@@ -3391,6 +3410,9 @@ static bool vk_create_fsr_resources(void)
     vk.fsr_previous_fd_valid = false;
     vk.fsr_reset = true;
     vk.fsr_composited = false;
+    vk.fsr_output_valid = false;
+    vk.fsr_pause_reuse = false;
+    vk.fsr_paused_last_frame = false;
     vk.fsr_presentation_logged = false;
     Com_Printf("Vulkan FSR3: %ux%u -> %ux%u (%s)\n",
                vk.render_extent.width, vk.render_extent.height,
@@ -18403,6 +18425,13 @@ static void vk_log_perf_stats(void)
                vk.gpu_frame_usec,
                vk.wait_usec, vk.acquire_usec, vk.record_usec,
                vk.submit_usec, vk.present_usec);
+    if (vk.separate_presentation) {
+        Com_Printf("VK FSR3 record: motion=%lluus dispatch=%lluus paused=%s history=%s\n",
+                   (unsigned long long)vk.fsr_motion_record_usec,
+                   (unsigned long long)vk.fsr_dispatch_record_usec,
+                   vk.fsr_pause_reuse ? "yes" : "no",
+                   vk.fsr_output_valid ? "valid" : "invalid");
+    }
 }
 
 bool VKR_Init(bool total)
@@ -19027,6 +19056,15 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk.fd = *fd;
     R_SyncUnderwaterFlag(vk.world.cache, &vk.fd);
     vk.fd_valid = true;
+    if (vk.fsr_pause_reuse) {
+        /* The presentation image was already populated from the last valid
+         * FSR output in VKR_BeginFrame. Keep the paused gameplay image and
+         * let the normal 2D path draw the pause/menu overlays on top. */
+        vk.fsr_jitter[0] = 0.0f;
+        vk.fsr_jitter[1] = 0.0f;
+        vk.fsr_jitter_ready = false;
+        return;
+    }
     if (vk.separate_presentation) {
         vk.frame_fsr = vk.fsr3 && vk_fsr_requested() &&
             !(fd->rdflags & RDF_NOWORLDMODEL);
@@ -19918,6 +19956,7 @@ static void vk_render_fsr_motion(const refdef_t *fd)
         !vk.fsr_motion_pipeline_layout)
         return;
 
+    uint64_t motion_start = vk_time_usec();
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     if (vk.render_pass_active) {
         vk.CmdEndRenderPass(cmd);
@@ -19956,6 +19995,7 @@ static void vk_render_fsr_motion(const refdef_t *fd)
     vk.fsr_motion_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     vk.fsr_reactive_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     vk.fsr_motion_initialized = true;
+    vk.fsr_motion_record_usec = vk_time_usec() - motion_start;
 
     vk_viewproj_matrix(vk.fsr_previous_viewproj, fd, false);
     vk.fsr_previous_viewproj_valid = true;
@@ -19976,6 +20016,7 @@ static bool vk_dispatch_fsr(void)
         vk.fsr_input_texture.height != vk.render_extent.height ||
         vk.fsr_output_texture.width != vk.swapchain_extent.width ||
         vk.fsr_output_texture.height != vk.swapchain_extent.height) {
+        vk.fsr_output_valid = false;
         if (!vk.fsr_warned) {
             Com_WPrintf("Vulkan FSR3 resources are incomplete; using spatially upscaled scene output "
                         "(render=%ux%u output=%ux%u swapchain=%ux%u)\n",
@@ -20053,6 +20094,7 @@ static bool vk_dispatch_fsr(void)
 
     float frame_time_ms = vk.fd_valid ? vk.fd.frametime * 1000.0f : 16.0f;
     float fov_y = vk.fd_valid ? DEG2RAD(vk.fd.fov_y) : DEG2RAD(75.0f);
+    uint64_t dispatch_start = vk_time_usec();
     bool dispatched = Q2_FSR3_Dispatch(
         vk.fsr3, cmd,
         vk.fsr_input_texture.image, vk.fsr_input_texture.view,
@@ -20070,6 +20112,7 @@ static bool vk_dispatch_fsr(void)
         max(vk_projection_zfar(vk.fd_valid ? vk.fd.rdflags : 0),
             (vk_znear ? Cvar_ClampValue(vk_znear, 0.1f, 4095.0f) : 2.0f) + 1.0f),
         vk.fsr_reset);
+    vk.fsr_dispatch_record_usec = vk_time_usec() - dispatch_start;
     if (!vk.fsr_presentation_logged) {
         Com_Printf("Vulkan FSR3 presentation: render=%ux%u output=%ux%u "
                    "swapchain=%ux%u view=%d,%d %dx%d result=%s target=color-only\n",
@@ -20081,6 +20124,7 @@ static bool vk_dispatch_fsr(void)
         vk.fsr_presentation_logged = true;
     }
     if (!dispatched) {
+        vk.fsr_output_valid = false;
         if (!vk.fsr_warned) {
             Com_WPrintf("Vulkan FSR3 dispatch failed (error %d); using spatially upscaled scene "
                         "output (render=%ux%u output=%ux%u swapchain=%ux%u)\n",
@@ -20103,6 +20147,7 @@ static bool vk_dispatch_fsr(void)
     }
 
     vk.fsr_reset = false;
+    vk.fsr_output_valid = true;
     vk_transition_color_target(cmd, &vk.fsr_output_texture,
                                &vk.fsr_output_layout,
                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -20527,13 +20572,35 @@ void VKR_BeginFrame(void)
     // client submits this frame. Do not otherwise reuse that refdef: menu-only
     // frames after a disconnect must not redraw stale bloom entities or blend.
     vk.fd_valid = false;
+    vk.fsr_pause_reuse = false;
 
     if (vk.separate_presentation) {
+        bool paused = vk_fsr_scene_paused();
+        if (!paused && vk.fsr_paused_last_frame) {
+            /* The first active frame after pause must not reuse stale
+             * temporal history or the paused camera's motion vectors. */
+            vk.fsr_reset = true;
+            vk.fsr_previous_fd_valid = false;
+            vk.fsr_previous_viewproj_valid = false;
+        }
+        vk.fsr_paused_last_frame = paused;
+
         /* UI may precede RenderFrame, or there may be no view at all. */
         vk.frame_bloom = false;
         vk.frame_waterwarp = false;
         vk.frame_ssr = false;
         vk_begin_presentation(true);
+        if (paused && vk.fsr_output_valid) {
+            /* Reuse the last complete upscaled frame. This prevents both
+             * camera jitter and animated interpolation from changing the
+             * paused scene while keeping menus and HUD live. */
+            vk.fsr_pause_reuse = true;
+            vk.frame_fsr = false;
+            vk_composite_presentation_texture(&vk.fsr_output_texture);
+            vk.fsr_composited = true;
+        } else if (paused) {
+            vk.fsr_reset = true;
+        }
         vk.frame_active = true;
         return;
     }
