@@ -239,6 +239,12 @@ static const uint32_t vk_motion_color_vert_spv[] =
 static const uint32_t vk_motion_frag_spv[] =
 #include "vk_motion_frag_spv.h"
 ;
+static const uint32_t vk_motion_camera_vert_spv[] =
+#include "vk_motion_camera_vert_spv.h"
+;
+static const uint32_t vk_motion_camera_frag_spv[] =
+#include "vk_motion_camera_frag_spv.h"
+;
 typedef struct {
     float rect[4];
     float color[4];
@@ -252,6 +258,7 @@ typedef struct {
     VkDeviceMemory memory;
     VkImageView view;
     VkDescriptorSet descriptor_set;
+    VkDescriptorSet fsr_descriptor_set;
     uint32_t width;
     uint32_t height;
     uint32_t mip_levels;
@@ -652,6 +659,11 @@ typedef struct {
     mat4_t previous_mvp;
     float backlerp;
     float reactive;
+    float previous_backlerp;
+    float alpha;
+    vec2_t jitter;
+    vec2_t motion_scale;
+    vec4_t viewport;
 } vk_fsr_motion_push_t;
 
 typedef struct {
@@ -817,6 +829,8 @@ typedef struct {
 #endif
     VkDescriptorPool descriptor_pool;
     VkSampler sampler;
+    VkSampler fsr_sampler;
+    float fsr_sampler_bias;
     VkSampler sky_sampler;
     VkSampler postprocess_sampler;
     VkSampler nearest_sampler;
@@ -865,7 +879,11 @@ typedef struct {
     VkPipelineLayout fsr_motion_pipeline_layout;
     VkPipeline fsr_motion_world_pipeline;
     VkPipeline fsr_motion_alias_pipeline;
+    VkPipeline fsr_motion_alias_reactive_pipeline;
+    VkPipeline fsr_motion_world_reactive_pipeline;
     VkPipeline fsr_motion_color_pipeline;
+    VkPipeline fsr_motion_camera_pipeline;
+    VkDescriptorSet fsr_depth_descriptor;
     VkPipeline alias_pipeline;
     VkPipeline alias_bloom_pipeline;
     VkPipeline alias_alpha_pipeline;
@@ -954,6 +972,7 @@ typedef struct {
     bool fsr_output_valid;
     bool fsr_pause_cache_valid;
     bool fsr_pause_reuse;
+    bool fsr_timing_discontinuity;
     bool fsr_paused_last_frame;
     uint64_t fsr_motion_record_usec;
     uint64_t fsr_dispatch_record_usec;
@@ -974,6 +993,10 @@ typedef struct {
     bool fsr_previous_viewproj_valid;
     refdef_t fsr_previous_fd;
     bool fsr_previous_fd_valid;
+    entity_t fsr_history[MAX_ENTITIES];
+    entity_t fsr_pending_history[MAX_ENTITIES];
+    uint32_t fsr_history_count;
+    uint32_t fsr_pending_history_count;
     q2_fsr3_context_t *fsr3;
     bool ssr_ready;
     float scale;
@@ -1013,6 +1036,15 @@ typedef struct {
     vk_buffer_t particle_vertices;
     void *particle_vertices_mapped;
     uint32_t particle_vertex_count;
+    VkDeviceSize particle_motion_offset;
+    uint32_t particle_motion_ranges[5];
+    struct {
+        mat4_t mvp;
+        const vk_mesh_t *mesh;
+        VkDescriptorSet texture;
+        float alpha;
+    } fsr_reactive_draws[2048];
+    uint32_t fsr_reactive_draw_count;
     vk_vertex_t particle_batch[VK_MAX_PARTICLE_VERTICES];
     uint32_t sky_images[6];
     vk_cubemap_t cubemaps[VK_MAX_CUBEMAPS];
@@ -1030,6 +1062,7 @@ typedef struct {
     vk_model_t models[MAX_MODELS];
     uint32_t model_count;
     vk_texture_t textures[MAX_RIMAGES];
+    vk_texture_t fsr_texture_views[MAX_RIMAGES]; // non-owning descriptor aliases
     float flare_fracs[MAX_EDICTS];
     uint32_t flare_times[MAX_EDICTS];
     float perf_stats_time;
@@ -1048,16 +1081,16 @@ typedef struct {
     unsigned fsr_gpu_presentation_usec;
     vk_fsr_auto_phase_t fsr_auto_phase;
     vk_fsr_quality_t fsr_auto_quality;
-    vk_fsr_quality_t fsr_auto_best_quality;
     uint32_t fsr_auto_samples;
-    uint32_t fsr_auto_trial_index;
     uint64_t fsr_auto_native_usec;
     uint64_t fsr_auto_fsr_usec;
-    uint64_t fsr_auto_native_min_usec;
-    uint64_t fsr_auto_native_max_usec;
-    uint64_t fsr_auto_fsr_min_usec;
-    uint64_t fsr_auto_fsr_max_usec;
-    uint64_t fsr_auto_best_usec;
+    uint64_t fsr_auto_window[VK_FSR_AUTO_SAMPLE_COUNT];
+    uint32_t fsr_auto_warmup;
+    uint32_t fsr_auto_generation;
+    uint32_t timing_generation[VK_MAX_FRAMES_IN_FLIGHT];
+    unsigned timing_record_usec[VK_MAX_FRAMES_IN_FLIGHT];
+    bool timing_eligible[VK_MAX_FRAMES_IN_FLIGHT];
+    bool fsr_auto_cpu_only;
     unsigned barrier_count;
     bool fsr_auto_recreate;
     bool fsr_presentation_copy;
@@ -1125,6 +1158,7 @@ static cvar_t *r_fsr_quality;
 static cvar_t *r_fsr_sharpness;
 static cvar_t *r_fsr_auto;
 static cvar_t *r_fsr_motion;
+static cvar_t *r_fsr_mip_bias;
 static cvar_t *r_fsr_frame_generation;
 static cvar_t *vk_perf_stats;
 static cvar_t *vk_frames_in_flight;
@@ -1275,12 +1309,8 @@ static bool vk_fsr_motion_fast_requested(void)
         return false;
     }
 
-    /* The automatic mode is performance-oriented: use the cheap path for
-     * upscaling, and only pay for real scene motion when frame generation is
-     * explicitly requested. GPU timing cannot measure temporal quality, so
-     * it must not promote the expensive path merely because the GPU is busy. */
     vk.fsr_motion_override_logged = false;
-    return !frame_generation;
+    return false;
 }
 
 static bool vk_fsr_requested(void)
@@ -1307,125 +1337,89 @@ static void vk_fsr_auto_reset(void)
         VK_FSR_AUTO_WARMUP : VK_FSR_AUTO_ACCEPTED;
     vk.fsr_auto_quality = vk_fsr_quality_from_string(
         r_fsr_quality ? r_fsr_quality->string : "quality");
-    vk.fsr_auto_best_quality = vk.fsr_auto_quality;
     vk.fsr_auto_samples = 0;
-    vk.fsr_auto_trial_index = (uint32_t)vk.fsr_auto_quality;
     vk.fsr_auto_native_usec = 0;
     vk.fsr_auto_fsr_usec = 0;
-    vk.fsr_auto_native_min_usec = UINT64_MAX;
-    vk.fsr_auto_native_max_usec = 0;
-    vk.fsr_auto_fsr_min_usec = UINT64_MAX;
-    vk.fsr_auto_fsr_max_usec = 0;
-    vk.fsr_auto_best_usec = 0;
+    vk.fsr_auto_cpu_only = false;
     vk.fsr_auto_recreate = false;
+    vk.fsr_auto_warmup = 15;
+    vk.fsr_auto_generation++;
 }
 
-static void vk_fsr_auto_add_sample(uint64_t value, uint64_t *sum,
-                                   uint64_t *min_value, uint64_t *max_value)
-{
-    *sum += value;
-    *min_value = min(*min_value, value);
-    *max_value = max(*max_value, value);
-}
-
-static uint64_t vk_fsr_auto_trimmed_average(uint64_t sum,
-                                            uint64_t min_value,
-                                            uint64_t max_value,
-                                            uint32_t count)
+/* Insertion sort is cheap for this bounded window and avoids comparator casts. */
+static uint64_t vk_fsr_auto_average(uint64_t *values, uint32_t count)
 {
     if (!count)
         return 0;
-    if (count > 2 && sum >= min_value + max_value)
-        return (sum - min_value - max_value) / (count - 2);
-    return sum / count;
+    for (uint32_t i = 1; i < count; i++) {
+        uint64_t value = values[i];
+        uint32_t j = i;
+        while (j && values[j - 1] > value) {
+            values[j] = values[j - 1];
+            j--;
+        }
+        values[j] = value;
+    }
+    uint32_t trim = count / 10;
+    uint64_t sum = 0;
+    for (uint32_t i = trim; i < count - trim; i++)
+        sum += values[i];
+    return sum / (count - 2 * trim);
 }
 
-static void vk_fsr_auto_update(unsigned record_usec)
+static bool vk_fsr_auto_is_faster(uint64_t native, uint64_t fsr)
 {
-    if (!vk_fsr_auto_enabled())
+    return native && fsr && fsr <= native - (native + 19) / 20;
+}
+
+/* Called once for a completed submission, with CPU and GPU costs from that
+ * same frame. Configuration generations prevent old in-flight work from
+ * contaminating a newly started trial. */
+static void vk_fsr_auto_update(unsigned record_usec, unsigned gpu_usec,
+                                uint32_t generation, bool eligible)
+{
+    if (!vk_fsr_auto_enabled() || !vk_fsr_user_requested() || !eligible ||
+        generation != vk.fsr_auto_generation || vk.fsr_auto_recreate ||
+        (vk.fsr_auto_phase != VK_FSR_AUTO_WARMUP &&
+         vk.fsr_auto_phase != VK_FSR_AUTO_TRIAL))
         return;
-
-    uint64_t gpu_usec = vk.gpu_frame_usec;
-    uint64_t frame_usec = max((uint64_t)record_usec, gpu_usec);
-    if (!frame_usec || !vk.fd_valid || vk.fsr_pause_reuse ||
-        vk.fsr_paused_last_frame)
+    uint64_t frame_usec = max(record_usec, gpu_usec);
+    if (!frame_usec)
         return;
-
-    if (vk.fsr_auto_phase == VK_FSR_AUTO_WARMUP) {
-        vk_fsr_auto_add_sample(frame_usec, &vk.fsr_auto_native_usec,
-                               &vk.fsr_auto_native_min_usec,
-                               &vk.fsr_auto_native_max_usec);
-        if (++vk.fsr_auto_samples < VK_FSR_AUTO_SAMPLE_COUNT)
-            return;
-
-        vk.fsr_auto_phase = VK_FSR_AUTO_TRIAL;
-        vk.fsr_auto_trial_index = (uint32_t)vk_fsr_quality_from_string(
-            r_fsr_quality ? r_fsr_quality->string : "quality");
-        vk.fsr_auto_quality = (vk_fsr_quality_t)vk.fsr_auto_trial_index;
-        vk.fsr_auto_samples = 0;
-        vk.fsr_auto_fsr_usec = 0;
-        vk.fsr_auto_fsr_min_usec = UINT64_MAX;
-        vk.fsr_auto_fsr_max_usec = 0;
-        vk.fsr_auto_best_usec = 0;
-        vk.fsr_auto_recreate = true;
-        Com_Printf("Vulkan FSR3 auto mode: native baseline complete; "
-                   "testing FSR quality profiles from %s\n",
-                   vk_fsr_quality_name(vk.fsr_auto_quality));
-    } else if (vk.fsr_auto_phase == VK_FSR_AUTO_TRIAL) {
-        vk_fsr_auto_add_sample(frame_usec, &vk.fsr_auto_fsr_usec,
-                               &vk.fsr_auto_fsr_min_usec,
-                               &vk.fsr_auto_fsr_max_usec);
-        if (++vk.fsr_auto_samples < VK_FSR_AUTO_SAMPLE_COUNT)
-            return;
-
-        uint64_t native_avg = vk_fsr_auto_trimmed_average(
-            vk.fsr_auto_native_usec, vk.fsr_auto_native_min_usec,
-            vk.fsr_auto_native_max_usec, VK_FSR_AUTO_SAMPLE_COUNT);
-        uint64_t fsr_avg = vk_fsr_auto_trimmed_average(
-            vk.fsr_auto_fsr_usec, vk.fsr_auto_fsr_min_usec,
-            vk.fsr_auto_fsr_max_usec, VK_FSR_AUTO_SAMPLE_COUNT);
-        if (!vk.fsr_auto_best_usec || fsr_avg < vk.fsr_auto_best_usec) {
-            vk.fsr_auto_best_usec = fsr_avg;
-            vk.fsr_auto_best_quality = vk.fsr_auto_quality;
-        }
-
-        if (vk.fsr_auto_trial_index < VK_FSR_ULTRA_PERFORMANCE) {
-            vk.fsr_auto_trial_index++;
-            vk.fsr_auto_quality = (vk_fsr_quality_t)vk.fsr_auto_trial_index;
-            vk.fsr_auto_samples = 0;
-            vk.fsr_auto_fsr_usec = 0;
-            vk.fsr_auto_fsr_min_usec = UINT64_MAX;
-            vk.fsr_auto_fsr_max_usec = 0;
-            vk.fsr_auto_recreate = true;
-            Com_Printf("Vulkan FSR3 auto mode: %s=%lluus; testing %s\n",
-                       vk_fsr_quality_name(vk.fsr_auto_quality - 1),
-                       (unsigned long long)fsr_avg,
-                       vk_fsr_quality_name(vk.fsr_auto_quality));
-            return;
-        }
-
-        if (vk.fsr_auto_best_usec > native_avg + native_avg / 20) {
-            vk.fsr_auto_phase = VK_FSR_AUTO_REJECTED;
-            vk.fsr_auto_recreate = true;
-            Com_WPrintf("Vulkan FSR3 auto mode: %lluus native vs %lluus FSR; "
-                        "FSR is slower and will be disabled for this session\n",
-                        (unsigned long long)native_avg,
-                        (unsigned long long)vk.fsr_auto_best_usec);
-        } else {
-            vk.fsr_auto_phase = VK_FSR_AUTO_ACCEPTED;
-            bool quality_changed = vk.fsr_auto_quality !=
-                vk.fsr_auto_best_quality;
-            vk.fsr_auto_quality = vk.fsr_auto_best_quality;
-            if (quality_changed)
-                vk.fsr_auto_recreate = true;
-            Com_Printf("Vulkan FSR3 auto mode: %lluus native vs %lluus FSR; "
-                       "using %s\n",
-                       (unsigned long long)native_avg,
-                       (unsigned long long)vk.fsr_auto_best_usec,
-                       vk_fsr_quality_name(vk.fsr_auto_quality));
-        }
-        vk.fsr_auto_samples = 0;
+    if (vk.fsr_auto_warmup) {
+        vk.fsr_auto_warmup--;
+        return;
     }
+    vk.fsr_auto_cpu_only = !gpu_usec;
+    vk.fsr_auto_window[vk.fsr_auto_samples++] = frame_usec;
+    if (vk.fsr_auto_samples < VK_FSR_AUTO_SAMPLE_COUNT)
+        return;
+    uint64_t average = vk_fsr_auto_average(vk.fsr_auto_window,
+                                           vk.fsr_auto_samples);
+    vk.fsr_auto_samples = 0;
+    if (vk.fsr_auto_phase == VK_FSR_AUTO_WARMUP) {
+        vk.fsr_auto_native_usec = average;
+        vk.fsr_auto_phase = VK_FSR_AUTO_TRIAL;
+        vk.fsr_auto_warmup = 15;
+        vk.fsr_auto_generation++;
+        vk.fsr_auto_recreate = true;
+        Com_Printf("Vulkan FSR3 auto: native=%lluus; testing selected %s (%s)\n",
+                   (unsigned long long)average,
+                   vk_fsr_quality_name(vk.fsr_auto_quality),
+                   vk.fsr_auto_cpu_only ? "CPU-only" : "CPU/GPU");
+        return;
+    }
+    vk.fsr_auto_fsr_usec = average;
+    bool accepted = vk_fsr_auto_is_faster(vk.fsr_auto_native_usec, average);
+    vk.fsr_auto_phase = accepted ? VK_FSR_AUTO_ACCEPTED : VK_FSR_AUTO_REJECTED;
+    vk.fsr_auto_recreate = !accepted;
+    Com_Printf("Vulkan FSR3 auto: native=%lluus %s=%lluus (%s); %s\n",
+               (unsigned long long)vk.fsr_auto_native_usec,
+               vk_fsr_quality_name(vk.fsr_auto_quality),
+               (unsigned long long)average,
+               vk.fsr_auto_cpu_only ? "CPU-only" : "CPU/GPU",
+               accepted ? "keeping selected quality" :
+                          "less than 5% faster; using native");
 }
 
 static void vk_disable_frame_generation(const char *reason)
@@ -2069,6 +2063,13 @@ static const vk_texture_t *vk_texture_for_index(unsigned index, bool allow_nobin
     if (index >= MAX_RIMAGES || !vk.textures[index].descriptor_set)
         return NULL;
 
+    if (vk.frame_fsr && (vk.active_render_pass == vk.render_pass ||
+                         vk.active_render_pass == vk.fsr_motion_render_pass) &&
+        vk.textures[index].fsr_descriptor_set) {
+        vk.fsr_texture_views[index] = vk.textures[index];
+        vk.fsr_texture_views[index].descriptor_set = vk.textures[index].fsr_descriptor_set;
+        return &vk.fsr_texture_views[index];
+    }
     return &vk.textures[index];
 }
 
@@ -3530,10 +3531,14 @@ static void vk_texture_mip_barrier(VkCommandBuffer cmd, VkImage image,
 
 typedef struct {
     VkImageMemoryBarrier barriers[4];
+    VkCommandBuffer cmd;
     uint32_t count;
     VkPipelineStageFlags src_stage;
     VkPipelineStageFlags dst_stage;
 } vk_image_barrier_batch_t;
+
+static void vk_image_barrier_batch_submit(VkCommandBuffer cmd,
+                                          vk_image_barrier_batch_t *batch);
 
 static bool vk_image_barrier_batch_add(vk_image_barrier_batch_t *batch,
                                         VkImage image,
@@ -3545,9 +3550,10 @@ static bool vk_image_barrier_batch_add(vk_image_barrier_batch_t *batch,
                                         VkPipelineStageFlags src_stage,
                                         VkPipelineStageFlags dst_stage)
 {
-    if (!image || old_layout == new_layout ||
-        batch->count >= q_countof(batch->barriers))
+    if (!image || (old_layout == new_layout && new_layout != VK_IMAGE_LAYOUT_GENERAL))
         return false;
+    if (batch->count == q_countof(batch->barriers))
+        vk_image_barrier_batch_submit(batch->cmd, batch);
 
     VkImageMemoryBarrier *barrier = &batch->barriers[batch->count++];
     *barrier = (VkImageMemoryBarrier) {
@@ -3602,6 +3608,12 @@ static void vk_update_texture_descriptor_with_sampler(vk_texture_t *texture,
     };
 
     vk.UpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
+    if (texture->fsr_descriptor_set) {
+        write.dstSet = texture->fsr_descriptor_set;
+        if (sampler == vk.sampler && vk.fsr_sampler)
+            image_info.sampler = vk.fsr_sampler;
+        vk.UpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
+    }
 }
 
 static void vk_update_texture_descriptor(vk_texture_t *texture)
@@ -3754,6 +3766,14 @@ static bool vk_create_fsr_resources(void)
          vk.render_extent.width == vk.swapchain_extent.width &&
          vk.render_extent.height == vk.swapchain_extent.height))
         return true;
+
+    if (sizeof(vk_fsr_motion_push_t) >
+        vk.physical_device_properties.limits.maxPushConstantsSize) {
+        Com_WPrintf("Vulkan FSR3 motion data exceeds device push constant limit; using native resolution\n");
+        vk.fsr_swapchain_direct = false;
+        vk.render_extent = vk.swapchain_extent;
+        return true;
+    }
 
     vk.fsr3 = Q2_FSR3_Create(vk.physical_device, vk.device, vk.instance,
                              vk.GetInstanceProcAddr, vk.GetDeviceProcAddr,
@@ -4766,6 +4786,12 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
         goto fail;
     }
 
+    result = vk.AllocateDescriptorSets(vk.device, &descriptor_info,
+                                       &uploaded.fsr_descriptor_set);
+    if (result != VK_SUCCESS) {
+        vk_fail_result("vkAllocateDescriptorSets(FSR sampler)", result);
+        goto fail;
+    }
     vk_update_texture_descriptor(&uploaded);
 
     uploaded.width = width;
@@ -5039,6 +5065,9 @@ static void vk_destroy_texture_resource(vk_texture_t *texture)
     if (texture->descriptor_set && vk.descriptor_pool)
         vk.FreeDescriptorSets(vk.device, vk.descriptor_pool, 1,
                               &texture->descriptor_set);
+    if (texture->fsr_descriptor_set && vk.descriptor_pool)
+        vk.FreeDescriptorSets(vk.device, vk.descriptor_pool, 1,
+                              &texture->fsr_descriptor_set);
     if (texture->view)
         vk.DestroyImageView(vk.device, texture->view, NULL);
     if (texture->image)
@@ -5764,6 +5793,7 @@ static bool vk_create_device(void)
 
     if (vk.physical_device_features.samplerAnisotropy)
         features.samplerAnisotropy = VK_TRUE;
+    features.independentBlend = vk.physical_device_features.independentBlend;
     if (vk.physical_device_features.fillModeNonSolid)
         features.fillModeNonSolid = VK_TRUE;
     if (vk.physical_device_features.wideLines)
@@ -5891,6 +5921,7 @@ static bool vk_create_sampler(VkSampler *sampler)
         .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
         .anisotropyEnable = anisotropy > 1.0f,
         .maxAnisotropy = anisotropy,
+        .mipLodBias = sampler == &vk.fsr_sampler ? vk.fsr_sampler_bias : 0.0f,
         .maxLod = vk_texturemode_uses_mipmaps() ? VK_LOD_CLAMP_NONE : 0.0f,
     };
     VkResult result = vk.CreateSampler(vk.device, &sampler_info, NULL, sampler);
@@ -5997,6 +6028,10 @@ static void vk_texturemode_changed(cvar_t *self)
 
     vk.sampler = sampler;
     vk.sky_sampler = sky_sampler;
+    if (vk.fsr_sampler)
+        vk.DestroySampler(vk.device, vk.fsr_sampler, NULL);
+    vk.fsr_sampler = VK_NULL_HANDLE;
+    vk_create_sampler(&vk.fsr_sampler);
     vk_update_texture_descriptors();
 }
 
@@ -6085,7 +6120,8 @@ static void vk_write_timestamp(uint32_t query)
 
 static void vk_write_fsr_timestamp(uint32_t query)
 {
-    if (!vk_fsr_gpu_timing_enabled())
+    if (!vk_fsr_gpu_timing_enabled() || !vk.timestamp_query_pool ||
+        (vk.timestamp_scope_mask[vk.frame_index] & (1u << query)))
         return;
     vk_write_timestamp(query);
     vk.timestamp_scope_mask[vk.frame_index] |= (uint16_t)(1u << query);
@@ -6195,7 +6231,8 @@ static bool vk_create_frame_resources(void)
 #endif
 
     const uint32_t texture_descriptor_count =
-        MAX_RIMAGES * 2 + VK_MAX_CUBEMAPS * 6 + 17;
+        /* Base/FSR sampler pairs, cubemap faces, scratch uploads and targets. */
+        MAX_RIMAGES * 2 + VK_MAX_CUBEMAPS * 12 + 64;
     VkDescriptorPoolSize pool_sizes[3] = { {
         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount = texture_descriptor_count,
@@ -6682,6 +6719,22 @@ static void vk_destroy_swapchain(void)
         vk.DestroyPipeline(vk.device, vk.fsr_motion_color_pipeline, NULL);
         vk.fsr_motion_color_pipeline = VK_NULL_HANDLE;
     }
+    if (vk.fsr_motion_camera_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.fsr_motion_camera_pipeline, NULL);
+        vk.fsr_motion_camera_pipeline = VK_NULL_HANDLE;
+    }
+    if (vk.fsr_motion_alias_reactive_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.fsr_motion_alias_reactive_pipeline, NULL);
+        vk.fsr_motion_alias_reactive_pipeline = VK_NULL_HANDLE;
+    }
+    if (vk.fsr_motion_world_reactive_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.fsr_motion_world_reactive_pipeline, NULL);
+        vk.fsr_motion_world_reactive_pipeline = VK_NULL_HANDLE;
+    }
+    if (vk.fsr_depth_descriptor) {
+        vk.FreeDescriptorSets(vk.device, vk.descriptor_pool, 1, &vk.fsr_depth_descriptor);
+        vk.fsr_depth_descriptor = VK_NULL_HANDLE;
+    }
     if (vk.fsr_motion_pipeline_layout) {
         vk.DestroyPipelineLayout(vk.device, vk.fsr_motion_pipeline_layout, NULL);
         vk.fsr_motion_pipeline_layout = VK_NULL_HANDLE;
@@ -7115,10 +7168,10 @@ static bool vk_create_render_pass(void)
             .samples = vk.sample_count,
             .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
         },
     };
     VkAttachmentReference motion_colors[2] = {
@@ -7127,7 +7180,7 @@ static bool vk_create_render_pass(void)
     };
     VkAttachmentReference motion_depth = {
         .attachment = 2,
-        .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
     };
     VkSubpassDescription motion_subpass = {
         .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -7139,12 +7192,12 @@ static bool vk_create_render_pass(void)
         {
             .srcSubpass = VK_SUBPASS_EXTERNAL,
             .dstSubpass = 0,
-            .srcStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+            .srcStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
                             VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+            .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
                             VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-            .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-            .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+            .srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
         },
         {
             .srcSubpass = 0,
@@ -7449,6 +7502,28 @@ static bool vk_create_framebuffers(void)
                                                &vk.fsr_motion_framebuffer);
         if (result != VK_SUCCESS)
             return vk_fail_result("vkCreateFramebuffer(FSR motion)", result);
+        VkDescriptorSetAllocateInfo allocation = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = vk.descriptor_pool,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &vk.texture_set_layout,
+        };
+        result = vk.AllocateDescriptorSets(vk.device, &allocation, &vk.fsr_depth_descriptor);
+        if (result != VK_SUCCESS)
+            return vk_fail_result("vkAllocateDescriptorSets(FSR depth)", result);
+        VkDescriptorImageInfo depth_info = {
+            .sampler = vk.nearest_sampler,
+            .imageView = vk.depth_sample_view,
+            .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+        };
+        VkWriteDescriptorSet write = {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = vk.fsr_depth_descriptor,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &depth_info,
+        };
+        vk.UpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
     }
 
     if (vk.separate_presentation) {
@@ -7652,9 +7727,13 @@ static bool vk_create_fsr_motion_pipeline(VkPipeline *pipeline,
                                           size_t vert_size,
                                           bool alias)
 {
+    bool camera = vert_spv == vk_motion_camera_vert_spv;
+    bool reactive_only = vert_spv == vk_motion_color_vert_spv ||
+        pipeline == &vk.fsr_motion_alias_reactive_pipeline ||
+        pipeline == &vk.fsr_motion_world_reactive_pipeline;
     VkShaderModule vert = vk_create_shader_module(vert_spv, vert_size);
-    VkShaderModule frag = vk_create_shader_module(vk_motion_frag_spv,
-                                                  sizeof(vk_motion_frag_spv));
+    VkShaderModule frag = vk_create_shader_module(camera ? vk_motion_camera_frag_spv : vk_motion_frag_spv,
+        camera ? sizeof(vk_motion_camera_frag_spv) : sizeof(vk_motion_frag_spv));
     if (!vert || !frag) {
         if (vert)
             vk.DestroyShaderModule(vk.device, vert, NULL);
@@ -7677,37 +7756,22 @@ static bool vk_create_fsr_motion_pipeline(VkPipeline *pipeline,
             .pName = "main",
         },
     };
-    VkVertexInputBindingDescription bindings[2] = {
-        {
-            .binding = 0,
-            .stride = sizeof(vk_vertex_t),
-            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
-        },
-        {
-            .binding = 1,
-            .stride = sizeof(vk_vertex_t),
-            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
-        },
-    };
-    VkVertexInputAttributeDescription attributes[2] = {
-        {
-            .location = 0,
-            .binding = 0,
-            .format = VK_FORMAT_R32G32B32_SFLOAT,
-            .offset = offsetof(vk_vertex_t, position),
-        },
-        {
-            .location = 3,
-            .binding = 1,
-            .format = VK_FORMAT_R32G32B32_SFLOAT,
-            .offset = offsetof(vk_vertex_t, position),
-        },
+    VkVertexInputBindingDescription bindings[4];
+    for (uint32_t i = 0; i < 4; i++)
+        bindings[i] = (VkVertexInputBindingDescription) { i, sizeof(vk_vertex_t), VK_VERTEX_INPUT_RATE_VERTEX };
+    VkVertexInputAttributeDescription attributes[] = {
+        { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(vk_vertex_t, position) },
+        { 1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(vk_vertex_t, uv) },
+        { 2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(vk_vertex_t, color) },
+        { 3, 1, VK_FORMAT_R32G32B32_SFLOAT, offsetof(vk_vertex_t, position) },
+        { 4, 2, VK_FORMAT_R32G32B32_SFLOAT, offsetof(vk_vertex_t, position) },
+        { 5, 3, VK_FORMAT_R32G32B32_SFLOAT, offsetof(vk_vertex_t, position) },
     };
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount = alias ? 2 : 1,
+        .vertexBindingDescriptionCount = camera ? 0 : (alias ? 4 : 1),
         .pVertexBindingDescriptions = bindings,
-        .vertexAttributeDescriptionCount = alias ? 2 : 1,
+        .vertexAttributeDescriptionCount = camera ? 0 : (alias ? 6 : 3),
         .pVertexAttributeDescriptions = attributes,
     };
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
@@ -7750,6 +7814,28 @@ static bool vk_create_fsr_motion_pipeline(VkPipeline *pipeline,
             .colorWriteMask = VK_COLOR_COMPONENT_R_BIT,
         },
     };
+    if (reactive_only)
+        blend_attachments[0].colorWriteMask = 0;
+    if (!camera) {
+        blend_attachments[1].blendEnable = VK_TRUE;
+        blend_attachments[1].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        blend_attachments[1].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        blend_attachments[1].colorBlendOp = VK_BLEND_OP_MAX;
+        blend_attachments[1].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blend_attachments[1].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blend_attachments[1].alphaBlendOp = VK_BLEND_OP_MAX;
+    }
+    VkDynamicState dynamic_states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    if (!vk.physical_device_features.independentBlend) {
+        blend_attachments[0].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT;
+        blend_attachments[0].blendEnable = VK_FALSE;
+        blend_attachments[1] = blend_attachments[0];
+    }
+    VkPipelineDynamicStateCreateInfo dynamic = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = q_countof(dynamic_states),
+        .pDynamicStates = dynamic_states,
+    };
     VkPipelineColorBlendStateCreateInfo blend = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .attachmentCount = 2,
@@ -7757,7 +7843,7 @@ static bool vk_create_fsr_motion_pipeline(VkPipeline *pipeline,
     };
     VkPipelineDepthStencilStateCreateInfo depth = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable = VK_TRUE,
+        .depthTestEnable = !camera,
         .depthWriteEnable = VK_FALSE,
         .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
     };
@@ -7772,6 +7858,7 @@ static bool vk_create_fsr_motion_pipeline(VkPipeline *pipeline,
         .pMultisampleState = &multisample,
         .pDepthStencilState = &depth,
         .pColorBlendState = &blend,
+        .pDynamicState = &dynamic,
         .layout = vk.fsr_motion_pipeline_layout,
         .renderPass = vk.fsr_motion_render_pass,
     };
@@ -7784,7 +7871,7 @@ static bool vk_create_fsr_motion_pipeline(VkPipeline *pipeline,
 
 static bool vk_create_fsr_motion_pipelines(void)
 {
-    if (vk.sample_count != VK_SAMPLE_COUNT_1_BIT)
+    if (!vk.fsr3 || vk.sample_count != VK_SAMPLE_COUNT_1_BIT)
         return true;
 
     VkPushConstantRange push_range = {
@@ -7794,6 +7881,8 @@ static bool vk_create_fsr_motion_pipelines(void)
     };
     VkPipelineLayoutCreateInfo layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts = &vk.texture_set_layout,
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &push_range,
     };
@@ -7802,7 +7891,10 @@ static bool vk_create_fsr_motion_pipelines(void)
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreatePipelineLayout(FSR motion)", result);
 
-    if (!vk_create_fsr_motion_pipeline(&vk.fsr_motion_world_pipeline,
+    if (!vk_create_fsr_motion_pipeline(&vk.fsr_motion_camera_pipeline,
+                                       vk_motion_camera_vert_spv,
+                                       sizeof(vk_motion_camera_vert_spv), false) ||
+        !vk_create_fsr_motion_pipeline(&vk.fsr_motion_world_pipeline,
                                        vk_motion_world_vert_spv,
                                        sizeof(vk_motion_world_vert_spv), false) ||
         !vk_create_fsr_motion_pipeline(&vk.fsr_motion_alias_pipeline,
@@ -7810,7 +7902,13 @@ static bool vk_create_fsr_motion_pipelines(void)
                                        sizeof(vk_motion_alias_vert_spv), true) ||
         !vk_create_fsr_motion_pipeline(&vk.fsr_motion_color_pipeline,
                                        vk_motion_color_vert_spv,
-                                       sizeof(vk_motion_color_vert_spv), false)) {
+                                       sizeof(vk_motion_color_vert_spv), false) ||
+        !vk_create_fsr_motion_pipeline(&vk.fsr_motion_alias_reactive_pipeline,
+                                       vk_motion_alias_vert_spv,
+                                       sizeof(vk_motion_alias_vert_spv), true) ||
+        !vk_create_fsr_motion_pipeline(&vk.fsr_motion_world_reactive_pipeline,
+                                       vk_motion_world_vert_spv,
+                                       sizeof(vk_motion_world_vert_spv), false)) {
         Com_SetLastError("Couldn't create Vulkan FSR3 motion pipeline");
         return false;
     }
@@ -9484,6 +9582,9 @@ static void vk_transition_image(VkCommandBuffer cmd, uint32_t image_index,
     } else if (vk.swapchain_layouts[image_index] == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
         src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         src_access = VK_ACCESS_TRANSFER_READ_BIT;
+    } else if (vk.swapchain_layouts[image_index] == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
     } else {
         src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         src_access = 0;
@@ -9508,50 +9609,19 @@ static void vk_transition_image(VkCommandBuffer cmd, uint32_t image_index,
     vk.swapchain_layouts[image_index] = new_layout;
 }
 
+static void vk_batch_color_target(vk_image_barrier_batch_t *batch,
+                                  vk_texture_t *texture, VkImageLayout *layout,
+                                  VkImageLayout new_layout, VkAccessFlags dst_access,
+                                  VkPipelineStageFlags dst_stage);
+
 static void vk_transition_color_target(VkCommandBuffer cmd, vk_texture_t *texture,
-                                       VkImageLayout *layout,
-                                       VkImageLayout new_layout,
+                                       VkImageLayout *layout, VkImageLayout new_layout,
                                        VkAccessFlags dst_access,
                                        VkPipelineStageFlags dst_stage)
 {
-    if (!texture->image || *layout == new_layout)
-        return;
-
-    VkPipelineStageFlags src_stage;
-    VkAccessFlags src_access;
-    VkPipelineStageFlags shader_stages = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    if (vk.separate_presentation)
-        shader_stages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-
-    if (*layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
-        src_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        src_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    } else if (*layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        src_stage = shader_stages;
-        src_access = VK_ACCESS_SHADER_READ_BIT;
-    } else if (*layout == VK_IMAGE_LAYOUT_GENERAL) {
-        src_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-        src_access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    } else if (*layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-        src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
-    } else if (*layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
-        src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        src_access = VK_ACCESS_TRANSFER_READ_BIT;
-    } else {
-        src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        src_access = 0;
-    }
-
-    /* Scene inputs can be sampled by both postprocessing and FSR, including
-     * a fragment fallback after a failed compute dispatch. */
-    if (new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-        dst_stage |= shader_stages;
-    vk_texture_barrier(cmd, texture->image,
-                       *layout, new_layout,
-                       src_access, dst_access,
-                       src_stage, dst_stage);
-    *layout = new_layout;
+    vk_image_barrier_batch_t batch = { .cmd = cmd };
+    vk_batch_color_target(&batch, texture, layout, new_layout, dst_access, dst_stage);
+    vk_image_barrier_batch_submit(cmd, &batch);
 }
 
 static void vk_batch_color_target(vk_image_barrier_batch_t *batch,
@@ -9561,7 +9631,7 @@ static void vk_batch_color_target(vk_image_barrier_batch_t *batch,
                                   VkAccessFlags dst_access,
                                   VkPipelineStageFlags dst_stage)
 {
-    if (!texture->image || *layout == new_layout)
+    if (!texture->image || (*layout == new_layout && new_layout != VK_IMAGE_LAYOUT_GENERAL))
         return;
 
     VkPipelineStageFlags src_stage;
@@ -9618,7 +9688,8 @@ static void vk_batch_depth(vk_image_barrier_batch_t *batch,
         shader_stages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     if (vk.depth_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
         src_access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        src_stage = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        src_stage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
     } else if (vk.depth_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) {
         src_access = VK_ACCESS_SHADER_READ_BIT;
         src_stage = shader_stages;
@@ -9651,45 +9722,9 @@ static void vk_transition_depth(VkCommandBuffer cmd, VkImageLayout new_layout,
                                 VkAccessFlags dst_access,
                                 VkPipelineStageFlags dst_stage)
 {
-    if (!vk.depth_image || vk.depth_layout == new_layout)
-        return;
-
-    VkAccessFlags src_access = 0;
-    VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    VkPipelineStageFlags shader_stages = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    if (vk.separate_presentation)
-        shader_stages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    if (vk.depth_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
-        src_access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        src_stage = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-    } else if (vk.depth_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) {
-        src_access = VK_ACCESS_SHADER_READ_BIT;
-        src_stage = shader_stages;
-    }
-
-    if (new_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL)
-        dst_stage |= shader_stages;
-
-    VkImageMemoryBarrier barrier = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        .srcAccessMask = src_access,
-        .dstAccessMask = dst_access,
-        .oldLayout = vk.depth_layout,
-        .newLayout = new_layout,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = vk.depth_image,
-        .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT |
-                (vk_shadow_stencil_enabled() ? VK_IMAGE_ASPECT_STENCIL_BIT : 0),
-            .levelCount = 1,
-            .layerCount = 1,
-        },
-    };
-    vk.barrier_count++;
-    vk.CmdPipelineBarrier(cmd, src_stage, dst_stage, 0,
-                          0, NULL, 0, NULL, 1, &barrier);
-    vk.depth_layout = new_layout;
+    vk_image_barrier_batch_t batch = { .cmd = cmd };
+    vk_batch_depth(&batch, new_layout, dst_access, dst_stage);
+    vk_image_barrier_batch_submit(cmd, &batch);
 }
 
 static VkClearColorValue vk_color_to_clear(uint32_t color)
@@ -10614,7 +10649,11 @@ static void vk_entity_mvp_unjittered(mat4_t out, const refdef_t *fd,
     mat4_t proj, view, model, view_model;
 
     vk_entity_model_matrix(model, ent, axis);
-    vk_projection_matrix_unjittered(proj, fd->fov_x, fd->fov_y, fd->rdflags);
+    vk_entity_projection_matrix(proj, fd, ent);
+    if (vk.frame_fsr && vk.render_extent.width && vk.render_extent.height) {
+        proj[8] -= 2.0f * vk.fsr_jitter[0] / vk.render_extent.width;
+        proj[9] += 2.0f * vk.fsr_jitter[1] / vk.render_extent.height;
+    }
     vk_view_matrix(view, fd);
     vk_matrix_multiply(view_model, view, model);
     vk_matrix_multiply(out, proj, view_model);
@@ -10622,21 +10661,33 @@ static void vk_entity_mvp_unjittered(mat4_t out, const refdef_t *fd,
 
 static void vk_entity_axis(const entity_t *ent, vec3_t axis[3]);
 
+static const entity_t *vk_fsr_previous_entity(const entity_t *ent)
+{
+    if (!ent->temporal_id || vk.fsr_reset || !vk.fsr_previous_fd_valid)
+        return NULL;
+    const entity_t *found = NULL;
+    for (uint32_t i = 0; i < vk.fsr_history_count; i++) {
+        const entity_t *previous = &vk.fsr_history[i];
+        if (previous->temporal_id != ent->temporal_id ||
+            previous->temporal_generation != ent->temporal_generation ||
+            previous->model != ent->model || previous->flags != ent->flags)
+            continue;
+        if (found || Distance(ent->origin, previous->origin) > 128.0f)
+            return NULL;
+        found = previous;
+    }
+    return found;
+}
+
 static void vk_previous_entity_mvp(mat4_t out, const entity_t *ent)
 {
-    entity_t previous = *ent;
     vec3_t axis[3];
-    mat4_t model;
-
-    if (!ent->previous_valid) {
-        memcpy(out, vk.fsr_previous_viewproj, sizeof(mat4_t));
-        return;
-    }
-    VectorCopy(ent->previous_origin, previous.origin);
-    VectorCopy(ent->previous_angles, previous.angles);
-    vk_entity_axis(&previous, axis);
-    vk_entity_model_matrix(model, &previous, axis);
-    vk_matrix_multiply(out, vk.fsr_previous_viewproj, model);
+    const entity_t *previous = vk_fsr_previous_entity(ent);
+    if (!previous)
+        previous = ent;
+    vk_entity_axis(previous, axis);
+    vk_entity_mvp_unjittered(out, vk.fsr_previous_fd_valid ?
+                            &vk.fsr_previous_fd : &vk.fd, previous, axis);
 }
 
 static void vk_model_mvp(mat4_t out, const refdef_t *fd, const mat4_t model)
@@ -13709,6 +13760,35 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
                               model, &push, count_stats);
 }
 
+#if USE_MD5
+static vk_model_t *vk_alias_geometry(vk_model_t *model, const entity_t *ent,
+                                    const refdef_t *fd, vk_model_t *view)
+{
+    if (model->md5_mesh.vertices.buffer && model->md5_mesh.indices.buffer &&
+        model->md5_frame_count && model->md5_vertex_count &&
+        vk_md5_use && vk_md5_use->integer &&
+        ((ent->flags & RF_NO_LOD) || !vk_md5_distance ||
+         vk_md5_distance->value <= 0.0f ||
+         Distance(ent->origin, fd->vieworg) <= vk_md5_distance->value)) {
+        *view = *model;
+        view->mesh = model->md5_mesh;
+        view->alias_line_indices = model->md5_line_indices;
+        view->alias_line_index_count = model->md5_line_index_count;
+        // Match OpenGL: replacement geometry uses the original model's frame
+        // bounds for visibility and projected-shadow sizing.
+        view->alias_frames = model->alias_frames;
+        view->alias_batches = model->md5_batches;
+        view->skins = model->md5_skins;
+        view->frame_count = model->md5_frame_count;
+        view->alias_batch_count = model->md5_batch_count;
+        view->skin_count = model->md5_skin_count;
+        view->vertex_count = model->md5_vertex_count;
+        return view;
+    }
+    return model;
+}
+#endif
+
 static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 {
     vk_model_t *model = vk_model_for_handle(ent->model);
@@ -13727,27 +13807,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         return;
 
 #if USE_MD5
-    if (model->md5_mesh.vertices.buffer && model->md5_mesh.indices.buffer &&
-        model->md5_frame_count && model->md5_vertex_count &&
-        vk_md5_use && vk_md5_use->integer &&
-        ((ent->flags & RF_NO_LOD) || !vk_md5_distance ||
-         vk_md5_distance->value <= 0.0f ||
-         Distance(ent->origin, fd->vieworg) <= vk_md5_distance->value)) {
-        md5_view = *model;
-        md5_view.mesh = model->md5_mesh;
-        md5_view.alias_line_indices = model->md5_line_indices;
-        md5_view.alias_line_index_count = model->md5_line_index_count;
-        // Match OpenGL: replacement geometry uses the original model's frame
-        // bounds for visibility and projected-shadow sizing.
-        md5_view.alias_frames = model->alias_frames;
-        md5_view.alias_batches = model->md5_batches;
-        md5_view.skins = model->md5_skins;
-        md5_view.frame_count = model->md5_frame_count;
-        md5_view.alias_batch_count = model->md5_batch_count;
-        md5_view.skin_count = model->md5_skin_count;
-        md5_view.vertex_count = model->md5_vertex_count;
-        model = &md5_view;
-    }
+    model = vk_alias_geometry(model, ent, fd, &md5_view);
 #endif
 
     if (vk.drawing_bloom && !bloom_only && !bloom_shell &&
@@ -13847,6 +13907,21 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp, false);
 }
 
+/* Replay the submitted coverage, including randomized beam geometry, without
+ * running the effect simulation a second time. These meshes outlive the frame. */
+static void vk_capture_fsr_reactive(const vk_mesh_t *mesh, const mat4_t mvp,
+                                  VkDescriptorSet texture, float alpha)
+{
+    if (!vk.frame_fsr || vk.fsr_motion_fast || vk.drawing_bloom ||
+        !texture || vk.fsr_reactive_draw_count == q_countof(vk.fsr_reactive_draws))
+        return;
+    unsigned i = vk.fsr_reactive_draw_count++;
+    memcpy(vk.fsr_reactive_draws[i].mvp, mvp, sizeof(mat4_t));
+    vk.fsr_reactive_draws[i].mesh = mesh;
+    vk.fsr_reactive_draws[i].texture = texture;
+    vk.fsr_reactive_draws[i].alpha = alpha;
+}
+
 static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
 {
     vk_model_t *model = vk_model_for_handle(ent->model);
@@ -13920,6 +13995,8 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+    vk_capture_fsr_reactive(&vk.sprite_quad, mvp, texture->descriptor_set,
+                           push.color[3]);
     c.trisDrawn += vk.sprite_quad.index_count / 3;
     vk_count_batch3d();
     vk_draw_fx_outlines(&vk.sprite_quad, &vk.sprite_quad_line_indices,
@@ -14092,6 +14169,8 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+    vk_capture_fsr_reactive(&vk.sprite_quad, mvp, texture->descriptor_set,
+                           push.color[3]);
     c.trisDrawn += vk.sprite_quad.index_count / 3;
     vk_count_batch3d();
     vk_draw_fx_outlines(&vk.sprite_quad, &vk.sprite_quad_line_indices,
@@ -16475,6 +16554,12 @@ static void vk_draw_particles(const refdef_t *fd)
         return;
     }
     vk.particle_vertex_count = vertex_count;
+    vk.particle_motion_offset = offset;
+    vk.particle_motion_ranges[0] = 0;
+    vk.particle_motion_ranges[1] = shockwave_first_vertex;
+    vk.particle_motion_ranges[2] = impact_first_vertex;
+    vk.particle_motion_ranges[3] = electric_first_vertex;
+    vk.particle_motion_ranges[4] = vertex_count;
 
     VkDeviceSize size = vertex_count * sizeof(vk.particle_batch[0]);
     memcpy((byte *)vk.particle_vertices_mapped + offset, vk.particle_batch, size);
@@ -16589,6 +16674,8 @@ static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
     vk_bind_index_buffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+    vk_capture_fsr_reactive(&vk.sprite_quad, mvp, vk.beam_texture.descriptor_set,
+                           color[3]);
     c.trisDrawn += vk.sprite_quad.index_count / 3;
     vk_count_batch3d();
     vk_draw_fx_outlines(&vk.sprite_quad, &vk.sprite_quad_line_indices,
@@ -16648,6 +16735,8 @@ static void vk_draw_poly_beam_segment(const vec3_t start, const vec3_t end,
                          VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(push), &push);
     vk.CmdDrawIndexed(cmd, vk.beam_cylinder.index_count, 1, 0, 0, 0);
+    vk_capture_fsr_reactive(&vk.beam_cylinder, mvp, vk.textures[0].descriptor_set,
+                           color[3]);
     c.trisDrawn += vk.beam_cylinder.index_count / 3;
     vk_count_batch3d();
     vk_draw_fx_outlines(&vk.beam_cylinder, &vk.beam_cylinder_line_indices,
@@ -19125,27 +19214,17 @@ static void vk_log_perf_stats(void)
                    vk.fsr_gpu_upscale_usec,
                    vk.fsr_gpu_frame_generation_usec,
                    vk.fsr_gpu_presentation_usec);
-        Com_Printf("VK FSR3 perf: auto=%s phase=%d quality=%s motion=%s native=%lluus fsr=%lluus best=%lluus samples=%u\n",
+        Com_Printf("VK FSR3 perf: auto=%s phase=%d quality=%s motion=%s native=%lluus fsr=%lluus samples=%u warmup=%u timing=%s mipbias=%.2f\n",
                    vk_fsr_auto_enabled() ? "yes" : "no",
                    vk.fsr_auto_phase,
                    vk_fsr_quality_name(vk.fsr_auto_quality),
-                   vk.fsr_motion_fast ? "fast" : "full",
-                   (unsigned long long)(vk.fsr_auto_samples &&
-                                        vk.fsr_auto_phase == VK_FSR_AUTO_WARMUP ?
-                                        vk_fsr_auto_trimmed_average(
-                                            vk.fsr_auto_native_usec,
-                                            vk.fsr_auto_native_min_usec,
-                                            vk.fsr_auto_native_max_usec,
-                                            vk.fsr_auto_samples) : 0),
-                   (unsigned long long)(vk.fsr_auto_samples &&
-                                        vk.fsr_auto_phase == VK_FSR_AUTO_TRIAL ?
-                                        vk_fsr_auto_trimmed_average(
-                                            vk.fsr_auto_fsr_usec,
-                                            vk.fsr_auto_fsr_min_usec,
-                                            vk.fsr_auto_fsr_max_usec,
-                                            vk.fsr_auto_samples) : 0),
-                   (unsigned long long)vk.fsr_auto_best_usec,
-                   vk.fsr_auto_samples);
+                   vk.fsr_motion_fast ? "fast" :
+                       (r_fsr_motion && !Q_stricmp(r_fsr_motion->string, "full") ? "full" : "auto"),
+                   (unsigned long long)vk.fsr_auto_native_usec,
+                   (unsigned long long)vk.fsr_auto_fsr_usec,
+                   vk.fsr_auto_samples, vk.fsr_auto_warmup,
+                   vk.timestamp_query_pool ? "CPU/GPU" : "CPU-only",
+                   vk.fsr_sampler_bias);
     }
 }
 
@@ -19244,7 +19323,8 @@ bool VKR_Init(bool total)
     r_fsr_quality = Cvar_Get("r_fsr_quality", "quality", CVAR_ARCHIVE);
     r_fsr_sharpness = Cvar_Get("r_fsr_sharpness", "0", CVAR_ARCHIVE);
     r_fsr_auto = Cvar_Get("r_fsr_auto", "1", CVAR_ARCHIVE);
-    r_fsr_motion = Cvar_Get("r_fsr_motion", "fast", CVAR_ARCHIVE);
+    r_fsr_motion = Cvar_Get("r_fsr_motion", "auto", CVAR_ARCHIVE);
+    r_fsr_mip_bias = Cvar_Get("r_fsr_mip_bias", "auto", CVAR_ARCHIVE);
     r_fsr_frame_generation = Cvar_Get("r_fsr_frame_generation", "0", CVAR_ARCHIVE);
     vk_fsr_auto_reset();
     vk_perf_stats = Cvar_Get("vk_perf_stats", "0", 0);
@@ -19549,6 +19629,10 @@ void VKR_Shutdown(bool total)
         vk.DestroySampler(vk.device, vk.sampler, NULL);
         vk.sampler = VK_NULL_HANDLE;
     }
+    if (vk.fsr_sampler) {
+        vk.DestroySampler(vk.device, vk.fsr_sampler, NULL);
+        vk.fsr_sampler = VK_NULL_HANDLE;
+    }
     if (vk.sky_sampler) {
         vk.DestroySampler(vk.device, vk.sky_sampler, NULL);
         vk.sky_sampler = VK_NULL_HANDLE;
@@ -19627,6 +19711,11 @@ void VKR_Shutdown(bool total)
 
 void VKR_BeginRegistration(const char *map)
 {
+    vk_fsr_auto_reset();
+    vk.fsr_reset = true;
+    vk.fsr_previous_fd_valid = false;
+    vk.fsr_previous_viewproj_valid = false;
+    vk.fsr_history_count = 0;
     r_registration_sequence++;
     memset(vk.flare_fracs, 0, sizeof(vk.flare_fracs));
     memset(vk.flare_times, 0, sizeof(vk.flare_times));
@@ -19801,13 +19890,15 @@ void VKR_RenderFrame(const refdef_t *fd)
     }
     if (vk.frame_fsr && vk.fsr_previous_fd_valid) {
         bool camera_cut = Distance(vk.fd.vieworg, vk.fsr_previous_fd.vieworg) > 128.0f ||
-            fabsf(vk.fd.viewangles[0] - vk.fsr_previous_fd.viewangles[0]) > 45.0f ||
-            fabsf(vk.fd.viewangles[1] - vk.fsr_previous_fd.viewangles[1]) > 45.0f ||
-            fabsf(vk.fd.viewangles[2] - vk.fsr_previous_fd.viewangles[2]) > 45.0f ||
+            fabsf(remainderf(vk.fd.viewangles[0] - vk.fsr_previous_fd.viewangles[0], 360.0f)) > 45.0f ||
+            fabsf(remainderf(vk.fd.viewangles[1] - vk.fsr_previous_fd.viewangles[1], 360.0f)) > 45.0f ||
+            fabsf(remainderf(vk.fd.viewangles[2] - vk.fsr_previous_fd.viewangles[2], 360.0f)) > 45.0f ||
             fabsf(vk.fd.fov_x - vk.fsr_previous_fd.fov_x) > 10.0f ||
             fabsf(vk.fd.fov_y - vk.fsr_previous_fd.fov_y) > 10.0f ||
             vk.fd.width != vk.fsr_previous_fd.width ||
             vk.fd.height != vk.fsr_previous_fd.height ||
+            vk.fd.x != vk.fsr_previous_fd.x ||
+            vk.fd.y != vk.fsr_previous_fd.y ||
             vk.fd.rdflags != vk.fsr_previous_fd.rdflags ||
             vk.fd.frametime > 0.25f;
         if (camera_cut) {
@@ -19816,6 +19907,11 @@ void VKR_RenderFrame(const refdef_t *fd)
         }
     }
     if (vk.frame_fsr && vk.fsr3) {
+        vk.fsr_timing_discontinuity = vk.fsr_reset;
+        vk.fsr_pending_history_count = min((uint32_t)max(fd->num_entities, 0), MAX_ENTITIES);
+        if (vk.fsr_pending_history_count)
+            memcpy(vk.fsr_pending_history, fd->entities,
+                   vk.fsr_pending_history_count * sizeof(entity_t));
         vk.fsr_jitter_ready = Q2_FSR3_GetJitter(vk.fsr3,
                                                  &vk.fsr_jitter[0],
                                                  &vk.fsr_jitter[1]);
@@ -19892,7 +19988,7 @@ void VKR_RenderFrame(const refdef_t *fd)
         vk_draw_bloom_only_entities(fd);
     }
     vk_write_fsr_timestamp(VK_TIMESTAMP_SCENE_END);
-    if (vk.frame_fsr && !vk.fsr_motion_fast)
+    if (vk.frame_fsr)
         vk_render_fsr_motion(fd);
     vk_finish_postprocess_scene();
 }
@@ -20557,42 +20653,97 @@ static void vk_composite_ssr(void)
                           &vk.ssr_resolve_texture, white);
 }
 
-static void vk_draw_fsr_motion_world(const refdef_t *fd)
+static void vk_fsr_motion_parameters(vk_fsr_motion_push_t *push, const refdef_t *fd)
 {
-    if (!fd || !vk.fsr_motion_world_pipeline ||
-        !vk.world.mesh.vertices.buffer || !vk.world.mesh.indices.buffer ||
-        !vk.world.mesh.index_count)
+    float sx = (float)vk.render_extent.width / vk.swapchain_extent.width;
+    float sy = (float)vk.render_extent.height / vk.swapchain_extent.height;
+    int x = Q_clip(Q_rint(fd->x * sx), 0, (int)vk.render_extent.width);
+    int y = Q_clip(Q_rint(fd->y * sy), 0, (int)vk.render_extent.height);
+    int x2 = Q_clip(Q_rint((fd->x + max(fd->width, 1)) * sx), x, (int)vk.render_extent.width);
+    int y2 = Q_clip(Q_rint((fd->y + max(fd->height, 1)) * sy), y, (int)vk.render_extent.height);
+    Vector4Set(push->viewport, x, y, max(x2 - x, 1), max(y2 - y, 1));
+    push->motion_scale[0] = 0.5f * push->viewport[2] / vk.render_extent.width;
+    push->motion_scale[1] = 0.5f * push->viewport[3] / vk.render_extent.height;
+    push->jitter[0] = -2.0f * vk.fsr_jitter[0] / vk.render_extent.width;
+    push->jitter[1] = 2.0f * vk.fsr_jitter[1] / vk.render_extent.height;
+    push->alpha = 1.0f;
+}
+
+/* Static geometry normally needs only reactive coverage. Full mode is retained
+ * as a geometry reference; moving inline models always override camera motion. */
+static void vk_draw_fsr_motion_world(const refdef_t *fd, const entity_t *ent, bool opaque)
+{
+    if (!vk.world.cache || !vk.world.mesh.index_count)
         return;
-
-    mat4_t current_mvp;
-    vk_viewproj_matrix(current_mvp, fd, false);
-
+    const mmodel_t *model = NULL;
     vk_fsr_motion_push_t push = { 0 };
-    memcpy(push.mvp, current_mvp, sizeof(push.mvp));
-    if (vk.fsr_previous_viewproj_valid)
-        memcpy(push.previous_mvp, vk.fsr_previous_viewproj,
-               sizeof(push.previous_mvp));
-    else
-        memcpy(push.previous_mvp, current_mvp, sizeof(push.previous_mvp));
-    push.reactive = 0.0f;
-
+    vk_fsr_motion_parameters(&push, fd);
+    if (ent) {
+        int index = ~ent->model;
+        if (index < 1 || index >= vk.world.cache->nummodels)
+            return;
+        model = &vk.world.cache->models[index];
+        vec3_t axis[3];
+        vk_entity_axis(ent, axis);
+        if (vk_bmodel_culled(model, ent, axis))
+            return;
+        vk_entity_mvp_unjittered(push.mvp, fd, ent, axis);
+        vk_previous_entity_mvp(push.previous_mvp, ent);
+    } else {
+        vk_viewproj_matrix(push.mvp, fd, false);
+        memcpy(push.previous_mvp, vk.fsr_previous_viewproj_valid && !vk.fsr_reset ?
+               vk.fsr_previous_viewproj : push.mvp, sizeof(mat4_t));
+    }
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                       vk.fsr_motion_world_pipeline);
-    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.world.mesh.vertices.buffer,
-                            &offset);
-    vk.CmdBindIndexBuffer(cmd, vk.world.mesh.indices.buffer, 0,
-                          VK_INDEX_TYPE_UINT32);
-    vk.CmdPushConstants(cmd, vk.fsr_motion_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
-    vk.CmdDrawIndexed(cmd, vk.world.mesh.index_count, 1, 0, 0, 0);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.world.mesh.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.world.mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    for (uint32_t i = 0; i < vk.world.face_count; i++) {
+        const vk_world_face_t *draw = &vk.world.faces[i];
+        mface_t *face = draw->face;
+        if (!face || !face->texinfo || !draw->index_count)
+            continue;
+        if (face->drawflags & (SURF_SKY | SURF_NODRAW))
+            continue;
+        if (model) {
+            if (face < model->firstface || face >= model->firstface + model->numfaces)
+                continue;
+        } else if (face->drawframe != vk.world.drawframe ||
+                   vk_world_face_backfacing(face, fd->vieworg)) {
+            continue;
+        }
+        bool translucent = !vk_world_face_in_pass(face, VK_WORLD_OPAQUE) ||
+            (ent && (ent->flags & RF_TRANSLUCENT));
+        if (!opaque && !translucent)
+            continue;
+        if (translucent && !vk.physical_device_features.independentBlend)
+            continue;
+        const image_t *image = vk_world_face_image(face, fd, ent);
+        const vk_texture_t *texture = image ? vk_texture_for_index(image->texnum, true) : NULL;
+        if (!texture)
+            continue;
+        push.alpha = ent && (ent->flags & RF_TRANSLUCENT) ? ent->alpha :
+            ((face->drawflags & SURF_TRANS33) ? 0.33f :
+             (face->drawflags & SURF_TRANS66) ? 0.66f : 1.0f);
+        push.reactive = translucent || (ent && !vk_fsr_previous_entity(ent)) ? 1.0f : 0.0f;
+        push.viewport[0] = (image->flags & IF_TRANSPARENT) ? 0.666f : 0.0f;
+        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           translucent ? vk.fsr_motion_world_reactive_pipeline :
+                                         vk.fsr_motion_world_pipeline);
+        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 vk.fsr_motion_pipeline_layout, 0, 1,
+                                 &texture->descriptor_set, 0, NULL);
+        vk.CmdPushConstants(cmd, vk.fsr_motion_pipeline_layout,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                            0, sizeof(push), &push);
+        vk.CmdDrawIndexed(cmd, draw->index_count, 1, draw->first_index, 0, 0);
+    }
 }
 
 static void vk_draw_fsr_motion_aliases(const refdef_t *fd)
 {
     if (!fd || !vk.fsr_motion_alias_pipeline ||
+        (vk_drawentities && !vk_drawentities->integer) ||
         !fd->entities || fd->num_entities <= 0)
         return;
 
@@ -20601,6 +20752,13 @@ static void vk_draw_fsr_motion_aliases(const refdef_t *fd)
         const entity_t *ent = &fd->entities[i];
         if (!ent->model || (ent->model & BIT(31)))
             continue;
+        if ((ent->flags & (RF_EFFECT_ONLY | RF_BEAM | RF_FLARE | RF_BLOOM_ONLY)) ||
+            !R_EntityVisibleAcrossLiquids(vk.world.cache, fd, ent))
+            continue;
+
+        if ((ent->flags & RF_TRANSLUCENT) &&
+            !vk.physical_device_features.independentBlend)
+            continue;
 
         vk_model_t *model = vk_model_for_handle(ent->model);
         if (!model || model->type != VK_MODEL_ALIAS ||
@@ -20608,18 +20766,36 @@ static void vk_draw_fsr_motion_aliases(const refdef_t *fd)
             !model->alias_batch_count)
             continue;
 
+        const entity_t *previous = vk_fsr_previous_entity(ent);
+#if USE_MD5
+        vk_model_t current_view, previous_view;
+        vk_model_t *base = model;
+        model = vk_alias_geometry(base, ent, fd, &current_view);
+        if (previous && vk_alias_geometry(base, previous, &vk.fsr_previous_fd,
+                                         &previous_view)->mesh.vertices.buffer !=
+                        model->mesh.vertices.buffer)
+            previous = NULL;
+#endif
         vk_alias_lerp_t lerp = vk_alias_lerp_for_entity(model, ent, fd);
-        VkDeviceSize offsets[2] = {
+        vk_alias_lerp_t previous_lerp = previous ?
+            vk_alias_lerp_for_entity(model, previous, &vk.fsr_previous_fd) : lerp;
+        VkDeviceSize offsets[4] = {
             (VkDeviceSize)lerp.frame * model->vertex_count * sizeof(vk_vertex_t),
             (VkDeviceSize)lerp.oldframe * model->vertex_count * sizeof(vk_vertex_t),
+            (VkDeviceSize)previous_lerp.frame * model->vertex_count * sizeof(vk_vertex_t),
+            (VkDeviceSize)previous_lerp.oldframe * model->vertex_count * sizeof(vk_vertex_t),
         };
-        VkBuffer buffers[2] = {
+        VkBuffer buffers[4] = {
+            model->mesh.vertices.buffer,
+            model->mesh.vertices.buffer,
             model->mesh.vertices.buffer,
             model->mesh.vertices.buffer,
         };
         vec3_t axis[3];
         mat4_t current_mvp, previous_mvp;
         vk_entity_axis(ent, axis);
+        if (vk_alias_model_culled(model, ent, axis, lerp.frame, lerp.oldframe))
+            continue;
         vk_entity_mvp_unjittered(current_mvp, fd, ent, axis);
 
         if (vk.fsr_previous_viewproj_valid)
@@ -20628,14 +20804,19 @@ static void vk_draw_fsr_motion_aliases(const refdef_t *fd)
             memcpy(previous_mvp, current_mvp, sizeof(previous_mvp));
 
         vk_fsr_motion_push_t push = { 0 };
+        vk_fsr_motion_parameters(&push, fd);
         memcpy(push.mvp, current_mvp, sizeof(push.mvp));
         memcpy(push.previous_mvp, previous_mvp, sizeof(push.previous_mvp));
         push.backlerp = lerp.backlerp;
-        push.reactive = (ent->flags & RF_TRANSLUCENT) ? 1.0f : 0.0f;
+        push.previous_backlerp = previous_lerp.backlerp;
+        push.reactive = !previous || (ent->flags & RF_TRANSLUCENT) ? 1.0f : 0.0f;
+        push.alpha = (ent->flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f;
+        push.viewport[1] = (ent->flags & RF_DEPTHHACK) ? 0.25f : 1.0f;
 
         vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                           vk.fsr_motion_alias_pipeline);
-        vk.CmdBindVertexBuffers(cmd, 0, 2, buffers, offsets);
+                           (ent->flags & RF_TRANSLUCENT) ?
+                           vk.fsr_motion_alias_reactive_pipeline : vk.fsr_motion_alias_pipeline);
+        vk.CmdBindVertexBuffers(cmd, 0, 4, buffers, offsets);
         vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0,
                               VK_INDEX_TYPE_UINT32);
         vk.CmdPushConstants(cmd, vk.fsr_motion_pipeline_layout,
@@ -20643,6 +20824,19 @@ static void vk_draw_fsr_motion_aliases(const refdef_t *fd)
                             0, sizeof(push), &push);
         for (uint32_t batch = 0; batch < model->alias_batch_count; batch++) {
             const vk_alias_batch_t *draw = &model->alias_batches[batch];
+            const image_t *skin = vk_skin_for_alias_batch(model, draw, ent);
+            if (!skin)
+                continue;
+            const vk_texture_t *texture = vk_texture_for_index(skin->texnum, true);
+            if (!texture)
+                continue;
+            push.viewport[0] = (skin->flags & IF_TRANSPARENT) ? 0.666f : 0.0f;
+            vk.CmdPushConstants(cmd, vk.fsr_motion_pipeline_layout,
+                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                0, sizeof(push), &push);
+            vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                     vk.fsr_motion_pipeline_layout, 0, 1,
+                                     &texture->descriptor_set, 0, NULL);
             if (draw->index_count)
                 vk.CmdDrawIndexed(cmd, draw->index_count, 1,
                                   draw->first_index, 0, 0);
@@ -20666,9 +20860,11 @@ static void vk_draw_fsr_motion_particles(const refdef_t *fd)
     else
         memcpy(push.previous_mvp, current_mvp, sizeof(push.previous_mvp));
     push.reactive = 1.0f;
+    vk_fsr_motion_parameters(&push, fd);
+    push.viewport[0] = 0.0f;
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
-    VkDeviceSize offset = 0;
+    VkDeviceSize offset = vk.particle_motion_offset;
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                        vk.fsr_motion_color_pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.particle_vertices.buffer,
@@ -20676,7 +20872,43 @@ static void vk_draw_fsr_motion_particles(const refdef_t *fd)
     vk.CmdPushConstants(cmd, vk.fsr_motion_pipeline_layout,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(push), &push);
-    vk.CmdDraw(cmd, vk.particle_vertex_count, 1, 0, 0);
+    const vk_texture_t *textures[] = { &vk.particle_texture,
+        &vk.shockwave_texture, &vk.impact_texture, &vk.beam_texture };
+    for (unsigned i = 0; i < q_countof(textures); i++) {
+        uint32_t first = vk.particle_motion_ranges[i];
+        uint32_t count = vk.particle_motion_ranges[i + 1] - first;
+        if (!count)
+            continue;
+        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                vk.fsr_motion_pipeline_layout, 0, 1,
+                                &textures[i]->descriptor_set, 0, NULL);
+        vk.CmdDraw(cmd, count, 1, first, 0);
+    }
+}
+
+static void vk_draw_fsr_reactive(void)
+{
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                       vk.fsr_motion_world_reactive_pipeline);
+    for (unsigned i = 0; i < vk.fsr_reactive_draw_count; i++) {
+        const vk_mesh_t *mesh = vk.fsr_reactive_draws[i].mesh;
+        vk_fsr_motion_push_t push = { 0 };
+        memcpy(push.mvp, vk.fsr_reactive_draws[i].mvp, sizeof(mat4_t));
+        memcpy(push.previous_mvp, push.mvp, sizeof(mat4_t));
+        push.alpha = vk.fsr_reactive_draws[i].alpha;
+        push.reactive = 1.0f;
+        vk.CmdBindVertexBuffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
+        vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                vk.fsr_motion_pipeline_layout, 0, 1,
+                                &vk.fsr_reactive_draws[i].texture, 0, NULL);
+        vk.CmdPushConstants(cmd, vk.fsr_motion_pipeline_layout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(push), &push);
+        vk.CmdDrawIndexed(cmd, mesh->index_count, 1, 0, 0, 0);
+    }
 }
 
 static void vk_render_fsr_motion(const refdef_t *fd)
@@ -20694,6 +20926,11 @@ static void vk_render_fsr_motion(const refdef_t *fd)
         vk_reset_bind_cache();
     }
 
+    vk_transition_depth(cmd, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
     VkClearValue clear[3] = {
         { .color = { .float32 = { 0, 0, 0, 0 } } },
         { .color = { .float32 = { 0, 0, 0, 0 } } },
@@ -20715,9 +20952,36 @@ static void vk_render_fsr_motion(const refdef_t *fd)
     vk.active_target_extent = vk.render_extent;
     vk_set_3d_viewport(fd);
 
-    vk_draw_fsr_motion_world(fd);
-    vk_draw_fsr_motion_aliases(fd);
-    vk_draw_fsr_motion_particles(fd);
+    vk_fsr_motion_push_t camera = { 0 };
+    vk_viewproj_matrix(camera.mvp, fd, false);
+    memcpy(camera.previous_mvp, vk.fsr_previous_viewproj_valid && !vk.fsr_reset ?
+           vk.fsr_previous_viewproj : camera.mvp, sizeof(mat4_t));
+    vk_fsr_motion_parameters(&camera, fd);
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.fsr_motion_camera_pipeline);
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.fsr_motion_pipeline_layout, 0, 1,
+                             &vk.fsr_depth_descriptor, 0, NULL);
+    vk.CmdPushConstants(cmd, vk.fsr_motion_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(camera), &camera);
+    vk.CmdDraw(cmd, 3, 1, 0, 0);
+    if (!vk.fsr_motion_fast) {
+        if (!(fd->rdflags & RDF_NOWORLDMODEL) &&
+            (!vk_drawworld || vk_drawworld->integer))
+            vk_draw_fsr_motion_world(fd, NULL,
+                r_fsr_motion && !Q_stricmp(r_fsr_motion->string, "full"));
+        for (int i = 0; i < fd->num_entities; i++)
+            if ((!vk_drawentities || vk_drawentities->integer) &&
+                (fd->entities[i].model & BIT(31)) &&
+                !(fd->entities[i].flags & (RF_EFFECT_ONLY | RF_BLOOM_ONLY)) &&
+                R_EntityVisibleAcrossLiquids(vk.world.cache, fd, &fd->entities[i]))
+                vk_draw_fsr_motion_world(fd, &fd->entities[i], true);
+        vk_draw_fsr_motion_aliases(fd);
+        if (vk.physical_device_features.independentBlend) {
+            vk_draw_fsr_motion_particles(fd);
+            vk_draw_fsr_reactive();
+        }
+    }
 
     vk.CmdEndRenderPass(cmd);
     vk.render_pass_active = false;
@@ -20728,8 +20992,6 @@ static void vk_render_fsr_motion(const refdef_t *fd)
     vk.fsr_motion_record_usec = vk_time_usec() - motion_start;
     vk_write_fsr_timestamp(VK_TIMESTAMP_MOTION_END);
 
-    vk_viewproj_matrix(vk.fsr_previous_viewproj, fd, false);
-    vk.fsr_previous_viewproj_valid = true;
 }
 
 static void vk_clear_fsr_motion_targets(VkCommandBuffer cmd, bool clear_reactive)
@@ -20890,7 +21152,7 @@ static bool vk_dispatch_fsr(void)
         vk_reset_bind_cache();
     }
 
-    vk_image_barrier_batch_t pre_fsr_barriers = { 0 };
+    vk_image_barrier_batch_t pre_fsr_barriers = { .cmd = cmd };
     if (vk.fsr_scene_direct)
         vk_batch_color_target(&pre_fsr_barriers, &vk.scene_texture,
                               &vk.scene_layout,
@@ -21038,6 +21300,7 @@ static bool vk_dispatch_fsr(void)
             vk_disable_frame_generation("frame-generation dispatch failed");
     }
     if (direct_output) {
+        vk_write_fsr_timestamp(VK_TIMESTAMP_PRESENT_BEGIN);
         vk_transition_image(cmd, vk.current_image,
                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -21059,12 +21322,6 @@ static bool vk_dispatch_fsr(void)
         cmd, presentation_texture, presentation_layout);
     /* The non-generated FSR output is also retained for pause reuse. The
      * frame-generation output is only the current presentation image. */
-    if (generated_frame)
-        vk_transition_color_target(cmd, &vk.fsr_output_texture,
-                                   &vk.fsr_output_layout,
-                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                   VK_ACCESS_SHADER_READ_BIT,
-                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     if (!presentation_copy)
         vk_transition_color_target(cmd, presentation_texture,
                                    presentation_layout,
@@ -21357,8 +21614,8 @@ static void vk_finish_postprocess_scene(void)
 
 void VKR_BeginFrame(void)
 {
-    unsigned previous_record_usec = vk.record_usec;
-    vk_fsr_auto_update(previous_record_usec);
+    vk.fsr_timing_discontinuity = false;
+    vk.fsr_reactive_draw_count = 0;
     memset(&c, 0, sizeof(c));
     vk.wait_usec = 0;
     vk.acquire_usec = 0;
@@ -21398,17 +21655,21 @@ void VKR_BeginFrame(void)
     if ((r_fsr && r_fsr->modified) ||
         (r_fsr_auto && r_fsr_auto->modified) ||
         (r_fsr_motion && r_fsr_motion->modified) ||
+        (r_fsr_mip_bias && r_fsr_mip_bias->modified) ||
+        (r_fsr_sharpness && r_fsr_sharpness->modified) ||
         (r_fsr_quality && r_fsr_quality->modified) ||
         (r_fsr_frame_generation && r_fsr_frame_generation->modified)) {
-        if ((r_fsr && r_fsr->modified) ||
-            (r_fsr_auto && r_fsr_auto->modified))
-            vk_fsr_auto_reset();
+        vk_fsr_auto_reset();
         if (r_fsr)
             r_fsr->modified = false;
         if (r_fsr_auto)
             r_fsr_auto->modified = false;
         if (r_fsr_motion)
             r_fsr_motion->modified = false;
+        if (r_fsr_mip_bias)
+            r_fsr_mip_bias->modified = false;
+        if (r_fsr_sharpness)
+            r_fsr_sharpness->modified = false;
         if (r_fsr_quality)
             r_fsr_quality->modified = false;
         if (r_fsr_frame_generation)
@@ -21419,6 +21680,7 @@ void VKR_BeginFrame(void)
     }
 
     if (gl_bloom && gl_bloom->modified) {
+        vk_fsr_auto_reset();
         bool enable_mrt = gl_bloom->integer > 0 ||
             (vk_raytracing && vk_raytracing->integer && vk_rt_reflections &&
              vk_rt_reflections->value > 0.001f);
@@ -21428,6 +21690,7 @@ void VKR_BeginFrame(void)
             return;
     }
     if (vk_rt_reflections && vk_rt_reflections->modified) {
+        vk_fsr_auto_reset();
         bool enable_mrt = (gl_bloom && gl_bloom->integer > 0) ||
             (vk_raytracing && vk_raytracing->integer &&
              vk_rt_reflections->value > 0.001f);
@@ -21437,6 +21700,7 @@ void VKR_BeginFrame(void)
             return;
     }
     if (vk_bloom_downsample && vk_bloom_downsample->modified) {
+        vk_fsr_auto_reset();
         vk_bloom_downsample->modified = false;
         if (vk.mrt_bloom &&
             !vk_recreate_swapchain("bloom downsample change"))
@@ -21445,6 +21709,21 @@ void VKR_BeginFrame(void)
 
     VkSemaphore image_available = vk.image_available[vk.frame_index];
     VkFence frame_fence = vk.frame_fence[vk.frame_index];
+
+    float bias = 0.0f;
+    if (vk.separate_presentation && vk.render_extent.width && vk.swapchain_extent.width) {
+        bias = r_fsr_mip_bias && Q_stricmp(r_fsr_mip_bias->string, "auto") ?
+            r_fsr_mip_bias->value :
+            log2f((float)vk.render_extent.width / vk.swapchain_extent.width) - 1.0f;
+        if (!isfinite(bias))
+            bias = 0.0f;
+        float limit = vk.physical_device_properties.limits.maxSamplerLodBias;
+        bias = Q_clipf(bias, -limit, limit);
+    }
+    if (vk.fsr_sampler_bias != bias || !vk.fsr_sampler) {
+        vk.fsr_sampler_bias = bias;
+        vk_texturemode_changed(NULL);
+    }
 
     if (!vk.swapchain || !frame_fence || !image_available || vk.frame_active)
         return;
@@ -21464,6 +21743,9 @@ void VKR_BeginFrame(void)
         if (vk_read_timestamp_pair(first + VK_TIMESTAMP_FRAME_BEGIN,
                                    &elapsed)) {
             vk.gpu_frame_usec = elapsed;
+            vk_fsr_auto_update(vk.timing_record_usec[vk.frame_index], elapsed,
+                               vk.timing_generation[vk.frame_index],
+                               vk.timing_eligible[vk.frame_index]);
             uint16_t mask = vk.timestamp_scope_mask[vk.frame_index];
             vk.gpu_scene_usec = 0;
             if ((mask & (1u << VK_TIMESTAMP_SCENE_BEGIN)) &&
@@ -21905,6 +22187,8 @@ void VKR_EndFrame(void)
     VkFence frame_fence = vk.frame_fence[vk.frame_index];
 
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    if (vk.fsr_presentation_copy)
+        wait_stage |= VK_PIPELINE_STAGE_TRANSFER_BIT;
     if (vk.fsr_swapchain_direct && (vk.frame_fsr || vk.fsr_pause_reuse))
         wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     VkSubmitInfo submit_info = {
@@ -21938,6 +22222,26 @@ void VKR_EndFrame(void)
         return;
     }
     vk.image_fences[vk.current_image] = frame_fence;
+    if (vk.frame_fsr && vk.fsr_output_valid && !vk.fsr_pause_reuse &&
+        !vk_fsr_scene_paused()) {
+        vk.fsr_previous_fd = vk.fd;
+        vk.fsr_previous_fd.entities = NULL;
+        vk.fsr_previous_fd_valid = true;
+        vk_viewproj_matrix(vk.fsr_previous_viewproj, &vk.fd, false);
+        vk.fsr_previous_viewproj_valid = true;
+        vk.fsr_history_count = vk.fsr_pending_history_count;
+        memcpy(vk.fsr_history, vk.fsr_pending_history,
+               vk.fsr_history_count * sizeof(entity_t));
+    }
+    bool timing_eligible = vk.fd_valid && !(vk.fd.rdflags & RDF_NOWORLDMODEL) &&
+        !vk.fsr_auto_recreate && !vk.fsr_timing_discontinuity &&
+        !vk_fsr_scene_paused() && !vk.fsr_pause_reuse &&
+        (!vk.separate_presentation || (vk.frame_fsr && vk.fsr_output_valid));
+    vk.timing_record_usec[vk.frame_index] = vk.record_usec;
+    vk.timing_generation[vk.frame_index] = vk.fsr_auto_generation;
+    vk.timing_eligible[vk.frame_index] = timing_eligible;
+    if (!vk.timestamp_query_pool)
+        vk_fsr_auto_update(vk.record_usec, 0, vk.fsr_auto_generation, timing_eligible);
     if (vk.timestamp_query_pool)
         vk.timestamp_valid[vk.frame_index] = true;
 

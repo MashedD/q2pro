@@ -774,20 +774,27 @@ r_fsr_sharpness::
 
 r_fsr_auto::
     Enables the Vulkan FSR3 automatic performance mode. When enabled, the
-    renderer measures a native-resolution baseline, tests progressively lower
-    quality profiles, and keeps the profile with the lowest measured frame
-    cost when it is at least 5% faster than native rendering. If no profile
-    improves frame time, FSR is disabled for the current session. The selected
-    r_fsr_quality value is the highest quality profile that automatic mode may
-    test. Set this to 0 to keep r_fsr_quality fixed. Default value is 1.
+    renderer compares native resolution with only the selected r_fsr_quality
+    profile. It keeps FSR when frame cost improves by at least 5%; otherwise
+    it uses native resolution without lowering the selected quality. Each
+    window discards 15 warmup frames, collects 90 eligible submissions, and
+    trims the fastest and slowest 10%. CPU recording and GPU timings belong
+    to the same submission; CPU-only estimates are identified in the log.
+    Set this to 0 to force the selected profile. Default value is 1.
 
 r_fsr_motion::
-    Selects the FSR motion-vector path: ‘full’ renders the additional scene
-    motion pass for best temporal quality, ‘fast’ clears motion/reactive data
-    and skips that pass, and ‘auto’ selects the fast path for ordinary
-    upscaling. Frame generation automatically requires full motion vectors.
-    The fast path can show more ghosting during movement. Default value is
-    ‘fast’.
+    Selects the FSR motion-vector path. ‘auto’ reconstructs camera motion from
+    depth, overrides moving objects, and adds reactive coverage for effects.
+    ‘full’ additionally redraws static geometry as a reference path. ‘fast’
+    uses camera motion only and can ghost on moving objects and effects.
+    Frame generation overrides ‘fast’ to include dynamic motion.
+    Default value is ‘auto’.
+
+r_fsr_mip_bias::
+    FSR scene texture mip bias. ‘auto’ uses log2(render width / display width)
+    minus one to retain texture detail at reduced resolution. A numeric value
+    overrides this bias within device limits. UI textures are unaffected.
+    Default value is ‘auto’.
 
 r_fsr_frame_generation::
     Enables the optional FSR3 optical-flow frame-generation path in the Vulkan

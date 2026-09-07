@@ -61,6 +61,7 @@ static inline void entity_reset_water_wake(centity_t *ent,
 static inline void
 entity_update_new(centity_t *ent, const centity_state_t *state, const vec_t *origin)
 {
+    ent->temporal_generation++;
     ent->trailcount = 1024;     // for diminishing rocket / grenade trails
     ent->flashlightfrac = 1.0f;
     entity_reset_water_wake(ent, origin);
@@ -112,6 +113,7 @@ entity_update_old(centity_t *ent, const centity_state_t *state, const vec_t *ori
         || fabsf(origin[2] - ent->current.origin[2]) > 512
         || cl_nolerp->integer == 1) {
         // some data changes will force no lerping
+        ent->temporal_generation++;
         ent->trailcount = 1024;     // for diminishing rocket / grenade trails
         ent->flashlightfrac = 1.0f;
         entity_reset_water_wake(ent, origin);
@@ -882,6 +884,8 @@ static void CL_AddPacketEntities(void)
         s1 = &cl.entityStates[i];
 
         cent = &cl_entities[s1->number];
+        ent.temporal_id = s1->number * 8;
+        ent.temporal_generation = cent->temporal_generation;
 
         has_trail = false;
 
@@ -1292,6 +1296,7 @@ static void CL_AddPacketEntities(void)
 
         // duplicate for linked models
         if (s1->modelindex2) {
+            ent.temporal_id = s1->number * 8 + 1;
             item_highlight_t weapon_highlight;
             bool has_weapon_highlight = false;
 
@@ -1343,16 +1348,19 @@ static void CL_AddPacketEntities(void)
         }
 
         if (s1->modelindex3) {
+            ent.temporal_id = s1->number * 8 + 2;
             ent.model = cl.model_draw[s1->modelindex3];
             V_AddEntity(&ent);
         }
 
         if (s1->modelindex4) {
+            ent.temporal_id = s1->number * 8 + 3;
             ent.model = cl.model_draw[s1->modelindex4];
             V_AddEntity(&ent);
         }
 
         if (effects & EF_POWERSCREEN) {
+            ent.temporal_id = s1->number * 8 + 4;
             ent.model = cl_mod_powerscreen;
             ent.oldframe = 0;
             ent.frame = 0;
@@ -1605,6 +1613,7 @@ static void CL_AddViewWeapon(void)
     if (gun.alpha != 1.0f)
         gun.flags |= RF_TRANSLUCENT;
 
+    gun.temporal_id = MAX_EDICTS * 8;
     V_AddEntity(&gun);
 
     // add shell effect from player entity

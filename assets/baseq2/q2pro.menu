@@ -110,13 +110,20 @@ begin video
         "ultra performance" ultra_performance
     range --status "Requires the Vulkan renderer; changing this refreshes the renderer" \
         "FSR3 sharpness" r_fsr_sharpness 0 1
-    toggle --status "Tests lower quality profiles and keeps the fastest one" \
+    toggle --status "Keeps selected quality only if at least 5% faster than native" \
         "FSR3 automatic performance" r_fsr_auto
-    pairs --status "Fast and auto skip an extra motion-vector scene pass" \
+    pairs --status "Auto: camera + objects; full: reference; fast: camera only" \
         "FSR3 motion vectors" r_fsr_motion \
         auto auto \
         full full \
         fast fast
+    pairs --status "Scene texture detail at reduced resolution; UI unaffected" \
+        "FSR3 texture mip bias" r_fsr_mip_bias \
+        auto auto \
+        neutral 0 \
+        "-0.5" -0.5 \
+        "-1" -1 \
+        "-1.5" -1.5
     toggle --status "Requires Vulkan FSR3; experimental; falls back after GPU errors" \
         "FSR3 frame generation" r_fsr_frame_generation
 end

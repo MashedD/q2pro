@@ -78,6 +78,7 @@ typedef struct {
     float           radius;             // from mid point
 
     int             serverframe;        // if not current, this ent isn't in the frame
+    uint32_t        temporal_generation;
 
     int             trailcount;         // for diminishing grenade trails
     vec3_t          lerp_origin;        // for trails (variable hz)

@@ -48,6 +48,10 @@ int Cvar_ClampInteger(cvar_t *var, int lo, int hi)
 {
     return Q_clip(var->integer, lo, hi);
 }
+float Cvar_ClampValue(cvar_t *var, float lo, float hi)
+{
+    return Q_clipf(var->value, lo, hi);
+}
 
 static VKAPI_ATTR VkResult VKAPI_CALL create_render_pass(VkDevice device,
     const VkRenderPassCreateInfo *info, const VkAllocationCallbacks *allocator,
@@ -286,8 +290,132 @@ static void check_configuration(uint32_t width, uint32_t height, bool bloom,
     assert(strstr(last_error, "exceeds scene attachments"));
 }
 
+static unsigned barrier_calls, barrier_images;
+static VKAPI_ATTR void VKAPI_CALL record_barriers(VkCommandBuffer cmd,
+    VkPipelineStageFlags src, VkPipelineStageFlags dst, VkDependencyFlags flags,
+    uint32_t memory_count, const VkMemoryBarrier *memory,
+    uint32_t buffer_count, const VkBufferMemoryBarrier *buffers,
+    uint32_t count, const VkImageMemoryBarrier *images)
+{
+    assert(cmd == HANDLE(VkCommandBuffer, 99));
+    assert(src && dst && count && count <= 4);
+    assert(!memory_count && !buffer_count);
+    barrier_calls++;
+    barrier_images += count;
+    for (unsigned i = 0; i < count; i++) {
+        assert(images[i].srcQueueFamilyIndex == VK_QUEUE_FAMILY_IGNORED);
+        assert(images[i].dstQueueFamilyIndex == VK_QUEUE_FAMILY_IGNORED);
+        assert(images[i].srcAccessMask & VK_ACCESS_SHADER_WRITE_BIT);
+        assert(images[i].dstAccessMask & VK_ACCESS_SHADER_READ_BIT);
+    }
+}
+
+static void check_fsr_barriers(void)
+{
+    vk.CmdPipelineBarrier = record_barriers;
+    vk_image_barrier_batch_t batch = { .cmd = HANDLE(VkCommandBuffer, 99) };
+    VkImageSubresourceRange range = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                     .levelCount = 1, .layerCount = 1 };
+    for (unsigned i = 0; i < 5; i++)
+        assert(vk_image_barrier_batch_add(&batch, HANDLE(VkImage, i + 1), range,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+            VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+    assert(barrier_calls == 1 && barrier_images == 4 && batch.count == 1);
+    vk_image_barrier_batch_submit(batch.cmd, &batch);
+    assert(barrier_calls == 2 && barrier_images == 5 && !batch.count);
+    vk_image_barrier_batch_submit(batch.cmd, &batch);
+    assert(barrier_calls == 2);
+    assert(!vk_image_barrier_batch_add(&batch, HANDLE(VkImage, 1), range,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT));
+    puts("FSR barrier contracts: passed (GENERAL dependencies, batch overflow, empty batch)");
+}
+
+static void check_fsr_temporal_contracts(void)
+{
+    _Static_assert(offsetof(vk_fsr_motion_push_t, previous_mvp) == 64, "GLSL layout");
+    _Static_assert(offsetof(vk_fsr_motion_push_t, previous_backlerp) == 136, "GLSL layout");
+    _Static_assert(offsetof(vk_fsr_motion_push_t, jitter) == 144, "GLSL layout");
+    _Static_assert(offsetof(vk_fsr_motion_push_t, viewport) == 160, "GLSL layout");
+    _Static_assert(sizeof(vk_fsr_motion_push_t) == 176, "GLSL layout");
+    vk.render_extent = (VkExtent2D) { 852, 480 };
+    vk.swapchain_extent = (VkExtent2D) { 1280, 720 };
+    vk.frame_fsr = true;
+    vk.fsr_jitter[0] = 0.25f;
+    vk.fsr_jitter[1] = -0.375f;
+    refdef_t fd = { .x = 128, .y = 72, .width = 1024, .height = 576 };
+    vk_fsr_motion_push_t motion = { 0 };
+    vk_fsr_motion_parameters(&motion, &fd);
+    assert(motion.viewport[0] == 85 && motion.viewport[1] == 48);
+    assert(motion.viewport[2] == 682 && motion.viewport[3] == 384);
+    mat4_t jittered, unjittered;
+    vk_projection_matrix_internal(jittered, 90, 60, 0, true);
+    vk_projection_matrix_internal(unjittered, 90, 60, 0, false);
+    /* Scene projection and motion raster coverage must have identical jitter.
+     * A point at view-space z=-1 has clip w=1. Velocity excludes this offset. */
+    assert(fabsf(-(jittered[8] - unjittered[8]) - motion.jitter[0]) < 1e-6f);
+    assert(fabsf(-(jittered[9] - unjittered[9]) - motion.jitter[1]) < 1e-6f);
+    assert(fabsf(motion.motion_scale[0] * 2 * vk.render_extent.width - 682) < 1e-4f);
+    vk.frame_fsr = false;
+    uint64_t samples[90];
+    for (unsigned i = 0; i < q_countof(samples); i++)
+        samples[i] = i < 9 ? 1 : i >= 81 ? 1000000 : 1000;
+    assert(vk_fsr_auto_average(samples, 90) == 1000);
+    assert(vk_fsr_auto_is_faster(1000, 950));
+    assert(!vk_fsr_auto_is_faster(1000, 951));
+    assert(!vk_fsr_auto_is_faster(0, 0));
+
+    cvar_t enabled = { .integer = 1 };
+    r_fsr = r_fsr_auto = &enabled;
+    vk.fsr_auto_phase = VK_FSR_AUTO_WARMUP;
+    vk.fsr_auto_quality = VK_FSR_QUALITY;
+    vk.fsr_auto_generation = 7;
+    vk.fsr_auto_recreate = false;
+    vk.fsr_auto_warmup = 15;
+    vk.fsr_auto_samples = 0;
+    vk_fsr_auto_update(1000, 2000, 6, true);
+    vk_fsr_auto_update(1000, 2000, 7, false);
+    assert(vk.fsr_auto_warmup == 15);
+    for (unsigned i = 0; i < 105; i++)
+        vk_fsr_auto_update(1000, 2000, 7, true);
+    assert(vk.fsr_auto_native_usec == 2000);
+    assert(vk.fsr_auto_phase == VK_FSR_AUTO_TRIAL);
+    assert(vk.fsr_auto_quality == VK_FSR_QUALITY);
+    assert(vk.fsr_auto_generation == 8 && vk.fsr_auto_recreate);
+    vk.fsr_auto_recreate = false;
+    for (unsigned i = 0; i < 105; i++)
+        vk_fsr_auto_update(1901, 1000, 8, true);
+    assert(vk.fsr_auto_phase == VK_FSR_AUTO_REJECTED);
+    assert(vk.fsr_auto_quality == VK_FSR_QUALITY);
+    r_fsr = r_fsr_auto = NULL;
+
+    entity_t entity = { .temporal_id = 1, .temporal_generation = 3, .model = 1 };
+    vk.fsr_reset = false;
+    vk.fsr_previous_fd_valid = true;
+    vk.fsr_history_count = 1;
+    vk.fsr_history[0] = entity;
+    assert(vk_fsr_previous_entity(&entity) == &vk.fsr_history[0]);
+    entity.temporal_generation++;
+    assert(!vk_fsr_previous_entity(&entity));
+    entity.temporal_generation--;
+    entity.origin[0] = 129;
+    assert(!vk_fsr_previous_entity(&entity));
+    entity.origin[0] = 0;
+    vk.fsr_history[1] = entity;
+    vk.fsr_history_count = 2;
+    assert(!vk_fsr_previous_entity(&entity));
+    vk.fsr_history_count = 1;
+    vk.fsr_reset = true;
+    assert(!vk_fsr_previous_entity(&entity));
+    puts("FSR temporal contracts: passed (layout, trimmed timing, generation, history)");
+}
+
 int main(void)
 {
+    check_fsr_barriers();
+    check_fsr_temporal_contracts();
     paused_cvar.integer = 0;
     assert(!vk_fsr_scene_paused());
     paused_cvar.integer = 1;

@@ -72,6 +72,8 @@ typedef enum {
 #define DLIGHT_CUTOFF       64
 
 typedef struct entity_s {
+    uint32_t           temporal_id;    // renderer history identity, 0 = transient
+    uint32_t           temporal_generation;
     qhandle_t           model;          // opaque type outside refresh
     vec3_t              angles;
 
