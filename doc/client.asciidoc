@@ -769,7 +769,8 @@ r_fsr_quality::
 
 r_fsr_sharpness::
     Controls the optional FSR3 RCAS sharpening pass from 0 (disabled) to 1
-    (maximum). The default value is 0.2.
+    (maximum). Zero is the fastest setting because it avoids an additional
+    sharpening pass. The default value is 0.
 
 r_fsr_auto::
     Enables the Vulkan FSR3 performance guard. When enabled, the renderer
@@ -780,9 +781,10 @@ r_fsr_auto::
 r_fsr_motion::
     Selects the FSR motion-vector path: ‘full’ renders the additional scene
     motion pass for best temporal quality, ‘fast’ clears motion/reactive data
-    and skips that pass, and ‘auto’ selects between them from CPU/GPU timing.
+    and skips that pass, and ‘auto’ selects the fast path for ordinary
+    upscaling. Frame generation automatically requires full motion vectors.
     The fast path can show more ghosting during movement. Default value is
-    ‘auto’.
+    ‘fast’.
 
 r_fsr_frame_generation::
     Enables the optional FSR3 optical-flow frame-generation path in the Vulkan

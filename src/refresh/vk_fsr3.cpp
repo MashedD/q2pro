@@ -501,7 +501,7 @@ extern "C" bool Q2_FSR3_Dispatch(
     (void)output_view;
     if (!context)
         return false;
-    if (!command_buffer || !color || !depth || !motion || !reactive ||
+    if (!command_buffer || !color || !depth || !motion ||
         !output || (!context->full_context_created &&
                     !q2_fsr3_has_shared_resources(context))) {
         context->last_error = FFX_ERROR_INVALID_POINTER;
@@ -518,9 +518,12 @@ extern "C" bool Q2_FSR3_Dispatch(
     FfxResource motion_resource = q2_fsr3_resource(
         motion, motion_format, context->render_width, context->render_height,
         FFX_RESOURCE_USAGE_READ_ONLY, FFX_RESOURCE_STATE_COMPUTE_READ);
-    FfxResource reactive_resource = q2_fsr3_resource(
-        reactive, reactive_format, context->render_width, context->render_height,
-        FFX_RESOURCE_USAGE_READ_ONLY, FFX_RESOURCE_STATE_COMPUTE_READ);
+    FfxResource reactive_resource = {};
+    if (reactive) {
+        reactive_resource = q2_fsr3_resource(
+            reactive, reactive_format, context->render_width, context->render_height,
+            FFX_RESOURCE_USAGE_READ_ONLY, FFX_RESOURCE_STATE_COMPUTE_READ);
+    }
     FfxResource output_resource = q2_fsr3_resource(
         output, output_format, context->display_width, context->display_height,
         FFX_RESOURCE_USAGE_UAV, FFX_RESOURCE_STATE_UNORDERED_ACCESS);
