@@ -80,6 +80,13 @@ void V_AddEntity(const entity_t *ent)
     if (r_numentities >= MAX_ENTITIES)
         return;
     r_entities[r_numentities++] = *ent;
+    if (!r_entities[r_numentities - 1].previous_valid) {
+        VectorCopy(r_entities[r_numentities - 1].origin,
+                   r_entities[r_numentities - 1].previous_origin);
+        VectorCopy(r_entities[r_numentities - 1].angles,
+                   r_entities[r_numentities - 1].previous_angles);
+        r_entities[r_numentities - 1].previous_valid = true;
+    }
 }
 
 /*

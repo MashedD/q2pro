@@ -155,16 +155,35 @@ extern "C" void Q2_FSR2_Destroy(q2_fsr2_context_t *context)
     delete context;
 }
 
+extern "C" bool Q2_FSR2_GetJitter(q2_fsr2_context_t *context, float *x, float *y)
+{
+    if (!context || !x || !y)
+        return false;
+
+    const int32_t phase_count = ffxFsr2GetJitterPhaseCount(
+        static_cast<int32_t>(context->render_width),
+        static_cast<int32_t>(context->display_width));
+    if (phase_count <= 0)
+        return false;
+
+    const int32_t phase = static_cast<int32_t>(context->frame_index % phase_count);
+    return ffxFsr2GetJitterOffset(x, y, phase, phase_count) == FFX_OK;
+}
+
 extern "C" bool Q2_FSR2_Dispatch(
     q2_fsr2_context_t *context, VkCommandBuffer command_buffer,
     VkImage color, VkImageView color_view, VkFormat color_format,
     VkImage depth, VkImageView depth_view, VkFormat depth_format,
     VkImage motion, VkImageView motion_view, VkFormat motion_format,
+    VkImage reactive, VkImageView reactive_view, VkFormat reactive_format,
     VkImage output, VkImageView output_view, VkFormat output_format,
-    float frame_time_ms, float vertical_fov_radians, bool reset)
+    float jitter_x, float jitter_y,
+    float frame_time_ms, float vertical_fov_radians,
+    float camera_near, float camera_far, bool reset)
 {
     if (!context || !command_buffer || !color || !color_view || !depth ||
-        !depth_view || !motion || !motion_view || !output || !output_view)
+        !depth_view || !motion || !motion_view || !reactive || !reactive_view ||
+        !output || !output_view)
         return false;
 
     FfxFsr2DispatchDescription description = {};
@@ -181,20 +200,27 @@ extern "C" bool Q2_FSR2_Dispatch(
         &context->context, motion, motion_view, context->render_width,
         context->render_height, motion_format, L"q2_motion",
         FFX_RESOURCE_STATE_COMPUTE_READ);
+    description.reactive = ffxGetTextureResourceVK(
+        &context->context, reactive, reactive_view, context->render_width,
+        context->render_height, reactive_format, L"q2_reactive",
+        FFX_RESOURCE_STATE_COMPUTE_READ);
     description.output = ffxGetTextureResourceVK(
         &context->context, output, output_view, context->display_width,
         context->display_height, output_format, L"q2_fsr_output",
         FFX_RESOURCE_STATE_UNORDERED_ACCESS);
-    description.jitterOffset = { 0.0f, 0.0f };
-    description.motionVectorScale = { 1.0f, 1.0f };
+    description.jitterOffset = { jitter_x, jitter_y };
+    description.motionVectorScale = {
+        static_cast<float>(context->render_width),
+        static_cast<float>(context->render_height)
+    };
     description.renderSize = { context->render_width, context->render_height };
     description.enableSharpening = false;
     description.sharpness = 0.0f;
     description.frameTimeDelta = std::max(frame_time_ms, 1.0f);
     description.preExposure = 1.0f;
     description.reset = reset;
-    description.cameraNear = 2.0f;
-    description.cameraFar = 2048.0f;
+    description.cameraNear = camera_near;
+    description.cameraFar = camera_far;
     description.cameraFovAngleVertical = vertical_fov_radians;
     description.viewSpaceToMetersFactor = 1.0f;
 

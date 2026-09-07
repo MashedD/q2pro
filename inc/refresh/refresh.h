@@ -86,6 +86,9 @@ typedef struct entity_s {
     */
     vec3_t              oldorigin;  // also used as RF_BEAM's "to"
     unsigned            oldframe;
+    vec3_t              previous_origin;
+    vec3_t              previous_angles;
+    bool                previous_valid;
 
     /*
     ** misc

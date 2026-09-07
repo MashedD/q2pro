@@ -398,7 +398,9 @@ if vulkan.found()
                     'vk_world_pixel_glow_alpha.frag',
                     'vk_world_glow.frag',
                     'vk_alias.vert', 'vk_alias_shadow.vert',
-                    'vk_alias_shadow.frag']
+                    'vk_alias_shadow.frag',
+                    'vk_motion_world.vert', 'vk_motion_alias.vert',
+                    'vk_motion_color.vert', 'vk_motion.frag']
     vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
       input: 'src/refresh' / shader,
       output: shader.underscorify() + '_spv.h',

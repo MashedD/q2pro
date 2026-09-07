@@ -959,16 +959,19 @@ static void CL_AddPacketEntities(void)
                        cl.lerpfrac, ent.origin);
             LerpVector(cent->prev.old_origin, cent->current.old_origin,
                        cl.lerpfrac, ent.oldorigin);
+            VectorCopy(cent->prev.origin, ent.previous_origin);
         } else {
             if (s1->number == cl.frame.clientNum + 1) {
                 // use predicted origin
                 VectorCopy(cl.playerEntityOrigin, ent.origin);
                 VectorCopy(cl.playerEntityOrigin, ent.oldorigin);
+                VectorCopy(cl.playerEntityOrigin, ent.previous_origin);
             } else {
                 // interpolate origin
                 LerpVector(cent->prev.origin, cent->current.origin,
                            cl.lerpfrac, ent.origin);
                 VectorCopy(ent.origin, ent.oldorigin);
+                VectorCopy(cent->prev.origin, ent.previous_origin);
             }
 #if USE_FPS
             // run alias model animation
@@ -997,7 +1000,9 @@ static void CL_AddPacketEntities(void)
         if (effects & EF_BOB && !cl_nobob->integer) {
             ent.origin[2] += autobob;
             ent.oldorigin[2] += autobob;
+            ent.previous_origin[2] += autobob;
         }
+        ent.previous_valid = true;
 
         if (!cl_gibs->integer) {
             if (effects & EF_GIB && !(cl.csr.extended && effects & EF_ROCKET))
@@ -1134,6 +1139,9 @@ static void CL_AddPacketEntities(void)
             if (s1->modelindex == MODELINDEX_PLAYER && cl_rollhack->integer)
                 ent.angles[ROLL] = -ent.angles[ROLL];
         }
+        VectorCopy(cent->prev.angles, ent.previous_angles);
+        if (s1->number == cl.frame.clientNum + 1)
+            VectorCopy(ent.angles, ent.previous_angles);
 
         if (s1->morefx & EFX_FLASHLIGHT) {
             vec3_t forward, start, end;

@@ -27,12 +27,16 @@ q2_fsr2_context_t *Q2_FSR2_Create(VkPhysicalDevice physical_device,
                                    uint32_t display_width,
                                    uint32_t display_height);
 void Q2_FSR2_Destroy(q2_fsr2_context_t *context);
+bool Q2_FSR2_GetJitter(q2_fsr2_context_t *context, float *x, float *y);
 bool Q2_FSR2_Dispatch(q2_fsr2_context_t *context, VkCommandBuffer command_buffer,
                       VkImage color, VkImageView color_view, VkFormat color_format,
                       VkImage depth, VkImageView depth_view, VkFormat depth_format,
                       VkImage motion, VkImageView motion_view, VkFormat motion_format,
+                      VkImage reactive, VkImageView reactive_view, VkFormat reactive_format,
                       VkImage output, VkImageView output_view, VkFormat output_format,
-                      float frame_time_ms, float vertical_fov_radians, bool reset);
+                      float jitter_x, float jitter_y,
+                      float frame_time_ms, float vertical_fov_radians,
+                      float camera_near, float camera_far, bool reset);
 
 #ifdef __cplusplus
 }
