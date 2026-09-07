@@ -52,11 +52,16 @@ the Free Software Foundation; either version 2 of the License, or
 #define VK_MAX_RAIL_IONIZATIONS    6
 #define VK_MAX_LIGHTMAP_EXTENTS    513
 #define VK_MAX_FRAMES_IN_FLIGHT    3
-#define VK_TIMESTAMP_QUERY_COUNT   10
+#define VK_TIMESTAMP_QUERY_COUNT   14
+#define VK_FSR_AUTO_SAMPLE_COUNT   90
 
 enum {
     VK_TIMESTAMP_FRAME_BEGIN,
     VK_TIMESTAMP_FRAME_END,
+    VK_TIMESTAMP_SCENE_BEGIN,
+    VK_TIMESTAMP_SCENE_END,
+    VK_TIMESTAMP_POSTPROCESS_BEGIN,
+    VK_TIMESTAMP_POSTPROCESS_END,
     VK_TIMESTAMP_MOTION_BEGIN,
     VK_TIMESTAMP_MOTION_END,
     VK_TIMESTAMP_FSR_BEGIN,
@@ -1035,6 +1040,8 @@ typedef struct {
     unsigned submit_usec;
     unsigned present_usec;
     unsigned gpu_frame_usec;
+    unsigned gpu_scene_usec;
+    unsigned gpu_postprocess_usec;
     unsigned fsr_gpu_motion_usec;
     unsigned fsr_gpu_upscale_usec;
     unsigned fsr_gpu_frame_generation_usec;
@@ -1046,7 +1053,12 @@ typedef struct {
     uint32_t fsr_auto_trial_index;
     uint64_t fsr_auto_native_usec;
     uint64_t fsr_auto_fsr_usec;
+    uint64_t fsr_auto_native_min_usec;
+    uint64_t fsr_auto_native_max_usec;
+    uint64_t fsr_auto_fsr_min_usec;
+    uint64_t fsr_auto_fsr_max_usec;
     uint64_t fsr_auto_best_usec;
+    unsigned barrier_count;
     bool fsr_auto_recreate;
     bool fsr_presentation_copy;
     bool timestamp_valid[VK_MAX_FRAMES_IN_FLIGHT];
@@ -1300,8 +1312,32 @@ static void vk_fsr_auto_reset(void)
     vk.fsr_auto_trial_index = (uint32_t)vk.fsr_auto_quality;
     vk.fsr_auto_native_usec = 0;
     vk.fsr_auto_fsr_usec = 0;
+    vk.fsr_auto_native_min_usec = UINT64_MAX;
+    vk.fsr_auto_native_max_usec = 0;
+    vk.fsr_auto_fsr_min_usec = UINT64_MAX;
+    vk.fsr_auto_fsr_max_usec = 0;
     vk.fsr_auto_best_usec = 0;
     vk.fsr_auto_recreate = false;
+}
+
+static void vk_fsr_auto_add_sample(uint64_t value, uint64_t *sum,
+                                   uint64_t *min_value, uint64_t *max_value)
+{
+    *sum += value;
+    *min_value = min(*min_value, value);
+    *max_value = max(*max_value, value);
+}
+
+static uint64_t vk_fsr_auto_trimmed_average(uint64_t sum,
+                                            uint64_t min_value,
+                                            uint64_t max_value,
+                                            uint32_t count)
+{
+    if (!count)
+        return 0;
+    if (count > 2 && sum >= min_value + max_value)
+        return (sum - min_value - max_value) / (count - 2);
+    return sum / count;
 }
 
 static void vk_fsr_auto_update(unsigned record_usec)
@@ -1316,8 +1352,10 @@ static void vk_fsr_auto_update(unsigned record_usec)
         return;
 
     if (vk.fsr_auto_phase == VK_FSR_AUTO_WARMUP) {
-        vk.fsr_auto_native_usec += frame_usec;
-        if (++vk.fsr_auto_samples < 90)
+        vk_fsr_auto_add_sample(frame_usec, &vk.fsr_auto_native_usec,
+                               &vk.fsr_auto_native_min_usec,
+                               &vk.fsr_auto_native_max_usec);
+        if (++vk.fsr_auto_samples < VK_FSR_AUTO_SAMPLE_COUNT)
             return;
 
         vk.fsr_auto_phase = VK_FSR_AUTO_TRIAL;
@@ -1326,18 +1364,26 @@ static void vk_fsr_auto_update(unsigned record_usec)
         vk.fsr_auto_quality = (vk_fsr_quality_t)vk.fsr_auto_trial_index;
         vk.fsr_auto_samples = 0;
         vk.fsr_auto_fsr_usec = 0;
+        vk.fsr_auto_fsr_min_usec = UINT64_MAX;
+        vk.fsr_auto_fsr_max_usec = 0;
         vk.fsr_auto_best_usec = 0;
         vk.fsr_auto_recreate = true;
         Com_Printf("Vulkan FSR3 auto mode: native baseline complete; "
                    "testing FSR quality profiles from %s\n",
                    vk_fsr_quality_name(vk.fsr_auto_quality));
     } else if (vk.fsr_auto_phase == VK_FSR_AUTO_TRIAL) {
-        vk.fsr_auto_fsr_usec += frame_usec;
-        if (++vk.fsr_auto_samples < 90)
+        vk_fsr_auto_add_sample(frame_usec, &vk.fsr_auto_fsr_usec,
+                               &vk.fsr_auto_fsr_min_usec,
+                               &vk.fsr_auto_fsr_max_usec);
+        if (++vk.fsr_auto_samples < VK_FSR_AUTO_SAMPLE_COUNT)
             return;
 
-        uint64_t native_avg = vk.fsr_auto_native_usec / 90;
-        uint64_t fsr_avg = vk.fsr_auto_fsr_usec / 90;
+        uint64_t native_avg = vk_fsr_auto_trimmed_average(
+            vk.fsr_auto_native_usec, vk.fsr_auto_native_min_usec,
+            vk.fsr_auto_native_max_usec, VK_FSR_AUTO_SAMPLE_COUNT);
+        uint64_t fsr_avg = vk_fsr_auto_trimmed_average(
+            vk.fsr_auto_fsr_usec, vk.fsr_auto_fsr_min_usec,
+            vk.fsr_auto_fsr_max_usec, VK_FSR_AUTO_SAMPLE_COUNT);
         if (!vk.fsr_auto_best_usec || fsr_avg < vk.fsr_auto_best_usec) {
             vk.fsr_auto_best_usec = fsr_avg;
             vk.fsr_auto_best_quality = vk.fsr_auto_quality;
@@ -1348,6 +1394,8 @@ static void vk_fsr_auto_update(unsigned record_usec)
             vk.fsr_auto_quality = (vk_fsr_quality_t)vk.fsr_auto_trial_index;
             vk.fsr_auto_samples = 0;
             vk.fsr_auto_fsr_usec = 0;
+            vk.fsr_auto_fsr_min_usec = UINT64_MAX;
+            vk.fsr_auto_fsr_max_usec = 0;
             vk.fsr_auto_recreate = true;
             Com_Printf("Vulkan FSR3 auto mode: %s=%lluus; testing %s\n",
                        vk_fsr_quality_name(vk.fsr_auto_quality - 1),
@@ -3443,6 +3491,7 @@ static void vk_texture_barrier(VkCommandBuffer cmd, VkImage image,
         },
     };
 
+    vk.barrier_count++;
     vk.CmdPipelineBarrier(cmd, src_stage, dst_stage,
                           0, 0, NULL, 0, NULL, 1, &barrier);
 }
@@ -3474,8 +3523,62 @@ static void vk_texture_mip_barrier(VkCommandBuffer cmd, VkImage image,
         },
     };
 
+    vk.barrier_count++;
     vk.CmdPipelineBarrier(cmd, src_stage, dst_stage,
                           0, 0, NULL, 0, NULL, 1, &barrier);
+}
+
+typedef struct {
+    VkImageMemoryBarrier barriers[4];
+    uint32_t count;
+    VkPipelineStageFlags src_stage;
+    VkPipelineStageFlags dst_stage;
+} vk_image_barrier_batch_t;
+
+static bool vk_image_barrier_batch_add(vk_image_barrier_batch_t *batch,
+                                        VkImage image,
+                                        VkImageSubresourceRange range,
+                                        VkImageLayout old_layout,
+                                        VkImageLayout new_layout,
+                                        VkAccessFlags src_access,
+                                        VkAccessFlags dst_access,
+                                        VkPipelineStageFlags src_stage,
+                                        VkPipelineStageFlags dst_stage)
+{
+    if (!image || old_layout == new_layout ||
+        batch->count >= q_countof(batch->barriers))
+        return false;
+
+    VkImageMemoryBarrier *barrier = &batch->barriers[batch->count++];
+    *barrier = (VkImageMemoryBarrier) {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = src_access,
+        .dstAccessMask = dst_access,
+        .oldLayout = old_layout,
+        .newLayout = new_layout,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = range,
+    };
+    batch->src_stage |= src_stage;
+    batch->dst_stage |= dst_stage;
+    return true;
+}
+
+static void vk_image_barrier_batch_submit(VkCommandBuffer cmd,
+                                          vk_image_barrier_batch_t *batch)
+{
+    if (!batch->count)
+        return;
+
+    vk.barrier_count++;
+    vk.CmdPipelineBarrier(cmd, batch->src_stage, batch->dst_stage,
+                          0, 0, NULL, 0, NULL, batch->count,
+                          batch->barriers);
+    batch->count = 0;
+    batch->src_stage = 0;
+    batch->dst_stage = 0;
 }
 
 static void vk_update_texture_descriptor_with_sampler(vk_texture_t *texture,
@@ -4042,6 +4145,7 @@ static void vk_rt_static_image_barrier(VkCommandBuffer cmd, VkImage image,
             .layerCount = 1,
         },
     };
+    vk.barrier_count++;
     vk.CmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, NULL, 0, NULL,
                           1, &barrier);
 }
@@ -9397,6 +9501,7 @@ static void vk_transition_image(VkCommandBuffer cmd, uint32_t image_index,
         .subresourceRange = range,
     };
 
+    vk.barrier_count++;
     vk.CmdPipelineBarrier(cmd, src_stage, dst_stage,
                           0, 0, NULL, 0, NULL, 1, &barrier);
 
@@ -9449,6 +9554,91 @@ static void vk_transition_color_target(VkCommandBuffer cmd, vk_texture_t *textur
     *layout = new_layout;
 }
 
+static void vk_batch_color_target(vk_image_barrier_batch_t *batch,
+                                  vk_texture_t *texture,
+                                  VkImageLayout *layout,
+                                  VkImageLayout new_layout,
+                                  VkAccessFlags dst_access,
+                                  VkPipelineStageFlags dst_stage)
+{
+    if (!texture->image || *layout == new_layout)
+        return;
+
+    VkPipelineStageFlags src_stage;
+    VkAccessFlags src_access;
+    VkPipelineStageFlags shader_stages = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    if (vk.separate_presentation)
+        shader_stages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+    if (*layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        src_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        src_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    } else if (*layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        src_stage = shader_stages;
+        src_access = VK_ACCESS_SHADER_READ_BIT;
+    } else if (*layout == VK_IMAGE_LAYOUT_GENERAL) {
+        src_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        src_access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    } else if (*layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
+    } else if (*layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+        src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        src_access = VK_ACCESS_TRANSFER_READ_BIT;
+    } else {
+        src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        src_access = 0;
+    }
+
+    if (new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        dst_stage |= shader_stages;
+    VkImageSubresourceRange range = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .levelCount = 1,
+        .layerCount = 1,
+    };
+    if (vk_image_barrier_batch_add(batch, texture->image, range,
+                                   *layout, new_layout, src_access, dst_access,
+                                   src_stage, dst_stage))
+        *layout = new_layout;
+}
+
+static void vk_batch_depth(vk_image_barrier_batch_t *batch,
+                           VkImageLayout new_layout,
+                           VkAccessFlags dst_access,
+                           VkPipelineStageFlags dst_stage)
+{
+    if (!vk.depth_image || vk.depth_layout == new_layout)
+        return;
+
+    VkAccessFlags src_access = 0;
+    VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkPipelineStageFlags shader_stages = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    if (vk.separate_presentation)
+        shader_stages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    if (vk.depth_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+        src_access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        src_stage = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    } else if (vk.depth_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) {
+        src_access = VK_ACCESS_SHADER_READ_BIT;
+        src_stage = shader_stages;
+    }
+
+    if (new_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+        dst_stage |= shader_stages;
+    VkImageSubresourceRange range = {
+        .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT |
+            (vk_shadow_stencil_enabled() ? VK_IMAGE_ASPECT_STENCIL_BIT : 0),
+        .levelCount = 1,
+        .layerCount = 1,
+    };
+    if (vk_image_barrier_batch_add(batch, vk.depth_image, range,
+                                   vk.depth_layout, new_layout,
+                                   src_access, dst_access,
+                                   src_stage, dst_stage))
+        vk.depth_layout = new_layout;
+}
+
 static void vk_transition_scene(VkCommandBuffer cmd, VkImageLayout new_layout,
                                 VkAccessFlags dst_access,
                                 VkPipelineStageFlags dst_stage)
@@ -9496,6 +9686,7 @@ static void vk_transition_depth(VkCommandBuffer cmd, VkImageLayout new_layout,
             .layerCount = 1,
         },
     };
+    vk.barrier_count++;
     vk.CmdPipelineBarrier(cmd, src_stage, dst_stage, 0,
                           0, NULL, 0, NULL, 1, &barrier);
     vk.depth_layout = new_layout;
@@ -18903,7 +19094,7 @@ static void vk_log_perf_stats(void)
         return;
 
     vk.perf_stats_time = vk.fd.time;
-    Com_Printf("VK perf: mode=%s imgs=%u fif=%u draws=%i 3d=%i world=%i ent=%i part=%i bloom=%i other=%i 2d=%i chars=%i pics=%i rects=%i pipe=%i desc=%i push=%i vb=%i tris=%i faces=%i ents=%i parts=%i gpu=%uus wait=%uus acq=%uus rec=%uus sub=%uus pres=%uus\n",
+    Com_Printf("VK perf: mode=%s imgs=%u fif=%u draws=%i 3d=%i world=%i ent=%i part=%i bloom=%i other=%i 2d=%i chars=%i pics=%i rects=%i pipe=%i desc=%i push=%i vb=%i tris=%i faces=%i ents=%i parts=%i gpu=%uus wait=%uus acq=%uus rec=%uus sub=%uus pres=%uus barriers=%u\n",
                vk_present_mode_name(vk.present_mode),
                vk.swapchain_image_count, vk_frames_in_flight_value(),
                c.batchesDrawn + c.batchesDrawn2D,
@@ -18916,7 +19107,7 @@ static void vk_log_perf_stats(void)
                glr.fd.num_entities, glr.fd.num_particles,
                vk.gpu_frame_usec,
                vk.wait_usec, vk.acquire_usec, vk.record_usec,
-               vk.submit_usec, vk.present_usec);
+               vk.submit_usec, vk.present_usec, vk.barrier_count);
     if (vk.separate_presentation) {
         Com_Printf("VK FSR3 record: motion=%lluus dispatch=%lluus paused=%s history=%s target=%s present=%s clear=%s\n",
                    (unsigned long long)vk.fsr_motion_record_usec,
@@ -18927,7 +19118,9 @@ static void vk_log_perf_stats(void)
                    vk.fsr_swapchain_direct ? "direct" :
                    (vk.fsr_presentation_copy ? "copy" : "shader"),
                    vk.fsr_motion_cleared ? "yes" : "no");
-        Com_Printf("VK FSR3 GPU: motion=%uus upscale=%uus framegen=%uus presentation=%uus\n",
+        Com_Printf("VK FSR3 GPU: scene=%uus post=%uus motion=%uus upscale=%uus framegen=%uus presentation=%uus\n",
+                   vk.gpu_scene_usec,
+                   vk.gpu_postprocess_usec,
                    vk.fsr_gpu_motion_usec,
                    vk.fsr_gpu_upscale_usec,
                    vk.fsr_gpu_frame_generation_usec,
@@ -18939,10 +19132,18 @@ static void vk_log_perf_stats(void)
                    vk.fsr_motion_fast ? "fast" : "full",
                    (unsigned long long)(vk.fsr_auto_samples &&
                                         vk.fsr_auto_phase == VK_FSR_AUTO_WARMUP ?
-                                        vk.fsr_auto_native_usec / vk.fsr_auto_samples : 0),
+                                        vk_fsr_auto_trimmed_average(
+                                            vk.fsr_auto_native_usec,
+                                            vk.fsr_auto_native_min_usec,
+                                            vk.fsr_auto_native_max_usec,
+                                            vk.fsr_auto_samples) : 0),
                    (unsigned long long)(vk.fsr_auto_samples &&
                                         vk.fsr_auto_phase == VK_FSR_AUTO_TRIAL ?
-                                        vk.fsr_auto_fsr_usec / vk.fsr_auto_samples : 0),
+                                        vk_fsr_auto_trimmed_average(
+                                            vk.fsr_auto_fsr_usec,
+                                            vk.fsr_auto_fsr_min_usec,
+                                            vk.fsr_auto_fsr_max_usec,
+                                            vk.fsr_auto_samples) : 0),
                    (unsigned long long)vk.fsr_auto_best_usec,
                    vk.fsr_auto_samples);
     }
@@ -19652,6 +19853,7 @@ void VKR_RenderFrame(const refdef_t *fd)
         vk.world.sky_visible = false;
     }
 
+    vk_write_fsr_timestamp(VK_TIMESTAMP_SCENE_BEGIN);
     if (drawworld)
         vk_draw_skybox(fd);
 
@@ -19689,6 +19891,7 @@ void VKR_RenderFrame(const refdef_t *fd)
         vk_draw_bloom_beams(fd);
         vk_draw_bloom_only_entities(fd);
     }
+    vk_write_fsr_timestamp(VK_TIMESTAMP_SCENE_END);
     if (vk.frame_fsr && !vk.fsr_motion_fast)
         vk_render_fsr_motion(fd);
     vk_finish_postprocess_scene();
@@ -20687,18 +20890,22 @@ static bool vk_dispatch_fsr(void)
         vk_reset_bind_cache();
     }
 
+    vk_image_barrier_batch_t pre_fsr_barriers = { 0 };
     if (vk.fsr_scene_direct)
-        vk_transition_scene(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                            VK_ACCESS_SHADER_READ_BIT,
-                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        vk_batch_color_target(&pre_fsr_barriers, &vk.scene_texture,
+                              &vk.scene_layout,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                              VK_ACCESS_SHADER_READ_BIT,
+                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     else
-        vk_transition_color_target(cmd, input_texture, input_layout,
-                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                   VK_ACCESS_SHADER_READ_BIT,
-                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    vk_transition_depth(cmd, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-                        VK_ACCESS_SHADER_READ_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        vk_batch_color_target(&pre_fsr_barriers, input_texture, input_layout,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                              VK_ACCESS_SHADER_READ_BIT,
+                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    vk_batch_depth(&pre_fsr_barriers,
+                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                   VK_ACCESS_SHADER_READ_BIT,
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     if (!vk.fsr_motion_initialized) {
         vk.fsr_motion_cleared = true;
         vk_clear_fsr_motion_targets(cmd, reactive_required);
@@ -20709,12 +20916,13 @@ static bool vk_dispatch_fsr(void)
                             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     } else {
-        vk_transition_color_target(cmd, &vk.fsr_output_texture,
-                                   &vk.fsr_output_layout,
-                                   VK_IMAGE_LAYOUT_GENERAL,
-                                   VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        vk_batch_color_target(&pre_fsr_barriers, &vk.fsr_output_texture,
+                              &vk.fsr_output_layout,
+                              VK_IMAGE_LAYOUT_GENERAL,
+                              VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     }
+    vk_image_barrier_batch_submit(cmd, &pre_fsr_barriers);
 
     bool generated_frame = false;
     bool frame_reset = vk.fsr_reset;
@@ -20877,10 +21085,12 @@ static void vk_finish_postprocess_scene(void)
         if (!vk.separate_presentation)
             return;
 
+    vk_write_fsr_timestamp(VK_TIMESTAMP_POSTPROCESS_BEGIN);
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     bool bloom = vk.frame_bloom;
     bool waterwarp = vk.frame_waterwarp;
     bool fsr_input_active = false;
+    bool postprocess_timestamp_ended = false;
 
     vk_render_ssr();
 
@@ -21103,6 +21313,8 @@ static void vk_finish_postprocess_scene(void)
     if (vk.frame_fsr) {
         if (fsr_input_active)
             vk.fsr_input_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        vk_write_fsr_timestamp(VK_TIMESTAMP_POSTPROCESS_END);
+        postprocess_timestamp_ended = true;
         vk_dispatch_fsr();
     }
 
@@ -21113,6 +21325,8 @@ static void vk_finish_postprocess_scene(void)
             vk.CmdEndRenderPass(cmd);
             vk.render_pass_active = false;
         }
+        vk_write_fsr_timestamp(VK_TIMESTAMP_POSTPROCESS_END);
+        postprocess_timestamp_ended = true;
         if (vk.fsr_scene_direct)
             vk_transition_scene(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                 VK_ACCESS_SHADER_READ_BIT,
@@ -21133,6 +21347,9 @@ static void vk_finish_postprocess_scene(void)
         vk.fsr_reset = true;
     }
 
+    if (!postprocess_timestamp_ended)
+        vk_write_fsr_timestamp(VK_TIMESTAMP_POSTPROCESS_END);
+
     vk.frame_bloom = false;
     vk.frame_waterwarp = false;
     vk.frame_ssr = false;
@@ -21148,6 +21365,7 @@ void VKR_BeginFrame(void)
     vk.record_usec = 0;
     vk.submit_usec = 0;
     vk.present_usec = 0;
+    vk.barrier_count = 0;
     vk.frame_start_usec = 0;
 
     if (vk.device_lost)
@@ -21247,6 +21465,16 @@ void VKR_BeginFrame(void)
                                    &elapsed)) {
             vk.gpu_frame_usec = elapsed;
             uint16_t mask = vk.timestamp_scope_mask[vk.frame_index];
+            vk.gpu_scene_usec = 0;
+            if ((mask & (1u << VK_TIMESTAMP_SCENE_BEGIN)) &&
+                (mask & (1u << VK_TIMESTAMP_SCENE_END)))
+                vk_read_timestamp_pair(first + VK_TIMESTAMP_SCENE_BEGIN,
+                                       &vk.gpu_scene_usec);
+            vk.gpu_postprocess_usec = 0;
+            if ((mask & (1u << VK_TIMESTAMP_POSTPROCESS_BEGIN)) &&
+                (mask & (1u << VK_TIMESTAMP_POSTPROCESS_END)))
+                vk_read_timestamp_pair(first + VK_TIMESTAMP_POSTPROCESS_BEGIN,
+                                       &vk.gpu_postprocess_usec);
             vk.fsr_gpu_motion_usec = 0;
             if ((mask & (1u << VK_TIMESTAMP_MOTION_BEGIN)) &&
                 (mask & (1u << VK_TIMESTAMP_MOTION_END)))

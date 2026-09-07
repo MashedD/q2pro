@@ -11,6 +11,7 @@ statCounters_t c;
 cvar_t paused_cvar;
 cvar_t *cl_paused = &paused_cvar;
 cvar_t *sv_paused;
+cmdbuf_t cmd_buffer;
 static char last_error[256];
 static unsigned framebuffer_calls, pass_calls, draw_calls;
 static VkRenderPass last_pass;
@@ -41,6 +42,7 @@ char *va(const char *format, ...)
 void Com_LPrintf(print_type_t type, const char *format, ...) { }
 void *Z_Mallocz(size_t size) { return calloc(1, size); }
 bool SCR_ParseColor(const char *text, color_t *color) { return false; }
+void Cbuf_AddText(cmdbuf_t *buf, const char *text) { }
 void Cvar_SetByVar(cvar_t *var, const char *value, from_t from) { abort(); }
 int Cvar_ClampInteger(cvar_t *var, int lo, int hi)
 {
