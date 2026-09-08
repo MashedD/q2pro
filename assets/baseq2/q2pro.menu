@@ -126,6 +126,18 @@ begin video
         "-1.5" -1.5
     toggle --status "Requires Vulkan FSR3; experimental; falls back after GPU errors" \
         "FSR3 frame generation" r_fsr_frame_generation
+    toggle --status "Marks transparent effects separately for FSR3" \
+        "FSR3 composition mask" r_fsr_composition_mask
+    pairs --status "FP16 is selected only when enabled by Vulkan" \
+        "FSR3 precision" vk_fsr_precision \
+        auto auto \
+        fp32 fp32 \
+        fp16 fp16
+    pairs --status "Optional fixed subgroup size; native is recommended" \
+        "FSR3 subgroup" vk_fsr_subgroup \
+        native native \
+        32 32 \
+        64 64
 end
 
 begin raytracing

@@ -13,6 +13,7 @@ python = find_program('python3')
 glslc = find_program('glslc')
 spirv_dis = find_program('spirv-dis')
 spirv_opt = find_program('spirv-opt')
+spirv_val = find_program('spirv-val')
 
 vk_backend_source = custom_target(
   'q2_fsr3_vk_backend',
@@ -58,7 +59,9 @@ shader_header = custom_target('q2_fsr3_shader_blobs',
             '--output', '@OUTPUT@',
             '--glslc', glslc,
             '--spirv-dis', spirv_dis,
-            '--spirv-opt', spirv_opt],
+            '--spirv-opt', spirv_opt,
+            '--spirv-val', spirv_val],
+  depend_files: files('tools/q2_fsr3_shader_gen.py'),
 )
 
 fsr3_sources = files(

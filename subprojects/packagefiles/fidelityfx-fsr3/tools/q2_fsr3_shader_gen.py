@@ -2,6 +2,8 @@
 """Generate Vulkan shader blobs for FSR3 upscaling and frame generation."""
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -148,13 +150,15 @@ def compile_shader(args, source_dir, temp, relpath, label, defines):
     label = '_'.join(str(part) for part in label) if isinstance(label, tuple) else label
     spv = os.path.join(temp, label + '.spv')
     command = [args.glslc, '-g', '--target-env=vulkan1.2',
-               '-fshader-stage=compute', '-Os', '-DFFX_GPU=1', '-DFFX_GLSL=1']
+               '-fshader-stage=compute', '-O' if args.optimization == 'speed' else '-Os',
+               '-DFFX_GPU=1', '-DFFX_GLSL=1']
     command += ['-D%s=%s' % pair for pair in defines]
     command += include_args + [os.path.join(source_dir, 'sdk/src/backends/vk/shaders', relpath), '-o', spv]
     run_checked(command)
     resources = reflect(args.spirv_dis, spv)
     stripped = os.path.join(temp, label + '.stripped.spv')
     run_checked([args.spirv_opt, '--strip-debug', spv, '-o', stripped])
+    run_checked([args.spirv_val, '--target-env', 'vulkan1.2', stripped])
     with open(stripped, 'rb') as stream:
         return stream.read(), resources
 
@@ -170,6 +174,9 @@ def main():
     parser.add_argument('--glslc', required=True)
     parser.add_argument('--spirv-dis', required=True)
     parser.add_argument('--spirv-opt', required=True)
+    parser.add_argument('--spirv-val', default='spirv-val')
+    parser.add_argument('--optimization', choices=('size', 'speed'), default='size')
+    parser.add_argument('--manifest')
     args = parser.parse_args()
     source_dir = os.path.abspath(args.source_dir)
     blobs = {}
@@ -215,6 +222,8 @@ def main():
         out.write('#pragma once\n#include <stdint.h>\n#include <string.h>\n')
         out.write('#if defined(__GNUC__)\n#define Q2_FSR3_UNUSED __attribute__((unused))\n#else\n#define Q2_FSR3_UNUSED\n#endif\n')
         out.write('#include <FidelityFX/host/ffx_fsr3upscaler.h>\n#include <FidelityFX/host/ffx_frameinterpolation.h>\n#include <FidelityFX/host/ffx_opticalflow.h>\n#include <FidelityFX/host/ffx_types.h>\n\n')
+        canonical = {}
+        manifest = []
         for key, value in blobs.items():
             if key[0] == 'up':
                 label = 'q2_fsr3_up_%s_lut%d_wave%d_fp%d' % key[1:]
@@ -222,7 +231,15 @@ def main():
                 label = 'q2_fsr3_frame_%s_wave%d_fp%d' % key[1:]
             else:
                 label = 'q2_fsr3_of_%s_wave%d_fp%d' % key[1:]
-            emit_blob(out, label, value[0], value[1])
+            digest = hashlib.sha256(value[0]).hexdigest()
+            identity = (digest, json.dumps(value[1], sort_keys=True))
+            if identity in canonical:
+                out.write('#define %s %s\n' % (label, canonical[identity]))
+            else:
+                canonical[identity] = label
+                emit_blob(out, label, value[0], value[1])
+            manifest.append(dict(label=label, canonical=canonical[identity],
+                                 sha256=digest, bytes=len(value[0]), resources=value[1]))
 
         out.write('''static inline FfxErrorCode fsr3UpscalerGetPermutationBlobByIndex(FfxFsr3UpscalerPass pass, uint32_t options, FfxShaderBlob *out) {
   if (!out) return FFX_ERROR_INVALID_POINTER;
@@ -255,6 +272,11 @@ def main():
             out.write('    case %d: { const FfxShaderBlob *b = &q2_fsr3_of_%s_wave0_fp0; if (wave) b = fp ? &q2_fsr3_of_%s_wave1_fp1 : &q2_fsr3_of_%s_wave1_fp0; else if (fp) b = &q2_fsr3_of_%s_wave0_fp1; memcpy(out, b, sizeof(*out)); return FFX_OK; }\n' % (pass_id, name, name, name, name))
         out.write('    default: return FFX_ERROR_INVALID_ENUM; } }\n\n')
         out.write('static inline FfxErrorCode opticalflowIsWave64(uint32_t options, bool &wave) { wave = (options & 1u) != 0; return FFX_OK; }\n')
+
+
+    if args.manifest:
+        with open(args.manifest, 'w', encoding='utf-8') as output:
+            json.dump(dict(optimization=args.optimization, permutations=manifest), output, indent=2)
 
 
 if __name__ == '__main__':

@@ -809,6 +809,41 @@ r_fsr_frame_generation::
     archived cvar value is preserved. OpenGL ignores this cvar. Default value
     is 0.
 
+r_fsr_composition_mask::
+    Enables the separate FSR3 transparency-and-composition mask for translucent
+    surfaces and effects. It is generated with the motion coverage pass and
+    defaults to 1. Devices without the required color attachments or
+    independent blending use the reactive-mask fallback.
+
+vk_fsr_precision::
+    Selects FSR3 shader precision: ‘auto’ enables FP16 only when Vulkan reports
+    and enables shaderFloat16, ‘fp16’ requests that capability and otherwise
+    falls back to FP32, and ‘fp32’ disables FP16. Default value is ‘auto’.
+
+vk_fsr_subgroup::
+    Requests a compute subgroup size of ‘native’, 32, or 64 when supported by
+    the device. Unsupported requests fall back to native. Changing this or
+    vk_fsr_precision recreates the Vulkan device. Default value is ‘native’.
+
+vk_fsr_profile::
+    Enables opt-in per-dispatch FSR GPU timestamp logging with SDK effect, pass,
+    permutation, and duration. It is excluded from automatic performance tests.
+    Default value is 0.
+
+vk_fsr_debug::
+    Selects an opt-in FSR overlay: ‘off’, ‘motion’, ‘reactive’, ‘composition’,
+    or ‘depth’. It is excluded from automatic performance tests. Default value
+    is ‘off’.
+
+vk_fsr_benchmark::
+    Emits timestamped per-frame samples for the external
+    ‘tests/fsr_benchmark.py’ harness. Default value is 0.
+
+fsr_retest::
+    Restarts the automatic FSR performance evaluation after a device, display,
+    or workload change. This is useful when r_fsr_auto is enabled and the
+    initial warm-up was captured under an unrepresentative workload.
+
 vk_raytracing::
     Enables the optional Vulkan ray-query path. The renderer preserves Vulkan
     pixel lightmaps, glow maps, and bloom while using ray queries for

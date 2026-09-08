@@ -6,7 +6,6 @@ layout(location = 0) flat in mat4 reprojection;
 layout(location = 4) flat in mat4 sky_reprojection;
 layout(location = 0) out vec2 out_motion;
 layout(location = 1) out float out_reactive;
-layout(location = 2) out float out_composition;
 void main()
 {
     float depth = texelFetch(scene_depth, ivec2(gl_FragCoord.xy), 0).r;
@@ -17,5 +16,4 @@ void main()
     bool valid = previous.w > 0.000001;
     out_motion = valid ? (previous.xy / previous.w - current) * pc.motion_scale : vec2(0);
     out_reactive = valid ? 0 : 1;
-    out_composition = 0;
 }

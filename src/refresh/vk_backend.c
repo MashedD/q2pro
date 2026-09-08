@@ -93,6 +93,15 @@ static const uint32_t vk_tex_vert_spv[] =
 #include "vk_tex_vert_spv.h"
 ;
 
+static const uint32_t vk_fsr_debug_frag_spv[] =
+#include "vk_fsr_debug_frag_spv.h"
+;
+static const uint32_t vk_motion_no_composition_frag_spv[] =
+#include "vk_motion_no_composition_frag_spv.h"
+;
+static const uint32_t vk_motion_camera_no_composition_frag_spv[] =
+#include "vk_motion_camera_no_composition_frag_spv.h"
+;
 static const uint32_t vk_tex_frag_spv[] =
 #include "vk_tex_frag_spv.h"
 ;
@@ -681,6 +690,7 @@ typedef struct {
 
 typedef struct {
     void *library;
+    q2_fsr3_capabilities_t fsr_capabilities;
 
     PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
     PFN_vkGetDeviceProcAddr GetDeviceProcAddr;
@@ -842,6 +852,7 @@ typedef struct {
     VkPipeline vignette_pipeline;
     VkPipeline texture_pipeline;
     VkPipeline presentation_pipeline;
+    VkPipeline fsr_debug_pipeline;
     VkPipeline scene_pipeline;
     VkPipeline waterwarp_pipeline;
     VkPipeline bloom_downscale_pipeline;
@@ -939,6 +950,7 @@ typedef struct {
     VkImageLayout fsr_pause_layout;
     VkImageLayout fsr_motion_layout;
     VkImageLayout fsr_reactive_layout;
+    VkImageLayout fsr_composition_layout;
     VkImageLayout fsr_input_layout;
     VkCommandBuffer *command_buffers;
     uint32_t swapchain_image_count;
@@ -1017,6 +1029,7 @@ typedef struct {
     vk_texture_t fsr_pause_texture;
     vk_texture_t fsr_motion_texture;
     vk_texture_t fsr_reactive_texture;
+    vk_texture_t fsr_composition_texture;
     vk_texture_t fsr_input_texture;
     vk_texture_t particle_texture;
     vk_texture_t beam_texture;
@@ -1045,6 +1058,7 @@ typedef struct {
         float alpha;
     } fsr_reactive_draws[2048];
     uint32_t fsr_reactive_draw_count;
+    bool fsr_reactive_overflow_logged;
     vk_vertex_t particle_batch[VK_MAX_PARTICLE_VERTICES];
     uint32_t sky_images[6];
     vk_cubemap_t cubemaps[VK_MAX_CUBEMAPS];
@@ -1090,6 +1104,7 @@ typedef struct {
     uint32_t timing_generation[VK_MAX_FRAMES_IN_FLIGHT];
     unsigned timing_record_usec[VK_MAX_FRAMES_IN_FLIGHT];
     bool timing_eligible[VK_MAX_FRAMES_IN_FLIGHT];
+    float timing_scene_time[VK_MAX_FRAMES_IN_FLIGHT];
     bool fsr_auto_cpu_only;
     unsigned barrier_count;
     bool fsr_auto_recreate;
@@ -1160,6 +1175,12 @@ static cvar_t *r_fsr_auto;
 static cvar_t *r_fsr_motion;
 static cvar_t *r_fsr_mip_bias;
 static cvar_t *r_fsr_frame_generation;
+static cvar_t *vk_fsr_precision;
+static cvar_t *vk_fsr_subgroup;
+static cvar_t *r_fsr_composition_mask;
+static cvar_t *vk_fsr_profile;
+static cvar_t *vk_fsr_debug;
+static cvar_t *vk_fsr_benchmark;
 static cvar_t *vk_perf_stats;
 static cvar_t *vk_frames_in_flight;
 static cvar_t *vk_device;
@@ -1347,6 +1368,14 @@ static void vk_fsr_auto_reset(void)
 }
 
 /* Insertion sort is cheap for this bounded window and avoids comparator casts. */
+static void vk_fsr_retest_f(void)
+{
+    vk_fsr_auto_reset();
+    vk.fsr_auto_recreate = true;
+    vk.fsr_reset = true;
+    Com_Printf("FSR automatic evaluation restarted\n");
+}
+
 static uint64_t vk_fsr_auto_average(uint64_t *values, uint32_t count)
 {
     if (!count)
@@ -1438,6 +1467,23 @@ static void vk_disable_frame_generation(const char *reason)
 static bool vk_fsr_any_requested(void)
 {
     return vk_fsr_requested() || vk_fsr_frame_generation_requested();
+}
+
+static bool vk_fsr_composition_enabled(void)
+{
+    return r_fsr_composition_mask && r_fsr_composition_mask->integer &&
+        vk.physical_device_features.independentBlend &&
+        vk.physical_device_properties.limits.maxColorAttachments >= 3;
+}
+
+static unsigned vk_fsr_debug_mode(void)
+{
+    const char *mode = vk_fsr_debug ? vk_fsr_debug->string : "off";
+    static const char *names[] = { "off", "motion", "reactive", "composition", "depth" };
+    for (unsigned i = 1; i < q_countof(names); i++)
+        if (!Q_stricmp(mode, names[i]))
+            return i;
+    return 0;
 }
 
 static bool vk_fsr_scene_paused(void)
@@ -3737,6 +3783,8 @@ static void vk_destroy_fsr_resources(void)
     vk_destroy_texture_resource(&vk.fsr_pause_texture);
     vk_destroy_texture_resource(&vk.fsr_motion_texture);
     vk_destroy_texture_resource(&vk.fsr_reactive_texture);
+    vk_destroy_texture_resource(&vk.fsr_composition_texture);
+    vk.fsr_composition_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_output_format = VK_FORMAT_UNDEFINED;
     vk.fsr_output_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_frame_generation_layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -3780,7 +3828,8 @@ static bool vk_create_fsr_resources(void)
                              vk.render_extent.width, vk.render_extent.height,
                              vk.swapchain_extent.width, vk.swapchain_extent.height,
                              vk_fsr_output_format(vk.swapchain_format),
-                             vk_fsr_frame_generation_requested());
+                             vk_fsr_frame_generation_requested(),
+                             &vk.fsr_capabilities);
     if (!vk.fsr3) {
         if (!vk.fsr_warned) {
             Com_WPrintf("Vulkan FSR3 is unavailable on this device; rendering at native resolution\n");
@@ -3856,6 +3905,14 @@ static bool vk_create_fsr_resources(void)
                                 VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
         Com_WPrintf("Couldn't create Vulkan FSR3 reactive target: %s; rendering at native resolution\n",
                     Com_GetLastError());
+        vk_destroy_fsr_resources();
+        return true;
+    }
+    if (vk_fsr_composition_enabled() &&
+        !vk_create_color_target(&vk.fsr_composition_texture,
+                                vk.render_extent.width, vk.render_extent.height,
+                                VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+        Com_WPrintf("Couldn't create FSR composition mask; using native resolution\n");
         vk_destroy_fsr_resources();
         return true;
     }
@@ -5714,7 +5771,7 @@ static bool vk_create_device(void)
     VkDeviceQueueCreateInfo queue_infos[2];
     uint32_t queue_info_count = 0;
     uint32_t present_queue_index = 0;
-    const char *extensions[2
+    const char *extensions[4
 #if USE_VULKAN_RAYTRACING
                            + VK_RT_REQUIRED_EXTENSION_COUNT
 #endif
@@ -5722,12 +5779,61 @@ static bool vk_create_device(void)
     uint32_t extension_count = 1;
     if (vk.swapchain_mutable_format_supported)
         extensions[extension_count++] = VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME;
+    VkPhysicalDeviceShaderFloat16Int8Features half = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
+    };
+    VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroup = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT,
+    };
+    void *fsr_features = NULL;
+    bool want_half = !vk_fsr_precision || Q_stricmp(vk_fsr_precision->string, "fp32");
+    if (want_half && vk.GetPhysicalDeviceFeatures2 &&
+        vk_has_device_extension(vk.physical_device, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 query = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                          .pNext = &half };
+        vk.GetPhysicalDeviceFeatures2(vk.physical_device, &query);
+        half.shaderInt8 = VK_FALSE;
+        if (half.shaderFloat16) {
+            extensions[extension_count++] = VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME;
+            fsr_features = &half;
+            vk.fsr_capabilities.fp16 = true;
+        }
+    }
+    uint32_t requested_subgroup = vk_fsr_subgroup ? vk_fsr_subgroup->integer : 0;
+    if ((requested_subgroup == 32 || requested_subgroup == 64) &&
+        vk.GetPhysicalDeviceFeatures2 && vk.GetPhysicalDeviceProperties2 &&
+        vk_has_device_extension(vk.physical_device, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 query = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                          .pNext = &subgroup };
+        VkPhysicalDeviceSubgroupSizeControlPropertiesEXT sizes = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES_EXT };
+        VkPhysicalDeviceProperties2 props = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                                             .pNext = &sizes };
+        vk.GetPhysicalDeviceFeatures2(vk.physical_device, &query);
+        vk.GetPhysicalDeviceProperties2(vk.physical_device, &props);
+        if (subgroup.subgroupSizeControl && requested_subgroup >= sizes.minSubgroupSize &&
+            requested_subgroup <= sizes.maxSubgroupSize &&
+            (sizes.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT)) {
+            extensions[extension_count++] = VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME;
+            subgroup.computeFullSubgroups = VK_FALSE;
+            subgroup.pNext = fsr_features;
+            fsr_features = &subgroup;
+            vk.fsr_capabilities.subgroup_size = requested_subgroup;
+        }
+    }
+    if (want_half && !vk.fsr_capabilities.fp16)
+        Com_WPrintf("Vulkan FSR3: FP16 unavailable; using FP32\n");
+    if (requested_subgroup && !vk.fsr_capabilities.subgroup_size)
+        Com_WPrintf("Vulkan FSR3: requested subgroup unavailable; using native\n");
+    Com_Printf("Vulkan FSR3 enabled capabilities: precision=%s subgroup=%u (0=native)\n",
+               vk.fsr_capabilities.fp16 ? "fp16" : "fp32", vk.fsr_capabilities.subgroup_size);
     const uint32_t raster_extension_count = extension_count;
     VkPhysicalDeviceFeatures features = { 0 };
 #if USE_VULKAN_RAYTRACING
     vk_probe_raytracing();
     VkPhysicalDeviceRayQueryFeaturesKHR ray_query = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+        .pNext = fsr_features,
     };
     VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
@@ -5803,7 +5909,9 @@ static bool vk_create_device(void)
     VkDeviceCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 #if USE_VULKAN_RAYTRACING
-        .pNext = vk.raytracing_active ? &descriptors : NULL,
+        .pNext = vk.raytracing_active ? &descriptors : fsr_features,
+#else
+        .pNext = fsr_features,
 #endif
         .queueCreateInfoCount = queue_info_count,
         .pQueueCreateInfos = queue_infos,
@@ -5820,7 +5928,7 @@ static bool vk_create_device(void)
         vk.raytracing_active = false;
         Q_strlcpy(vk.raytracing_reason, "ray-query device creation failed",
                   sizeof(vk.raytracing_reason));
-        create_info.pNext = NULL;
+        create_info.pNext = fsr_features;
         create_info.enabledExtensionCount = raster_extension_count;
         result = vk.CreateDevice(vk.physical_device, &create_info, NULL, &vk.device);
     }
@@ -6541,6 +6649,10 @@ static void vk_destroy_swapchain(void)
         vk.DestroyPipeline(vk.device, vk.presentation_pipeline, NULL);
         vk.presentation_pipeline = VK_NULL_HANDLE;
     }
+    if (vk.fsr_debug_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.fsr_debug_pipeline, NULL);
+        vk.fsr_debug_pipeline = VK_NULL_HANDLE;
+    }
     if (vk.scene_pipeline) {
         vk.DestroyPipeline(vk.device, vk.scene_pipeline, NULL);
         vk.scene_pipeline = VK_NULL_HANDLE;
@@ -7142,7 +7254,7 @@ static bool vk_create_render_pass(void)
     if (vk.sample_count != VK_SAMPLE_COUNT_1_BIT)
         return true;
 
-    VkAttachmentDescription motion_attachments[3] = {
+    VkAttachmentDescription motion_attachments[4] = {
         {
             .format = VK_FORMAT_R16G16_SFLOAT,
             .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -7174,9 +7286,11 @@ static bool vk_create_render_pass(void)
             .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
         },
     };
-    VkAttachmentReference motion_colors[2] = {
+    motion_attachments[3] = motion_attachments[1];
+    VkAttachmentReference motion_colors[3] = {
         { .attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
         { .attachment = 1, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+        { .attachment = 3, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
     };
     VkAttachmentReference motion_depth = {
         .attachment = 2,
@@ -7184,7 +7298,7 @@ static bool vk_create_render_pass(void)
     };
     VkSubpassDescription motion_subpass = {
         .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-        .colorAttachmentCount = 2,
+        .colorAttachmentCount = vk_fsr_composition_enabled() ? 3 : 2,
         .pColorAttachments = motion_colors,
         .pDepthStencilAttachment = &motion_depth,
     };
@@ -7211,7 +7325,7 @@ static bool vk_create_render_pass(void)
     };
     VkRenderPassCreateInfo motion_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = q_countof(motion_attachments),
+        .attachmentCount = vk_fsr_composition_enabled() ? 4 : 3,
         .pAttachments = motion_attachments,
         .subpassCount = 1,
         .pSubpasses = &motion_subpass,
@@ -7488,11 +7602,12 @@ static bool vk_create_framebuffers(void)
             vk.fsr_motion_texture.view,
             vk.fsr_reactive_texture.view,
             vk.depth_view,
+            vk.fsr_composition_texture.view,
         };
         VkFramebufferCreateInfo create_info = {
             .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
             .renderPass = vk.fsr_motion_render_pass,
-            .attachmentCount = q_countof(attachments),
+            .attachmentCount = vk_fsr_composition_enabled() ? 4 : 3,
             .pAttachments = attachments,
             .width = vk.render_extent.width,
             .height = vk.render_extent.height,
@@ -7732,8 +7847,17 @@ static bool vk_create_fsr_motion_pipeline(VkPipeline *pipeline,
         pipeline == &vk.fsr_motion_alias_reactive_pipeline ||
         pipeline == &vk.fsr_motion_world_reactive_pipeline;
     VkShaderModule vert = vk_create_shader_module(vert_spv, vert_size);
-    VkShaderModule frag = vk_create_shader_module(camera ? vk_motion_camera_frag_spv : vk_motion_frag_spv,
-        camera ? sizeof(vk_motion_camera_frag_spv) : sizeof(vk_motion_frag_spv));
+    const uint32_t *frag_spv = camera ?
+        (vk_fsr_composition_enabled() ? vk_motion_camera_frag_spv :
+         vk_motion_camera_no_composition_frag_spv) :
+        (vk_fsr_composition_enabled() ? vk_motion_frag_spv :
+         vk_motion_no_composition_frag_spv);
+    size_t frag_size = camera ?
+        (vk_fsr_composition_enabled() ? sizeof(vk_motion_camera_frag_spv) :
+         sizeof(vk_motion_camera_no_composition_frag_spv)) :
+        (vk_fsr_composition_enabled() ? sizeof(vk_motion_frag_spv) :
+         sizeof(vk_motion_no_composition_frag_spv));
+    VkShaderModule frag = vk_create_shader_module(frag_spv, frag_size);
     if (!vert || !frag) {
         if (vert)
             vk.DestroyShaderModule(vk.device, vert, NULL);
@@ -7805,7 +7929,7 @@ static bool vk_create_fsr_motion_pipeline(VkPipeline *pipeline,
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
     };
-    VkPipelineColorBlendAttachmentState blend_attachments[2] = {
+    VkPipelineColorBlendAttachmentState blend_attachments[3] = {
         {
             .colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
                               VK_COLOR_COMPONENT_G_BIT,
@@ -7825,6 +7949,7 @@ static bool vk_create_fsr_motion_pipeline(VkPipeline *pipeline,
         blend_attachments[1].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
         blend_attachments[1].alphaBlendOp = VK_BLEND_OP_MAX;
     }
+    blend_attachments[2] = blend_attachments[1];
     VkDynamicState dynamic_states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
     if (!vk.physical_device_features.independentBlend) {
         blend_attachments[0].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT;
@@ -7838,7 +7963,7 @@ static bool vk_create_fsr_motion_pipeline(VkPipeline *pipeline,
     };
     VkPipelineColorBlendStateCreateInfo blend = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = 2,
+        .attachmentCount = vk_fsr_composition_enabled() ? 3 : 2,
         .pAttachments = blend_attachments,
     };
     VkPipelineDepthStencilStateCreateInfo depth = {
@@ -9396,6 +9521,11 @@ static bool vk_create_swapchain(int width, int height)
                                     vk_vignette_vert_spv,
                                     sizeof(vk_vignette_vert_spv)) ||
         !vk_create_texture_pipeline() ||
+        !vk_create_texture_pipeline_ex(&vk.fsr_debug_pipeline,
+                                       vk_fsr_debug_frag_spv,
+                                       sizeof(vk_fsr_debug_frag_spv),
+                                       VK_TEXTURE_OPAQUE, vk.swapchain_extent,
+                                       vk.separate_presentation, true) ||
         !vk_create_texture_pipeline_ex(&vk.presentation_pipeline,
                                        vk_tex_frag_spv,
                                        sizeof(vk_tex_frag_spv),
@@ -10379,6 +10509,22 @@ static void vk_composite_presentation_texture(const vk_texture_t *texture)
         vk.presentation_pipeline : vk.texture_pipeline;
 
     vk_draw_refdef_texture(pipeline, texture, white);
+}
+
+static void vk_fsr_debug_overlay(void)
+{
+    unsigned mode = vk_fsr_debug_mode();
+    if (!mode || !vk.frame_fsr || !vk.fsr_debug_pipeline)
+        return;
+    vk_texture_t depth = { .descriptor_set = vk.fsr_depth_descriptor,
+        .width = vk.render_extent.width, .height = vk.render_extent.height };
+    const vk_texture_t *texture = mode == 1 ? &vk.fsr_motion_texture :
+        mode == 2 ? &vk.fsr_reactive_texture :
+        mode == 3 ? &vk.fsr_composition_texture : &depth;
+    if (!texture->descriptor_set)
+        return;
+    const vec4_t color = { mode, 0, 0, 1 };
+    vk_draw_refdef_texture(vk.fsr_debug_pipeline, texture, color);
 }
 
 static bool vk_copy_presentation_texture(VkCommandBuffer cmd,
@@ -13912,9 +14058,16 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 static void vk_capture_fsr_reactive(const vk_mesh_t *mesh, const mat4_t mvp,
                                   VkDescriptorSet texture, float alpha)
 {
-    if (!vk.frame_fsr || vk.fsr_motion_fast || vk.drawing_bloom ||
-        !texture || vk.fsr_reactive_draw_count == q_countof(vk.fsr_reactive_draws))
+    if (!vk.frame_fsr || vk.fsr_motion_fast || vk.drawing_bloom || !texture)
         return;
+    if (vk.fsr_reactive_draw_count == q_countof(vk.fsr_reactive_draws)) {
+        if (!vk.fsr_reactive_overflow_logged) {
+            Com_WPrintf("FSR effect coverage capacity exceeded (%u draws); further coverage omitted\n",
+                        vk.fsr_reactive_draw_count);
+            vk.fsr_reactive_overflow_logged = true;
+        }
+        return;
+    }
     unsigned i = vk.fsr_reactive_draw_count++;
     memcpy(vk.fsr_reactive_draws[i].mvp, mvp, sizeof(mat4_t));
     vk.fsr_reactive_draws[i].mesh = mesh;
@@ -19324,6 +19477,12 @@ bool VKR_Init(bool total)
     r_fsr_sharpness = Cvar_Get("r_fsr_sharpness", "0", CVAR_ARCHIVE);
     r_fsr_auto = Cvar_Get("r_fsr_auto", "1", CVAR_ARCHIVE);
     r_fsr_motion = Cvar_Get("r_fsr_motion", "auto", CVAR_ARCHIVE);
+    vk_fsr_precision = Cvar_Get("vk_fsr_precision", "auto", CVAR_REFRESH);
+    vk_fsr_subgroup = Cvar_Get("vk_fsr_subgroup", "native", CVAR_REFRESH);
+    r_fsr_composition_mask = Cvar_Get("r_fsr_composition_mask", "1", CVAR_ARCHIVE);
+    vk_fsr_profile = Cvar_Get("vk_fsr_profile", "0", 0);
+    vk_fsr_debug = Cvar_Get("vk_fsr_debug", "off", 0);
+    vk_fsr_benchmark = Cvar_Get("vk_fsr_benchmark", "0", 0);
     r_fsr_mip_bias = Cvar_Get("r_fsr_mip_bias", "auto", CVAR_ARCHIVE);
     r_fsr_frame_generation = Cvar_Get("r_fsr_frame_generation", "0", CVAR_ARCHIVE);
     vk_fsr_auto_reset();
@@ -19486,6 +19645,7 @@ bool VKR_Init(bool total)
 #endif
 
     Cmd_AddCommand("strings", vk_strings_f);
+    Cmd_AddCommand("fsr_retest", vk_fsr_retest_f);
     Cmd_AddCommand("modellist", vk_model_list_f);
 #if USE_DEBUG
     R_ClearDebugLines();
@@ -19542,6 +19702,7 @@ void VKR_Shutdown(bool total)
         vk_clearcolor->generator = NULL;
 
     Cmd_RemoveCommand("strings");
+    Cmd_RemoveCommand("fsr_retest");
     Cmd_RemoveCommand("modellist");
 #if USE_DEBUG
     Cmd_RemoveCommand("cleardebuglines");
@@ -20726,6 +20887,11 @@ static void vk_draw_fsr_motion_world(const refdef_t *fd, const entity_t *ent, bo
             ((face->drawflags & SURF_TRANS33) ? 0.33f :
              (face->drawflags & SURF_TRANS66) ? 0.66f : 1.0f);
         push.reactive = translucent || (ent && !vk_fsr_previous_entity(ent)) ? 1.0f : 0.0f;
+        push.viewport[2] = translucent || (face->drawflags & (SURF_WARP | SURF_FLOWING)) ? 1.0f : 0.0f;
+        float scroll[4];
+        vk_world_face_scroll(face, fd->time, scroll);
+        push.backlerp = scroll[0];
+        push.previous_backlerp = scroll[1];
         push.viewport[0] = (image->flags & IF_TRANSPARENT) ? 0.666f : 0.0f;
         vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            translucent ? vk.fsr_motion_world_reactive_pipeline :
@@ -20810,6 +20976,7 @@ static void vk_draw_fsr_motion_aliases(const refdef_t *fd)
         push.backlerp = lerp.backlerp;
         push.previous_backlerp = previous_lerp.backlerp;
         push.reactive = !previous || (ent->flags & RF_TRANSLUCENT) ? 1.0f : 0.0f;
+        push.viewport[2] = (ent->flags & (RF_TRANSLUCENT | RF_SHELL_MASK)) ? 1.0f : 0.0f;
         push.alpha = (ent->flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f;
         push.viewport[1] = (ent->flags & RF_DEPTHHACK) ? 0.25f : 1.0f;
 
@@ -20862,6 +21029,7 @@ static void vk_draw_fsr_motion_particles(const refdef_t *fd)
     push.reactive = 1.0f;
     vk_fsr_motion_parameters(&push, fd);
     push.viewport[0] = 0.0f;
+    push.viewport[2] = 1.0f;
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = vk.particle_motion_offset;
@@ -20899,6 +21067,7 @@ static void vk_draw_fsr_reactive(void)
         memcpy(push.previous_mvp, push.mvp, sizeof(mat4_t));
         push.alpha = vk.fsr_reactive_draws[i].alpha;
         push.reactive = 1.0f;
+        push.viewport[2] = 1.0f;
         vk.CmdBindVertexBuffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
         vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
         vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -20931,10 +21100,11 @@ static void vk_render_fsr_motion(const refdef_t *fd)
                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
-    VkClearValue clear[3] = {
+    VkClearValue clear[4] = {
         { .color = { .float32 = { 0, 0, 0, 0 } } },
         { .color = { .float32 = { 0, 0, 0, 0 } } },
         { .depthStencil = { .depth = 1.0f, .stencil = 0 } },
+        { .color = { .float32 = { 0, 0, 0, 0 } } },
     };
     VkRenderPassBeginInfo begin = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -20943,7 +21113,7 @@ static void vk_render_fsr_motion(const refdef_t *fd)
         .renderArea = {
             .extent = { vk.render_extent.width, vk.render_extent.height },
         },
-        .clearValueCount = q_countof(clear),
+        .clearValueCount = vk_fsr_composition_enabled() ? 4 : 3,
         .pClearValues = clear,
     };
     vk.CmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
@@ -20988,6 +21158,7 @@ static void vk_render_fsr_motion(const refdef_t *fd)
     vk_reset_bind_cache();
     vk.fsr_motion_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     vk.fsr_reactive_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    vk.fsr_composition_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     vk.fsr_motion_initialized = true;
     vk.fsr_motion_record_usec = vk_time_usec() - motion_start;
     vk_write_fsr_timestamp(VK_TIMESTAMP_MOTION_END);
@@ -21216,6 +21387,10 @@ static bool vk_dispatch_fsr(void)
     float fov_y = vk.fd_valid ? DEG2RAD(vk.fd.fov_y) : DEG2RAD(75.0f);
     uint64_t dispatch_start = vk_time_usec();
     vk_write_fsr_timestamp(VK_TIMESTAMP_FSR_BEGIN);
+    Q2_FSR3_ProfileBegin(vk.fsr3, cmd, vk.frame_index,
+                         vk_fsr_profile && vk_fsr_profile->integer &&
+                         vk.physical_device_properties.limits.timestampComputeAndGraphics,
+                         vk.physical_device_properties.limits.timestampPeriod);
     bool dispatched = Q2_FSR3_Dispatch(
         vk.fsr3, cmd,
         input_texture->image, input_texture->view,
@@ -21226,6 +21401,7 @@ static bool vk_dispatch_fsr(void)
         reactive_required ? vk.fsr_reactive_texture.image : VK_NULL_HANDLE,
         reactive_required ? vk.fsr_reactive_texture.view : VK_NULL_HANDLE,
         reactive_required ? VK_FORMAT_R8_UNORM : VK_FORMAT_UNDEFINED,
+        reactive_required && vk_fsr_composition_enabled() ? vk.fsr_composition_texture.image : VK_NULL_HANDLE,
         output_image, output_view,
         vk.fsr_output_format,
         vk.fsr_jitter[0], vk.fsr_jitter[1],
@@ -21308,6 +21484,7 @@ static bool vk_dispatch_fsr(void)
         vk.fsr_direct_source_image = vk.current_image;
         vk.fsr_direct_source_valid = true;
         vk_begin_presentation(false);
+        vk_fsr_debug_overlay();
         vk_write_fsr_timestamp(VK_TIMESTAMP_PRESENT_BEGIN);
         vk_write_fsr_timestamp(VK_TIMESTAMP_PRESENT_END);
         vk.fsr_composited = true;
@@ -21331,6 +21508,7 @@ static bool vk_dispatch_fsr(void)
     vk_begin_presentation(false);
     if (!presentation_copy)
         vk_composite_presentation_texture(presentation_texture);
+    vk_fsr_debug_overlay();
     vk_write_fsr_timestamp(VK_TIMESTAMP_PRESENT_END);
     vk.fsr_composited = true;
     return true;
@@ -21656,7 +21834,10 @@ void VKR_BeginFrame(void)
         (r_fsr_auto && r_fsr_auto->modified) ||
         (r_fsr_motion && r_fsr_motion->modified) ||
         (r_fsr_mip_bias && r_fsr_mip_bias->modified) ||
+        (r_fsr_composition_mask && r_fsr_composition_mask->modified) ||
         (r_fsr_sharpness && r_fsr_sharpness->modified) ||
+        (vk_fsr_precision && vk_fsr_precision->modified) ||
+        (vk_fsr_subgroup && vk_fsr_subgroup->modified) ||
         (r_fsr_quality && r_fsr_quality->modified) ||
         (r_fsr_frame_generation && r_fsr_frame_generation->modified)) {
         vk_fsr_auto_reset();
@@ -21668,8 +21849,14 @@ void VKR_BeginFrame(void)
             r_fsr_motion->modified = false;
         if (r_fsr_mip_bias)
             r_fsr_mip_bias->modified = false;
+        if (r_fsr_composition_mask)
+            r_fsr_composition_mask->modified = false;
         if (r_fsr_sharpness)
             r_fsr_sharpness->modified = false;
+        if (vk_fsr_precision)
+            vk_fsr_precision->modified = false;
+        if (vk_fsr_subgroup)
+            vk_fsr_subgroup->modified = false;
         if (r_fsr_quality)
             r_fsr_quality->modified = false;
         if (r_fsr_frame_generation)
@@ -21743,6 +21930,11 @@ void VKR_BeginFrame(void)
         if (vk_read_timestamp_pair(first + VK_TIMESTAMP_FRAME_BEGIN,
                                    &elapsed)) {
             vk.gpu_frame_usec = elapsed;
+            if (vk_fsr_benchmark && vk_fsr_benchmark->integer &&
+                vk.timing_eligible[vk.frame_index] &&
+                vk.timing_generation[vk.frame_index] == vk.fsr_auto_generation)
+                Com_Printf("FSR sample: time=%.6f cpu_us=%u gpu_us=%u\n",
+                    vk.timing_scene_time[vk.frame_index], vk.timing_record_usec[vk.frame_index], elapsed);
             vk_fsr_auto_update(vk.timing_record_usec[vk.frame_index], elapsed,
                                vk.timing_generation[vk.frame_index],
                                vk.timing_eligible[vk.frame_index]);
@@ -22235,13 +22427,17 @@ void VKR_EndFrame(void)
     }
     bool timing_eligible = vk.fd_valid && !(vk.fd.rdflags & RDF_NOWORLDMODEL) &&
         !vk.fsr_auto_recreate && !vk.fsr_timing_discontinuity &&
+        !vk_fsr_debug_mode() && !(vk_fsr_profile && vk_fsr_profile->integer) &&
         !vk_fsr_scene_paused() && !vk.fsr_pause_reuse &&
         (!vk.separate_presentation || (vk.frame_fsr && vk.fsr_output_valid));
     vk.timing_record_usec[vk.frame_index] = vk.record_usec;
+    vk.timing_scene_time[vk.frame_index] = vk.fd.time;
     vk.timing_generation[vk.frame_index] = vk.fsr_auto_generation;
     vk.timing_eligible[vk.frame_index] = timing_eligible;
     if (!vk.timestamp_query_pool)
         vk_fsr_auto_update(vk.record_usec, 0, vk.fsr_auto_generation, timing_eligible);
+    if (!vk.timestamp_query_pool && timing_eligible && vk_fsr_benchmark && vk_fsr_benchmark->integer)
+        Com_Printf("FSR sample: time=%.6f cpu_us=%u gpu_us=0\n", vk.fd.time, vk.record_usec);
     if (vk.timestamp_query_pool)
         vk.timestamp_valid[vk.frame_index] = true;
 

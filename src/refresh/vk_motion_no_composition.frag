@@ -8,7 +8,6 @@ layout(location = 2) in vec2 v_uv;
 layout(location = 3) in float v_alpha;
 layout(location = 0) out vec2 out_motion;
 layout(location = 1) out float out_reactive;
-layout(location = 2) out float out_composition;
 void main()
 {
     float coverage = texture(skin, v_uv).a * pc.alpha * v_alpha;
@@ -17,5 +16,4 @@ void main()
     out_motion = valid ? (v_previous_clip.xy / v_previous_clip.w -
                           v_current_clip.xy / v_current_clip.w) * pc.motion_scale : vec2(0);
     out_reactive = valid ? clamp(pc.reactive * coverage, 0, 1) : 1;
-    out_composition = clamp(pc.viewport.z * coverage, 0, 1);
 }
