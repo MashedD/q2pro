@@ -827,6 +827,15 @@ if not win32 and not web and config.get('USE_VULKAN', 0) != 0
   endif
 endif
 
+fsr_benchmark_parser_python = find_program('python3', 'python', required: false)
+if fsr_benchmark_parser_python.found()
+  test('fsr-benchmark-parser', fsr_benchmark_parser_python,
+    args: [meson.current_source_dir() / 'tests/test_fsr_benchmark.py'],
+    env: ['PYTHONDONTWRITEBYTECODE=1'],
+    timeout: 120,
+  )
+endif
+
 if system_wide
   summary({'datadir': datadir, 'libdir': libdir, 'homedir': homedir}, section: 'Directories')
 endif

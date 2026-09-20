@@ -1000,6 +1000,8 @@ typedef struct {
     uint64_t fsr_motion_record_usec;
     uint64_t fsr_dispatch_record_usec;
     uint64_t fsr_frame_id;
+    uint64_t fsr_sdk_frame_id;
+    bool fsr_sdk_frame_id_valid;
     bool fsr_frame_reset;
     bool fsr_frame_pause;
     vk_fsr_result_t fsr_result;
@@ -1120,6 +1122,13 @@ typedef struct {
     unsigned timing_record_usec[VK_MAX_FRAMES_IN_FLIGHT];
     bool timing_eligible[VK_MAX_FRAMES_IN_FLIGHT];
     float timing_scene_time[VK_MAX_FRAMES_IN_FLIGHT];
+    uint64_t timing_frame_id[VK_MAX_FRAMES_IN_FLIGHT];
+    uint64_t timing_sdk_frame_id[VK_MAX_FRAMES_IN_FLIGHT];
+    bool timing_sdk_frame_valid[VK_MAX_FRAMES_IN_FLIGHT];
+    uint64_t timing_completed_frame_id;
+    uint64_t timing_completed_sdk_frame_id;
+    bool timing_completed_sdk_frame_valid;
+    float timing_completed_scene_time;
     bool fsr_auto_cpu_only;
     unsigned barrier_count;
     bool fsr_auto_recreate;
@@ -1604,6 +1613,7 @@ static void vk_destroy_texture_resource(vk_texture_t *texture);
 static VkShaderModule vk_create_shader_module(const uint32_t *code,
                                               size_t code_size);
 static uint64_t vk_time_usec(void);
+static void vk_sync_fsr_frame_id(void);
 static void vk_destroy_pixel_lightmap_staging(void);
 static bool vk_create_particle_texture(void);
 static bool vk_create_beam_texture(void);
@@ -19454,8 +19464,10 @@ static void vk_log_perf_stats(void)
                vk.wait_usec, vk.acquire_usec, vk.record_usec,
                vk.submit_usec, vk.present_usec, vk.barrier_count);
     if (vk.separate_presentation) {
-        Com_Printf("VK FSR3 frame: id=%llu result=%s reset=%s pause=%s motion=%lluus dispatch=%lluus reuse=%s history=%s target=%s present=%s clear=%s\n",
+        Com_Printf("VK FSR3 frame: id=%llu sdk_id=%llu sdk_valid=%s result=%s reset=%s pause=%s motion=%lluus dispatch=%lluus reuse=%s history=%s target=%s present=%s clear=%s\n",
                    (unsigned long long)vk.fsr_frame_id,
+                   (unsigned long long)vk.fsr_sdk_frame_id,
+                   vk.fsr_sdk_frame_id_valid ? "yes" : "no",
                    vk_fsr_result_name(vk.fsr_result),
                    vk.fsr_frame_reset ? "yes" : "no",
                    vk.fsr_frame_pause ? "yes" : "no",
@@ -19467,8 +19479,11 @@ static void vk_log_perf_stats(void)
                    vk.fsr_swapchain_direct ? "direct" :
                    (vk.fsr_presentation_copy ? "copy" : "shader"),
                    vk.fsr_motion_cleared ? "yes" : "no");
-        Com_Printf("VK FSR3 GPU: frame=%llu time=%.6f scene=%uus post=%uus motion=%uus upscale=%uus framegen=%uus presentation=%uus\n",
-                   (unsigned long long)vk.fsr_frame_id, vk.fd.time,
+        Com_Printf("VK FSR3 GPU: frame=%llu sdk_id=%llu sdk_valid=%s time=%.6f scene=%uus post=%uus motion=%uus upscale=%uus framegen=%uus presentation=%uus\n",
+                   (unsigned long long)vk.timing_completed_frame_id,
+                   (unsigned long long)vk.timing_completed_sdk_frame_id,
+                   vk.timing_completed_sdk_frame_valid ? "yes" : "no",
+                   vk.timing_completed_scene_time,
                    vk.gpu_scene_usec,
                    vk.gpu_postprocess_usec,
                    vk.fsr_gpu_motion_usec,
@@ -20193,6 +20208,7 @@ void VKR_RenderFrame(const refdef_t *fd)
     }
     if (vk.frame_fsr && vk.fsr3) {
         Q2_FSR3_BeginFrame(vk.fsr3);
+        vk_sync_fsr_frame_id();
         vk.fsr_timing_discontinuity = vk.fsr_reset;
         vk.fsr_pending_history_count = min((uint32_t)max(fd->num_entities, 0), MAX_ENTITIES);
         if (vk.fsr_pending_history_count)
@@ -21344,6 +21360,20 @@ static void vk_clear_fsr_motion_targets(VkCommandBuffer cmd, bool clear_reactive
     vk.fsr_motion_initialized = true;
 }
 
+/* Keep the renderer sequence unique for telemetry correlation while exposing
+ * the SDK's own temporal ID separately. The SDK may restart its sequence when
+ * its context is recreated, so it must not replace the renderer ID. */
+static void vk_sync_fsr_frame_id(void)
+{
+    if (!vk.fsr3 || !vk.frame_fsr) {
+        vk.fsr_sdk_frame_id_valid = false;
+        return;
+    }
+
+    vk.fsr_sdk_frame_id = Q2_FSR3_GetCurrentFrameId(vk.fsr3);
+    vk.fsr_sdk_frame_id_valid = true;
+}
+
 static bool vk_dispatch_fsr(void)
 {
     vk_texture_t *input_texture = vk.fsr_scene_direct ?
@@ -21897,6 +21927,7 @@ static void vk_finish_postprocess_scene(void)
 void VKR_BeginFrame(void)
 {
     vk.fsr_frame_id++;
+    vk.fsr_sdk_frame_id_valid = false;
     vk.fsr_result = VK_FSR_RESULT_NATIVE;
     vk.fsr_frame_pause = false;
     vk.fsr_frame_reset = vk.fsr_reset;
@@ -22035,14 +22066,22 @@ void VKR_BeginFrame(void)
     if (vk.timestamp_query_pool && vk.timestamp_valid[vk.frame_index]) {
         uint32_t first = vk.frame_index * VK_TIMESTAMP_QUERY_COUNT;
         unsigned elapsed;
+        vk.timing_completed_frame_id = vk.timing_frame_id[vk.frame_index];
+        vk.timing_completed_sdk_frame_id =
+            vk.timing_sdk_frame_id[vk.frame_index];
+        vk.timing_completed_sdk_frame_valid =
+            vk.timing_sdk_frame_valid[vk.frame_index];
+        vk.timing_completed_scene_time = vk.timing_scene_time[vk.frame_index];
         if (vk_read_timestamp_pair(first + VK_TIMESTAMP_FRAME_BEGIN,
                                    &elapsed)) {
             vk.gpu_frame_usec = elapsed;
             if (vk_fsr_benchmark && vk_fsr_benchmark->integer &&
                 vk.timing_eligible[vk.frame_index] &&
                 vk.timing_generation[vk.frame_index] == vk.fsr_auto_generation)
-                Com_Printf("FSR sample: frame=%llu time=%.6f wall_usec=%llu cpu_us=%u gpu_us=%u\n",
-                    (unsigned long long)vk.fsr_frame_id,
+                Com_Printf("FSR sample: frame=%llu sdk_id=%llu sdk_valid=%s time=%.6f wall_usec=%llu cpu_us=%u gpu_us=%u\n",
+                    (unsigned long long)vk.timing_frame_id[vk.frame_index],
+                    (unsigned long long)vk.timing_sdk_frame_id[vk.frame_index],
+                    vk.timing_sdk_frame_valid[vk.frame_index] ? "yes" : "no",
                     vk.timing_scene_time[vk.frame_index],
                     (unsigned long long)vk_time_usec(),
                     vk.timing_record_usec[vk.frame_index], elapsed);
@@ -22560,11 +22599,16 @@ void VKR_EndFrame(void)
     vk.timing_scene_time[vk.frame_index] = vk.fd.time;
     vk.timing_generation[vk.frame_index] = vk.fsr_auto_generation;
     vk.timing_eligible[vk.frame_index] = timing_eligible;
+    vk.timing_frame_id[vk.frame_index] = vk.fsr_frame_id;
+    vk.timing_sdk_frame_id[vk.frame_index] = vk.fsr_sdk_frame_id;
+    vk.timing_sdk_frame_valid[vk.frame_index] = vk.fsr_sdk_frame_id_valid;
     if (!vk.timestamp_query_pool)
         vk_fsr_auto_update(vk.record_usec, 0, vk.fsr_auto_generation, timing_eligible);
     if (!vk.timestamp_query_pool && timing_eligible && vk_fsr_benchmark && vk_fsr_benchmark->integer)
-        Com_Printf("FSR sample: frame=%llu time=%.6f wall_usec=%llu cpu_us=%u gpu_us=0\n",
+        Com_Printf("FSR sample: frame=%llu sdk_id=%llu sdk_valid=%s time=%.6f wall_usec=%llu cpu_us=%u gpu_us=0\n",
                    (unsigned long long)vk.fsr_frame_id,
+                   (unsigned long long)vk.fsr_sdk_frame_id,
+                   vk.fsr_sdk_frame_id_valid ? "yes" : "no",
                    vk.fd.time, (unsigned long long)vk_time_usec(), vk.record_usec);
     if (vk.timestamp_query_pool)
         vk.timestamp_valid[vk.frame_index] = true;

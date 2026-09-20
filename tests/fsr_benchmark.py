@@ -15,7 +15,7 @@ import tempfile
 
 
 SAMPLE = re.compile(
-    r'FSR sample: (?:frame=(?P<frame_id>\d+) )?'
+    r'FSR sample: .*?'
     r'time=(?P<time>[\d.]+)(?: wall_usec=(?P<wall_usec>\d+))? '
     r'cpu_us=(?P<cpu_us>\d+) gpu_us=(?P<gpu_us>\d+)')
 PRESENTATION = re.compile(
@@ -108,8 +108,9 @@ def parse_benchmark_log(log):
                 'cpu_us': int(values['cpu_us']),
                 'gpu_us': int(values['gpu_us']),
             }
-            if values['frame_id']:
-                entry['frame_id'] = int(values['frame_id'])
+            frame_id = fields.get('frame_id', fields.get('frame'))
+            if frame_id is not None:
+                entry['frame_id'] = frame_id
             for key in ('result', 'frame_id', 'reset', 'paused'):
                 if key in fields:
                     entry[key] = fields[key]
@@ -142,15 +143,16 @@ def parse_benchmark_log(log):
             frame_results.append(fields)
         match = GPU_TIMING.search(line)
         if match:
-            timings = _typed_fields(match.group('timings'))
-            if 'frame' in timings:
-                timings['frame_id'] = timings.pop('frame')
-            timings = {key if key.endswith('_us') else f'{key}_us': value
-                       for key, value in timings.items()
-                       if key not in ('time', 'frame_id')}
             metadata = _typed_fields(match.group('timings'))
+            timings = {
+                key if key.endswith('_us') else f'{key}_us': value
+                for key, value in metadata.items()
+                if key not in ('time', 'frame', 'sdk_id', 'sdk_valid')
+            }
             timings['time'] = metadata.get('time')
             timings['frame_id'] = metadata.get('frame')
+            timings['sdk_id'] = metadata.get('sdk_id')
+            timings['sdk_valid'] = metadata.get('sdk_valid')
             gpu_timings.append(timings)
     result = (frame_results[-1].get('result') if frame_results else
               presentations[-1].get('result') if presentations else None)
@@ -162,7 +164,11 @@ def parse_benchmark_log(log):
         if frame_id in results_by_frame:
             entry['result'] = results_by_frame[frame_id]
     for frame in frames:
-        if 'result' not in frame and result is not None:
+        # A presentation banner is only a legacy, run-level result. Once
+        # frame-specific result records exist, an unannotated frame must stay
+        # unclassified instead of inheriting a later frame's result.
+        if ('result' not in frame and result is not None and
+                (not frame_results or frame.get('frame_id') is None)):
             frame['result'] = result
     return {
         'samples': samples,

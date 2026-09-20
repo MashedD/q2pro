@@ -511,23 +511,66 @@ static void check_fsr_lifecycle_contracts(void)
     vk.fsr_history_count = 3;
     vk.fsr_pending_history_count = 2;
     vk.fsr_motion_initialized = true;
+    vk.fsr_output_valid = true;
+    vk.fsr_pause_cache_valid = true;
+    vk.fsr_pause_reuse = true;
+    vk.fsr_direct_source_valid = true;
     vk_fsr_invalidate_history();
     assert(vk.fsr_reset && !vk.fsr_previous_viewproj_valid &&
            !vk.fsr_previous_fd_valid && vk.fsr_history_count == 0 &&
            vk.fsr_pending_history_count == 0 && !vk.fsr_motion_initialized);
+    /* Invalidation preserves the last completed output for a safe pause
+     * composite, while discarding all state that depends on the old scene. */
+    assert(vk.fsr_output_valid);
+    assert(!vk.fsr_pause_cache_valid && !vk.fsr_pause_reuse &&
+           !vk.fsr_direct_source_valid);
+
+    /* Repeating the helper must be harmless and must not consume the retained
+     * output.  This is exercised by resize/camera-cut paths that can converge
+     * on the same reset in one frame. */
+    vk.fsr_pause_cache_valid = true;
+    vk.fsr_pause_reuse = true;
+    vk.fsr_direct_source_valid = true;
+    vk_fsr_invalidate_history();
+    assert(vk.fsr_reset && vk.fsr_output_valid &&
+           !vk.fsr_pause_cache_valid && !vk.fsr_pause_reuse &&
+           !vk.fsr_direct_source_valid && !vk.fsr_motion_initialized);
+
+    /* Entering pause reuses only a complete retained output.  Resuming clears
+     * reuse state and forces the first active frame through temporal reset. */
+    vk.fsr_output_valid = true;
+    vk.fsr_pause_cache_valid = true;
+    vk.fsr_pause_reuse = true;
+    paused_cvar.integer = 1;
+    assert(vk_fsr_scene_paused());
+    assert(vk.fsr_output_valid && vk.fsr_pause_cache_valid &&
+           vk.fsr_pause_reuse);
+    paused_cvar.integer = 0;
+    assert(!vk_fsr_scene_paused());
+    vk_fsr_invalidate_history();
+    assert(vk.fsr_reset && vk.fsr_output_valid &&
+           !vk.fsr_pause_cache_valid && !vk.fsr_pause_reuse &&
+           !vk.fsr_direct_source_valid);
 
     /* Preparation, dispatch, and device-loss style failures all converge on
      * the same session fallback: preserve ordinary FSR and force a reset. */
     vk.fsr_reset = false;
+    vk.fsr_output_valid = true;
     vk_disable_frame_generation("preparation failed");
-    assert(vk_session_frame_generation_disabled && vk.fsr_reset);
+    assert(vk_session_frame_generation_disabled && vk.fsr_reset &&
+           vk.fsr_output_valid);
     assert(vk_fsr_requested() && !vk_fsr_frame_generation_requested());
 
     vk_session_frame_generation_disabled = false;
+    vk.fsr_reset = false;
+    vk.fsr_output_valid = true;
     vk.device_lost = false;
     vk_device_lost_recovery_queued = false;
     vk_handle_device_lost("contract", VK_ERROR_DEVICE_LOST);
-    assert(vk.device_lost && vk_session_frame_generation_disabled);
+    /* Device-loss handling owns session disable/restart scheduling; it does
+     * not mutate the retained FSR output or synthesize a temporal reset. */
+    assert(vk.device_lost && vk_session_frame_generation_disabled &&
+           !vk.fsr_reset && vk.fsr_output_valid);
     assert(!vk_fsr_frame_generation_requested());
 
     r_fsr = r_fsr_frame_generation = NULL;
