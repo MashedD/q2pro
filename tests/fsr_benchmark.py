@@ -15,10 +15,16 @@ import tempfile
 
 
 SAMPLE = re.compile(
-    r'FSR sample: time=([\d.]+)(?: wall_usec=(\d+))? '
-    r'cpu_us=(\d+) gpu_us=(\d+)')
+    r'FSR sample: (?:frame=(?P<frame_id>\d+) )?'
+    r'time=(?P<time>[\d.]+)(?: wall_usec=(?P<wall_usec>\d+))? '
+    r'cpu_us=(?P<cpu_us>\d+) gpu_us=(?P<gpu_us>\d+)')
 PRESENTATION = re.compile(
     r'Vulkan FSR3 presentation: .*?result=(\S+)')
+KEY_VALUE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)')
+GPU_TIMING = re.compile(r'VK FSR3 GPU: (?P<timings>.*)')
+RECORD = re.compile(r'VK FSR3 record: (?P<telemetry>.*)')
+FRAME = re.compile(r'VK FSR3 frame: (?P<telemetry>.*)')
+FRAME_RESULT = re.compile(r'VK FSR3 result: (?P<telemetry>.*)')
 DEVICE = re.compile(r'(?:Using Vulkan device:|Vulkan FSR3 enabled capabilities:).*')
 FALLBACK = re.compile(
     r'(?:spatial-fallback|resources are incomplete|dispatch failed|'
@@ -48,12 +54,137 @@ def pacing_from_timestamps(timestamps, source):
 
 
 def pacing_from_samples(samples, times):
-    """Prefer renderer-completion timestamps, with a labeled fallback."""
+    """Return renderer-completion pacing when completion timestamps exist."""
     wall = [samples[time][2] for time in times]
     if all(value is not None for value in wall):
         return pacing_from_timestamps([value / 1000000.0 for value in wall],
                                       'renderer-completion')
-    return pacing_from_timestamps(times, 'demo-simulation-time')
+    return {'count': 0, 'source': 'renderer-completion-unavailable'}
+
+
+def _typed_fields(line):
+    """Parse optional key/value telemetry without making it mandatory."""
+    fields = {}
+    for key, value in KEY_VALUE.findall(line):
+        if value.lower() in ('yes', 'true'):
+            fields[key] = True
+        elif value.lower() in ('no', 'false'):
+            fields[key] = False
+        else:
+            try:
+                fields[key] = int(value, 0)
+            except ValueError:
+                try:
+                    fields[key] = float(value)
+                except ValueError:
+                    match = re.fullmatch(r'(\d+(?:\.\d+)?)us', value)
+                    fields[key] = (float(match.group(1)) if '.' in match.group(1)
+                                   else int(match.group(1))) if match else value
+    return fields
+
+
+def parse_benchmark_log(log):
+    """Parse benchmark telemetry into stable, JSON-friendly structures.
+
+    The optional frame_id/reset/paused/result fields are intentionally parsed
+    when present, so this remains compatible with logs from older binaries.
+    """
+    samples = {}
+    frames = []
+    gpu_timings = []
+    records = []
+    frame_records = []
+    frame_results = []
+    presentations = []
+    for line in log.splitlines():
+        sample = SAMPLE.search(line)
+        if sample:
+            values = sample.groupdict()
+            time = values['time']
+            fields = _typed_fields(line)
+            entry = {
+                'time': time,
+                'wall_usec': int(values['wall_usec']) if values['wall_usec'] else None,
+                'cpu_us': int(values['cpu_us']),
+                'gpu_us': int(values['gpu_us']),
+            }
+            if values['frame_id']:
+                entry['frame_id'] = int(values['frame_id'])
+            for key in ('result', 'frame_id', 'reset', 'paused'):
+                if key in fields:
+                    entry[key] = fields[key]
+            samples.setdefault(time, (entry['cpu_us'], entry['gpu_us'],
+                                      entry['wall_usec'], entry.get('frame_id')))
+            frames.append(entry)
+        if 'Vulkan FSR3 presentation:' in line:
+            fields = _typed_fields(line)
+            match = PRESENTATION.search(line)
+            if match:
+                fields['result'] = match.group(1)
+            presentations.append(fields)
+        match = RECORD.search(line)
+        if match:
+            records.append(_typed_fields(match.group('telemetry')))
+        match = FRAME.search(line)
+        if match:
+            fields = _typed_fields(match.group('telemetry'))
+            if 'id' in fields:
+                fields['frame_id'] = fields.pop('id')
+            if 'pause' in fields:
+                fields['paused'] = fields.pop('pause')
+            frame_records.append(fields)
+            records.append(fields)
+        match = FRAME_RESULT.search(line)
+        if match:
+            fields = _typed_fields(match.group('telemetry'))
+            if 'frame' in fields:
+                fields['frame_id'] = fields.pop('frame')
+            frame_results.append(fields)
+        match = GPU_TIMING.search(line)
+        if match:
+            timings = _typed_fields(match.group('timings'))
+            if 'frame' in timings:
+                timings['frame_id'] = timings.pop('frame')
+            timings = {key if key.endswith('_us') else f'{key}_us': value
+                       for key, value in timings.items()
+                       if key not in ('time', 'frame_id')}
+            metadata = _typed_fields(match.group('timings'))
+            timings['time'] = metadata.get('time')
+            timings['frame_id'] = metadata.get('frame')
+            gpu_timings.append(timings)
+    result = (frame_results[-1].get('result') if frame_results else
+              presentations[-1].get('result') if presentations else None)
+    results_by_frame = {entry.get('frame_id'): entry.get('result')
+                        for entry in frame_results
+                        if entry.get('frame_id') is not None}
+    for entry in frames + frame_records:
+        frame_id = entry.get('frame_id')
+        if frame_id in results_by_frame:
+            entry['result'] = results_by_frame[frame_id]
+    for frame in frames:
+        if 'result' not in frame and result is not None:
+            frame['result'] = result
+    return {
+        'samples': samples,
+        'frames': frames,
+        'frame_records': frame_records,
+        'presentations': presentations,
+        'records': records,
+        'frame_results': frame_results,
+        'gpu_timings': gpu_timings,
+        'result': result,
+    }
+
+
+def summarize_gpu_timings(timings, frame_ids=None):
+    """Summarize each existing VK FSR3 per-pass GPU timing independently."""
+    if frame_ids:
+        timings = [timing for timing in timings
+                   if timing.get('frame_id') in frame_ids]
+    keys = sorted({key for timing in timings for key in timing
+                   if key.endswith('_us') and key != 'wall_usec'})
+    return {key: summarize([timing[key] for timing in timings if key in timing])
+            for key in keys}
 
 
 def summarize(values):
@@ -130,7 +261,8 @@ def main():
                     r_fsr_frame_generation=(args.frame_generation if mode == 'fsr' else '0'),
                     vk_fsr_precision=args.precision, vk_fsr_subgroup=args.subgroup,
                     vk_fsr_profile='0', vk_fsr_debug='off', vk_fsr_benchmark='1',
-                    con_notifytime='0', logfile='1', logfile_name='benchmark', logfile_flush='2')
+                    vk_perf_stats='1',
+                    con_notifytime='0', logfile='1', logfile_name='benchmark', logfile_flush='0')
                 if gamelib is not None:
                     settings['sys_forcegamelib'] = str(gamelib.resolve())
                 command = [str(args.binary.resolve())]
@@ -149,15 +281,17 @@ def main():
                 (args.output / f'{repeat}-{mode}.log').write_text(log)
                 if completed.returncode or re.search(r'Vulkan error', log, re.IGNORECASE):
                     raise RuntimeError(f'{mode} run failed; see saved log')
-                samples = {}
-                for time, wall, cpu, gpu in SAMPLE.findall(log):
-                    samples.setdefault(time, (int(cpu), int(gpu),
-                                               int(wall) if wall else None))
-                result = [value for value in PRESENTATION.findall(log)]
+                parsed = parse_benchmark_log(log)
+                samples = parsed['samples']
+                result = parsed['result']
                 fallback_reasons = sorted(set(FALLBACK.findall(log)))
                 captured[mode] = {
                     'samples': samples,
-                    'result': result[-1] if result else ('native' if mode == 'native' else 'unknown'),
+                    'result': result or ('native' if mode == 'native' else 'unknown'),
+                    'frames': parsed['frames'],
+                    'records': parsed['records'],
+                    'frame_records': parsed['frame_records'],
+                    'gpu_timings': parsed['gpu_timings'],
                     'fallback': bool(fallback_reasons),
                     'fallback_reasons': fallback_reasons,
                     'fallback_reason': fallback_reasons[0] if fallback_reasons else None,
@@ -189,11 +323,15 @@ def main():
             mode: pacing_from_samples(captured[mode]['samples'], times)
             for mode in captured
         }
-        run['simulation_frame_pacing'] = pacing_from_timestamps(
+        run['renderer_completion_pacing'] = run['frame_pacing']
+        run['simulation_time_pacing'] = pacing_from_timestamps(
             times, 'demo-simulation-time')
+        # Keep the old key as a compatibility alias while making the two
+        # pacing clocks explicit in the report.
+        run['simulation_frame_pacing'] = run['simulation_time_pacing']
         for mode in captured:
-            cpu, gpu, _wall = zip(*(captured[mode]['samples'][time]
-                             for time in times))
+            cpu, gpu, _wall, _frame = zip(*(captured[mode]['samples'][time]
+                                            for time in times))
             gpu_samples = [value for value in gpu if value]
             run[mode] = {'cpu_us': summarize(cpu), 'gpu_us': summarize(gpu),
                          'frame_cost_us': summarize([max(c, g) for c, g in zip(cpu, gpu)]),
@@ -207,6 +345,16 @@ def main():
             run[mode]['generated_fps'] = (
                 run[mode]['fps'] if captured[mode]['result'] == 'framegen' else None)
             run[mode]['frame_pacing'] = run['frame_pacing'][mode]
+            run[mode]['renderer_completion_pacing'] = run['frame_pacing'][mode]
+            run[mode]['simulation_time_pacing'] = run['simulation_time_pacing']
+            run[mode]['fsr_frames'] = captured[mode]['frames']
+            run[mode]['frame_telemetry'] = captured[mode]['records']
+            run[mode]['fsr_frame_telemetry'] = captured[mode]['frame_records']
+            frame_ids = {captured[mode]['samples'][time][3]
+                         for time in times
+                         if captured[mode]['samples'][time][3] is not None}
+            run[mode]['gpu_pass_timings'] = summarize_gpu_timings(
+                captured[mode]['gpu_timings'], frame_ids)
         run['native_fps'] = run['native'].get('native_fps')
         run['upscaled_fps'] = run['fsr'].get('upscaled_fps')
         run['generated_fps'] = run['fsr'].get('generated_fps')

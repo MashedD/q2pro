@@ -12,9 +12,11 @@ the Free Software Foundation; either version 2 of the License, or
 #if USE_VULKAN
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 #include <map>
 
@@ -71,6 +73,7 @@ struct q2_fsr3_context {
     bool frame_started = false;
     bool frame_generation = false;
     bool frame_generation_failed = false;
+    bool force_reset = false;
     bool full_context_created = false;
     FfxErrorCode last_error = FFX_OK;
 };
@@ -79,6 +82,74 @@ struct q2_fsr3_context {
  * callback binding thread-local and scope it around every SDK call instead of
  * storing a process-global device/context pair. */
 static thread_local q2_fsr3_context_t *q2_callback_context;
+
+struct q2_fsr3_dispatch_inputs {
+    float jitter_x;
+    float jitter_y;
+    float frame_time_ms;
+    float vertical_fov_radians;
+    float camera_near;
+    float camera_far;
+    bool reset;
+};
+
+static bool q2_fsr3_valid_dimensions(uint32_t width, uint32_t height)
+{
+    const uint32_t max_dimension = static_cast<uint32_t>(
+        std::numeric_limits<int32_t>::max());
+    return width && height && width <= max_dimension && height <= max_dimension;
+}
+
+static q2_fsr3_dispatch_inputs q2_fsr3_sanitize_inputs(
+    float jitter_x, float jitter_y, float frame_time_ms,
+    float vertical_fov_radians, float camera_near, float camera_far,
+    bool reset)
+{
+    constexpr float default_frame_time_ms = 16.0f;
+    constexpr float default_fov = 75.0f * 0.01745329251994329577f;
+    constexpr float default_near = 2.0f;
+    constexpr float default_far = 2048.0f;
+    q2_fsr3_dispatch_inputs result = {
+        jitter_x, jitter_y, frame_time_ms, vertical_fov_radians,
+        camera_near, camera_far, reset
+    };
+
+    if (!std::isfinite(result.jitter_x)) {
+        result.jitter_x = 0.0f;
+        result.reset = true;
+    }
+    if (!std::isfinite(result.jitter_y)) {
+        result.jitter_y = 0.0f;
+        result.reset = true;
+    }
+    if (!std::isfinite(result.frame_time_ms) || result.frame_time_ms <= 0.0f) {
+        result.frame_time_ms = default_frame_time_ms;
+        result.reset = true;
+    }
+    if (!std::isfinite(result.vertical_fov_radians) ||
+        result.vertical_fov_radians <= 0.0f ||
+        result.vertical_fov_radians >= 3.14159265358979323846f) {
+        result.vertical_fov_radians = default_fov;
+        result.reset = true;
+    }
+    if (!std::isfinite(result.camera_near) || result.camera_near <= 0.0f) {
+        result.camera_near = default_near;
+        result.reset = true;
+    }
+    if (!std::isfinite(result.camera_far) ||
+        result.camera_far <= result.camera_near) {
+        result.camera_far = default_far;
+        if (result.camera_far <= result.camera_near)
+            result.camera_near = default_near;
+        result.reset = true;
+    }
+    return result;
+}
+
+static float q2_fsr3_sanitize_sharpness(float sharpness)
+{
+    return std::isfinite(sharpness) ? std::clamp(sharpness, 0.0f, 1.0f) : 0.0f;
+}
 
 struct q2_fsr3_context_scope {
     q2_fsr3_context_t *previous;
@@ -512,7 +583,8 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
 {
     if (!physical_device || !device || !instance || !get_instance_proc_addr ||
         !get_device_proc_addr ||
-        !render_width || !render_height || !display_width || !display_height)
+        !q2_fsr3_valid_dimensions(render_width, render_height) ||
+        !q2_fsr3_valid_dimensions(display_width, display_height))
         return nullptr;
 
     q2_fsr3_context_t *result = new q2_fsr3_context_t;
@@ -661,12 +733,8 @@ extern "C" void Q2_FSR3_Destroy(q2_fsr3_context_t *context)
 
 extern "C" bool Q2_FSR3_GetJitter(q2_fsr3_context_t *context, float *x, float *y)
 {
-    if (!context || !x || !y)
+    if (!context || !context->frame_started || !x || !y)
         return false;
-    if (!context->frame_started) {
-        context->current_frame_id = context->next_frame_id++;
-        context->frame_started = true;
-    }
 
     const int32_t phase_count = ffxFsr3GetJitterPhaseCount(
         static_cast<int32_t>(context->render_width),
@@ -675,7 +743,13 @@ extern "C" bool Q2_FSR3_GetJitter(q2_fsr3_context_t *context, float *x, float *y
         return false;
 
     const int32_t phase = static_cast<int32_t>(context->current_frame_id % phase_count);
-    return ffxFsr3GetJitterOffset(x, y, phase, phase_count) == FFX_OK;
+    if (ffxFsr3GetJitterOffset(x, y, phase, phase_count) != FFX_OK ||
+        !std::isfinite(*x) || !std::isfinite(*y)) {
+        *x = 0.0f;
+        *y = 0.0f;
+        return false;
+    }
+    return true;
 }
 
 extern "C" void Q2_FSR3_BeginFrame(q2_fsr3_context_t *context)
@@ -684,6 +758,13 @@ extern "C" void Q2_FSR3_BeginFrame(q2_fsr3_context_t *context)
         return;
     context->current_frame_id = context->next_frame_id++;
     context->frame_started = true;
+    context->force_reset = false;
+}
+
+extern "C" uint64_t Q2_FSR3_GetCurrentFrameId(
+    const q2_fsr3_context_t *context)
+{
+    return context && context->frame_started ? context->current_frame_id : 0;
 }
 
 extern "C" int Q2_FSR3_GetLastError(const q2_fsr3_context_t *context)
@@ -719,6 +800,11 @@ extern "C" bool Q2_FSR3_Dispatch(
         return false;
     }
 
+    const q2_fsr3_dispatch_inputs inputs = q2_fsr3_sanitize_inputs(
+        jitter_x, jitter_y, frame_time_ms, vertical_fov_radians,
+        camera_near, camera_far, reset || context->force_reset);
+    context->force_reset = inputs.reset;
+
     FfxCommandList command_list = ffxGetCommandListVK(command_buffer);
     FfxResource color_resource = q2_fsr3_resource(
         color, color_format, context->render_width, context->render_height,
@@ -751,21 +837,21 @@ extern "C" bool Q2_FSR3_Dispatch(
                 composition, VK_FORMAT_R8_UNORM, context->render_width, context->render_height,
                 FFX_RESOURCE_USAGE_READ_ONLY, FFX_RESOURCE_STATE_COMPUTE_READ);
         description.upscaleOutput = output_resource;
-        description.jitterOffset = { jitter_x, jitter_y };
+        description.jitterOffset = { inputs.jitter_x, inputs.jitter_y };
         description.motionVectorScale = {
             static_cast<float>(context->render_width),
             static_cast<float>(context->render_height)
         };
         description.renderSize = { context->render_width, context->render_height };
         description.upscaleSize = { context->display_width, context->display_height };
-        description.enableSharpening = sharpness > 0.0f;
-        description.sharpness = std::clamp(sharpness, 0.0f, 1.0f);
-        description.frameTimeDelta = std::max(frame_time_ms, 1.0f);
+        description.sharpness = q2_fsr3_sanitize_sharpness(sharpness);
+        description.enableSharpening = description.sharpness > 0.0f;
+        description.frameTimeDelta = std::max(inputs.frame_time_ms, 1.0f);
         description.preExposure = 1.0f;
-        description.reset = reset;
-        description.cameraNear = camera_near;
-        description.cameraFar = camera_far;
-        description.cameraFovAngleVertical = vertical_fov_radians;
+        description.reset = inputs.reset;
+        description.cameraNear = inputs.camera_near;
+        description.cameraFar = inputs.camera_far;
+        description.cameraFovAngleVertical = inputs.vertical_fov_radians;
         description.viewSpaceToMetersFactor = 1.0f;
         description.frameID = context->current_frame_id;
         context->last_error = ffxFsr3ContextDispatchUpscale(
@@ -788,21 +874,21 @@ extern "C" bool Q2_FSR3_Dispatch(
         description.reconstructedPrevNearestDepth = context->interface.fpGetResource(
             &context->interface, context->reconstructed_prev_nearest_depth);
         description.output = output_resource;
-        description.jitterOffset = { jitter_x, jitter_y };
+        description.jitterOffset = { inputs.jitter_x, inputs.jitter_y };
         description.motionVectorScale = {
             static_cast<float>(context->render_width),
             static_cast<float>(context->render_height)
         };
         description.renderSize = { context->render_width, context->render_height };
         description.upscaleSize = { context->display_width, context->display_height };
-        description.enableSharpening = sharpness > 0.0f;
-        description.sharpness = std::clamp(sharpness, 0.0f, 1.0f);
-        description.frameTimeDelta = std::max(frame_time_ms, 1.0f);
+        description.sharpness = q2_fsr3_sanitize_sharpness(sharpness);
+        description.enableSharpening = description.sharpness > 0.0f;
+        description.frameTimeDelta = std::max(inputs.frame_time_ms, 1.0f);
         description.preExposure = 1.0f;
-        description.reset = reset;
-        description.cameraNear = camera_near;
-        description.cameraFar = camera_far;
-        description.cameraFovAngleVertical = vertical_fov_radians;
+        description.reset = inputs.reset;
+        description.cameraNear = inputs.camera_near;
+        description.cameraFar = inputs.camera_far;
+        description.cameraFovAngleVertical = inputs.vertical_fov_radians;
         description.viewSpaceToMetersFactor = 1.0f;
         context->last_error = ffxFsr3UpscalerContextDispatch(
             &context->context, &description);
@@ -825,6 +911,11 @@ extern "C" bool Q2_FSR3_PrepareFrameGeneration(
         return false;
     q2_fsr3_context_scope scope(context);
 
+    const q2_fsr3_dispatch_inputs inputs = q2_fsr3_sanitize_inputs(
+        jitter_x, jitter_y, frame_time_ms, vertical_fov_radians,
+        camera_near, camera_far, context->force_reset);
+    context->force_reset = inputs.reset;
+
     FfxFsr3DispatchFrameGenerationPrepareDescription description = {};
     description.commandList = ffxGetCommandListVK(command_buffer);
     description.depth = q2_fsr3_resource(depth, depth_format,
@@ -837,16 +928,16 @@ extern "C" bool Q2_FSR3_PrepareFrameGeneration(
                                                  context->render_height,
                                                  FFX_RESOURCE_USAGE_READ_ONLY,
                                                  FFX_RESOURCE_STATE_COMPUTE_READ);
-    description.jitterOffset = { jitter_x, jitter_y };
+    description.jitterOffset = { inputs.jitter_x, inputs.jitter_y };
     description.motionVectorScale = {
         static_cast<float>(context->render_width),
         static_cast<float>(context->render_height)
     };
     description.renderSize = { context->render_width, context->render_height };
-    description.frameTimeDelta = std::max(frame_time_ms, 1.0f);
-    description.cameraNear = camera_near;
-    description.cameraFar = camera_far;
-    description.cameraFovAngleVertical = vertical_fov_radians;
+    description.frameTimeDelta = std::max(inputs.frame_time_ms, 1.0f);
+    description.cameraNear = inputs.camera_near;
+    description.cameraFar = inputs.camera_far;
+    description.cameraFovAngleVertical = inputs.vertical_fov_radians;
     description.viewSpaceToMetersFactor = 1.0f;
     description.frameID = context->current_frame_id;
     const FfxErrorCode error = ffxFsr3ContextDispatchFrameGenerationPrepare(
@@ -878,7 +969,7 @@ extern "C" bool Q2_FSR3_DispatchFrameGeneration(
         output, output_format, context->display_width, context->display_height,
         FFX_RESOURCE_USAGE_UAV, FFX_RESOURCE_STATE_UNORDERED_ACCESS);
     description.numInterpolatedFrames = 1;
-    description.reset = reset;
+    description.reset = reset || context->force_reset;
     description.backBufferTransferFunction = FFX_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
     description.minMaxLuminance[0] = 0.0f;
     description.minMaxLuminance[1] = 1000.0f;
@@ -898,6 +989,12 @@ extern "C" bool Q2_FSR3_FrameGenerationEnabled(
 {
     return context && context->full_context_created &&
         !context->frame_generation_failed;
+}
+
+extern "C" bool Q2_FSR3_FrameGenerationFailed(
+    const q2_fsr3_context_t *context)
+{
+    return context && context->frame_generation_failed;
 }
 
 #endif

@@ -41,6 +41,7 @@ void Q2_FSR3_BeginFrame(q2_fsr3_context_t *context);
 void Q2_FSR3_ProfileBegin(q2_fsr3_context_t *context, VkCommandBuffer cmd,
                          uint32_t slot, bool enabled, float timestamp_period);
 bool Q2_FSR3_GetJitter(q2_fsr3_context_t *context, float *x, float *y);
+uint64_t Q2_FSR3_GetCurrentFrameId(const q2_fsr3_context_t *context);
 int Q2_FSR3_GetLastError(const q2_fsr3_context_t *context);
 bool Q2_FSR3_Dispatch(q2_fsr3_context_t *context, VkCommandBuffer command_buffer,
                       VkImage color, VkImageView color_view, VkFormat color_format,
@@ -66,6 +67,7 @@ bool Q2_FSR3_DispatchFrameGeneration(q2_fsr3_context_t *context,
                                      VkImage output, VkFormat output_format,
                                      bool reset);
 bool Q2_FSR3_FrameGenerationEnabled(const q2_fsr3_context_t *context);
+bool Q2_FSR3_FrameGenerationFailed(const q2_fsr3_context_t *context);
 
 #ifdef __cplusplus
 }

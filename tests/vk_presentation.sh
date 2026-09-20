@@ -59,6 +59,46 @@ require_contract 'context->current_frame_id = context->next_frame_id++' \
 require_contract 'description.frameID = context->current_frame_id' \
     "$repo_dir/src/refresh/vk_fsr3.cpp"
 
+# A renderer frame owns one FSR frame ID.  Keep the explicit lifecycle at the
+# call site: BeginFrame must open the SDK frame before jitter is requested, and
+# jitter failure must sanitize the values and force a reset.
+begin_line=$(grep -n 'Q2_FSR3_BeginFrame(vk.fsr3)' "$repo_dir/src/refresh/vk_backend.c" | head -n 1 | cut -d: -f1)
+jitter_line=$(grep -n 'Q2_FSR3_GetJitter(vk.fsr3' "$repo_dir/src/refresh/vk_backend.c" | head -n 1 | cut -d: -f1)
+test -n "$begin_line" -a -n "$jitter_line" -a "$begin_line" -lt "$jitter_line" || {
+    echo "FSR3 contract: BeginFrame must precede GetJitter" >&2
+    exit 2
+}
+require_contract 'if (!vk.fsr_jitter_ready)' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk.fsr_jitter[0] = 0.0f' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk.fsr_jitter[1] = 0.0f' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk.fsr_reset = true' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'q2_fsr3_sanitize_inputs' \
+    "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract 'q2_fsr3_sanitize_sharpness' \
+    "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract '!std::isfinite(*x) || !std::isfinite(*y)' \
+    "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract 'context->force_reset = inputs.reset' \
+    "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract 'Q2_FSR3_GetCurrentFrameId' "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract 'if (error != FFX_OK)' "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract 'context->frame_generation_failed = true' "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract 'if (!dispatched)' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_disable_frame_generation("FSR3 upscaler dispatch failed")' \
+    "$repo_dir/src/refresh/vk_backend.c"
+
+# Pause reuse composites a retained FSR texture. It must not route the paused
+# frame through the normal presentation-image copy path.
+require_contract 'vk_composite_presentation_texture(&vk.fsr_output_texture)' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'Do not copy it during pause entry' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk.fsr_pause_reuse = true' "$repo_dir/src/refresh/vk_backend.c"
+require_contract '!vk.fsr_pause_reuse' "$repo_dir/src/refresh/vk_backend.c"
+if $fixed_search_command 'vk_prepare_direct_pause_cache' "$repo_dir/src/refresh/vk_backend.c"; then
+    echo "FSR3 contract: pause must not copy the presented image directly" >&2
+    exit 2
+fi
+
 cc=${CC:-cc}
 if command -v pkg-config >/dev/null 2>&1; then
     sdl_cflags=$(pkg-config --cflags sdl2 2>/dev/null || true)

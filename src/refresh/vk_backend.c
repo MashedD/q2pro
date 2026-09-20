@@ -314,6 +314,13 @@ typedef enum {
     VK_FSR_ULTRA_PERFORMANCE,
 } vk_fsr_quality_t;
 
+typedef enum {
+    VK_FSR_RESULT_NATIVE,
+    VK_FSR_RESULT_SPATIAL_FALLBACK,
+    VK_FSR_RESULT_FSR3,
+    VK_FSR_RESULT_FRAMEGEN,
+} vk_fsr_result_t;
+
 
 typedef struct {
     vk_buffer_t vertices;
@@ -992,6 +999,10 @@ typedef struct {
     bool fsr_pause_frame;
     uint64_t fsr_motion_record_usec;
     uint64_t fsr_dispatch_record_usec;
+    uint64_t fsr_frame_id;
+    bool fsr_frame_reset;
+    bool fsr_frame_pause;
+    vk_fsr_result_t fsr_result;
     bool fsr_presentation_logged;
     bool fsr_warned;
     bool fsr_motion_initialized;
@@ -1514,12 +1525,34 @@ static bool vk_fsr_scene_paused(void)
 
 static void vk_fsr_invalidate_history(void)
 {
+    /* History reset is independent from the last completed display image.
+     * Keep that image available for a pause/menu frame; dispatch failures
+     * explicitly invalidate it after detecting that the output may be
+     * partially overwritten. */
     vk.fsr_reset = true;
+    vk.fsr_pause_cache_valid = false;
+    vk.fsr_pause_reuse = false;
+    vk.fsr_direct_source_valid = false;
     vk.fsr_previous_viewproj_valid = false;
     vk.fsr_previous_fd_valid = false;
     vk.fsr_history_count = 0;
     vk.fsr_pending_history_count = 0;
     vk.fsr_motion_initialized = false;
+}
+
+static const char *vk_fsr_result_name(vk_fsr_result_t result)
+{
+    switch (result) {
+    case VK_FSR_RESULT_SPATIAL_FALLBACK:
+        return "spatial-fallback";
+    case VK_FSR_RESULT_FSR3:
+        return "fsr3";
+    case VK_FSR_RESULT_FRAMEGEN:
+        return "framegen";
+    case VK_FSR_RESULT_NATIVE:
+    default:
+        return "native";
+    }
 }
 
 static float vk_fsr_quality_scale(void)
@@ -3867,7 +3900,11 @@ static bool vk_create_fsr_resources(void)
     }
 
     bool frame_generation_requested = vk_fsr_frame_generation_requested();
-    if (frame_generation_requested)
+    /* Keep a retained output for pause/menu reuse. Direct rendering into a
+     * swapchain image cannot be safely copied after vkQueuePresentKHR without
+     * an explicit present-ownership protocol, which this integration does not
+     * have. The extra composite is preferable to a black or racy paused frame. */
+    if (frame_generation_requested || vk_fsr_any_requested())
         vk.fsr_swapchain_direct = false;
     VkFormat output_format = vk_fsr_output_format(vk.swapchain_format);
     bool needs_intermediate = !vk.fsr_swapchain_direct;
@@ -19417,7 +19454,11 @@ static void vk_log_perf_stats(void)
                vk.wait_usec, vk.acquire_usec, vk.record_usec,
                vk.submit_usec, vk.present_usec, vk.barrier_count);
     if (vk.separate_presentation) {
-        Com_Printf("VK FSR3 record: motion=%lluus dispatch=%lluus paused=%s history=%s target=%s present=%s clear=%s\n",
+        Com_Printf("VK FSR3 frame: id=%llu result=%s reset=%s pause=%s motion=%lluus dispatch=%lluus reuse=%s history=%s target=%s present=%s clear=%s\n",
+                   (unsigned long long)vk.fsr_frame_id,
+                   vk_fsr_result_name(vk.fsr_result),
+                   vk.fsr_frame_reset ? "yes" : "no",
+                   vk.fsr_frame_pause ? "yes" : "no",
                    (unsigned long long)vk.fsr_motion_record_usec,
                    (unsigned long long)vk.fsr_dispatch_record_usec,
                    vk.fsr_pause_reuse ? "yes" : "no",
@@ -19426,7 +19467,8 @@ static void vk_log_perf_stats(void)
                    vk.fsr_swapchain_direct ? "direct" :
                    (vk.fsr_presentation_copy ? "copy" : "shader"),
                    vk.fsr_motion_cleared ? "yes" : "no");
-        Com_Printf("VK FSR3 GPU: scene=%uus post=%uus motion=%uus upscale=%uus framegen=%uus presentation=%uus\n",
+        Com_Printf("VK FSR3 GPU: frame=%llu time=%.6f scene=%uus post=%uus motion=%uus upscale=%uus framegen=%uus presentation=%uus\n",
+                   (unsigned long long)vk.fsr_frame_id, vk.fd.time,
                    vk.gpu_scene_usec,
                    vk.gpu_postprocess_usec,
                    vk.fsr_gpu_motion_usec,
@@ -21302,74 +21344,6 @@ static void vk_clear_fsr_motion_targets(VkCommandBuffer cmd, bool clear_reactive
     vk.fsr_motion_initialized = true;
 }
 
-static bool vk_prepare_direct_pause_cache(VkCommandBuffer cmd)
-{
-    if (!vk.fsr_swapchain_direct || !vk.fsr_pause_texture.image ||
-        !vk.fsr_direct_source_valid ||
-        vk.fsr_direct_source_image >= vk.swapchain_image_count)
-        return false;
-
-    uint32_t source_image = vk.fsr_direct_source_image;
-    if (source_image != vk.current_image && vk.image_fences[source_image]) {
-        uint64_t start = vk_time_usec();
-        VkResult result = vk.WaitForFences(vk.device, 1,
-                                           &vk.image_fences[source_image],
-                                           VK_TRUE, UINT64_MAX);
-        vk.wait_usec += vk_time_usec() - start;
-        if (result != VK_SUCCESS) {
-            vk_handle_device_lost("vkWaitForFences", result);
-            Com_EPrintf("vkWaitForFences failed while caching paused FSR3 output: Vulkan error %d\n",
-                        result);
-            return false;
-        }
-    }
-
-    VkImageLayout source_restore_layout = source_image == vk.current_image ?
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    vk_transition_image(cmd, source_image,
-                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                        VK_ACCESS_TRANSFER_READ_BIT,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT);
-    vk_transition_color_target(cmd, &vk.fsr_pause_texture,
-                               &vk.fsr_pause_layout,
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                               VK_ACCESS_TRANSFER_WRITE_BIT,
-                               VK_PIPELINE_STAGE_TRANSFER_BIT);
-    VkImageCopy region = {
-        .srcSubresource = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .layerCount = 1,
-        },
-        .dstSubresource = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .layerCount = 1,
-        },
-        .extent = {
-            .width = vk.swapchain_extent.width,
-            .height = vk.swapchain_extent.height,
-            .depth = 1,
-        },
-    };
-    vk.CmdCopyImage(cmd, vk.swapchain_images[source_image],
-                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    vk.fsr_pause_texture.image,
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    1, &region);
-    vk_transition_color_target(cmd, &vk.fsr_pause_texture,
-                               &vk.fsr_pause_layout,
-                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                               VK_ACCESS_SHADER_READ_BIT,
-                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    vk_transition_image(cmd, source_image, source_restore_layout,
-                        source_restore_layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR ? 0 :
-                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                        source_restore_layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR ?
-                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT :
-                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-    vk.fsr_pause_cache_valid = true;
-    return true;
-}
-
 static bool vk_dispatch_fsr(void)
 {
     vk_texture_t *input_texture = vk.fsr_scene_direct ?
@@ -21402,7 +21376,9 @@ static bool vk_dispatch_fsr(void)
         input_texture->height != vk.render_extent.height ||
         output_width != vk.swapchain_extent.width ||
         output_height != vk.swapchain_extent.height) {
+        vk_fsr_invalidate_history();
         vk.fsr_output_valid = false;
+        vk.fsr_result = VK_FSR_RESULT_SPATIAL_FALLBACK;
         if (!vk.fsr_warned) {
             Com_WPrintf("Vulkan FSR3 resources are incomplete; using spatially upscaled scene output "
                         "(render=%ux%u output=%ux%u swapchain=%ux%u)\n",
@@ -21457,6 +21433,7 @@ static bool vk_dispatch_fsr(void)
 
     bool generated_frame = false;
     bool frame_reset = vk.fsr_reset;
+    vk.fsr_frame_reset = frame_reset;
     bool frame_generation_prepared = false;
     if (!frame_reset && !vk.fsr_pause_frame && vk.fd_valid &&
         vk_fsr_frame_generation_requested() &&
@@ -21472,7 +21449,10 @@ static bool vk_dispatch_fsr(void)
             max(vk_projection_zfar(vk.fd_valid ? vk.fd.rdflags : 0),
                 (vk_znear ? Cvar_ClampValue(vk_znear, 0.1f, 4095.0f) : 2.0f) + 1.0f));
         if (!frame_generation_prepared) {
+            vk_fsr_invalidate_history();
             vk_disable_frame_generation("frame-generation preparation failed");
+            frame_reset = vk.fsr_reset;
+            vk.fsr_frame_reset = frame_reset;
         } else {
             vk_transition_color_target(cmd, &vk.fsr_frame_generation_texture,
                                        &vk.fsr_frame_generation_layout,
@@ -21513,9 +21493,12 @@ static bool vk_dispatch_fsr(void)
     vk.fsr_dispatch_record_usec = vk_time_usec() - dispatch_start;
     vk_write_fsr_timestamp(VK_TIMESTAMP_FSR_END);
     if (!dispatched) {
+        vk_fsr_invalidate_history();
+        vk.fsr_output_valid = false;
+        vk.fsr_frame_reset = true;
         if (vk_fsr_frame_generation_requested())
             vk_disable_frame_generation("FSR3 upscaler dispatch failed");
-        vk.fsr_output_valid = false;
+        vk.fsr_result = VK_FSR_RESULT_SPATIAL_FALLBACK;
         if (!vk.fsr_warned) {
             Com_WPrintf("Vulkan FSR3 dispatch failed (error %d); using spatially upscaled scene "
                         "output (render=%ux%u output=%ux%u swapchain=%ux%u)\n",
@@ -21534,7 +21517,6 @@ static bool vk_dispatch_fsr(void)
                        vk.fd.x, vk.fd.y, vk.fd.width, vk.fd.height);
             vk.fsr_presentation_logged = true;
         }
-        vk.fsr_reset = true;
         if (direct_output)
             vk_transition_image(cmd, vk.current_image,
                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -21581,9 +21563,12 @@ static bool vk_dispatch_fsr(void)
             vk.fsr_frame_generation_texture.image, vk.fsr_output_format,
             frame_reset);
         vk_write_fsr_timestamp(VK_TIMESTAMP_FRAMEGEN_END);
-        if (!generated_frame)
+        if (!generated_frame) {
+            vk_fsr_invalidate_history();
             vk_disable_frame_generation("frame-generation dispatch failed");
+        }
     }
+    vk.fsr_result = generated_frame ? VK_FSR_RESULT_FRAMEGEN : VK_FSR_RESULT_FSR3;
     if (!vk.fsr_presentation_logged) {
         Com_Printf("Vulkan FSR3 presentation: render=%ux%u output=%ux%u "
                    "swapchain=%ux%u view=%d,%d %dx%d result=%s target=color-only\n",
@@ -21911,6 +21896,10 @@ static void vk_finish_postprocess_scene(void)
 
 void VKR_BeginFrame(void)
 {
+    vk.fsr_frame_id++;
+    vk.fsr_result = VK_FSR_RESULT_NATIVE;
+    vk.fsr_frame_pause = false;
+    vk.fsr_frame_reset = vk.fsr_reset;
     vk.fsr_timing_discontinuity = false;
     vk.fsr_reactive_draw_count = 0;
     memset(&c, 0, sizeof(c));
@@ -22052,7 +22041,8 @@ void VKR_BeginFrame(void)
             if (vk_fsr_benchmark && vk_fsr_benchmark->integer &&
                 vk.timing_eligible[vk.frame_index] &&
                 vk.timing_generation[vk.frame_index] == vk.fsr_auto_generation)
-                Com_Printf("FSR sample: time=%.6f wall_usec=%llu cpu_us=%u gpu_us=%u\n",
+                Com_Printf("FSR sample: frame=%llu time=%.6f wall_usec=%llu cpu_us=%u gpu_us=%u\n",
+                    (unsigned long long)vk.fsr_frame_id,
                     vk.timing_scene_time[vk.frame_index],
                     (unsigned long long)vk_time_usec(),
                     vk.timing_record_usec[vk.frame_index], elapsed);
@@ -22195,15 +22185,19 @@ void VKR_BeginFrame(void)
     vk.fd_valid = false;
     vk.fsr_pause_reuse = false;
     vk.fsr_pause_frame = false;
+    vk.fsr_pause_cache_valid = false;
+    vk.fsr_direct_source_valid = false;
 
     if (vk.separate_presentation) {
         bool paused = vk_fsr_scene_paused();
         vk.fsr_pause_frame = paused;
+        vk.fsr_frame_pause = paused;
         if (!paused && vk.fsr_paused_last_frame) {
             /* The first active frame after pause must not reuse stale
              * temporal history or the paused camera's motion vectors. */
             vk.fsr_reset = true;
             vk_fsr_invalidate_history();
+            vk.fsr_frame_reset = true;
         }
         vk.fsr_paused_last_frame = paused;
 
@@ -22217,22 +22211,23 @@ void VKR_BeginFrame(void)
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                        VK_ACCESS_SHADER_READ_BIT,
                                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-        if (paused && vk.fsr_swapchain_direct && vk.fsr_output_valid)
-            vk_prepare_direct_pause_cache(cmd);
         vk_begin_presentation(true);
         if (paused && vk.fsr_output_valid &&
-            (!vk.fsr_swapchain_direct || vk.fsr_pause_cache_valid)) {
+            !vk.fsr_swapchain_direct) {
             /* Reuse the last complete upscaled frame. This prevents both
              * camera jitter and animated interpolation from changing the
              * paused scene while keeping menus and HUD live. */
             vk.fsr_pause_reuse = true;
             vk.frame_fsr = false;
-            vk_composite_presentation_texture(vk.fsr_swapchain_direct ?
-                                              &vk.fsr_pause_texture :
-                                              &vk.fsr_output_texture);
+            vk_composite_presentation_texture(&vk.fsr_output_texture);
             vk.fsr_composited = true;
         } else if (paused) {
+            /* A direct FSR output lives in a previously presented swapchain
+             * image. Do not copy it during pause entry: presentation may
+             * still own that image, and this integration has no safe proxy. */
+            vk.fsr_direct_source_valid = false;
             vk.fsr_reset = true;
+            vk.fsr_frame_reset = true;
             vk.frame_fsr = false;
         }
         vk.frame_active = true;
@@ -22568,7 +22563,8 @@ void VKR_EndFrame(void)
     if (!vk.timestamp_query_pool)
         vk_fsr_auto_update(vk.record_usec, 0, vk.fsr_auto_generation, timing_eligible);
     if (!vk.timestamp_query_pool && timing_eligible && vk_fsr_benchmark && vk_fsr_benchmark->integer)
-        Com_Printf("FSR sample: time=%.6f wall_usec=%llu cpu_us=%u gpu_us=0\n",
+        Com_Printf("FSR sample: frame=%llu time=%.6f wall_usec=%llu cpu_us=%u gpu_us=0\n",
+                   (unsigned long long)vk.fsr_frame_id,
                    vk.fd.time, (unsigned long long)vk_time_usec(), vk.record_usec);
     if (vk.timestamp_query_pool)
         vk.timestamp_valid[vk.frame_index] = true;
@@ -22601,6 +22597,15 @@ void VKR_EndFrame(void)
     }
 
     vk_log_perf_stats();
+    if ((vk_perf_stats && vk_perf_stats->integer && vk.separate_presentation) ||
+        (vk_fsr_benchmark && vk_fsr_benchmark->integer))
+        Com_Printf("VK FSR3 result: frame=%llu result=%s reset=%s pause=%s reuse=%s output=%s\n",
+                   (unsigned long long)vk.fsr_frame_id,
+                   vk_fsr_result_name(vk.fsr_result),
+                   vk.fsr_frame_reset ? "yes" : "no",
+                   vk.fsr_frame_pause ? "yes" : "no",
+                   vk.fsr_pause_reuse ? "yes" : "no",
+                   vk.fsr_output_valid ? "valid" : "invalid");
 
     vk.frame_active = false;
     vk.frame_index = (vk.frame_index + 1) % vk_frames_in_flight_value();

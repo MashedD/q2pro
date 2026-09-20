@@ -10,7 +10,22 @@ They exercise the actual backend's presentation configurations (20 plus four
 MSAA variants), C/GLSL push layout, projection jitter and reduced viewport
 scaling, timing-window trimming, the 5% acceptance boundary, stale submission
 rejection, selected-quality-only fallback, entity history invalidation, and
-barrier batching including GENERAL-to-GENERAL dependencies and overflow.
+barrier batching including GENERAL-to-GENERAL dependencies and overflow. The
+contract harness also checks explicit BeginFrame/GetJitter ordering, sanitized
+inputs and jitter fallback, failure-state reset, frame-ID propagation, and
+pause reuse through the retained output texture rather than the normal
+presentation-image copy path.
+
+## Acceptance matrix
+
+| Area | Acceptance | Evidence |
+| --- | --- | --- |
+| FSR3 upscaling | Native, quality/balanced/performance/ultra-performance, motion auto/full/fast, and pause/resume | GPU-free contracts plus 720p/1440p smoke runs |
+| Temporal inputs | BeginFrame precedes GetJitter; invalid jitter falls back to zero and sets reset; sharpness/frame time are bounded | `tests/vk_presentation.sh` source contracts |
+| Recovery | Upscale/frame-generation failures disable generation, preserve ordinary FSR, and reset temporal history | C harness and source contracts |
+| Telemetry | Per-frame result, optional frame ID/reset/pause fields, renderer-completion pacing, simulation-time pacing, and FSR per-pass GPU timings parse deterministically | `tests/fsr_benchmark.py` |
+| Pause presentation | Reuses the retained FSR output and leaves the normal presentation-image copy path unused for pause reuse | Source contract and manual pause captures |
+| Frame generation | Swapchain pacing and runtime stability | Unsupported / not validated on the current Linux path |
 
 Compile and validate every motion vertex/fragment shader with `glslc` and
 `spirv-val`. The shared push layout is a Meson dependency of generated shader
@@ -48,8 +63,10 @@ FSR dispatch remains the dominant cost on this lightweight scene.
 
 These are smoke tests, not a long-duration image-quality benchmark. No Vulkan
 validation layer was available for synchronization validation. Windows runtime,
-frame-generation stability, device-loss injection, and every transparency/MD5
-asset combination remain untested. Test CPU-only timing fallback, other GPU
+device-loss injection, and every transparency/MD5 asset combination remain
+untested. Frame-generation swapchain pacing is explicitly unsupported and not
+validated; the benchmark records requested/result telemetry but does not claim
+generated-frame presentation cadence. Test CPU-only timing fallback, other GPU
 vendors, and long moving-camera demos before making broader performance claims.
 
 For manual comparisons use `r_fsr_auto 0`, the same quality/resolution and demo,

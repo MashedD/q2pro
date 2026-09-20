@@ -138,6 +138,17 @@ begin video
         native native \
         32 32 \
         64 64
+    toggle --status "Record per-dispatch FSR3 GPU timestamps; excluded from auto performance tests" \
+        "FSR3 GPU profile" vk_fsr_profile
+    pairs --status "Optional FSR3 diagnostic overlay" \
+        "FSR3 debug overlay" vk_fsr_debug \
+        off off \
+        motion motion \
+        reactive reactive \
+        composition composition \
+        depth depth
+    toggle --status "Emit per-frame FSR3 samples for tests/fsr_benchmark.py" \
+        "FSR3 benchmark telemetry" vk_fsr_benchmark
 end
 
 begin raytracing
