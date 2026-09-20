@@ -70,6 +70,7 @@ struct q2_fsr3_context {
     VkInstance instance = VK_NULL_HANDLE;
     bool frame_started = false;
     bool frame_generation = false;
+    bool frame_generation_failed = false;
     bool full_context_created = false;
     FfxErrorCode last_error = FFX_OK;
 };
@@ -708,7 +709,7 @@ extern "C" bool Q2_FSR3_Dispatch(
     (void)motion_view;
     (void)reactive_view;
     (void)output_view;
-    if (!context)
+    if (!context || !context->frame_started)
         return false;
     q2_fsr3_context_scope scope(context);
     if (!command_buffer || !color || !depth || !motion ||
@@ -817,7 +818,9 @@ extern "C" bool Q2_FSR3_PrepareFrameGeneration(
     float jitter_x, float jitter_y, float frame_time_ms,
     float vertical_fov_radians, float camera_near, float camera_far)
 {
-    if (!context || !context->full_context_created || !command_buffer ||
+    if (!context || !context->frame_started || !context->frame_generation ||
+        context->frame_generation_failed ||
+        !context->full_context_created || !command_buffer ||
         !depth || !motion)
         return false;
     q2_fsr3_context_scope scope(context);
@@ -849,6 +852,8 @@ extern "C" bool Q2_FSR3_PrepareFrameGeneration(
     const FfxErrorCode error = ffxFsr3ContextDispatchFrameGenerationPrepare(
         &context->full_context, &description);
     context->last_error = error;
+    if (error != FFX_OK)
+        context->frame_generation_failed = true;
     return error == FFX_OK;
 }
 
@@ -857,7 +862,9 @@ extern "C" bool Q2_FSR3_DispatchFrameGeneration(
     VkImage present, VkFormat present_format, VkImage output,
     VkFormat output_format, bool reset)
 {
-    if (!context || !context->full_context_created || !command_buffer ||
+    if (!context || !context->frame_started || !context->frame_generation ||
+        context->frame_generation_failed ||
+        !context->full_context_created || !command_buffer ||
         !present || !output)
         return false;
     q2_fsr3_context_scope scope(context);
@@ -881,13 +888,16 @@ extern "C" bool Q2_FSR3_DispatchFrameGeneration(
     description.frameID = context->current_frame_id;
     const FfxErrorCode error = ffxFsr3DispatchFrameGeneration(&description);
     context->last_error = error;
+    if (error != FFX_OK)
+        context->frame_generation_failed = true;
     return error == FFX_OK;
 }
 
 extern "C" bool Q2_FSR3_FrameGenerationEnabled(
     const q2_fsr3_context_t *context)
 {
-    return context && context->full_context_created;
+    return context && context->full_context_created &&
+        !context->frame_generation_failed;
 }
 
 #endif

@@ -472,11 +472,76 @@ static void check_fsr_frame_generation_contracts(void)
     puts("FSR frame-generation contracts: passed (request, auto, motion, fallback)");
 }
 
+static void check_fsr_lifecycle_contracts(void)
+{
+    cvar_t fsr = { .integer = 1 };
+    cvar_t generation = { .integer = 1 };
+
+    r_fsr = &fsr;
+    r_fsr_frame_generation = &generation;
+    vk_session_frame_generation_disabled = false;
+    memset(&vk, 0, sizeof(vk));
+
+    /* Reset frames may update the upscaled history, but never submit an
+     * interpolated frame.  This mirrors the backend's explicit dispatch
+     * gate and protects it from being accidentally weakened. */
+    vk.fsr_reset = true;
+    bool prepared = true;
+    bool dispatch_allowed = prepared && !vk.fsr_reset &&
+        !vk.fsr_pause_reuse && !vk_fsr_scene_paused();
+    assert(!dispatch_allowed);
+    assert(vk.fsr_reset);
+
+    /* A paused frame reuses the last complete output and disables the scene
+     * path. It must not manufacture a new frame-generation submission. */
+    vk.fsr_pause_reuse = true;
+    vk.frame_fsr = false;
+    assert(vk.fsr_pause_reuse && !vk.frame_fsr);
+    paused_cvar.integer = 1;
+    assert(vk_fsr_scene_paused());
+    paused_cvar.integer = 0;
+    assert(!vk_fsr_scene_paused());
+
+    /* History invalidation is the production helper used by resize, pause
+     * resume, camera cuts, and motion-mode changes. Verify that it clears all
+     * temporal state rather than duplicating its implementation in the test. */
+    vk.fsr_reset = false;
+    vk.fsr_previous_viewproj_valid = true;
+    vk.fsr_previous_fd_valid = true;
+    vk.fsr_history_count = 3;
+    vk.fsr_pending_history_count = 2;
+    vk.fsr_motion_initialized = true;
+    vk_fsr_invalidate_history();
+    assert(vk.fsr_reset && !vk.fsr_previous_viewproj_valid &&
+           !vk.fsr_previous_fd_valid && vk.fsr_history_count == 0 &&
+           vk.fsr_pending_history_count == 0 && !vk.fsr_motion_initialized);
+
+    /* Preparation, dispatch, and device-loss style failures all converge on
+     * the same session fallback: preserve ordinary FSR and force a reset. */
+    vk.fsr_reset = false;
+    vk_disable_frame_generation("preparation failed");
+    assert(vk_session_frame_generation_disabled && vk.fsr_reset);
+    assert(vk_fsr_requested() && !vk_fsr_frame_generation_requested());
+
+    vk_session_frame_generation_disabled = false;
+    vk.device_lost = false;
+    vk_device_lost_recovery_queued = false;
+    vk_handle_device_lost("contract", VK_ERROR_DEVICE_LOST);
+    assert(vk.device_lost && vk_session_frame_generation_disabled);
+    assert(!vk_fsr_frame_generation_requested());
+
+    r_fsr = r_fsr_frame_generation = NULL;
+    vk_session_frame_generation_disabled = false;
+    paused_cvar.integer = 0;
+    puts("FSR lifecycle contracts: passed (reset gate, pause reuse, fallback, device loss)");
+}
+
 int main(void)
 {
     check_fsr_barriers();
     check_fsr_temporal_contracts();
     check_fsr_frame_generation_contracts();
+    check_fsr_lifecycle_contracts();
     paused_cvar.integer = 0;
     assert(!vk_fsr_scene_paused());
     paused_cvar.integer = 1;

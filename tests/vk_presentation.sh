@@ -16,14 +16,48 @@ test -f "$build_dir/config.h" || {
 test -f "$repo_dir/src/refresh/vk_fsr3.cpp" || exit 2
 if command -v rg >/dev/null 2>&1; then
     search_command='rg -q'
+    fixed_search_command='rg -Fq'
 else
     search_command='grep -q'
+    fixed_search_command='grep -Fq'
 fi
 if $search_command 'FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE' \
        "$repo_dir/src/refresh/vk_fsr3.cpp"; then
     echo "unsupported FSR3 auto-exposure define is present" >&2
     exit 2
 fi
+
+# Keep the contract harness coupled to the real control-flow guards. These
+# checks are intentionally read-only: the renderer remains outside this test's
+# ownership, while regressions in reset/pause/frame-id ordering fail early.
+require_contract() {
+    pattern=$1
+    file=$2
+    if ! $fixed_search_command "$pattern" "$file"; then
+        echo "missing FSR3 contract: $pattern" >&2
+        exit 2
+    fi
+}
+require_contract 'bool frame_reset = vk.fsr_reset' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'if (!frame_reset && frame_generation_prepared &&' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk.fsr_pause_reuse = true' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk.frame_fsr = false' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk.fsr_timing_discontinuity = vk.fsr_reset' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_session_frame_generation_disabled = true' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'context->frame_generation_failed ||' \
+    "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract '!context->frame_started' \
+    "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract 'context->current_frame_id = context->next_frame_id++' \
+    "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract 'description.frameID = context->current_frame_id' \
+    "$repo_dir/src/refresh/vk_fsr3.cpp"
 
 cc=${CC:-cc}
 if command -v pkg-config >/dev/null 2>&1; then

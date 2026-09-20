@@ -14,13 +14,46 @@ import subprocess
 import tempfile
 
 
-SAMPLE = re.compile(r'FSR sample: time=([\d.]+) cpu_us=(\d+) gpu_us=(\d+)')
+SAMPLE = re.compile(
+    r'FSR sample: time=([\d.]+)(?: wall_usec=(\d+))? '
+    r'cpu_us=(\d+) gpu_us=(\d+)')
 PRESENTATION = re.compile(
     r'Vulkan FSR3 presentation: .*?result=(\S+)')
 DEVICE = re.compile(r'(?:Using Vulkan device:|Vulkan FSR3 enabled capabilities:).*')
 FALLBACK = re.compile(
     r'(?:spatial-fallback|resources are incomplete|dispatch failed|'
-    r'using spatially upscaled|frame generation disabled)', re.IGNORECASE)
+    r'using spatially upscaled|frame generation disabled|'
+    r'preparation failed|configuration failed|unavailable|'
+    r'unsupported on this platform|device lost)', re.IGNORECASE)
+
+
+def fps_from_cost(summary):
+    """Return a useful FPS estimate, or None when no timing was collected."""
+    mean = summary.get('mean')
+    return round(1000000.0 / mean, 3) if mean else None
+
+
+def pacing_from_timestamps(timestamps, source):
+    """Summarize frame pacing and identify the timestamp source."""
+    if len(timestamps) < 2:
+        return {'count': 0, 'source': source}
+    intervals = [(b - a) * 1000000.0
+                 for a, b in zip(map(float, timestamps),
+                                 map(float, timestamps[1:]))]
+    summary = summarize(intervals)
+    summary['jitter_us'] = round(summary['stdev'], 3)
+    summary['fps'] = fps_from_cost(summary)
+    summary['source'] = source
+    return summary
+
+
+def pacing_from_samples(samples, times):
+    """Prefer renderer-completion timestamps, with a labeled fallback."""
+    wall = [samples[time][2] for time in times]
+    if all(value is not None for value in wall):
+        return pacing_from_timestamps([value / 1000000.0 for value in wall],
+                                      'renderer-completion')
+    return pacing_from_timestamps(times, 'demo-simulation-time')
 
 
 def summarize(values):
@@ -49,6 +82,8 @@ def main():
     parser.add_argument('--subgroup', choices=['native', '32', '64'], default='native')
     parser.add_argument('--composition', choices=['0', '1'], default='1')
     parser.add_argument('--raytracing', choices=['0', '1'], default='0')
+    parser.add_argument('--frame-generation', choices=['0', '1'], default='0',
+                        help='request FSR3 frame generation when supported')
     parser.add_argument('--frames', type=int, default=90)
     parser.add_argument('--warmup', type=int, default=15)
     parser.add_argument('--repeats', type=int, default=3)
@@ -70,7 +105,7 @@ def main():
         parser.error(f'file not found: {gamelib}')
     args.output.mkdir(parents=True, exist_ok=True)
     report = {
-        'schema': 2,
+        'schema': 3,
         'demo_sha256': hashlib.sha256(args.demo.read_bytes()).hexdigest(),
         'settings': {key: str(value) for key, value in vars(args).items()},
         'tool': {'python': __import__('sys').version.split()[0]},
@@ -91,7 +126,8 @@ def main():
                     vk_raytracing=args.raytracing, r_fsr='1' if mode == 'fsr' else '0',
                     r_fsr_auto='0', r_fsr_quality=args.quality, r_fsr_motion='auto',
                     r_fsr_composition_mask=args.composition, r_fsr_mip_bias='auto',
-                    r_fsr_sharpness='0', r_fsr_frame_generation='0',
+                    r_fsr_sharpness='0',
+                    r_fsr_frame_generation=(args.frame_generation if mode == 'fsr' else '0'),
                     vk_fsr_precision=args.precision, vk_fsr_subgroup=args.subgroup,
                     vk_fsr_profile='0', vk_fsr_debug='off', vk_fsr_benchmark='1',
                     con_notifytime='0', logfile='1', logfile_name='benchmark', logfile_flush='2')
@@ -114,8 +150,9 @@ def main():
                 if completed.returncode or re.search(r'Vulkan error', log, re.IGNORECASE):
                     raise RuntimeError(f'{mode} run failed; see saved log')
                 samples = {}
-                for time, cpu, gpu in SAMPLE.findall(log):
-                    samples.setdefault(time, (int(cpu), int(gpu)))
+                for time, wall, cpu, gpu in SAMPLE.findall(log):
+                    samples.setdefault(time, (int(cpu), int(gpu),
+                                               int(wall) if wall else None))
                 result = [value for value in PRESENTATION.findall(log)]
                 fallback_reasons = sorted(set(FALLBACK.findall(log)))
                 captured[mode] = {
@@ -123,6 +160,7 @@ def main():
                     'result': result[-1] if result else ('native' if mode == 'native' else 'unknown'),
                     'fallback': bool(fallback_reasons),
                     'fallback_reasons': fallback_reasons,
+                    'fallback_reason': fallback_reasons[0] if fallback_reasons else None,
                 }
                 devices = re.findall(DEVICE, log)
                 if devices:
@@ -143,11 +181,18 @@ def main():
                     'result': captured[mode]['result'],
                     'fallback': captured[mode]['fallback'],
                     'fallback_reasons': captured[mode]['fallback_reasons'],
+                    'fallback_reason': captured[mode]['fallback_reason'],
                 } for mode in captured
             },
         }
+        run['frame_pacing'] = {
+            mode: pacing_from_samples(captured[mode]['samples'], times)
+            for mode in captured
+        }
+        run['simulation_frame_pacing'] = pacing_from_timestamps(
+            times, 'demo-simulation-time')
         for mode in captured:
-            cpu, gpu = zip(*(captured[mode]['samples'][time]
+            cpu, gpu, _wall = zip(*(captured[mode]['samples'][time]
                              for time in times))
             gpu_samples = [value for value in gpu if value]
             run[mode] = {'cpu_us': summarize(cpu), 'gpu_us': summarize(gpu),
@@ -155,6 +200,17 @@ def main():
                          'timing_source': 'CPU/GPU' if all(gpu) else 'CPU-only',
                          'gpu_samples': len(gpu_samples),
                          'sample_count': len(times)}
+            run[mode]['fps'] = fps_from_cost(run[mode]['frame_cost_us'])
+            run[mode]['native_fps'] = run[mode]['fps'] if mode == 'native' else None
+            run[mode]['upscaled_fps'] = (
+                run[mode]['fps'] if mode == 'fsr' else None)
+            run[mode]['generated_fps'] = (
+                run[mode]['fps'] if captured[mode]['result'] == 'framegen' else None)
+            run[mode]['frame_pacing'] = run['frame_pacing'][mode]
+        run['native_fps'] = run['native'].get('native_fps')
+        run['upscaled_fps'] = run['fsr'].get('upscaled_fps')
+        run['generated_fps'] = run['fsr'].get('generated_fps')
+        run['fallback_reason'] = captured['fsr']['fallback_reason']
         report['runs'].append(run)
     (args.output / 'report.json').write_text(json.dumps(report, indent=2))
     print(args.output / 'report.json')

@@ -103,31 +103,31 @@ begin video
     toggle --status "Requires the Vulkan renderer; changing this refreshes the renderer" \
         "FSR3 upscaling" r_fsr
     pairs --status "Requires the Vulkan renderer; changing this refreshes the renderer" \
-        "FSR3 quality" r_fsr_quality \
+        "FSR3 quality profile" r_fsr_quality \
         quality quality \
         balanced balanced \
         performance performance \
         "ultra performance" ultra_performance
     range --status "Requires the Vulkan renderer; changing this refreshes the renderer" \
-        "FSR3 sharpness" r_fsr_sharpness 0 1
+        "FSR3 sharpening" r_fsr_sharpness 0 1
     toggle --status "Keeps selected quality only if at least 5% faster than native" \
         "FSR3 automatic performance" r_fsr_auto
     pairs --status "Auto: camera + objects; full: reference; fast: camera only" \
-        "FSR3 motion vectors" r_fsr_motion \
+        "FSR3 motion mode" r_fsr_motion \
         auto auto \
         full full \
         fast fast
     pairs --status "Scene texture detail at reduced resolution; UI unaffected" \
-        "FSR3 texture mip bias" r_fsr_mip_bias \
+        "FSR3 mip bias" r_fsr_mip_bias \
         auto auto \
         neutral 0 \
         "-0.5" -0.5 \
         "-1" -1 \
         "-1.5" -1.5
     toggle --status "Requires Vulkan FSR3; experimental; falls back after GPU errors" \
-        "FSR3 frame generation" r_fsr_frame_generation
-    toggle --status "Marks transparent effects separately for FSR3" \
-        "FSR3 composition mask" r_fsr_composition_mask
+        "FSR3 frame-generation request" r_fsr_frame_generation
+    toggle --status "Reactive mask is automatic; this adds the composition mask for transparent effects" \
+        "FSR3 reactive/composition mask" r_fsr_composition_mask
     pairs --status "FP16 is selected only when enabled by Vulkan" \
         "FSR3 precision" vk_fsr_precision \
         auto auto \
