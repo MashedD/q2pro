@@ -62,26 +62,43 @@ struct q2_fsr3_context {
     uint32_t render_height = 0;
     uint32_t display_width = 0;
     uint32_t display_height = 0;
-    uint32_t frame_index = 0;
+    uint64_t next_frame_id = 0;
+    uint64_t current_frame_id = 0;
+    q2_fsr3_capabilities_t capabilities = {};
+    PFN_vkGetInstanceProcAddr get_instance_proc_addr = nullptr;
+    PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;
+    VkInstance instance = VK_NULL_HANDLE;
+    bool frame_started = false;
     bool frame_generation = false;
     bool full_context_created = false;
     FfxErrorCode last_error = FFX_OK;
 };
 
-/* Q2Pro loads the Vulkan loader dynamically. The FSR3 Vulkan backend uses a
- * few global physical-device entry points, so route those calls through the
- * renderer's loader instead of linking against the Vulkan loader. */
-static PFN_vkGetInstanceProcAddr q2_get_instance_proc_addr;
-static PFN_vkGetDeviceProcAddr q2_get_device_proc_addr;
-static VkInstance q2_instance;
-static q2_fsr3_capabilities_t q2_enabled_capabilities;
-static q2_fsr3_context_t *q2_active_context;
+/* The SDK callback signatures do not carry an opaque context. Keep the
+ * callback binding thread-local and scope it around every SDK call instead of
+ * storing a process-global device/context pair. */
+static thread_local q2_fsr3_context_t *q2_callback_context;
+
+struct q2_fsr3_context_scope {
+    q2_fsr3_context_t *previous;
+    explicit q2_fsr3_context_scope(q2_fsr3_context_t *context)
+        : previous(q2_callback_context)
+    {
+        q2_callback_context = context;
+    }
+    ~q2_fsr3_context_scope()
+    {
+        q2_callback_context = previous;
+    }
+};
 
 static FfxErrorCode q2_fsr3_create_pipeline(FfxInterface *backend, FfxEffect effect,
     FfxPass pass, uint32_t permutation, const FfxPipelineDescription *description,
     FfxUInt32 id, FfxPipelineState *pipeline)
 {
-    auto *context = q2_active_context;
+    auto *context = q2_callback_context;
+    if (!context || !context->create_pipeline)
+        return FFX_ERROR_INVALID_POINTER;
     FfxErrorCode result = context->create_pipeline(backend, effect, pass, permutation,
                                                   description, id, pipeline);
     if (result == FFX_OK) {
@@ -96,24 +113,28 @@ static FfxErrorCode q2_fsr3_create_pipeline(FfxInterface *backend, FfxEffect eff
 static VKAPI_ATTR void VKAPI_CALL q2_fsr3_bind_pipeline(VkCommandBuffer cmd,
     VkPipelineBindPoint point, VkPipeline pipeline)
 {
-    auto *context = q2_active_context;
+    auto *context = q2_callback_context;
+    if (!context || !context->get_device_proc_addr)
+        return;
     if (point == VK_PIPELINE_BIND_POINT_COMPUTE)
         context->profile_pipeline = pipeline;
     auto function = reinterpret_cast<PFN_vkCmdBindPipeline>(
-        q2_get_device_proc_addr(context->device_context.vkDevice, "vkCmdBindPipeline"));
+        context->get_device_proc_addr(context->device_context.vkDevice, "vkCmdBindPipeline"));
     function(cmd, point, pipeline);
 }
 
 static VKAPI_ATTR void VKAPI_CALL q2_fsr3_dispatch(VkCommandBuffer cmd,
     uint32_t x, uint32_t y, uint32_t z)
 {
-    auto *context = q2_active_context;
+    auto *context = q2_callback_context;
+    if (!context || !context->get_device_proc_addr)
+        return;
     auto dispatch = reinterpret_cast<PFN_vkCmdDispatch>(
-        q2_get_device_proc_addr(context->device_context.vkDevice, "vkCmdDispatch"));
+        context->get_device_proc_addr(context->device_context.vkDevice, "vkCmdDispatch"));
     uint32_t slot = context->profile_slot, index = context->profile_count[slot];
     bool profile = context->profile_active && index < 64;
     auto stamp = reinterpret_cast<PFN_vkCmdWriteTimestamp>(
-        q2_get_device_proc_addr(context->device_context.vkDevice, "vkCmdWriteTimestamp"));
+        context->get_device_proc_addr(context->device_context.vkDevice, "vkCmdWriteTimestamp"));
     if (profile) {
         context->profile_labels[slot][index] = context->pipeline_labels[context->profile_pipeline];
         stamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, context->profile_pool, slot * 128 + index * 2);
@@ -130,6 +151,7 @@ extern "C" void Q2_FSR3_ProfileBegin(q2_fsr3_context_t *context, VkCommandBuffer
 {
     if (!context || slot >= 3)
         return;
+    q2_fsr3_context_scope scope(context);
     context->profile_active = false;
     VkDevice device = context->device_context.vkDevice;
     if (!context->profile_pool && enabled) {
@@ -137,7 +159,7 @@ extern "C" void Q2_FSR3_ProfileBegin(q2_fsr3_context_t *context, VkCommandBuffer
         info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
         info.queryType = VK_QUERY_TYPE_TIMESTAMP;
         info.queryCount = 384;
-        auto create = reinterpret_cast<PFN_vkCreateQueryPool>(q2_get_device_proc_addr(device, "vkCreateQueryPool"));
+        auto create = reinterpret_cast<PFN_vkCreateQueryPool>(context->get_device_proc_addr(device, "vkCreateQueryPool"));
         if (create(device, &info, nullptr, &context->profile_pool) != VK_SUCCESS) {
             Com_WPrintf("FSR per-pass timestamp allocation failed\n");
             return;
@@ -147,7 +169,7 @@ extern "C" void Q2_FSR3_ProfileBegin(q2_fsr3_context_t *context, VkCommandBuffer
         return;
     if (context->profile_count[slot]) {
         uint64_t values[128] = {};
-        auto read = reinterpret_cast<PFN_vkGetQueryPoolResults>(q2_get_device_proc_addr(device, "vkGetQueryPoolResults"));
+        auto read = reinterpret_cast<PFN_vkGetQueryPoolResults>(context->get_device_proc_addr(device, "vkGetQueryPoolResults"));
         if (read(device, context->profile_pool, slot * 128, context->profile_count[slot] * 2,
                  sizeof(values), values, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
             for (uint32_t i = 0; i < context->profile_count[slot]; i++) {
@@ -161,7 +183,7 @@ extern "C" void Q2_FSR3_ProfileBegin(q2_fsr3_context_t *context, VkCommandBuffer
     context->profile_count[slot] = 0;
     context->profile_slot = slot;
     if (enabled) {
-        auto reset = reinterpret_cast<PFN_vkCmdResetQueryPool>(q2_get_device_proc_addr(device, "vkCmdResetQueryPool"));
+        auto reset = reinterpret_cast<PFN_vkCmdResetQueryPool>(context->get_device_proc_addr(device, "vkCmdResetQueryPool"));
         reset(cmd, context->profile_pool, slot * 128, 128);
         context->profile_active = true;
     }
@@ -169,8 +191,9 @@ extern "C" void Q2_FSR3_ProfileBegin(q2_fsr3_context_t *context, VkCommandBuffer
 
 static PFN_vkVoidFunction q2_fsr3_get_instance_proc(const char *name)
 {
-    return q2_get_instance_proc_addr && q2_instance ?
-        q2_get_instance_proc_addr(q2_instance, name) : nullptr;
+    auto *context = q2_callback_context;
+    return context && context->get_instance_proc_addr && context->instance ?
+        context->get_instance_proc_addr(context->instance, name) : nullptr;
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL q2_fsr3_create_compute_pipelines(
@@ -178,9 +201,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL q2_fsr3_create_compute_pipelines(
     const VkComputePipelineCreateInfo *infos, const VkAllocationCallbacks *allocator,
     VkPipeline *pipelines)
 {
+    auto *context = q2_callback_context;
+    if (!context || !context->get_device_proc_addr)
+        return VK_ERROR_INITIALIZATION_FAILED;
     auto function = reinterpret_cast<PFN_vkCreateComputePipelines>(
-        q2_get_device_proc_addr(device, "vkCreateComputePipelines"));
-    if (!q2_enabled_capabilities.subgroup_size)
+        context->get_device_proc_addr(device, "vkCreateComputePipelines"));
+    if (!context->capabilities.subgroup_size)
         return function(device, cache, count, infos, allocator, pipelines);
     std::vector<VkComputePipelineCreateInfo> copies(infos, infos + count);
     std::vector<VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT> sizes(count);
@@ -188,7 +214,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL q2_fsr3_create_compute_pipelines(
         const auto *head = static_cast<const VkBaseInStructure *>(copies[i].stage.pNext);
         sizes[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT;
         sizes[i].pNext = head && head->sType == sizes[i].sType ? head->pNext : head;
-        sizes[i].requiredSubgroupSize = q2_enabled_capabilities.subgroup_size;
+        sizes[i].requiredSubgroupSize = context->capabilities.subgroup_size;
         copies[i].stage.pNext = &sizes[i];
     }
     return function(device, cache, count, copies.data(), allocator, pipelines);
@@ -197,8 +223,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL q2_fsr3_create_compute_pipelines(
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL q2_fsr3_get_device_proc(
     VkDevice device, const char *name)
 {
-    PFN_vkVoidFunction function = q2_get_device_proc_addr && device ?
-        q2_get_device_proc_addr(device, name) : nullptr;
+    auto *context = q2_callback_context;
+    PFN_vkVoidFunction function = context && context->get_device_proc_addr && device ?
+        context->get_device_proc_addr(device, name) : nullptr;
     if (function && !strcmp(name, "vkCreateComputePipelines"))
         return reinterpret_cast<PFN_vkVoidFunction>(q2_fsr3_create_compute_pipelines);
     if (function && !strcmp(name, "vkCmdBindPipeline"))
@@ -206,8 +233,8 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL q2_fsr3_get_device_proc(
     if (function && !strcmp(name, "vkCmdDispatch"))
         return reinterpret_cast<PFN_vkVoidFunction>(q2_fsr3_dispatch);
     if (!function && !std::strcmp(name, "vkGetBufferMemoryRequirements2KHR"))
-        function = q2_get_device_proc_addr ?
-            q2_get_device_proc_addr(device, "vkGetBufferMemoryRequirements2") : nullptr;
+        function = context && context->get_device_proc_addr ?
+            context->get_device_proc_addr(device, "vkGetBufferMemoryRequirements2") : nullptr;
     return function;
 }
 
@@ -273,7 +300,7 @@ static bool q2_fsr3_has_device_functions(VkDevice device)
         "vkCmdFillBuffer",
     };
 
-    if (!q2_get_device_proc_addr || !device)
+    if (!q2_callback_context || !q2_callback_context->get_device_proc_addr || !device)
         return false;
     for (const char *name : names) {
         if (!q2_fsr3_get_device_proc(device, name))
@@ -292,7 +319,7 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(
     VkPhysicalDevice device, const char *layer, uint32_t *count,
     VkExtensionProperties *properties)
 {
-    auto function = q2_get_instance_proc_addr ?
+    auto function = q2_callback_context ?
         reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
             q2_fsr3_get_instance_proc("vkEnumerateDeviceExtensionProperties")) : nullptr;
     if (!function || !count)
@@ -308,9 +335,9 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(
     uint32_t written = 0, capacity = properties ? *count : 0;
     for (uint32_t i = 0; i < available; i++) {
         const char *name = list[i].extensionName;
-        if ((!q2_enabled_capabilities.fp16 &&
+        if ((!q2_callback_context->capabilities.fp16 &&
              !strcmp(name, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME)) ||
-            (!q2_enabled_capabilities.subgroup_size &&
+            (!q2_callback_context->capabilities.subgroup_size &&
              !strcmp(name, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME)))
             continue;
         if (properties && written < capacity)
@@ -324,7 +351,7 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(
 extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties(
     VkPhysicalDevice device, VkPhysicalDeviceProperties *properties)
 {
-    auto function = q2_get_instance_proc_addr ?
+    auto function = q2_callback_context ?
         reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
             q2_fsr3_get_instance_proc("vkGetPhysicalDeviceProperties")) : nullptr;
     if (function)
@@ -334,7 +361,7 @@ extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties(
 extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties2(
     VkPhysicalDevice device, VkPhysicalDeviceProperties2 *properties)
 {
-    auto function = q2_get_instance_proc_addr ?
+    auto function = q2_callback_context ?
         reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
             q2_fsr3_get_instance_proc("vkGetPhysicalDeviceProperties2")) : nullptr;
     if (function)
@@ -344,7 +371,7 @@ extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties2(
 extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures2(
     VkPhysicalDevice device, VkPhysicalDeviceFeatures2 *features)
 {
-    auto function = q2_get_instance_proc_addr ?
+    auto function = q2_callback_context ?
         reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
             q2_fsr3_get_instance_proc("vkGetPhysicalDeviceFeatures2")) : nullptr;
     if (function)
@@ -354,7 +381,7 @@ extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures2(
 extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures(
     VkPhysicalDevice device, VkPhysicalDeviceFeatures *features)
 {
-    auto function = q2_get_instance_proc_addr ?
+    auto function = q2_callback_context ?
         reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(
             q2_fsr3_get_instance_proc("vkGetPhysicalDeviceFeatures")) : nullptr;
     if (function)
@@ -364,7 +391,7 @@ extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures(
 extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties(
     VkPhysicalDevice device, VkPhysicalDeviceMemoryProperties *properties)
 {
-    auto function = q2_get_instance_proc_addr ?
+    auto function = q2_callback_context ?
         reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
             q2_fsr3_get_instance_proc("vkGetPhysicalDeviceMemoryProperties")) : nullptr;
     if (function)
@@ -375,7 +402,7 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateBuffer(
     VkDevice device, const VkBufferCreateInfo *create_info,
     const VkAllocationCallbacks *allocator, VkBuffer *buffer)
 {
-    auto function = q2_get_device_proc_addr ?
+    auto function = q2_callback_context ?
         reinterpret_cast<PFN_vkCreateBuffer>(
             q2_fsr3_get_device_proc(device, "vkCreateBuffer")) : nullptr;
     return function ? function(device, create_info, allocator, buffer) :
@@ -487,21 +514,20 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
         !render_width || !render_height || !display_width || !display_height)
         return nullptr;
 
-    q2_instance = instance;
-    q2_enabled_capabilities = capabilities ? *capabilities : q2_fsr3_capabilities_t{};
-    q2_get_instance_proc_addr = get_instance_proc_addr;
-    q2_get_device_proc_addr = get_device_proc_addr;
+    q2_fsr3_context_t *result = new q2_fsr3_context_t;
+    result->capabilities = capabilities ? *capabilities : q2_fsr3_capabilities_t{};
+    result->get_instance_proc_addr = get_instance_proc_addr;
+    result->get_device_proc_addr = get_device_proc_addr;
+    result->instance = instance;
+    result->device_context = { device, physical_device, q2_fsr3_get_device_proc };
+    q2_fsr3_context_scope scope(result);
     if (!q2_fsr3_has_instance_functions() ||
         !q2_fsr3_has_device_functions(device)) {
         Com_WPrintf("Vulkan FSR3 is missing required Vulkan entry points\n");
-        q2_instance = VK_NULL_HANDLE;
-        q2_get_instance_proc_addr = nullptr;
-        q2_get_device_proc_addr = nullptr;
+        delete result;
         return nullptr;
     }
 
-    q2_fsr3_context_t *result = new q2_fsr3_context_t;
-    q2_active_context = result;
     result->render_width = render_width;
     result->render_height = render_height;
     result->display_width = display_width;
@@ -511,9 +537,6 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
     FfxFsr3ContextDescription full_description = {};
     bool context_created = false;
     FfxErrorCode error = FFX_OK;
-    result->device_context = {
-        device, physical_device, q2_fsr3_get_device_proc
-    };
     const size_t max_contexts = frame_generation ? FFX_FSR3_CONTEXT_COUNT : 1;
     result->scratch_size = ffxGetScratchMemorySizeVK(physical_device,
                                                      max_contexts);
@@ -612,10 +635,6 @@ fail:
         ffxFsr3UpscalerContextDestroy(&result->context);
     std::free(result->scratch);
     delete result;
-    q2_active_context = nullptr;
-    q2_instance = VK_NULL_HANDLE;
-    q2_get_instance_proc_addr = nullptr;
-    q2_get_device_proc_addr = nullptr;
     return nullptr;
 }
 
@@ -623,6 +642,7 @@ extern "C" void Q2_FSR3_Destroy(q2_fsr3_context_t *context)
 {
     if (!context)
         return;
+    q2_fsr3_context_scope scope(context);
     if (context->full_context_created)
         ffxFsr3ContextDestroy(&context->full_context);
     else {
@@ -632,20 +652,20 @@ extern "C" void Q2_FSR3_Destroy(q2_fsr3_context_t *context)
     std::free(context->scratch);
     if (context->profile_pool) {
         auto destroy = reinterpret_cast<PFN_vkDestroyQueryPool>(
-            q2_get_device_proc_addr(context->device_context.vkDevice, "vkDestroyQueryPool"));
+            context->get_device_proc_addr(context->device_context.vkDevice, "vkDestroyQueryPool"));
         destroy(context->device_context.vkDevice, context->profile_pool, nullptr);
     }
     delete context;
-    q2_active_context = nullptr;
-    q2_instance = VK_NULL_HANDLE;
-    q2_get_instance_proc_addr = nullptr;
-    q2_get_device_proc_addr = nullptr;
 }
 
 extern "C" bool Q2_FSR3_GetJitter(q2_fsr3_context_t *context, float *x, float *y)
 {
     if (!context || !x || !y)
         return false;
+    if (!context->frame_started) {
+        context->current_frame_id = context->next_frame_id++;
+        context->frame_started = true;
+    }
 
     const int32_t phase_count = ffxFsr3GetJitterPhaseCount(
         static_cast<int32_t>(context->render_width),
@@ -653,8 +673,16 @@ extern "C" bool Q2_FSR3_GetJitter(q2_fsr3_context_t *context, float *x, float *y
     if (phase_count <= 0)
         return false;
 
-    const int32_t phase = static_cast<int32_t>(context->frame_index % phase_count);
+    const int32_t phase = static_cast<int32_t>(context->current_frame_id % phase_count);
     return ffxFsr3GetJitterOffset(x, y, phase, phase_count) == FFX_OK;
+}
+
+extern "C" void Q2_FSR3_BeginFrame(q2_fsr3_context_t *context)
+{
+    if (!context)
+        return;
+    context->current_frame_id = context->next_frame_id++;
+    context->frame_started = true;
 }
 
 extern "C" int Q2_FSR3_GetLastError(const q2_fsr3_context_t *context)
@@ -682,6 +710,7 @@ extern "C" bool Q2_FSR3_Dispatch(
     (void)output_view;
     if (!context)
         return false;
+    q2_fsr3_context_scope scope(context);
     if (!command_buffer || !color || !depth || !motion ||
         !output || (!context->full_context_created &&
                     !q2_fsr3_has_shared_resources(context))) {
@@ -737,7 +766,7 @@ extern "C" bool Q2_FSR3_Dispatch(
         description.cameraFar = camera_far;
         description.cameraFovAngleVertical = vertical_fov_radians;
         description.viewSpaceToMetersFactor = 1.0f;
-        description.frameID = context->frame_index;
+        description.frameID = context->current_frame_id;
         context->last_error = ffxFsr3ContextDispatchUpscale(
             &context->full_context, &description);
     } else {
@@ -779,8 +808,6 @@ extern "C" bool Q2_FSR3_Dispatch(
     }
     if (context->last_error != FFX_OK)
         return false;
-    if (!context->full_context_created)
-        context->frame_index++;
     return true;
 }
 
@@ -793,6 +820,7 @@ extern "C" bool Q2_FSR3_PrepareFrameGeneration(
     if (!context || !context->full_context_created || !command_buffer ||
         !depth || !motion)
         return false;
+    q2_fsr3_context_scope scope(context);
 
     FfxFsr3DispatchFrameGenerationPrepareDescription description = {};
     description.commandList = ffxGetCommandListVK(command_buffer);
@@ -817,7 +845,7 @@ extern "C" bool Q2_FSR3_PrepareFrameGeneration(
     description.cameraFar = camera_far;
     description.cameraFovAngleVertical = vertical_fov_radians;
     description.viewSpaceToMetersFactor = 1.0f;
-    description.frameID = context->frame_index;
+    description.frameID = context->current_frame_id;
     const FfxErrorCode error = ffxFsr3ContextDispatchFrameGenerationPrepare(
         &context->full_context, &description);
     context->last_error = error;
@@ -832,6 +860,7 @@ extern "C" bool Q2_FSR3_DispatchFrameGeneration(
     if (!context || !context->full_context_created || !command_buffer ||
         !present || !output)
         return false;
+    q2_fsr3_context_scope scope(context);
 
     FfxFrameGenerationDispatchDescription description = {};
     description.commandList = ffxGetCommandListVK(command_buffer);
@@ -849,11 +878,9 @@ extern "C" bool Q2_FSR3_DispatchFrameGeneration(
     description.interpolationRect = { 0, 0,
                                       static_cast<int32_t>(context->display_width),
                                       static_cast<int32_t>(context->display_height) };
-    description.frameID = context->frame_index;
+    description.frameID = context->current_frame_id;
     const FfxErrorCode error = ffxFsr3DispatchFrameGeneration(&description);
     context->last_error = error;
-    if (error == FFX_OK)
-        context->frame_index++;
     return error == FFX_OK;
 }
 

@@ -9,6 +9,8 @@ import re
 import subprocess
 import tempfile
 
+INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]')
+
 UPSCALER_PASSES = (
     ('prepare_inputs', 'fsr3upscaler/ffx_fsr3upscaler_prepare_inputs_pass.glsl', 0, 0),
     ('luma_pyramid', 'fsr3upscaler/ffx_fsr3upscaler_luma_pyramid_pass.glsl', 1, 0),
@@ -46,6 +48,71 @@ OPTICALFLOW_PASSES = (
     ('filter_optical_flow', 'opticalflow/ffx_opticalflow_filter_optical_flow_pass_v5.glsl', 5),
     ('scale_optical_flow', 'opticalflow/ffx_opticalflow_scale_optical_flow_advanced_pass_v5.glsl', 6),
 )
+
+
+def all_passes():
+    return (('up', UPSCALER_PASSES), ('frame', FRAME_PASSES),
+            ('of', OPTICALFLOW_PASSES))
+
+
+def validate_pass_definitions(source_dir):
+    """Validate the hand-maintained SDK source/permutation definitions."""
+    for group, passes in all_passes():
+        seen_ids = set()
+        seen_names = set()
+        for definition in passes:
+            name, relpath, pass_id = definition[:3]
+            if name in seen_names:
+                raise RuntimeError('duplicate %s pass name: %s' % (group, name))
+            if pass_id in seen_ids:
+                raise RuntimeError('duplicate %s pass id: %s' % (group, pass_id))
+            seen_names.add(name)
+            seen_ids.add(pass_id)
+            if not relpath.startswith(group == 'up' and 'fsr3upscaler/' or
+                                     group == 'frame' and 'frameinterpolation/' or
+                                     'opticalflow/'):
+                raise RuntimeError('invalid %s pass path: %s' % (group, relpath))
+            path = os.path.join(source_dir, 'sdk/src/backends/vk/shaders', relpath)
+            if not os.path.isfile(path):
+                raise RuntimeError('missing shader source: %s' % path)
+
+
+def shader_dependencies(source_dir):
+    """Return all shader sources and recursively included SDK headers."""
+    validate_pass_definitions(source_dir)
+    include_dirs = [
+        os.path.join(source_dir, 'sdk/include'),
+        os.path.join(source_dir, 'sdk/include/FidelityFX/gpu'),
+        os.path.join(source_dir, 'sdk/include/FidelityFX/gpu/fsr3upscaler'),
+    ]
+    roots = [os.path.join(source_dir, 'sdk/src/backends/vk/shaders', relpath)
+             for _, passes in all_passes() for definition in passes
+             for relpath in [definition[1]]]
+    dependencies = set()
+    pending = list(roots)
+    while pending:
+        path = os.path.realpath(pending.pop())
+        if path in dependencies:
+            continue
+        if not os.path.isfile(path):
+            raise RuntimeError('missing shader dependency: %s' % path)
+        dependencies.add(path)
+        with open(path, encoding='utf-8') as source:
+            for line in source:
+                match = INCLUDE_RE.match(line)
+                if not match:
+                    continue
+                include = match.group(1)
+                candidates = [os.path.join(os.path.dirname(path), include)]
+                candidates += [os.path.join(directory, include)
+                               for directory in include_dirs]
+                resolved = next((candidate for candidate in candidates
+                                 if os.path.isfile(candidate)), None)
+                if resolved is None:
+                    raise RuntimeError('unresolved shader include %r in %s' %
+                                       (include, path))
+                pending.append(resolved)
+    return sorted(os.path.relpath(path, source_dir) for path in dependencies)
 
 
 def run_checked(command):
@@ -170,15 +237,26 @@ def add_blob(blobs, key, args, source_dir, temp, relpath, defines):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--source-dir', required=True)
-    parser.add_argument('--output', required=True)
-    parser.add_argument('--glslc', required=True)
-    parser.add_argument('--spirv-dis', required=True)
-    parser.add_argument('--spirv-opt', required=True)
+    parser.add_argument('--output')
+    parser.add_argument('--glslc')
+    parser.add_argument('--spirv-dis')
+    parser.add_argument('--spirv-opt')
     parser.add_argument('--spirv-val', default='spirv-val')
     parser.add_argument('--optimization', choices=('size', 'speed'), default='size')
     parser.add_argument('--manifest')
+    parser.add_argument('--list-dependencies', action='store_true')
     args = parser.parse_args()
     source_dir = os.path.abspath(args.source_dir)
+    dependencies = shader_dependencies(source_dir)
+    if args.list_dependencies:
+        print('\n'.join(dependencies))
+        return
+    if not args.output:
+        parser.error('--output is required unless --list-dependencies is used')
+    for option in ('glslc', 'spirv_dis', 'spirv_opt'):
+        if not getattr(args, option):
+            parser.error('--%s is required unless --list-dependencies is used' %
+                         option.replace('_', '-'))
     blobs = {}
     with tempfile.TemporaryDirectory(prefix='q2-fsr3-') as temp:
         for key, path, _, sharpen in UPSCALER_PASSES:

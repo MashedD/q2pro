@@ -816,6 +816,17 @@ endif
 
 configure_file(output: 'config.h', configuration: config)
 
+if not win32 and not web and config.get('USE_VULKAN', 0) != 0
+  fsr_contract_shell = find_program('sh', required: false)
+  if fsr_contract_shell.found()
+    test('vulkan-fsr3-contracts', fsr_contract_shell,
+      args: [meson.current_source_dir() / 'tests/vk_presentation.sh',
+             meson.current_build_dir()],
+      timeout: 120,
+    )
+  endif
+endif
+
 if system_wide
   summary({'datadir': datadir, 'libdir': libdir, 'homedir': homedir}, section: 'Directories')
 endif

@@ -39,6 +39,15 @@ char *va(const char *format, ...)
     return buffer;
 }
 
+int Q_strcasecmp(const char *s1, const char *s2)
+{
+    while (*s1 && tolower((unsigned char)*s1) == tolower((unsigned char)*s2)) {
+        s1++;
+        s2++;
+    }
+    return tolower((unsigned char)*s1) - tolower((unsigned char)*s2);
+}
+
 void Com_LPrintf(print_type_t type, const char *format, ...) { }
 void *Z_Mallocz(size_t size) { return calloc(1, size); }
 bool SCR_ParseColor(const char *text, color_t *color) { return false; }
@@ -403,6 +412,12 @@ static void check_fsr_temporal_contracts(void)
     entity.origin[0] = 129;
     assert(!vk_fsr_previous_entity(&entity));
     entity.origin[0] = 0;
+    entity.temporal_id = 0;
+    assert(!vk_fsr_previous_entity(&entity));
+    entity.temporal_id = 1;
+    entity.flags = 1;
+    assert(!vk_fsr_previous_entity(&entity));
+    entity.flags = 0;
     vk.fsr_history[1] = entity;
     vk.fsr_history_count = 2;
     assert(!vk_fsr_previous_entity(&entity));
@@ -412,10 +427,56 @@ static void check_fsr_temporal_contracts(void)
     puts("FSR temporal contracts: passed (layout, trimmed timing, generation, history)");
 }
 
+static void check_fsr_frame_generation_contracts(void)
+{
+    cvar_t fsr = { .integer = 1 };
+    cvar_t auto_fsr = { .integer = 0 };
+    cvar_t frame_generation = { .integer = 1 };
+    cvar_t motion = { .string = "auto" };
+
+    r_fsr = &fsr;
+    r_fsr_auto = &auto_fsr;
+    r_fsr_frame_generation = &frame_generation;
+    r_fsr_motion = &motion;
+    vk_session_frame_generation_disabled = false;
+    assert(vk_fsr_frame_generation_requested());
+    assert(vk_fsr_any_requested());
+
+    /* Automatic selection owns the temporal path, so explicit frame
+     * generation must not leak into an auto-evaluation swapchain. */
+    auto_fsr.integer = 1;
+    assert(!vk_fsr_frame_generation_requested());
+    auto_fsr.integer = 0;
+
+    /* Fast motion is incompatible with frame generation: the request remains
+     * active, but the backend must force full motion vectors. */
+    motion.string = "fast";
+    assert(!vk_fsr_motion_fast_requested());
+    assert(vk_fsr_frame_generation_requested());
+    motion.string = "auto";
+
+    vk_disable_frame_generation("test fallback");
+    assert(vk_session_frame_generation_disabled);
+    assert(frame_generation.modified);
+    assert(!vk_fsr_frame_generation_requested());
+    assert(vk_fsr_requested());
+
+    /* A second failure is idempotent and must not clear the normal FSR path. */
+    frame_generation.modified = false;
+    vk_disable_frame_generation("repeat fallback");
+    assert(!frame_generation.modified);
+    assert(vk_fsr_requested());
+
+    r_fsr = r_fsr_auto = r_fsr_frame_generation = r_fsr_motion = NULL;
+    vk_session_frame_generation_disabled = false;
+    puts("FSR frame-generation contracts: passed (request, auto, motion, fallback)");
+}
+
 int main(void)
 {
     check_fsr_barriers();
     check_fsr_temporal_contracts();
+    check_fsr_frame_generation_contracts();
     paused_cvar.integer = 0;
     assert(!vk_fsr_scene_paused());
     paused_cvar.integer = 1;

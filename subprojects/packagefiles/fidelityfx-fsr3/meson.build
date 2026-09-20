@@ -10,10 +10,18 @@ fsr3_include = include_directories(
 )
 
 python = find_program('python3')
+shader_generator = fsr3_root / '../packagefiles/fidelityfx-fsr3/tools/q2_fsr3_shader_gen.py'
 glslc = find_program('glslc')
 spirv_dis = find_program('spirv-dis')
 spirv_opt = find_program('spirv-opt')
 spirv_val = find_program('spirv-val')
+
+shader_dependencies = run_command(
+  python, shader_generator,
+  '--source-dir', fsr3_root,
+  '--list-dependencies',
+  check: true,
+).stdout().strip().split('\n')
 
 vk_backend_source = custom_target(
   'q2_fsr3_vk_backend',
@@ -54,14 +62,14 @@ shader_header = custom_target('q2_fsr3_shader_blobs',
     'sdk/src/backends/vk/shaders/opticalflow/ffx_opticalflow_scale_optical_flow_advanced_pass_v5.glsl',
   ),
   output: 'q2_fsr3_shader_blobs.h',
-  command: [python, fsr3_root / '../packagefiles/fidelityfx-fsr3/tools/q2_fsr3_shader_gen.py',
+  command: [python, shader_generator,
             '--source-dir', fsr3_root,
             '--output', '@OUTPUT@',
             '--glslc', glslc,
             '--spirv-dis', spirv_dis,
             '--spirv-opt', spirv_opt,
             '--spirv-val', spirv_val],
-  depend_files: files('tools/q2_fsr3_shader_gen.py'),
+  depend_files: files('tools/q2_fsr3_shader_gen.py') + files(shader_dependencies),
 )
 
 fsr3_sources = files(

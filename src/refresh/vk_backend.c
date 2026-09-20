@@ -1464,6 +1464,19 @@ static void vk_disable_frame_generation(const char *reason)
                 reason ? ": " : "", reason ? reason : "");
 }
 
+/* The vendored 1.1.4 manual frame-generation integration is not safe on the
+ * Linux Vulkan/RADV path. Keep the explicit request from taking down the
+ * device; the upscaler remains available and the Windows path stays enabled
+ * for platforms where this SDK integration is supported. */
+static bool vk_fsr_frame_generation_backend_supported(void)
+{
+#if defined(_WIN32)
+    return true;
+#else
+    return false;
+#endif
+}
+
 static bool vk_fsr_any_requested(void)
 {
     return vk_fsr_requested() || vk_fsr_frame_generation_requested();
@@ -3772,6 +3785,19 @@ static bool vk_create_color_target(vk_texture_t *texture, uint32_t width,
                                    VK_IMAGE_USAGE_SAMPLED_BIT | extra_usage);
 }
 
+static bool vk_fsr_format_support(VkFormat format, VkFormatFeatureFlags required,
+                                   const char *name)
+{
+    VkFormatProperties properties;
+    vk.GetPhysicalDeviceFormatProperties(vk.physical_device, format, &properties);
+    VkFormatFeatureFlags missing = required & ~properties.optimalTilingFeatures;
+    if (!missing)
+        return true;
+    Com_WPrintf("Vulkan FSR3: %s format %d lacks optimal-tile features 0x%x\n",
+                name, format, missing);
+    return false;
+}
+
 static void vk_destroy_fsr_resources(void)
 {
     if (vk.fsr3) {
@@ -3807,6 +3833,11 @@ static void vk_destroy_fsr_resources(void)
 
 static bool vk_create_fsr_resources(void)
 {
+    if (vk_fsr_frame_generation_requested() &&
+        !vk_fsr_frame_generation_backend_supported()) {
+        vk_disable_frame_generation(
+            "manual Vulkan frame generation is unsupported on this platform");
+    }
     vk.render_extent = vk_fsr_render_extent();
     if (!vk_fsr_any_requested() ||
         vk.sample_count != VK_SAMPLE_COUNT_1_BIT ||
@@ -3823,11 +3854,34 @@ static bool vk_create_fsr_resources(void)
         return true;
     }
 
+    bool frame_generation_requested = vk_fsr_frame_generation_requested();
+    if (frame_generation_requested)
+        vk.fsr_swapchain_direct = false;
+    VkFormat output_format = vk_fsr_output_format(vk.swapchain_format);
+    bool needs_intermediate = !vk.fsr_swapchain_direct;
+    VkFormatFeatureFlags output_features = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+    if (needs_intermediate)
+        output_features |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+            VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+    if (!vk_fsr_format_support(output_format, output_features, "output") ||
+        !vk_fsr_format_support(VK_FORMAT_R16G16_SFLOAT,
+                               VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                               VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                               VK_FORMAT_FEATURE_TRANSFER_DST_BIT, "motion") ||
+        !vk_fsr_format_support(VK_FORMAT_R8_UNORM,
+                               VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                               VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                               VK_FORMAT_FEATURE_TRANSFER_DST_BIT, "reactive")) {
+        vk.fsr_swapchain_direct = false;
+        vk.render_extent = vk.swapchain_extent;
+        return true;
+    }
+
     vk.fsr3 = Q2_FSR3_Create(vk.physical_device, vk.device, vk.instance,
                              vk.GetInstanceProcAddr, vk.GetDeviceProcAddr,
                              vk.render_extent.width, vk.render_extent.height,
                              vk.swapchain_extent.width, vk.swapchain_extent.height,
-                             vk_fsr_output_format(vk.swapchain_format),
+                             output_format,
                              vk_fsr_frame_generation_requested(),
                              &vk.fsr_capabilities);
     if (!vk.fsr3) {
@@ -3840,8 +3894,8 @@ static bool vk_create_fsr_resources(void)
         return true;
     }
 
-    vk.fsr_output_format = vk_fsr_output_format(vk.swapchain_format);
-    if (!vk.fsr_swapchain_direct &&
+    vk.fsr_output_format = output_format;
+    if (needs_intermediate &&
         !vk_create_image_target(&vk.fsr_output_texture,
                                 vk.swapchain_extent.width,
                                 vk.swapchain_extent.height,
@@ -7262,7 +7316,7 @@ static bool vk_create_render_pass(void)
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         },
         {
@@ -7272,7 +7326,7 @@ static bool vk_create_render_pass(void)
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         },
         {
@@ -20068,6 +20122,7 @@ void VKR_RenderFrame(const refdef_t *fd)
         }
     }
     if (vk.frame_fsr && vk.fsr3) {
+        Q2_FSR3_BeginFrame(vk.fsr3);
         vk.fsr_timing_discontinuity = vk.fsr_reset;
         vk.fsr_pending_history_count = min((uint32_t)max(fd->num_entities, 0), MAX_ENTITIES);
         if (vk.fsr_pending_history_count)
@@ -21201,6 +21256,21 @@ static void vk_clear_fsr_motion_targets(VkCommandBuffer cmd, bool clear_reactive
                                    VK_ACCESS_SHADER_READ_BIT,
                                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     }
+    if (vk_fsr_composition_enabled() && vk.fsr_composition_texture.image) {
+        vk_transition_color_target(cmd, &vk.fsr_composition_texture,
+                                   &vk.fsr_composition_layout,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                   VK_ACCESS_TRANSFER_WRITE_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT);
+        vk.CmdClearColorImage(cmd, vk.fsr_composition_texture.image,
+                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                              &zero, 1, &range);
+        vk_transition_color_target(cmd, &vk.fsr_composition_texture,
+                                   &vk.fsr_composition_layout,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_ACCESS_SHADER_READ_BIT,
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    }
     vk.fsr_motion_initialized = true;
 }
 
@@ -21461,6 +21531,17 @@ static bool vk_dispatch_fsr(void)
 
     vk.fsr_reset = false;
     vk.fsr_output_valid = true;
+    if (frame_generation_prepared) {
+        /* The SDK tracks dynamic-resource states internally. Keep an explicit
+         * GENERAL-to-GENERAL dependency in the application command stream as
+         * well: the upscaled frame becomes the sampled source for optical
+         * flow/interpolation immediately after the upscaler dispatch. */
+        vk_transition_color_target(cmd, &vk.fsr_output_texture,
+                                   &vk.fsr_output_layout,
+                                   VK_IMAGE_LAYOUT_GENERAL,
+                                   VK_ACCESS_SHADER_READ_BIT,
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    }
     if (!frame_reset && frame_generation_prepared &&
         vk.fsr_frame_generation_texture.image &&
         vk.fsr_frame_generation_texture.view &&

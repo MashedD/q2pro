@@ -35,6 +35,8 @@ q2_fsr3_context_t *Q2_FSR3_Create(VkPhysicalDevice physical_device,
                                    bool frame_generation,
                                    const q2_fsr3_capabilities_t *capabilities);
 void Q2_FSR3_Destroy(q2_fsr3_context_t *context);
+/* Captures one logical renderer frame. All subsequent dispatches use its ID. */
+void Q2_FSR3_BeginFrame(q2_fsr3_context_t *context);
 /* Call only after the fence for slot has completed; timestamps are opt-in. */
 void Q2_FSR3_ProfileBegin(q2_fsr3_context_t *context, VkCommandBuffer cmd,
                          uint32_t slot, bool enabled, float timestamp_period);

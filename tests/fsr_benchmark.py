@@ -15,11 +15,22 @@ import tempfile
 
 
 SAMPLE = re.compile(r'FSR sample: time=([\d.]+) cpu_us=(\d+) gpu_us=(\d+)')
+PRESENTATION = re.compile(
+    r'Vulkan FSR3 presentation: .*?result=(\S+)')
+DEVICE = re.compile(r'(?:Using Vulkan device:|Vulkan FSR3 enabled capabilities:).*')
+FALLBACK = re.compile(
+    r'(?:spatial-fallback|resources are incomplete|dispatch failed|'
+    r'using spatially upscaled|frame generation disabled)', re.IGNORECASE)
 
 
 def summarize(values):
+    if not values:
+        return {'count': 0}
     values = sorted(values)
-    return {'mean': statistics.mean(values), 'median': statistics.median(values),
+    return {'count': len(values), 'mean': statistics.mean(values),
+            'min': values[0], 'max': values[-1],
+            'stdev': statistics.stdev(values) if len(values) > 1 else 0,
+            'median': statistics.median(values),
             'p95': values[int((len(values) - 1) * .95)],
             'p99': values[int((len(values) - 1) * .99)]}
 
@@ -58,8 +69,13 @@ def main():
     if gamelib is not None and not gamelib.is_file():
         parser.error(f'file not found: {gamelib}')
     args.output.mkdir(parents=True, exist_ok=True)
-    report = {'demo_sha256': hashlib.sha256(args.demo.read_bytes()).hexdigest(),
-              'settings': {key: str(value) for key, value in vars(args).items()}, 'runs': []}
+    report = {
+        'schema': 2,
+        'demo_sha256': hashlib.sha256(args.demo.read_bytes()).hexdigest(),
+        'settings': {key: str(value) for key, value in vars(args).items()},
+        'tool': {'python': __import__('sys').version.split()[0]},
+        'runs': [],
+    }
     for repeat in range(args.repeats):
         captured = {}
         # Alternate execution order to reduce systematic thermal/order bias.
@@ -85,27 +101,60 @@ def main():
                 for key, value in settings.items():
                     command += ['+set', key, value]
                 command += ['+demo', 'benchmark', '+wait', str(args.frames + args.warmup + 300), '+quit']
-                completed = subprocess.run(command, capture_output=True, text=True, timeout=180)
+                try:
+                    completed = subprocess.run(command, capture_output=True,
+                                               text=True, timeout=180)
+                except subprocess.TimeoutExpired as exc:
+                    (args.output / f'{repeat}-{mode}.log').write_text(
+                        (exc.stdout or '') + (exc.stderr or ''))
+                    raise RuntimeError(f'{mode} run timed out; see saved log') from exc
                 log_path = Path(home) / 'baseq2/logs/benchmark.log'
                 log = log_path.read_text(errors='replace') if log_path.exists() else completed.stdout + completed.stderr
                 (args.output / f'{repeat}-{mode}.log').write_text(log)
-                if completed.returncode or re.search(r'Vulkan error|FSR3.*failed|spatial-fallback', log):
+                if completed.returncode or re.search(r'Vulkan error', log, re.IGNORECASE):
                     raise RuntimeError(f'{mode} run failed; see saved log')
                 samples = {}
                 for time, cpu, gpu in SAMPLE.findall(log):
                     samples.setdefault(time, (int(cpu), int(gpu)))
-                captured[mode] = samples
-                report.setdefault('device', re.findall(r'(?:Using Vulkan device:|Vulkan FSR3 enabled capabilities:).*', log))
-        common = sorted(set(captured['native']) & set(captured['fsr']), key=float)
+                result = [value for value in PRESENTATION.findall(log)]
+                fallback_reasons = sorted(set(FALLBACK.findall(log)))
+                captured[mode] = {
+                    'samples': samples,
+                    'result': result[-1] if result else ('native' if mode == 'native' else 'unknown'),
+                    'fallback': bool(fallback_reasons),
+                    'fallback_reasons': fallback_reasons,
+                }
+                devices = re.findall(DEVICE, log)
+                if devices:
+                    report.setdefault('device', [])
+                    report['device'] = sorted(set(report['device']) | set(devices))
+                if not samples:
+                    raise RuntimeError(f'{mode} run produced no FSR samples; see saved log')
+        common = sorted(set(captured['native']['samples']) &
+                        set(captured['fsr']['samples']), key=float)
         times = common[args.warmup:args.warmup + args.frames]
         if len(times) != args.frames:
             raise RuntimeError('not enough matching demo timestamps; use a longer demo or fewer frames')
-        run = {'timestamps': times}
+        run = {
+            'timestamps': times,
+            'modes': {
+                mode: {
+                    'requested': mode,
+                    'result': captured[mode]['result'],
+                    'fallback': captured[mode]['fallback'],
+                    'fallback_reasons': captured[mode]['fallback_reasons'],
+                } for mode in captured
+            },
+        }
         for mode in captured:
-            cpu, gpu = zip(*(captured[mode][time] for time in times))
+            cpu, gpu = zip(*(captured[mode]['samples'][time]
+                             for time in times))
+            gpu_samples = [value for value in gpu if value]
             run[mode] = {'cpu_us': summarize(cpu), 'gpu_us': summarize(gpu),
                          'frame_cost_us': summarize([max(c, g) for c, g in zip(cpu, gpu)]),
-                         'timing_source': 'CPU/GPU' if all(gpu) else 'CPU-only'}
+                         'timing_source': 'CPU/GPU' if all(gpu) else 'CPU-only',
+                         'gpu_samples': len(gpu_samples),
+                         'sample_count': len(times)}
         report['runs'].append(run)
     (args.output / 'report.json').write_text(json.dumps(report, indent=2))
     print(args.output / 'report.json')
