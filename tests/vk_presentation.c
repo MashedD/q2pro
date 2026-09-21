@@ -17,6 +17,8 @@ static char last_error[256];
 static unsigned framebuffer_calls, pass_calls, draw_calls;
 static unsigned destroy_framebuffer_calls;
 static int fail_framebuffer_ordinal;
+static q2_fsr3_context_t *test_fsr_context;
+static unsigned test_image_calls, destroyed_image_calls;
 static VkRenderPass last_pass;
 static VkExtent2D last_extent;
 static VkViewport last_viewport;
@@ -68,7 +70,7 @@ q2_fsr3_context_t *Q2_FSR3_Create(VkPhysicalDevice physical_device,
     VkFormat display_format, bool frame_generation,
     const q2_fsr3_capabilities_t *capabilities)
 {
-    return NULL;
+    return test_fsr_context;
 }
 void Q2_FSR3_Destroy(q2_fsr3_context_t *context) { }
 bool SCR_ParseColor(const char *text, color_t *color) { return false; }
@@ -138,6 +140,56 @@ static VKAPI_ATTR void VKAPI_CALL destroy_framebuffer(VkDevice device,
 {
     assert(framebuffer != VK_NULL_HANDLE);
     destroy_framebuffer_calls++;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL transaction_create_image(
+    VkDevice device, const VkImageCreateInfo *info,
+    const VkAllocationCallbacks *allocator, VkImage *out)
+{
+    test_image_calls++;
+    *out = HANDLE(VkImage, 800 + test_image_calls);
+    return VK_SUCCESS;
+}
+
+static VKAPI_ATTR void VKAPI_CALL transaction_get_image_requirements(
+    VkDevice device, VkImage image, VkMemoryRequirements *requirements)
+{
+    *requirements = (VkMemoryRequirements) {
+        .size = 4096,
+        .alignment = 256,
+        .memoryTypeBits = 1,
+    };
+}
+
+static VKAPI_ATTR void VKAPI_CALL transaction_get_memory_properties(
+    VkPhysicalDevice physical_device, VkPhysicalDeviceMemoryProperties *memory)
+{
+    memset(memory, 0, sizeof(*memory));
+    memory->memoryTypeCount = 1;
+    memory->memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    memory->memoryTypes[0].heapIndex = 0;
+}
+
+static VKAPI_ATTR void VKAPI_CALL transaction_get_format_properties(
+    VkPhysicalDevice physical_device, VkFormat format,
+    VkFormatProperties *properties)
+{
+    memset(properties, 0, sizeof(*properties));
+    properties->optimalTilingFeatures = ~0u;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL transaction_allocate_memory(
+    VkDevice device, const VkMemoryAllocateInfo *info,
+    const VkAllocationCallbacks *allocator, VkDeviceMemory *out)
+{
+    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+}
+
+static VKAPI_ATTR void VKAPI_CALL transaction_destroy_image(
+    VkDevice device, VkImage image, const VkAllocationCallbacks *allocator)
+{
+    assert(image != VK_NULL_HANDLE);
+    destroyed_image_calls++;
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL create_shader(VkDevice device,
@@ -382,6 +434,68 @@ static void check_fsr_transaction_guards(void)
     assert(vk.fsr_dynamic.current_scale == 1.75f);
     assert(vk.fsr_output_valid && !vk.fsr_reset);
     puts("FSR transaction guards: passed (frame ownership, device loss, input validation)");
+}
+
+static void check_fsr_transaction_resource_rollback(void)
+{
+    cvar_t fsr = { .integer = 1 };
+    q2_fsr3_context_t *old_fsr_context =
+        HANDLE(q2_fsr3_context_t *, 900);
+    q2_fsr3_context_t *candidate_fsr_context =
+        HANDLE(q2_fsr3_context_t *, 901);
+
+    memset(&vk, 0, sizeof(vk));
+    vk.device = HANDLE(VkDevice, 902);
+    vk.physical_device = HANDLE(VkPhysicalDevice, 903);
+    vk.separate_presentation = true;
+    vk.swapchain_extent = (VkExtent2D) { 1280, 720 };
+    vk.render_extent = (VkExtent2D) { 640, 360 };
+    vk.swapchain_format = VK_FORMAT_B8G8R8A8_UNORM;
+    vk.sample_count = VK_SAMPLE_COUNT_1_BIT;
+    vk.fsr3 = old_fsr_context;
+    vk.fsr_output_texture.image = HANDLE(VkImage, 904);
+    vk.fsr_output_texture.width = 1280;
+    vk.fsr_output_texture.height = 720;
+    vk.scene_framebuffer = HANDLE(VkFramebuffer, 905);
+    vk.fsr_output_valid = true;
+    vk.fsr_reset = false;
+    vk.fsr_dynamic.current_scale = 1.5f;
+    vk.fsr_dynamic.cooldown_remaining = 7;
+    vk.physical_device_properties.limits.maxPushConstantsSize =
+        sizeof(vk_fsr_motion_push_t);
+    vk.DeviceWaitIdle = transaction_wait_idle;
+    vk.CreateImage = transaction_create_image;
+    vk.GetImageMemoryRequirements = transaction_get_image_requirements;
+    vk.GetPhysicalDeviceMemoryProperties = transaction_get_memory_properties;
+    vk.GetPhysicalDeviceFormatProperties = transaction_get_format_properties;
+    vk.AllocateMemory = transaction_allocate_memory;
+    vk.DestroyImage = transaction_destroy_image;
+
+    r_fsr = &fsr;
+    r_fsr_auto = NULL;
+    r_fsr_frame_generation = NULL;
+    test_fsr_context = candidate_fsr_context;
+    test_image_calls = 0;
+    destroyed_image_calls = 0;
+    transaction_wait_idle_calls = 0;
+
+    assert(!vk_rebuild_internal_render_targets(1.5f));
+    assert(test_image_calls == 1);
+    assert(destroyed_image_calls == 1);
+    assert(transaction_wait_idle_calls == 1);
+    assert(vk.render_extent.width == 640 && vk.render_extent.height == 360);
+    assert(vk.fsr3 == old_fsr_context);
+    assert(vk.fsr_output_texture.image == HANDLE(VkImage, 904));
+    assert(vk.scene_framebuffer == HANDLE(VkFramebuffer, 905));
+    assert(vk.fsr_output_valid && !vk.fsr_reset);
+    assert(vk.fsr_dynamic.current_scale == 1.5f);
+    assert(vk.fsr_dynamic.cooldown_remaining == 7);
+
+    r_fsr = NULL;
+    r_fsr_auto = NULL;
+    r_fsr_frame_generation = NULL;
+    test_fsr_context = NULL;
+    puts("FSR transaction resource rollback: passed (candidate allocation failure)");
 }
 
 static void check_fsr_framebuffer_failure_cleanup(void)
@@ -761,6 +875,7 @@ int main(void)
     check_fsr_frame_generation_contracts();
     check_fsr_lifecycle_contracts();
     check_fsr_transaction_guards();
+    check_fsr_transaction_resource_rollback();
     framebuffer_calls = 0;
     check_fsr_framebuffer_failure_cleanup();
     framebuffer_calls = 0;

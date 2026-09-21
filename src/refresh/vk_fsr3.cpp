@@ -73,6 +73,7 @@ struct q2_fsr3_context {
     bool frame_started = false;
     bool frame_generation = false;
     bool frame_generation_failed = false;
+    bool profile_supported = true;
     bool force_reset = false;
     bool full_context_created = false;
     FfxErrorCode last_error = FFX_OK;
@@ -106,6 +107,7 @@ static q2_fsr3_dispatch_inputs q2_fsr3_sanitize_inputs(
     bool reset)
 {
     constexpr float default_frame_time_ms = 16.0f;
+    constexpr float max_frame_time_ms = 1000.0f;
     constexpr float default_fov = 75.0f * 0.01745329251994329577f;
     constexpr float default_near = 2.0f;
     constexpr float default_far = 2048.0f;
@@ -124,6 +126,9 @@ static q2_fsr3_dispatch_inputs q2_fsr3_sanitize_inputs(
     }
     if (!std::isfinite(result.frame_time_ms) || result.frame_time_ms <= 0.0f) {
         result.frame_time_ms = default_frame_time_ms;
+        result.reset = true;
+    } else if (result.frame_time_ms > max_frame_time_ms) {
+        result.frame_time_ms = max_frame_time_ms;
         result.reset = true;
     }
     if (!std::isfinite(result.vertical_fov_radians) ||
@@ -207,12 +212,12 @@ static VKAPI_ATTR void VKAPI_CALL q2_fsr3_dispatch(VkCommandBuffer cmd,
     bool profile = context->profile_active && index < 64;
     auto stamp = reinterpret_cast<PFN_vkCmdWriteTimestamp>(
         context->get_device_proc_addr(context->device_context.vkDevice, "vkCmdWriteTimestamp"));
-    if (profile) {
+    if (profile && stamp) {
         context->profile_labels[slot][index] = context->pipeline_labels[context->profile_pipeline];
         stamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, context->profile_pool, slot * 128 + index * 2);
     }
     dispatch(cmd, x, y, z);
-    if (profile) {
+    if (profile && stamp) {
         stamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, context->profile_pool, slot * 128 + index * 2 + 1);
         context->profile_count[slot]++;
     }
@@ -225,13 +230,32 @@ extern "C" void Q2_FSR3_ProfileBegin(q2_fsr3_context_t *context, VkCommandBuffer
         return;
     q2_fsr3_context_scope scope(context);
     context->profile_active = false;
+    if (!context->get_device_proc_addr) {
+        context->profile_supported = false;
+        return;
+    }
     VkDevice device = context->device_context.vkDevice;
+    auto create = reinterpret_cast<PFN_vkCreateQueryPool>(
+        context->get_device_proc_addr(device, "vkCreateQueryPool"));
+    auto read = reinterpret_cast<PFN_vkGetQueryPoolResults>(
+        context->get_device_proc_addr(device, "vkGetQueryPoolResults"));
+    auto reset = reinterpret_cast<PFN_vkCmdResetQueryPool>(
+        context->get_device_proc_addr(device, "vkCmdResetQueryPool"));
+    auto stamp = reinterpret_cast<PFN_vkCmdWriteTimestamp>(
+        context->get_device_proc_addr(device, "vkCmdWriteTimestamp"));
+    if (!create || !read || !reset || !stamp) {
+        if (context->profile_supported)
+            Com_WPrintf("FSR per-pass profiling disabled: Vulkan timestamp/query functions unavailable\n");
+        context->profile_supported = false;
+        context->profile_count[slot] = 0;
+        return;
+    }
+    context->profile_supported = true;
     if (!context->profile_pool && enabled) {
         VkQueryPoolCreateInfo info = {};
         info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
         info.queryType = VK_QUERY_TYPE_TIMESTAMP;
         info.queryCount = 384;
-        auto create = reinterpret_cast<PFN_vkCreateQueryPool>(context->get_device_proc_addr(device, "vkCreateQueryPool"));
         if (create(device, &info, nullptr, &context->profile_pool) != VK_SUCCESS) {
             Com_WPrintf("FSR per-pass timestamp allocation failed\n");
             return;
@@ -241,7 +265,6 @@ extern "C" void Q2_FSR3_ProfileBegin(q2_fsr3_context_t *context, VkCommandBuffer
         return;
     if (context->profile_count[slot]) {
         uint64_t values[128] = {};
-        auto read = reinterpret_cast<PFN_vkGetQueryPoolResults>(context->get_device_proc_addr(device, "vkGetQueryPoolResults"));
         if (read(device, context->profile_pool, slot * 128, context->profile_count[slot] * 2,
                  sizeof(values), values, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
             for (uint32_t i = 0; i < context->profile_count[slot]; i++) {
@@ -255,7 +278,6 @@ extern "C" void Q2_FSR3_ProfileBegin(q2_fsr3_context_t *context, VkCommandBuffer
     context->profile_count[slot] = 0;
     context->profile_slot = slot;
     if (enabled) {
-        auto reset = reinterpret_cast<PFN_vkCmdResetQueryPool>(context->get_device_proc_addr(device, "vkCmdResetQueryPool"));
         reset(cmd, context->profile_pool, slot * 128, 128);
         context->profile_active = true;
     }
@@ -322,8 +344,10 @@ static bool q2_fsr3_has_instance_functions(void)
     };
 
     for (const char *name : names) {
-        if (!q2_fsr3_get_instance_proc(name))
+        if (!q2_fsr3_get_instance_proc(name)) {
+            Com_WPrintf("FSR3 unavailable: missing Vulkan instance function %s\n", name);
             return false;
+        }
     }
     return true;
 }
@@ -375,8 +399,10 @@ static bool q2_fsr3_has_device_functions(VkDevice device)
     if (!q2_callback_context || !q2_callback_context->get_device_proc_addr || !device)
         return false;
     for (const char *name : names) {
-        if (!q2_fsr3_get_device_proc(device, name))
+        if (!q2_fsr3_get_device_proc(device, name)) {
+            Com_WPrintf("FSR3 unavailable: missing Vulkan device function %s\n", name);
             return false;
+        }
     }
     return true;
 }
@@ -723,10 +749,11 @@ extern "C" void Q2_FSR3_Destroy(q2_fsr3_context_t *context)
         ffxFsr3UpscalerContextDestroy(&context->context);
     }
     std::free(context->scratch);
-    if (context->profile_pool) {
+    if (context->profile_pool && context->get_device_proc_addr) {
         auto destroy = reinterpret_cast<PFN_vkDestroyQueryPool>(
             context->get_device_proc_addr(context->device_context.vkDevice, "vkDestroyQueryPool"));
-        destroy(context->device_context.vkDevice, context->profile_pool, nullptr);
+        if (destroy)
+            destroy(context->device_context.vkDevice, context->profile_pool, nullptr);
     }
     delete context;
 }

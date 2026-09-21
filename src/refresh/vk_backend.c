@@ -1207,6 +1207,8 @@ typedef struct {
     uint32_t flare_times[MAX_EDICTS];
     float perf_stats_time;
     uint64_t frame_start_usec;
+    VkResult last_submit_result;
+    uint64_t last_submit_frame_id;
     unsigned wait_usec;
     unsigned acquire_usec;
     unsigned record_usec;
@@ -2019,6 +2021,22 @@ static bool vk_fail_result(const char *what, VkResult result)
     Com_SetLastError(va("%s failed: Vulkan error %d", what, result));
     vk_handle_device_lost(what, result);
     return false;
+}
+
+static void vk_log_fence_wait_failure(const char *what, VkResult result)
+{
+    bool image_fence = vk.image_fences &&
+        vk.current_image < vk.swapchain_image_count &&
+        vk.image_fences[vk.current_image];
+    Com_EPrintf("%s failed: Vulkan error %d frame_slot=%u current_image=%u "
+                "frame_fence=%s image_fence=%s image_acquired=%s "
+                "last_submit_result=%d last_submit_frame=%llu\n",
+                what, result, vk.frame_index, vk.current_image,
+                vk.frame_fence[vk.frame_index] ? "set" : "none",
+                image_fence ? "set" : "none",
+                vk.image_acquired ? "yes" : "no",
+                vk.last_submit_result,
+                (unsigned long long)vk.last_submit_frame_id);
 }
 
 static uint32_t vk_find_memory_type(uint32_t type_bits, VkMemoryPropertyFlags properties)
@@ -4041,7 +4059,9 @@ static bool vk_create_image_target(vk_texture_t *texture, uint32_t width,
     return true;
 
 fail:
-    vk_destroy_texture_resource(&target);
+    /* The candidate has never been published or referenced by a command
+     * buffer, so failure cleanup must not add another device-wide stall. */
+    vk_destroy_texture_resource_nowait(&target);
     return false;
 }
 
@@ -4098,18 +4118,6 @@ static void vk_destroy_fsr_resources_nowait(void)
     vk.fsr_presentation_logged = false;
     vk.fsr_presentation_copy = false;
     vk.render_extent = vk.swapchain_extent;
-}
-
-static void vk_destroy_fsr_resources(void)
-{
-    if (!vk.device)
-        return;
-
-    if (!vk.device_lost && vk.DeviceWaitIdle)
-        vk_handle_device_lost("vkDeviceWaitIdle",
-                              vk.DeviceWaitIdle(vk.device));
-
-    vk_destroy_fsr_resources_nowait();
 }
 
 static bool vk_create_fsr_resources(float scale_override)
@@ -4190,7 +4198,7 @@ static bool vk_create_fsr_resources(float scale_override)
                                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
         Com_WPrintf("Couldn't create Vulkan FSR3 output target: %s; rendering at native resolution\n",
                     Com_GetLastError());
-        vk_destroy_fsr_resources();
+        vk_destroy_fsr_resources_nowait();
         return true;
     }
     if (vk_fsr_frame_generation_requested() &&
@@ -4203,7 +4211,7 @@ static bool vk_create_fsr_resources(float scale_override)
                                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
         Com_WPrintf("Couldn't create Vulkan FSR3 frame-generation target: %s; rendering without frame generation\n",
                     Com_GetLastError());
-        vk_destroy_fsr_resources();
+        vk_destroy_fsr_resources_nowait();
         return true;
     }
     if (vk.fsr_swapchain_direct &&
@@ -4223,7 +4231,7 @@ static bool vk_create_fsr_resources(float scale_override)
                                     VK_IMAGE_USAGE_SAMPLED_BIT |
                                     VK_IMAGE_USAGE_STORAGE_BIT |
                                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
-            vk_destroy_fsr_resources();
+            vk_destroy_fsr_resources_nowait();
             return true;
         }
     }
@@ -4234,7 +4242,7 @@ static bool vk_create_fsr_resources(float scale_override)
                                 VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
         Com_WPrintf("Couldn't create Vulkan FSR3 motion target: %s; rendering at native resolution\n",
                     Com_GetLastError());
-        vk_destroy_fsr_resources();
+        vk_destroy_fsr_resources_nowait();
         return true;
     }
     if (!vk_create_color_target(&vk.fsr_reactive_texture,
@@ -4244,7 +4252,7 @@ static bool vk_create_fsr_resources(float scale_override)
                                 VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
         Com_WPrintf("Couldn't create Vulkan FSR3 reactive target: %s; rendering at native resolution\n",
                     Com_GetLastError());
-        vk_destroy_fsr_resources();
+        vk_destroy_fsr_resources_nowait();
         return true;
     }
     if (vk_fsr_composition_enabled() &&
@@ -4252,7 +4260,7 @@ static bool vk_create_fsr_resources(float scale_override)
                                 vk.render_extent.width, vk.render_extent.height,
                                 VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
         Com_WPrintf("Couldn't create FSR composition mask; using native resolution\n");
-        vk_destroy_fsr_resources();
+        vk_destroy_fsr_resources_nowait();
         return true;
     }
     if (vk.fsr_output_texture.image)
@@ -22031,6 +22039,19 @@ static void vk_sync_fsr_frame_id(void)
     vk.fsr_sdk_frame_id_valid = true;
 }
 
+static void vk_log_fsr_frame_generation_failure(const char *stage)
+{
+    Com_WPrintf("Vulkan FSR3 frame generation %s failed: sdk_error=%d "
+                "renderer_frame=%llu sdk_frame=%llu sdk_frame_valid=%s "
+                "output_layout=%d framegen_layout=%d\n",
+                stage, vk.fsr3 ? Q2_FSR3_GetLastError(vk.fsr3) : 0,
+                (unsigned long long)vk.fsr_frame_id,
+                (unsigned long long)vk.fsr_sdk_frame_id,
+                vk.fsr_sdk_frame_id_valid ? "yes" : "no",
+                (int)vk.fsr_output_layout,
+                (int)vk.fsr_frame_generation_layout);
+}
+
 static bool vk_dispatch_fsr(void)
 {
     vk_texture_t *input_texture = vk.fsr_scene_direct ?
@@ -22140,6 +22161,7 @@ static bool vk_dispatch_fsr(void)
             max(vk_projection_zfar(vk.fd_valid ? vk.fd.rdflags : 0),
                 (vk_znear ? Cvar_ClampValue(vk_znear, 0.1f, 4095.0f) : 2.0f) + 1.0f));
         if (!frame_generation_prepared) {
+            vk_log_fsr_frame_generation_failure("preparation");
             vk_fsr_invalidate_history_reason(VK_FSR_RESET_FRAMEGEN_FAILURE);
             vk_disable_frame_generation("frame-generation preparation failed");
             frame_reset = vk.fsr_reset;
@@ -22258,6 +22280,7 @@ static bool vk_dispatch_fsr(void)
             frame_reset);
         vk_write_fsr_timestamp(VK_TIMESTAMP_FRAMEGEN_END);
         if (!generated_frame) {
+            vk_log_fsr_frame_generation_failure("dispatch");
             vk_fsr_invalidate_history_reason(VK_FSR_RESET_FRAMEGEN_FAILURE);
             vk_disable_frame_generation("frame-generation dispatch failed");
         }
@@ -22770,7 +22793,7 @@ void VKR_BeginFrame(void)
     vk.wait_usec = vk_time_usec() - start;
     if (result != VK_SUCCESS) {
         vk_handle_device_lost("vkWaitForFences", result);
-        Com_EPrintf("vkWaitForFences failed: Vulkan error %d\n", result);
+        vk_log_fence_wait_failure("vkWaitForFences", result);
         return;
     }
     if (vk.timestamp_query_pool && vk.timestamp_valid[vk.frame_index]) {
@@ -22865,7 +22888,7 @@ void VKR_BeginFrame(void)
         vk.wait_usec += vk_time_usec() - start;
         if (result != VK_SUCCESS) {
             vk_handle_device_lost("vkWaitForFences", result);
-            Com_EPrintf("vkWaitForFences failed: Vulkan error %d\n", result);
+            vk_log_fence_wait_failure("vkWaitForFences", result);
             return;
         }
     }
@@ -23293,6 +23316,8 @@ void VKR_EndFrame(void)
     start = vk_time_usec();
     result = vk.QueueSubmit(vk.graphics_queue, 1, &submit_info, frame_fence);
     vk.submit_usec = vk_time_usec() - start;
+    vk.last_submit_result = result;
+    vk.last_submit_frame_id = vk.fsr_frame_id;
     if (result != VK_SUCCESS) {
         vk_handle_device_lost("vkQueueSubmit", result);
         Com_EPrintf("vkQueueSubmit failed: Vulkan error %d\n", result);
@@ -23417,7 +23442,7 @@ bool VKR_VideoSync(void)
         return false;
     if (result != VK_SUCCESS) {
         vk_handle_device_lost("vkWaitForFences", result);
-        Com_EPrintf("vkWaitForFences failed: Vulkan error %d\n", result);
+        vk_log_fence_wait_failure("vkWaitForFences", result);
         return false;
     }
 
@@ -23448,7 +23473,7 @@ bool VKR_VideoSync(void)
         return false;
     if (result != VK_SUCCESS) {
         vk_handle_device_lost("vkWaitForFences", result);
-        Com_EPrintf("vkWaitForFences failed: Vulkan error %d\n", result);
+        vk_log_fence_wait_failure("vkWaitForFences", result);
         return false;
     }
     return true;

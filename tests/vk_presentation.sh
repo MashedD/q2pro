@@ -101,6 +101,7 @@ require_contract 'vk_create_fsr_motion_framebuffer' "$repo_dir/src/refresh/vk_ba
 require_contract 'vk_destroy_display_framebuffers_nowait' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'VK_FSR_RESET_RENDER_SCALE' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_rebuild_internal_render_targets' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_destroy_internal_targets_bundle_nowait' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk.frame_active || vk.render_pass_active' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'Vulkan FSR motion requires a sampled depth view' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk.fsr_dynamic.cooldown_remaining = cooldown_frames' "$repo_dir/src/refresh/vk_backend.c"
@@ -111,6 +112,12 @@ require_contract 'context->frame_generation_failed = true' "$repo_dir/src/refres
 require_contract 'if (!dispatched)' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_disable_frame_generation("FSR3 upscaler dispatch failed")' \
     "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_log_fence_wait_failure' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'last_submit_result' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_log_fsr_frame_generation_failure' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'missing Vulkan device function %s' "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract 'profile_supported' "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract 'max_frame_time_ms' "$repo_dir/src/refresh/vk_fsr3.cpp"
 
 # Pause reuse composites a retained FSR texture. It must not route the paused
 # frame through the normal presentation-image copy path.
