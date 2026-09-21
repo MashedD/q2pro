@@ -68,14 +68,16 @@ for non-finite motion vectors and mask coverage is still deliberately deferred:
 it requires an opt-in readback/compute pass and must not affect normal
 benchmarks.
 
-Dynamic-resolution groundwork is recommendation-only for now. Set
-`r_fsr_dynamic 1` to collect GPU-time recommendations with hysteresis,
-quantized scale steps, and a cooldown; the backend reports them as
-`VK FSR3 dynamic` telemetry but deliberately keeps `applied=no` until the
-internal-target rebuild transaction has rollback coverage. The lifecycle is
-now split into a wait-free internal-target destruction stage and a separate
-FSR motion-framebuffer creation stage; this does not yet apply a new scale or
-change swapchain lifetime. `r_fsr_dynamic_cpu 1` opts into CPU timing only
+Set `r_fsr_dynamic 1` to collect GPU-time recommendations with hysteresis,
+quantized scale steps, and a cooldown. At a safe frame boundary the backend
+builds a candidate internal-target bundle, commits it only after all resources
+succeed, and preserves the swapchain/display framebuffers. Failed candidates
+are discarded and the previous scale remains active. `VK FSR3 dynamic`
+telemetry reports the applied state and transaction counter. The lifecycle is
+split into wait-free internal-target destruction and separate FSR
+motion-framebuffer creation. Native-scale fallback remains recoverable, and
+disabling dynamic mode retries restoration of the fixed profile after a
+transient allocation failure. `r_fsr_dynamic_cpu 1` opts into CPU timing only
 when GPU timestamps are unavailable.
 
 These are smoke tests, not a long-duration image-quality benchmark. No Vulkan

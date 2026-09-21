@@ -2,8 +2,8 @@
  * FSR3 dynamic-resolution control policy.
  *
  * This header intentionally contains only deterministic state transitions.
- * The Vulkan backend owns resource lifetime and may apply a recommendation
- * only after an internal-target rebuild path has been made safe.
+ * The Vulkan backend owns resource lifetime and applies recommendations only
+ * through its transactional internal-target rebuild path.
  */
 
 #ifndef VK_FSR_DYNAMIC_H
@@ -134,7 +134,6 @@ static inline bool vk_fsr_dynamic_update(vk_fsr_dynamic_state_t *state,
         state->timing = timing;
         state->stable_samples = 0;
         state->direction = 0;
-        state->cooldown_remaining = 0;
     }
     state->last_ms = (float)(timing == VK_FSR_DYNAMIC_TIMING_GPU ?
                              gpu_usec : record_usec) / 1000.0f;

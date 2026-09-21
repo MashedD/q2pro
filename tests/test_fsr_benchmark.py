@@ -117,6 +117,16 @@ VK FSR3 result: frame=12 result=spatial-fallback
         self.assertEqual(record['cooldown'], 45)
         self.assertIs(record['applied'], False)
 
+    def test_dynamic_resolution_transaction_fields_are_typed(self):
+        parsed = fsr_benchmark.parse_benchmark_log(
+            'VK FSR3 dynamic: enabled=yes source=GPU target_ms=16.67 '
+            'measured_ms=19.25 current_scale=1.625 '
+            'recommended_scale=1.625 applied=yes transaction=12\n')
+
+        record = parsed['dynamic'][0]
+        self.assertIs(record['applied'], True)
+        self.assertEqual(record['transaction'], 12)
+
     def test_legacy_samples_without_frame_ids_remain_supported(self):
         parsed = fsr_benchmark.parse_benchmark_log(
             'FSR sample: time=2.000 cpu_us=200 gpu_us=150\n'

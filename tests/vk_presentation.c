@@ -450,6 +450,9 @@ static void check_fsr_temporal_contracts(void)
     assert(dynamic.timing == VK_FSR_DYNAMIC_TIMING_CPU);
     assert(!vk_fsr_dynamic_update(&dynamic, 0, 0, true, 11));
     assert(dynamic.timing == VK_FSR_DYNAMIC_TIMING_UNAVAILABLE);
+    dynamic.cooldown_remaining = 2;
+    assert(!vk_fsr_dynamic_update(&dynamic, 20000, 0, true, 11));
+    assert(dynamic.cooldown_remaining == 1);
 
     entity_t entity = { .temporal_id = 1, .temporal_generation = 3, .model = 1 };
     vk.fsr_reset = false;

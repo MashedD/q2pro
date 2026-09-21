@@ -280,6 +280,58 @@ typedef struct {
     VkDeviceSize size;
 } vk_buffer_t;
 
+typedef struct {
+    VkExtent2D render_extent;
+    VkFormat fsr_output_format;
+    VkImage multisample_image;
+    VkDeviceMemory multisample_memory;
+    VkImageView multisample_view;
+    VkImage bloom_multisample_image;
+    VkDeviceMemory bloom_multisample_memory;
+    VkImageView bloom_multisample_view;
+    VkImage depth_image;
+    VkDeviceMemory depth_memory;
+    VkImageView depth_view;
+    VkImageView depth_sample_view;
+    VkFramebuffer scene_framebuffer;
+    VkFramebuffer bloom_framebuffer;
+    VkFramebuffer blur_framebuffer;
+    VkFramebuffer ssr_framebuffer;
+    VkFramebuffer ssr_resolve_framebuffer;
+    VkFramebuffer fsr_motion_framebuffer;
+    VkFramebuffer fsr_input_framebuffer;
+    VkDescriptorSet fsr_depth_descriptor;
+    VkImageLayout scene_layout;
+    VkImageLayout bloom_source_layout;
+    VkImageLayout bloom_layout;
+    VkImageLayout blur_layout;
+    VkImageLayout depth_layout;
+    VkImageLayout ssr_layout;
+    VkImageLayout ssr_resolve_layout;
+    VkImageLayout fsr_output_layout;
+    VkImageLayout fsr_frame_generation_layout;
+    VkImageLayout fsr_pause_layout;
+    VkImageLayout fsr_motion_layout;
+    VkImageLayout fsr_reactive_layout;
+    VkImageLayout fsr_composition_layout;
+    VkImageLayout fsr_input_layout;
+    vk_texture_t scene_texture;
+    vk_texture_t bloom_source_texture;
+    vk_texture_t bloom_texture;
+    vk_texture_t blur_texture;
+    vk_texture_t ssr_texture;
+    vk_texture_t ssr_resolve_texture;
+    vk_texture_t fsr_output_texture;
+    vk_texture_t fsr_frame_generation_texture;
+    vk_texture_t fsr_pause_texture;
+    vk_texture_t fsr_motion_texture;
+    vk_texture_t fsr_reactive_texture;
+    vk_texture_t fsr_composition_texture;
+    vk_texture_t fsr_input_texture;
+    q2_fsr3_context_t *fsr3;
+    bool ssr_ready;
+} vk_internal_targets_t;
+
 #if USE_VULKAN_RAYTRACING
 typedef struct {
     VkAccelerationStructureKHR handle;
@@ -355,6 +407,24 @@ static const char *vk_fsr_reset_reason_name(vk_fsr_reset_reason_t reason)
     default: return "none";
     }
 }
+
+typedef struct {
+    bool fsr_swapchain_direct;
+    bool fsr_motion_initialized;
+    bool fsr_previous_viewproj_valid;
+    bool fsr_previous_fd_valid;
+    bool fsr_composited;
+    bool fsr_output_valid;
+    bool fsr_pause_cache_valid;
+    bool fsr_pause_reuse;
+    bool fsr_paused_last_frame;
+    bool fsr_direct_source_valid;
+    bool fsr_presentation_logged;
+    bool fsr_presentation_copy;
+    bool fsr_reset;
+    vk_fsr_reset_reason_t fsr_reset_reason;
+    q2_fsr3_capabilities_t fsr_capabilities;
+} vk_internal_runtime_t;
 
 
 typedef struct {
@@ -1159,6 +1229,9 @@ typedef struct {
     uint32_t fsr_auto_generation;
     vk_fsr_dynamic_state_t fsr_dynamic;
     uint32_t fsr_dynamic_generation;
+    bool fsr_dynamic_last_applied;
+    bool fsr_dynamic_fixed_restore_pending;
+    uint32_t fsr_dynamic_transaction_id;
     uint32_t timing_generation[VK_MAX_FRAMES_IN_FLIGHT];
     uint32_t timing_dynamic_generation[VK_MAX_FRAMES_IN_FLIGHT];
     unsigned timing_record_usec[VK_MAX_FRAMES_IN_FLIGHT];
@@ -1384,6 +1457,8 @@ static float vk_fsr_quality_scale_for(vk_fsr_quality_t quality)
 
 static void vk_fsr_dynamic_configure(void)
 {
+    bool was_enabled = vk.fsr_dynamic.enabled;
+    float current_scale = vk.fsr_dynamic.current_scale;
     vk.fsr_dynamic.enabled = r_fsr_dynamic && r_fsr_dynamic->integer &&
         vk_fsr_user_requested() && !vk_fsr_auto_enabled();
     vk.fsr_dynamic.cpu_fallback = r_fsr_dynamic_cpu &&
@@ -1404,9 +1479,12 @@ static void vk_fsr_dynamic_configure(void)
     vk.fsr_dynamic.required_samples = r_fsr_dynamic_samples &&
         r_fsr_dynamic_samples->integer > 0 ?
         (unsigned)r_fsr_dynamic_samples->integer : 30;
+    vk.fsr_dynamic_last_applied = false;
     vk.fsr_dynamic_generation++;
+    if (!was_enabled || !(current_scale > 0.0f))
+        current_scale = vk_fsr_quality_scale_for(vk.fsr_auto_quality);
     vk_fsr_dynamic_reset(&vk.fsr_dynamic,
-                         vk_fsr_quality_scale_for(vk.fsr_auto_quality),
+                         current_scale,
                          vk.fsr_dynamic_generation);
 }
 
@@ -1702,12 +1780,13 @@ static float vk_fsr_quality_scale(void)
         r_fsr_quality ? r_fsr_quality->string : "quality"));
 }
 
-static VkExtent2D vk_fsr_render_extent(void)
+static VkExtent2D vk_fsr_render_extent_for_scale(float scale_override)
 {
     if (!vk_fsr_requested())
         return vk.swapchain_extent;
 
-    float scale = vk_fsr_quality_scale();
+    float scale = scale_override > 0.0f ? scale_override :
+        vk_fsr_quality_scale();
     VkExtent2D extent = {
         max((uint32_t)(vk.swapchain_extent.width / scale), 1),
         max((uint32_t)(vk.swapchain_extent.height / scale), 1),
@@ -1741,6 +1820,8 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    bool mipmaps);
 static void vk_destroy_texture_resource_nowait(vk_texture_t *texture);
 static void vk_destroy_texture_resource(vk_texture_t *texture);
+static bool vk_create_fsr_motion_pipelines(void);
+static void vk_destroy_fsr_motion_pipelines_nowait(void);
 static VkShaderModule vk_create_shader_module(const uint32_t *code,
                                               size_t code_size);
 static uint64_t vk_time_usec(void);
@@ -4030,14 +4111,14 @@ static void vk_destroy_fsr_resources(void)
     vk_destroy_fsr_resources_nowait();
 }
 
-static bool vk_create_fsr_resources(void)
+static bool vk_create_fsr_resources(float scale_override)
 {
     if (vk_fsr_frame_generation_requested() &&
         !vk_fsr_frame_generation_backend_supported()) {
         vk_disable_frame_generation(
             "manual Vulkan frame generation is unsupported on this platform");
     }
-    vk.render_extent = vk_fsr_render_extent();
+    vk.render_extent = vk_fsr_render_extent_for_scale(scale_override);
     if (!vk_fsr_any_requested() ||
         vk.sample_count != VK_SAMPLE_COUNT_1_BIT ||
         (!vk_fsr_frame_generation_requested() &&
@@ -6882,6 +6963,195 @@ static VkExtent2D vk_choose_extent(const VkSurfaceCapabilitiesKHR *caps,
     return extent;
 }
 
+/* A render-scale transaction owns this resource set independently from the
+ * swapchain. Moving the handles out of vk leaves the active bundle intact
+ * while existing constructors fill zeroed destinations with a candidate. */
+#define VK_INTERNAL_TAKE(field) do { \
+    targets->field = vk.field; \
+    memset(&vk.field, 0, sizeof(vk.field)); \
+} while (0)
+#define VK_INTERNAL_PUT(field) do { \
+    vk.field = targets->field; \
+    memset(&targets->field, 0, sizeof(targets->field)); \
+} while (0)
+
+static void vk_internal_targets_take(vk_internal_targets_t *targets)
+{
+    memset(targets, 0, sizeof(*targets));
+    VK_INTERNAL_TAKE(render_extent);
+    VK_INTERNAL_TAKE(fsr_output_format);
+    VK_INTERNAL_TAKE(multisample_image);
+    VK_INTERNAL_TAKE(multisample_memory);
+    VK_INTERNAL_TAKE(multisample_view);
+    VK_INTERNAL_TAKE(bloom_multisample_image);
+    VK_INTERNAL_TAKE(bloom_multisample_memory);
+    VK_INTERNAL_TAKE(bloom_multisample_view);
+    VK_INTERNAL_TAKE(depth_image);
+    VK_INTERNAL_TAKE(depth_memory);
+    VK_INTERNAL_TAKE(depth_view);
+    VK_INTERNAL_TAKE(depth_sample_view);
+    VK_INTERNAL_TAKE(scene_framebuffer);
+    VK_INTERNAL_TAKE(bloom_framebuffer);
+    VK_INTERNAL_TAKE(blur_framebuffer);
+    VK_INTERNAL_TAKE(ssr_framebuffer);
+    VK_INTERNAL_TAKE(ssr_resolve_framebuffer);
+    VK_INTERNAL_TAKE(fsr_motion_framebuffer);
+    VK_INTERNAL_TAKE(fsr_input_framebuffer);
+    VK_INTERNAL_TAKE(fsr_depth_descriptor);
+    VK_INTERNAL_TAKE(scene_layout);
+    VK_INTERNAL_TAKE(bloom_source_layout);
+    VK_INTERNAL_TAKE(bloom_layout);
+    VK_INTERNAL_TAKE(blur_layout);
+    VK_INTERNAL_TAKE(depth_layout);
+    VK_INTERNAL_TAKE(ssr_layout);
+    VK_INTERNAL_TAKE(ssr_resolve_layout);
+    VK_INTERNAL_TAKE(fsr_output_layout);
+    VK_INTERNAL_TAKE(fsr_frame_generation_layout);
+    VK_INTERNAL_TAKE(fsr_pause_layout);
+    VK_INTERNAL_TAKE(fsr_motion_layout);
+    VK_INTERNAL_TAKE(fsr_reactive_layout);
+    VK_INTERNAL_TAKE(fsr_composition_layout);
+    VK_INTERNAL_TAKE(fsr_input_layout);
+    VK_INTERNAL_TAKE(scene_texture);
+    VK_INTERNAL_TAKE(bloom_source_texture);
+    VK_INTERNAL_TAKE(bloom_texture);
+    VK_INTERNAL_TAKE(blur_texture);
+    VK_INTERNAL_TAKE(ssr_texture);
+    VK_INTERNAL_TAKE(ssr_resolve_texture);
+    VK_INTERNAL_TAKE(fsr_output_texture);
+    VK_INTERNAL_TAKE(fsr_frame_generation_texture);
+    VK_INTERNAL_TAKE(fsr_pause_texture);
+    VK_INTERNAL_TAKE(fsr_motion_texture);
+    VK_INTERNAL_TAKE(fsr_reactive_texture);
+    VK_INTERNAL_TAKE(fsr_composition_texture);
+    VK_INTERNAL_TAKE(fsr_input_texture);
+    VK_INTERNAL_TAKE(fsr3);
+    VK_INTERNAL_TAKE(ssr_ready);
+}
+
+static void vk_internal_targets_put(vk_internal_targets_t *targets)
+{
+    VK_INTERNAL_PUT(render_extent);
+    VK_INTERNAL_PUT(fsr_output_format);
+    VK_INTERNAL_PUT(multisample_image);
+    VK_INTERNAL_PUT(multisample_memory);
+    VK_INTERNAL_PUT(multisample_view);
+    VK_INTERNAL_PUT(bloom_multisample_image);
+    VK_INTERNAL_PUT(bloom_multisample_memory);
+    VK_INTERNAL_PUT(bloom_multisample_view);
+    VK_INTERNAL_PUT(depth_image);
+    VK_INTERNAL_PUT(depth_memory);
+    VK_INTERNAL_PUT(depth_view);
+    VK_INTERNAL_PUT(depth_sample_view);
+    VK_INTERNAL_PUT(scene_framebuffer);
+    VK_INTERNAL_PUT(bloom_framebuffer);
+    VK_INTERNAL_PUT(blur_framebuffer);
+    VK_INTERNAL_PUT(ssr_framebuffer);
+    VK_INTERNAL_PUT(ssr_resolve_framebuffer);
+    VK_INTERNAL_PUT(fsr_motion_framebuffer);
+    VK_INTERNAL_PUT(fsr_input_framebuffer);
+    VK_INTERNAL_PUT(fsr_depth_descriptor);
+    VK_INTERNAL_PUT(scene_layout);
+    VK_INTERNAL_PUT(bloom_source_layout);
+    VK_INTERNAL_PUT(bloom_layout);
+    VK_INTERNAL_PUT(blur_layout);
+    VK_INTERNAL_PUT(depth_layout);
+    VK_INTERNAL_PUT(ssr_layout);
+    VK_INTERNAL_PUT(ssr_resolve_layout);
+    VK_INTERNAL_PUT(fsr_output_layout);
+    VK_INTERNAL_PUT(fsr_frame_generation_layout);
+    VK_INTERNAL_PUT(fsr_pause_layout);
+    VK_INTERNAL_PUT(fsr_motion_layout);
+    VK_INTERNAL_PUT(fsr_reactive_layout);
+    VK_INTERNAL_PUT(fsr_composition_layout);
+    VK_INTERNAL_PUT(fsr_input_layout);
+    VK_INTERNAL_PUT(scene_texture);
+    VK_INTERNAL_PUT(bloom_source_texture);
+    VK_INTERNAL_PUT(bloom_texture);
+    VK_INTERNAL_PUT(blur_texture);
+    VK_INTERNAL_PUT(ssr_texture);
+    VK_INTERNAL_PUT(ssr_resolve_texture);
+    VK_INTERNAL_PUT(fsr_output_texture);
+    VK_INTERNAL_PUT(fsr_frame_generation_texture);
+    VK_INTERNAL_PUT(fsr_pause_texture);
+    VK_INTERNAL_PUT(fsr_motion_texture);
+    VK_INTERNAL_PUT(fsr_reactive_texture);
+    VK_INTERNAL_PUT(fsr_composition_texture);
+    VK_INTERNAL_PUT(fsr_input_texture);
+    VK_INTERNAL_PUT(fsr3);
+    VK_INTERNAL_PUT(ssr_ready);
+}
+
+#undef VK_INTERNAL_TAKE
+#undef VK_INTERNAL_PUT
+
+static void vk_destroy_internal_targets_bundle_nowait(vk_internal_targets_t *targets)
+{
+    if (targets->fsr_depth_descriptor && vk.descriptor_pool)
+        vk.FreeDescriptorSets(vk.device, vk.descriptor_pool, 1,
+                              &targets->fsr_depth_descriptor);
+    targets->fsr_depth_descriptor = VK_NULL_HANDLE;
+
+    VkFramebuffer *framebuffers[] = {
+        &targets->scene_framebuffer,
+        &targets->bloom_framebuffer,
+        &targets->blur_framebuffer,
+        &targets->ssr_framebuffer,
+        &targets->ssr_resolve_framebuffer,
+        &targets->fsr_motion_framebuffer,
+        &targets->fsr_input_framebuffer,
+    };
+    for (size_t i = 0; i < q_countof(framebuffers); i++) {
+        if (*framebuffers[i]) {
+            vk.DestroyFramebuffer(vk.device, *framebuffers[i], NULL);
+            *framebuffers[i] = VK_NULL_HANDLE;
+        }
+    }
+
+    vk_destroy_texture_resource_nowait(&targets->scene_texture);
+    vk_destroy_texture_resource_nowait(&targets->bloom_source_texture);
+    vk_destroy_texture_resource_nowait(&targets->bloom_texture);
+    vk_destroy_texture_resource_nowait(&targets->ssr_texture);
+    vk_destroy_texture_resource_nowait(&targets->ssr_resolve_texture);
+    vk_destroy_texture_resource_nowait(&targets->blur_texture);
+    vk_destroy_texture_resource_nowait(&targets->fsr_input_texture);
+
+    if (targets->fsr3) {
+        Q2_FSR3_Destroy(targets->fsr3);
+        targets->fsr3 = NULL;
+    }
+    vk_destroy_texture_resource_nowait(&targets->fsr_output_texture);
+    vk_destroy_texture_resource_nowait(&targets->fsr_frame_generation_texture);
+    vk_destroy_texture_resource_nowait(&targets->fsr_pause_texture);
+    vk_destroy_texture_resource_nowait(&targets->fsr_motion_texture);
+    vk_destroy_texture_resource_nowait(&targets->fsr_reactive_texture);
+    vk_destroy_texture_resource_nowait(&targets->fsr_composition_texture);
+
+    if (targets->multisample_view)
+        vk.DestroyImageView(vk.device, targets->multisample_view, NULL);
+    if (targets->multisample_image)
+        vk.DestroyImage(vk.device, targets->multisample_image, NULL);
+    if (targets->multisample_memory)
+        vk.FreeMemory(vk.device, targets->multisample_memory, NULL);
+    if (targets->bloom_multisample_view)
+        vk.DestroyImageView(vk.device, targets->bloom_multisample_view, NULL);
+    if (targets->bloom_multisample_image)
+        vk.DestroyImage(vk.device, targets->bloom_multisample_image, NULL);
+    if (targets->bloom_multisample_memory)
+        vk.FreeMemory(vk.device, targets->bloom_multisample_memory, NULL);
+
+    if (targets->depth_view)
+        vk.DestroyImageView(vk.device, targets->depth_view, NULL);
+    if (targets->depth_sample_view)
+        vk.DestroyImageView(vk.device, targets->depth_sample_view, NULL);
+    if (targets->depth_image)
+        vk.DestroyImage(vk.device, targets->depth_image, NULL);
+    if (targets->depth_memory)
+        vk.FreeMemory(vk.device, targets->depth_memory, NULL);
+
+    memset(targets, 0, sizeof(*targets));
+}
+
 /* Destroy render-sized targets and the FSR resources that own their temporal
  * state. The caller must have already made the device idle; this helper
  * deliberately does not wait so a future internal-target rebuild can stage
@@ -7814,6 +8084,10 @@ static bool vk_create_fsr_motion_framebuffer(void)
         !vk.fsr_motion_render_pass || !vk.fsr_motion_texture.view ||
         !vk.fsr_reactive_texture.view || !vk.depth_view)
         return true;
+    if (!vk.depth_sample_view) {
+        Com_SetLastError("Vulkan FSR motion requires a sampled depth view");
+        return false;
+    }
 
     VkImageView attachments[] = {
         vk.fsr_motion_texture.view,
@@ -7938,6 +8212,64 @@ static bool vk_create_framebuffers(void)
     return true;
 }
 
+static void vk_update_ssr_descriptors(void)
+{
+    vk.ssr_ready = false;
+    if (vk.sample_count == VK_SAMPLE_COUNT_1_BIT && vk.ssr_pipeline_layout &&
+        vk.ssr_descriptor_set && vk.ssr_resolve_descriptor_set &&
+        vk.depth_sample_view && vk.scene_texture.view &&
+        vk.ssr_framebuffer && vk.ssr_resolve_framebuffer) {
+        VkDescriptorImageInfo images[3] = {
+            {
+                .sampler = vk.postprocess_sampler,
+                .imageView = vk.scene_texture.view,
+                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            },
+            {
+                .sampler = vk.postprocess_sampler,
+                .imageView = vk.depth_sample_view,
+                .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            },
+            {
+                .sampler = vk.postprocess_sampler,
+                .imageView = vk.bloom_source_texture.view,
+                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            },
+        };
+        VkDescriptorImageInfo resolve_images[3] = {
+            {
+                .sampler = vk.postprocess_sampler,
+                .imageView = vk.ssr_texture.view,
+                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            },
+            {
+                .sampler = vk.postprocess_sampler,
+                .imageView = vk.depth_sample_view,
+                .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            },
+            {
+                .sampler = vk.postprocess_sampler,
+                .imageView = vk.bloom_source_texture.view,
+                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            },
+        };
+        VkWriteDescriptorSet writes[6];
+        memset(writes, 0, sizeof(writes));
+        for (uint32_t i = 0; i < 3; i++) {
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = vk.ssr_descriptor_set;
+            writes[i].dstBinding = i;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[i].pImageInfo = &images[i];
+            writes[i + 3] = writes[i];
+            writes[i + 3].dstSet = vk.ssr_resolve_descriptor_set;
+            writes[i + 3].pImageInfo = &resolve_images[i];
+        }
+        vk.UpdateDescriptorSets(vk.device, q_countof(writes), writes, 0, NULL);
+    }
+}
+
 static bool vk_create_scene_target(void)
 {
     uint32_t bloom_downsample = vk_bloom_downsample_value();
@@ -8048,61 +8380,136 @@ static bool vk_create_scene_target(void)
             return vk_fail_result("vkCreateFramebuffer(FSR input)", result);
     }
 
-    vk.ssr_ready = false;
-    if (vk.sample_count == VK_SAMPLE_COUNT_1_BIT && vk.ssr_pipeline_layout &&
-        vk.ssr_descriptor_set && vk.ssr_resolve_descriptor_set &&
-        vk.depth_sample_view && vk.scene_texture.view && vk.ssr_framebuffer &&
-        vk.ssr_resolve_framebuffer) {
-        VkDescriptorImageInfo images[3] = {
-            {
-                .sampler = vk.postprocess_sampler,
-                .imageView = vk.scene_texture.view,
-                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            },
-            {
-                .sampler = vk.postprocess_sampler,
-                .imageView = vk.depth_sample_view,
-                .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-            },
-            {
-                .sampler = vk.postprocess_sampler,
-                .imageView = vk.bloom_source_texture.view,
-                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            },
-        };
-        VkDescriptorImageInfo resolve_images[3] = {
-            {
-                .sampler = vk.postprocess_sampler,
-                .imageView = vk.ssr_texture.view,
-                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            },
-            {
-                .sampler = vk.postprocess_sampler,
-                .imageView = vk.depth_sample_view,
-                .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-            },
-            {
-                .sampler = vk.postprocess_sampler,
-                .imageView = vk.bloom_source_texture.view,
-                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            },
-        };
-        VkWriteDescriptorSet writes[6];
-        memset(writes, 0, sizeof(writes));
-        for (uint32_t i = 0; i < 3; i++) {
-            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[i].dstSet = vk.ssr_descriptor_set;
-            writes[i].dstBinding = i;
-            writes[i].descriptorCount = 1;
-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[i].pImageInfo = &images[i];
-            writes[i + 3] = writes[i];
-            writes[i + 3].dstSet = vk.ssr_resolve_descriptor_set;
-            writes[i + 3].pImageInfo = &resolve_images[i];
-        }
-        vk.UpdateDescriptorSets(vk.device, q_countof(writes), writes, 0, NULL);
+    vk_update_ssr_descriptors();
+
+    return true;
+}
+
+static vk_internal_runtime_t vk_internal_runtime_capture(void)
+{
+    vk_internal_runtime_t state = {
+        .fsr_swapchain_direct = vk.fsr_swapchain_direct,
+        .fsr_motion_initialized = vk.fsr_motion_initialized,
+        .fsr_previous_viewproj_valid = vk.fsr_previous_viewproj_valid,
+        .fsr_previous_fd_valid = vk.fsr_previous_fd_valid,
+        .fsr_composited = vk.fsr_composited,
+        .fsr_output_valid = vk.fsr_output_valid,
+        .fsr_pause_cache_valid = vk.fsr_pause_cache_valid,
+        .fsr_pause_reuse = vk.fsr_pause_reuse,
+        .fsr_paused_last_frame = vk.fsr_paused_last_frame,
+        .fsr_direct_source_valid = vk.fsr_direct_source_valid,
+        .fsr_presentation_logged = vk.fsr_presentation_logged,
+        .fsr_presentation_copy = vk.fsr_presentation_copy,
+        .fsr_reset = vk.fsr_reset,
+        .fsr_reset_reason = vk.fsr_reset_reason,
+        .fsr_capabilities = vk.fsr_capabilities,
+    };
+    return state;
+}
+
+static void vk_internal_runtime_restore(const vk_internal_runtime_t *state)
+{
+    vk.fsr_swapchain_direct = state->fsr_swapchain_direct;
+    vk.fsr_motion_initialized = state->fsr_motion_initialized;
+    vk.fsr_previous_viewproj_valid = state->fsr_previous_viewproj_valid;
+    vk.fsr_previous_fd_valid = state->fsr_previous_fd_valid;
+    vk.fsr_composited = state->fsr_composited;
+    vk.fsr_output_valid = state->fsr_output_valid;
+    vk.fsr_pause_cache_valid = state->fsr_pause_cache_valid;
+    vk.fsr_pause_reuse = state->fsr_pause_reuse;
+    vk.fsr_paused_last_frame = state->fsr_paused_last_frame;
+    vk.fsr_direct_source_valid = state->fsr_direct_source_valid;
+    vk.fsr_presentation_logged = state->fsr_presentation_logged;
+    vk.fsr_presentation_copy = state->fsr_presentation_copy;
+    vk.fsr_reset = state->fsr_reset;
+    vk.fsr_reset_reason = state->fsr_reset_reason;
+    vk.fsr_capabilities = state->fsr_capabilities;
+}
+
+static bool vk_rebuild_internal_render_targets(float requested_scale)
+{
+    if (!vk.device || vk.device_lost || !vk.separate_presentation ||
+        vk.frame_active || vk.render_pass_active ||
+        !isfinite(requested_scale) || requested_scale < 1.0f)
+        return false;
+
+    VkExtent2D candidate_extent =
+        vk_fsr_render_extent_for_scale(requested_scale);
+    if (!candidate_extent.width || !candidate_extent.height)
+        return false;
+    if (candidate_extent.width == vk.render_extent.width &&
+        candidate_extent.height == vk.render_extent.height) {
+        vk.fsr_dynamic.current_scale = requested_scale;
+        vk_fsr_dynamic_reset_runtime();
+        vk.fsr_dynamic.cooldown_remaining = vk.fsr_dynamic.cooldown_frames;
+        return true;
     }
 
+    if (!vk.DeviceWaitIdle)
+        return false;
+    VkResult idle_result = vk.DeviceWaitIdle(vk.device);
+    vk_handle_device_lost("vkDeviceWaitIdle", idle_result);
+    if (idle_result != VK_SUCCESS)
+        return false;
+
+    vk_internal_targets_t old_targets;
+    vk_internal_runtime_t old_runtime = vk_internal_runtime_capture();
+    vk_internal_targets_take(&old_targets);
+    bool old_ssr_ready = old_targets.ssr_ready;
+    vk.fsr_swapchain_direct = old_runtime.fsr_swapchain_direct;
+
+    bool created_motion_pipelines = false;
+    bool built = vk_create_fsr_resources(requested_scale) &&
+        vk.render_extent.width == candidate_extent.width &&
+        vk.render_extent.height == candidate_extent.height;
+    if (built && vk.fsr3 && !vk.fsr_motion_pipeline_layout) {
+        created_motion_pipelines = true;
+        built = vk_create_fsr_motion_pipelines();
+    }
+    if (built)
+        built = vk_create_depth_resources();
+    if (built)
+        built = vk_create_multisample_resources();
+    if (built)
+        built = vk_create_scene_target();
+    if (built)
+        built = vk_create_fsr_motion_framebuffer();
+
+    if (!built) {
+        vk_internal_targets_t failed_targets;
+        vk_internal_targets_take(&failed_targets);
+        vk_destroy_internal_targets_bundle_nowait(&failed_targets);
+        if (created_motion_pipelines)
+            vk_destroy_fsr_motion_pipelines_nowait();
+        vk_internal_targets_put(&old_targets);
+        vk_internal_runtime_restore(&old_runtime);
+        vk_update_ssr_descriptors();
+        vk.ssr_ready = old_ssr_ready;
+        return false;
+    }
+
+    /* SSR's pipeline and descriptor layouts are display-lifetime objects, so
+     * a successful scale transaction only needs to rebind their image views. */
+    vk.ssr_ready = old_ssr_ready &&
+        vk.sample_count == VK_SAMPLE_COUNT_1_BIT &&
+        vk.depth_sample_view && vk.scene_texture.view &&
+        vk.ssr_framebuffer && vk.ssr_resolve_framebuffer;
+
+    vk_internal_targets_t new_targets;
+    vk_internal_targets_take(&new_targets);
+    vk_destroy_internal_targets_bundle_nowait(&old_targets);
+    vk_internal_targets_put(&new_targets);
+
+    unsigned cooldown_frames = vk.fsr_dynamic.cooldown_frames;
+    vk.fsr_dynamic.current_scale = requested_scale;
+    vk_fsr_invalidate_history_reason(VK_FSR_RESET_RENDER_SCALE);
+    vk.fsr_output_valid = false;
+    vk.fsr_pause_cache_valid = false;
+    vk.fsr_pause_reuse = false;
+    vk.fsr_direct_source_valid = false;
+    vk.fsr_dynamic.cooldown_remaining = cooldown_frames;
+    vk.fsr_history_render_extent = vk.render_extent;
+    vk.fsr_history_display_extent = vk.swapchain_extent;
     return true;
 }
 
@@ -8325,6 +8732,28 @@ static bool vk_create_fsr_motion_pipelines(void)
         return false;
     }
     return true;
+}
+
+static void vk_destroy_fsr_motion_pipelines_nowait(void)
+{
+    VkPipeline *pipelines[] = {
+        &vk.fsr_motion_camera_pipeline,
+        &vk.fsr_motion_world_pipeline,
+        &vk.fsr_motion_alias_pipeline,
+        &vk.fsr_motion_color_pipeline,
+        &vk.fsr_motion_alias_reactive_pipeline,
+        &vk.fsr_motion_world_reactive_pipeline,
+    };
+    for (size_t i = 0; i < q_countof(pipelines); i++) {
+        if (*pipelines[i]) {
+            vk.DestroyPipeline(vk.device, *pipelines[i], NULL);
+            *pipelines[i] = VK_NULL_HANDLE;
+        }
+    }
+    if (vk.fsr_motion_pipeline_layout) {
+        vk.DestroyPipelineLayout(vk.device, vk.fsr_motion_pipeline_layout, NULL);
+        vk.fsr_motion_pipeline_layout = VK_NULL_HANDLE;
+    }
 }
 
 static int vk_pixel_lightmap_mode(void)
@@ -9901,7 +10330,7 @@ static bool vk_create_swapchain(int width, int height)
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
-        !vk_create_fsr_resources() ||
+        !vk_create_fsr_resources(0.0f) ||
         !vk_create_fsr_motion_pipelines() ||
         !vk_create_depth_resources() ||
         !vk_create_multisample_resources() ||
@@ -19680,7 +20109,7 @@ static void vk_log_perf_stats(void)
                    vk.timestamp_query_pool ? "CPU/GPU" : "CPU-only",
                    vk.fsr_sampler_bias);
         if (r_fsr_dynamic && r_fsr_dynamic->integer)
-            Com_Printf("VK FSR3 dynamic: enabled=%s source=%s target_ms=%.2f measured_ms=%.2f current_scale=%.3f recommended_scale=%.3f hysteresis_ms=%.2f cooldown=%u samples=%u applied=no\n",
+            Com_Printf("VK FSR3 dynamic: enabled=%s source=%s target_ms=%.2f measured_ms=%.2f current_scale=%.3f recommended_scale=%.3f hysteresis_ms=%.2f cooldown=%u samples=%u applied=%s transaction=%u\n",
                        vk.fsr_dynamic.enabled ? "yes" : "no",
                        vk_fsr_dynamic_timing_name(vk.fsr_dynamic.timing),
                        vk.fsr_dynamic.target_ms, vk.fsr_dynamic.last_ms,
@@ -19688,7 +20117,9 @@ static void vk_log_perf_stats(void)
                        vk.fsr_dynamic.recommended_scale,
                        vk.fsr_dynamic.hysteresis_ms,
                        vk.fsr_dynamic.cooldown_remaining,
-                       vk.fsr_dynamic.stable_samples);
+                       vk.fsr_dynamic.stable_samples,
+                       vk.fsr_dynamic_last_applied ? "yes" : "no",
+                       vk.fsr_dynamic_transaction_id);
     }
 }
 
@@ -22175,8 +22606,15 @@ void VKR_BeginFrame(void)
     }
 
     if (vk_fsr_dynamic_cvars_modified()) {
+        bool dynamic_was_enabled = vk.fsr_dynamic.enabled;
         vk_fsr_dynamic_configure();
         vk_fsr_dynamic_clear_modified();
+        if (vk.fsr_dynamic.enabled)
+            vk.fsr_dynamic_fixed_restore_pending = false;
+        if (dynamic_was_enabled && !vk.fsr_dynamic.enabled &&
+            vk.separate_presentation) {
+            vk.fsr_dynamic_fixed_restore_pending = true;
+        }
     }
 
     if (vk.fsr_auto_recreate) {
@@ -22257,6 +22695,34 @@ void VKR_BeginFrame(void)
         if (vk.mrt_bloom &&
             !vk_recreate_swapchain("bloom downsample change"))
             return;
+    }
+
+    if (vk.fsr_dynamic_fixed_restore_pending &&
+        !vk.fsr_dynamic.enabled && vk.separate_presentation) {
+        if (vk_rebuild_internal_render_targets(vk_fsr_quality_scale())) {
+            vk.fsr_dynamic_fixed_restore_pending = false;
+            vk.fsr_dynamic_last_applied = true;
+            vk.fsr_dynamic_transaction_id++;
+        } else {
+            vk.fsr_dynamic_last_applied = false;
+            Com_WPrintf("Vulkan FSR3: couldn't restore fixed render scale after disabling dynamic resolution: %s\n",
+                        Com_GetLastError());
+        }
+    }
+
+    if (vk.fsr_dynamic.enabled && vk.separate_presentation &&
+        vk.fsr_dynamic.recommended_scale != vk.fsr_dynamic.current_scale) {
+        float requested_scale = vk.fsr_dynamic.recommended_scale;
+        if (vk_rebuild_internal_render_targets(requested_scale)) {
+            vk.fsr_dynamic_last_applied = true;
+            vk.fsr_dynamic_transaction_id++;
+        } else {
+            /* Reject the pending step instead of retrying every frame. The
+             * controller keeps the last known-good bundle and starts a new
+             * timing generation after the failed transaction. */
+            vk.fsr_dynamic_last_applied = false;
+            vk_fsr_dynamic_reset_runtime();
+        }
     }
 
     VkSemaphore image_available = vk.image_available[vk.frame_index];
@@ -22833,7 +23299,9 @@ void VKR_EndFrame(void)
         !vk.fsr_auto_recreate && !vk.fsr_timing_discontinuity &&
         !vk_fsr_debug_mode() && !(vk_fsr_profile && vk_fsr_profile->integer) &&
         !vk_fsr_scene_paused() && !vk.fsr_pause_reuse &&
-        (!vk.separate_presentation || (vk.frame_fsr && vk.fsr_output_valid));
+        (!vk.separate_presentation ||
+         (vk.frame_fsr && vk.fsr_output_valid) ||
+         (vk.fsr_dynamic.enabled && !vk.frame_fsr));
     vk.timing_record_usec[vk.frame_index] = vk.record_usec;
     vk.timing_scene_time[vk.frame_index] = vk.fd.time;
     vk.timing_generation[vk.frame_index] = vk.fsr_auto_generation;
