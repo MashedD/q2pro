@@ -98,7 +98,24 @@ VK FSR3 result: frame=12 result=spatial-fallback
 
         self.assertEqual(parsed['jitter'], [])
         self.assertEqual(parsed['diagnostics'], [])
+        self.assertEqual(parsed['dynamic'], [])
         self.assertEqual(parsed['frame_records'][0]['frame_id'], 30)
+
+    def test_dynamic_resolution_telemetry_is_typed_and_optional(self):
+        parsed = fsr_benchmark.parse_benchmark_log(
+            'VK FSR3 dynamic: enabled=yes source=GPU target_ms=16.67 '
+            'measured_ms=19.25 current_scale=1.500 '
+            'recommended_scale=1.625 hysteresis_ms=0.75 cooldown=45 '
+            'samples=0 applied=no\n')
+
+        self.assertEqual(len(parsed['dynamic']), 1)
+        record = parsed['dynamic'][0]
+        self.assertIs(record['enabled'], True)
+        self.assertEqual(record['source'], 'GPU')
+        self.assertAlmostEqual(record['target_ms'], 16.67)
+        self.assertAlmostEqual(record['recommended_scale'], 1.625)
+        self.assertEqual(record['cooldown'], 45)
+        self.assertIs(record['applied'], False)
 
     def test_legacy_samples_without_frame_ids_remain_supported(self):
         parsed = fsr_benchmark.parse_benchmark_log(

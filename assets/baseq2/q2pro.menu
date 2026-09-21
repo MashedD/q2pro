@@ -112,6 +112,12 @@ begin video
         "FSR3 sharpening" r_fsr_sharpness 0 1
     toggle --status "Keeps selected quality only if at least 5% faster than native" \
         "FSR3 automatic performance" r_fsr_auto
+    toggle --status "Recommendation-only telemetry; internal resolution is not changed yet" \
+        "FSR3 dynamic resolution" r_fsr_dynamic
+    range --status "Target GPU frame time for dynamic-resolution recommendations" \
+        "FSR3 dynamic target (ms)" r_fsr_dynamic_target_ms 8 33
+    toggle --status "Use CPU recording time only when GPU timestamps are unavailable" \
+        "FSR3 dynamic CPU fallback" r_fsr_dynamic_cpu
     pairs --status "Auto: camera + objects; full: reference; fast: camera only" \
         "FSR3 motion mode" r_fsr_motion \
         auto auto \

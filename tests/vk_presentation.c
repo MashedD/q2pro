@@ -409,6 +409,47 @@ static void check_fsr_temporal_contracts(void)
     assert(vk.fsr_auto_quality == VK_FSR_QUALITY);
     r_fsr = r_fsr_auto = NULL;
 
+    vk_fsr_dynamic_state_t dynamic = {
+        .enabled = true,
+        .target_ms = 16.67f,
+        .min_scale = 1.0f,
+        .max_scale = 2.0f,
+        .scale_step = 0.125f,
+        .hysteresis_ms = 0.75f,
+        .cooldown_frames = 2,
+        .required_samples = 3,
+    };
+    vk_fsr_dynamic_reset(&dynamic, 1.5f, 11);
+    dynamic.min_scale = 2.0f;
+    vk_fsr_dynamic_reset(&dynamic, 1.7f, 11);
+    assert(dynamic.current_scale == 1.7f);
+    dynamic.min_scale = 1.0f;
+    vk_fsr_dynamic_reset(&dynamic, 1.5f, 11);
+    for (unsigned i = 0; i < 2; i++)
+        assert(!vk_fsr_dynamic_update(&dynamic, 20000, 0, true, 11));
+    /* A single spike does not satisfy the sustained-direction window. */
+    assert(!vk_fsr_dynamic_update(&dynamic, 16670, 0, true, 11));
+    vk_fsr_dynamic_reset(&dynamic, 1.5f, 11);
+    for (unsigned i = 0; i < 2; i++)
+        assert(!vk_fsr_dynamic_update(&dynamic, 20000, 0, true, 11));
+    assert(vk_fsr_dynamic_update(&dynamic, 20000, 0, true, 11));
+    assert(dynamic.recommended_scale == 1.625f);
+    /* A pending recommendation is stable until an owner applies it. */
+    for (unsigned i = 0; i < 8; i++)
+        assert(!vk_fsr_dynamic_update(&dynamic, 10000, 0, true, 11));
+    assert(dynamic.current_scale == 1.5f);
+    dynamic.current_scale = dynamic.recommended_scale;
+    dynamic.recommended_scale = dynamic.current_scale;
+    dynamic.stable_samples = 0;
+    dynamic.cooldown_remaining = 0;
+    assert(!vk_fsr_dynamic_update(&dynamic, 17000, 0, true, 10));
+    assert(dynamic.timing == VK_FSR_DYNAMIC_TIMING_GPU);
+    dynamic.cpu_fallback = true;
+    assert(!vk_fsr_dynamic_update(&dynamic, 0, 17000, true, 11));
+    assert(dynamic.timing == VK_FSR_DYNAMIC_TIMING_CPU);
+    assert(!vk_fsr_dynamic_update(&dynamic, 0, 0, true, 11));
+    assert(dynamic.timing == VK_FSR_DYNAMIC_TIMING_UNAVAILABLE);
+
     entity_t entity = { .temporal_id = 1, .temporal_generation = 3, .model = 1 };
     vk.fsr_reset = false;
     vk.fsr_previous_fd_valid = true;

@@ -26,6 +26,7 @@ RECORD = re.compile(r'VK FSR3 record: (?P<telemetry>.*)')
 FRAME = re.compile(r'VK FSR3 frame: (?P<telemetry>.*)')
 FRAME_RESULT = re.compile(r'VK FSR3 result: (?P<telemetry>.*)')
 DIAGNOSTICS = re.compile(r'VK FSR3 diagnostics: (?P<telemetry>.*)')
+DYNAMIC = re.compile(r'VK FSR3 dynamic: (?P<telemetry>.*)')
 DEVICE = re.compile(r'(?:Using Vulkan device:|Vulkan FSR3 enabled capabilities:).*')
 FALLBACK = re.compile(
     r'(?:spatial-fallback|resources are incomplete|dispatch failed|'
@@ -98,6 +99,7 @@ def parse_benchmark_log(log):
     frame_results = []
     jitter_records = []
     diagnostics = []
+    dynamic = []
     presentations = []
     for line in log.splitlines():
         sample = SAMPLE.search(line)
@@ -154,6 +156,9 @@ def parse_benchmark_log(log):
             if 'frame' in fields:
                 fields['frame_id'] = fields.pop('frame')
             diagnostics.append(fields)
+        match = DYNAMIC.search(line)
+        if match:
+            dynamic.append(_typed_fields(match.group('telemetry')))
         match = GPU_TIMING.search(line)
         if match:
             metadata = _typed_fields(match.group('timings'))
@@ -192,6 +197,7 @@ def parse_benchmark_log(log):
         'frame_results': frame_results,
         'jitter': jitter_records,
         'diagnostics': diagnostics,
+        'dynamic': dynamic,
         'gpu_timings': gpu_timings,
         'result': result,
     }
@@ -280,6 +286,7 @@ def main():
                     r_fsr_composition_mask=args.composition, r_fsr_mip_bias='auto',
                     r_fsr_sharpness='0',
                     r_fsr_frame_generation=(args.frame_generation if mode == 'fsr' else '0'),
+                    r_fsr_dynamic='0',
                     vk_fsr_precision=args.precision, vk_fsr_subgroup=args.subgroup,
                     vk_fsr_profile='0', vk_fsr_debug='off', vk_fsr_benchmark='1',
                     vk_perf_stats='1',
@@ -314,6 +321,7 @@ def main():
                     'frame_records': parsed['frame_records'],
                     'jitter': parsed['jitter'],
                     'diagnostics': parsed['diagnostics'],
+                    'dynamic': parsed['dynamic'],
                     'gpu_timings': parsed['gpu_timings'],
                     'fallback': bool(fallback_reasons),
                     'fallback_reasons': fallback_reasons,
@@ -375,6 +383,7 @@ def main():
             run[mode]['fsr_frame_telemetry'] = captured[mode]['frame_records']
             run[mode]['jitter_telemetry'] = captured[mode]['jitter']
             run[mode]['diagnostics'] = captured[mode]['diagnostics']
+            run[mode]['dynamic_telemetry'] = captured[mode]['dynamic']
             frame_ids = {captured[mode]['samples'][time][3]
                          for time in times
                          if captured[mode]['samples'][time][3] is not None}

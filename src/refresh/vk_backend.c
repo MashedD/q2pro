@@ -28,6 +28,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include "system/system.h"
 #include "vk_backend.h"
 #include "vk_fsr3.h"
+#include "vk_fsr_dynamic.h"
 
 #if USE_VULKAN
 
@@ -1154,7 +1155,10 @@ typedef struct {
     uint64_t fsr_auto_window[VK_FSR_AUTO_SAMPLE_COUNT];
     uint32_t fsr_auto_warmup;
     uint32_t fsr_auto_generation;
+    vk_fsr_dynamic_state_t fsr_dynamic;
+    uint32_t fsr_dynamic_generation;
     uint32_t timing_generation[VK_MAX_FRAMES_IN_FLIGHT];
+    uint32_t timing_dynamic_generation[VK_MAX_FRAMES_IN_FLIGHT];
     unsigned timing_record_usec[VK_MAX_FRAMES_IN_FLIGHT];
     bool timing_eligible[VK_MAX_FRAMES_IN_FLIGHT];
     float timing_scene_time[VK_MAX_FRAMES_IN_FLIGHT];
@@ -1235,6 +1239,15 @@ static cvar_t *r_fsr_auto;
 static cvar_t *r_fsr_motion;
 static cvar_t *r_fsr_mip_bias;
 static cvar_t *r_fsr_frame_generation;
+static cvar_t *r_fsr_dynamic;
+static cvar_t *r_fsr_dynamic_target_ms;
+static cvar_t *r_fsr_dynamic_min_scale;
+static cvar_t *r_fsr_dynamic_max_scale;
+static cvar_t *r_fsr_dynamic_scale_step;
+static cvar_t *r_fsr_dynamic_hysteresis;
+static cvar_t *r_fsr_dynamic_cooldown;
+static cvar_t *r_fsr_dynamic_samples;
+static cvar_t *r_fsr_dynamic_cpu;
 static cvar_t *vk_fsr_precision;
 static cvar_t *vk_fsr_subgroup;
 static cvar_t *r_fsr_composition_mask;
@@ -1367,6 +1380,69 @@ static float vk_fsr_quality_scale_for(vk_fsr_quality_t quality)
     }
 }
 
+static void vk_fsr_dynamic_configure(void)
+{
+    vk.fsr_dynamic.enabled = r_fsr_dynamic && r_fsr_dynamic->integer &&
+        vk_fsr_user_requested() && !vk_fsr_auto_enabled();
+    vk.fsr_dynamic.cpu_fallback = r_fsr_dynamic_cpu &&
+        r_fsr_dynamic_cpu->integer;
+    vk.fsr_dynamic.target_ms = r_fsr_dynamic_target_ms ?
+        r_fsr_dynamic_target_ms->value : 16.67f;
+    vk.fsr_dynamic.min_scale = r_fsr_dynamic_min_scale ?
+        r_fsr_dynamic_min_scale->value : 1.0f;
+    vk.fsr_dynamic.max_scale = r_fsr_dynamic_max_scale ?
+        r_fsr_dynamic_max_scale->value : 3.0f;
+    vk.fsr_dynamic.scale_step = r_fsr_dynamic_scale_step ?
+        r_fsr_dynamic_scale_step->value : 0.125f;
+    vk.fsr_dynamic.hysteresis_ms = r_fsr_dynamic_hysteresis ?
+        r_fsr_dynamic_hysteresis->value : 0.75f;
+    vk.fsr_dynamic.cooldown_frames = r_fsr_dynamic_cooldown &&
+        r_fsr_dynamic_cooldown->integer > 0 ?
+        (unsigned)r_fsr_dynamic_cooldown->integer : 45;
+    vk.fsr_dynamic.required_samples = r_fsr_dynamic_samples &&
+        r_fsr_dynamic_samples->integer > 0 ?
+        (unsigned)r_fsr_dynamic_samples->integer : 30;
+    vk.fsr_dynamic_generation++;
+    vk_fsr_dynamic_reset(&vk.fsr_dynamic,
+                         vk_fsr_quality_scale_for(vk.fsr_auto_quality),
+                         vk.fsr_dynamic_generation);
+}
+
+static bool vk_fsr_dynamic_cvars_modified(void)
+{
+    return (r_fsr_dynamic && r_fsr_dynamic->modified) ||
+        (r_fsr_dynamic_target_ms && r_fsr_dynamic_target_ms->modified) ||
+        (r_fsr_dynamic_min_scale && r_fsr_dynamic_min_scale->modified) ||
+        (r_fsr_dynamic_max_scale && r_fsr_dynamic_max_scale->modified) ||
+        (r_fsr_dynamic_scale_step && r_fsr_dynamic_scale_step->modified) ||
+        (r_fsr_dynamic_hysteresis && r_fsr_dynamic_hysteresis->modified) ||
+        (r_fsr_dynamic_cooldown && r_fsr_dynamic_cooldown->modified) ||
+        (r_fsr_dynamic_samples && r_fsr_dynamic_samples->modified) ||
+        (r_fsr_dynamic_cpu && r_fsr_dynamic_cpu->modified);
+}
+
+static void vk_fsr_dynamic_clear_modified(void)
+{
+    if (r_fsr_dynamic)
+        r_fsr_dynamic->modified = false;
+    if (r_fsr_dynamic_target_ms)
+        r_fsr_dynamic_target_ms->modified = false;
+    if (r_fsr_dynamic_min_scale)
+        r_fsr_dynamic_min_scale->modified = false;
+    if (r_fsr_dynamic_max_scale)
+        r_fsr_dynamic_max_scale->modified = false;
+    if (r_fsr_dynamic_scale_step)
+        r_fsr_dynamic_scale_step->modified = false;
+    if (r_fsr_dynamic_hysteresis)
+        r_fsr_dynamic_hysteresis->modified = false;
+    if (r_fsr_dynamic_cooldown)
+        r_fsr_dynamic_cooldown->modified = false;
+    if (r_fsr_dynamic_samples)
+        r_fsr_dynamic_samples->modified = false;
+    if (r_fsr_dynamic_cpu)
+        r_fsr_dynamic_cpu->modified = false;
+}
+
 static bool vk_fsr_motion_fast_requested(void)
 {
     const char *mode = r_fsr_motion ? r_fsr_motion->string : "auto";
@@ -1425,6 +1501,7 @@ static void vk_fsr_auto_reset(void)
     vk.fsr_auto_recreate = false;
     vk.fsr_auto_warmup = 15;
     vk.fsr_auto_generation++;
+    vk_fsr_dynamic_configure();
 }
 
 /* Insertion sort is cheap for this bounded window and avoids comparator casts. */
@@ -1585,6 +1662,7 @@ static void vk_fsr_invalidate_history_reason(vk_fsr_reset_reason_t reason)
     vk.fsr_pending_history_count = 0;
     vk.fsr_motion_initialized = false;
     vk.fsr_reset_reason = reason;
+    vk_fsr_dynamic_configure();
 }
 
 static const char *vk_fsr_result_name(vk_fsr_result_t result)
@@ -2300,6 +2378,7 @@ static void vk_free_world(void)
         vk.world.cache = NULL;
     }
     vk.fsr_reset = true;
+    vk_fsr_dynamic_configure();
     vk.fsr_previous_viewproj_valid = false;
     vk.fsr_previous_fd_valid = false;
 }
@@ -19544,6 +19623,16 @@ static void vk_log_perf_stats(void)
                    vk.fsr_auto_samples, vk.fsr_auto_warmup,
                    vk.timestamp_query_pool ? "CPU/GPU" : "CPU-only",
                    vk.fsr_sampler_bias);
+        if (r_fsr_dynamic && r_fsr_dynamic->integer)
+            Com_Printf("VK FSR3 dynamic: enabled=%s source=%s target_ms=%.2f measured_ms=%.2f current_scale=%.3f recommended_scale=%.3f hysteresis_ms=%.2f cooldown=%u samples=%u applied=no\n",
+                       vk.fsr_dynamic.enabled ? "yes" : "no",
+                       vk_fsr_dynamic_timing_name(vk.fsr_dynamic.timing),
+                       vk.fsr_dynamic.target_ms, vk.fsr_dynamic.last_ms,
+                       vk.fsr_dynamic.current_scale,
+                       vk.fsr_dynamic.recommended_scale,
+                       vk.fsr_dynamic.hysteresis_ms,
+                       vk.fsr_dynamic.cooldown_remaining,
+                       vk.fsr_dynamic.stable_samples);
     }
 }
 
@@ -19651,6 +19740,15 @@ bool VKR_Init(bool total)
     vk_fsr_benchmark = Cvar_Get("vk_fsr_benchmark", "0", 0);
     r_fsr_mip_bias = Cvar_Get("r_fsr_mip_bias", "auto", CVAR_ARCHIVE);
     r_fsr_frame_generation = Cvar_Get("r_fsr_frame_generation", "0", CVAR_ARCHIVE);
+    r_fsr_dynamic = Cvar_Get("r_fsr_dynamic", "0", CVAR_ARCHIVE);
+    r_fsr_dynamic_target_ms = Cvar_Get("r_fsr_dynamic_target_ms", "16.67", CVAR_ARCHIVE);
+    r_fsr_dynamic_min_scale = Cvar_Get("r_fsr_dynamic_min_scale", "1.0", CVAR_ARCHIVE);
+    r_fsr_dynamic_max_scale = Cvar_Get("r_fsr_dynamic_max_scale", "3.0", CVAR_ARCHIVE);
+    r_fsr_dynamic_scale_step = Cvar_Get("r_fsr_dynamic_scale_step", "0.125", CVAR_ARCHIVE);
+    r_fsr_dynamic_hysteresis = Cvar_Get("r_fsr_dynamic_hysteresis", "0.75", CVAR_ARCHIVE);
+    r_fsr_dynamic_cooldown = Cvar_Get("r_fsr_dynamic_cooldown", "45", CVAR_ARCHIVE);
+    r_fsr_dynamic_samples = Cvar_Get("r_fsr_dynamic_samples", "30", CVAR_ARCHIVE);
+    r_fsr_dynamic_cpu = Cvar_Get("r_fsr_dynamic_cpu", "0", CVAR_ARCHIVE);
     vk_fsr_auto_reset();
     vk_perf_stats = Cvar_Get("vk_perf_stats", "0", 0);
     vk_frames_in_flight = Cvar_Get("vk_frames_in_flight", "2", CVAR_ARCHIVE);
@@ -20272,6 +20370,7 @@ void VKR_RenderFrame(const refdef_t *fd)
             vk.fsr_reset = true;
             vk.fsr_frame_reset_reason = VK_FSR_RESET_INVALID_JITTER;
             vk.fsr_reset_reason = VK_FSR_RESET_INVALID_JITTER;
+            vk_fsr_dynamic_configure();
         }
     } else {
         vk.fsr_jitter[0] = 0.0f;
@@ -22019,6 +22118,11 @@ void VKR_BeginFrame(void)
             return;
     }
 
+    if (vk_fsr_dynamic_cvars_modified()) {
+        vk_fsr_dynamic_configure();
+        vk_fsr_dynamic_clear_modified();
+    }
+
     if (vk.fsr_auto_recreate) {
         vk.fsr_auto_recreate = false;
         if (!vk_recreate_swapchain("FSR automatic performance selection"))
@@ -22151,6 +22255,11 @@ void VKR_BeginFrame(void)
                     vk.timing_scene_time[vk.frame_index],
                     (unsigned long long)vk_time_usec(),
                     vk.timing_record_usec[vk.frame_index], elapsed);
+            vk_fsr_dynamic_update(&vk.fsr_dynamic,
+                                  elapsed,
+                                  vk.timing_record_usec[vk.frame_index],
+                                  vk.timing_eligible[vk.frame_index],
+                                  vk.timing_dynamic_generation[vk.frame_index]);
             vk_fsr_auto_update(vk.timing_record_usec[vk.frame_index], elapsed,
                                vk.timing_generation[vk.frame_index],
                                vk.timing_eligible[vk.frame_index]);
@@ -22339,6 +22448,7 @@ void VKR_BeginFrame(void)
             vk.fsr_reset = true;
             vk.fsr_frame_reset = true;
             vk.fsr_reset_reason = VK_FSR_RESET_PAUSE_RESUME;
+            vk_fsr_dynamic_configure();
             vk.frame_fsr = false;
         }
         vk.fsr_frame_reset_reason = vk.fsr_reset ? vk.fsr_reset_reason : VK_FSR_RESET_NONE;
@@ -22671,12 +22781,16 @@ void VKR_EndFrame(void)
     vk.timing_record_usec[vk.frame_index] = vk.record_usec;
     vk.timing_scene_time[vk.frame_index] = vk.fd.time;
     vk.timing_generation[vk.frame_index] = vk.fsr_auto_generation;
+    vk.timing_dynamic_generation[vk.frame_index] = vk.fsr_dynamic.generation;
     vk.timing_eligible[vk.frame_index] = timing_eligible;
     vk.timing_frame_id[vk.frame_index] = vk.fsr_frame_id;
     vk.timing_sdk_frame_id[vk.frame_index] = vk.fsr_sdk_frame_id;
     vk.timing_sdk_frame_valid[vk.frame_index] = vk.fsr_sdk_frame_id_valid;
-    if (!vk.timestamp_query_pool)
+    if (!vk.timestamp_query_pool) {
+        vk_fsr_dynamic_update(&vk.fsr_dynamic, 0, vk.record_usec,
+                              timing_eligible, vk.fsr_dynamic.generation);
         vk_fsr_auto_update(vk.record_usec, 0, vk.fsr_auto_generation, timing_eligible);
+    }
     if (!vk.timestamp_query_pool && timing_eligible && vk_fsr_benchmark && vk_fsr_benchmark->integer)
         Com_Printf("FSR sample: frame=%llu sdk_id=%llu sdk_valid=%s time=%.6f wall_usec=%llu cpu_us=%u gpu_us=0\n",
                    (unsigned long long)vk.fsr_frame_id,
