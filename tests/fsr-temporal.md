@@ -23,7 +23,7 @@ presentation-image copy path.
 | FSR3 upscaling | Native, quality/balanced/performance/ultra-performance, motion auto/full/fast, and pause/resume | GPU-free contracts plus 720p/1440p smoke runs |
 | Temporal inputs | BeginFrame precedes GetJitter; invalid jitter falls back to zero and sets reset; sharpness/frame time are bounded | `tests/vk_presentation.sh` source contracts |
 | Recovery | Upscale/frame-generation failures disable generation, preserve ordinary FSR, and reset temporal history | C harness and source contracts |
-| Telemetry | Unique renderer frame IDs, separate SDK temporal IDs, per-frame result/reset/pause fields, renderer-completion pacing, simulation-time pacing, and FSR per-pass GPU timings parse deterministically | `tests/fsr_benchmark.py`, `tests/test_fsr_benchmark.py` |
+| Telemetry | Unique renderer frame IDs, separate SDK temporal IDs, jitter values/phase, reasoned reset fields, per-frame result/pause fields, renderer-completion pacing, simulation-time pacing, and FSR per-pass GPU timings parse deterministically | `tests/fsr_benchmark.py`, `tests/test_fsr_benchmark.py` |
 | Pause presentation | Reuses the retained FSR output and leaves the normal presentation-image copy path unused for pause reuse | Source contract and manual pause captures |
 | Frame generation | Swapchain pacing and runtime stability | Unsupported / not validated on the current Linux path |
 
@@ -60,6 +60,13 @@ and correctly returned to native without changing the selected quality.
 FSR dispatch remains the dominant cost on this lightweight scene.
 
 ## Remaining validation limits
+
+Temporal diagnostics now identify the reset cause (`camera_cut`, `resize`,
+`pause_resume`, configuration, invalid jitter, or dispatch failure) and expose
+the SDK jitter phase in `VK FSR3 frame` records. Optional GPU pixel validation
+for non-finite motion vectors and mask coverage is still deliberately deferred:
+it requires an opt-in readback/compute pass and must not affect normal
+benchmarks.
 
 These are smoke tests, not a long-duration image-quality benchmark. No Vulkan
 validation layer was available for synchronization validation. Windows runtime,

@@ -344,6 +344,15 @@ static void check_fsr_barriers(void)
 
 static void check_fsr_temporal_contracts(void)
 {
+    assert(!strcmp(vk_fsr_reset_reason_name(VK_FSR_RESET_NONE), "none"));
+    assert(!strcmp(vk_fsr_reset_reason_name(VK_FSR_RESET_CAMERA_CUT), "camera_cut"));
+    assert(!strcmp(vk_fsr_reset_reason_name(VK_FSR_RESET_INVALID_JITTER), "invalid_jitter"));
+    vk.frame_active = true;
+    vk_fsr_invalidate_history_reason(VK_FSR_RESET_RESIZE);
+    assert(vk.fsr_reset &&
+           vk.fsr_reset_reason == VK_FSR_RESET_RESIZE);
+    vk.frame_active = false;
+
     _Static_assert(offsetof(vk_fsr_motion_push_t, previous_mvp) == 64, "GLSL layout");
     _Static_assert(offsetof(vk_fsr_motion_push_t, previous_backlerp) == 136, "GLSL layout");
     _Static_assert(offsetof(vk_fsr_motion_push_t, jitter) == 144, "GLSL layout");
@@ -515,10 +524,14 @@ static void check_fsr_lifecycle_contracts(void)
     vk.fsr_pause_cache_valid = true;
     vk.fsr_pause_reuse = true;
     vk.fsr_direct_source_valid = true;
-    vk_fsr_invalidate_history();
+    vk.frame_active = false;
+    vk.fsr_frame_reset_reason = VK_FSR_RESET_NONE;
+    vk_fsr_invalidate_history_reason(VK_FSR_RESET_INITIAL);
     assert(vk.fsr_reset && !vk.fsr_previous_viewproj_valid &&
            !vk.fsr_previous_fd_valid && vk.fsr_history_count == 0 &&
            vk.fsr_pending_history_count == 0 && !vk.fsr_motion_initialized);
+    assert(vk.fsr_reset_reason == VK_FSR_RESET_INITIAL &&
+           vk.fsr_frame_reset_reason == VK_FSR_RESET_NONE);
     /* Invalidation preserves the last completed output for a safe pause
      * composite, while discarding all state that depends on the old scene. */
     assert(vk.fsr_output_valid);
@@ -531,7 +544,7 @@ static void check_fsr_lifecycle_contracts(void)
     vk.fsr_pause_cache_valid = true;
     vk.fsr_pause_reuse = true;
     vk.fsr_direct_source_valid = true;
-    vk_fsr_invalidate_history();
+    vk_fsr_invalidate_history_reason(VK_FSR_RESET_PAUSE_RESUME);
     assert(vk.fsr_reset && vk.fsr_output_valid &&
            !vk.fsr_pause_cache_valid && !vk.fsr_pause_reuse &&
            !vk.fsr_direct_source_valid && !vk.fsr_motion_initialized);
@@ -547,7 +560,7 @@ static void check_fsr_lifecycle_contracts(void)
            vk.fsr_pause_reuse);
     paused_cvar.integer = 0;
     assert(!vk_fsr_scene_paused());
-    vk_fsr_invalidate_history();
+    vk_fsr_invalidate_history_reason(VK_FSR_RESET_DISPATCH_FAILURE);
     assert(vk.fsr_reset && vk.fsr_output_valid &&
            !vk.fsr_pause_cache_valid && !vk.fsr_pause_reuse &&
            !vk.fsr_direct_source_valid);
@@ -555,10 +568,12 @@ static void check_fsr_lifecycle_contracts(void)
     /* Preparation, dispatch, and device-loss style failures all converge on
      * the same session fallback: preserve ordinary FSR and force a reset. */
     vk.fsr_reset = false;
+    vk.fsr_reset_reason = VK_FSR_RESET_DISPATCH_FAILURE;
     vk.fsr_output_valid = true;
     vk_disable_frame_generation("preparation failed");
     assert(vk_session_frame_generation_disabled && vk.fsr_reset &&
-           vk.fsr_output_valid);
+           vk.fsr_output_valid &&
+           vk.fsr_reset_reason == VK_FSR_RESET_DISPATCH_FAILURE);
     assert(vk_fsr_requested() && !vk_fsr_frame_generation_requested());
 
     vk_session_frame_generation_disabled = false;

@@ -321,6 +321,38 @@ typedef enum {
     VK_FSR_RESULT_FRAMEGEN,
 } vk_fsr_result_t;
 
+typedef enum {
+    VK_FSR_RESET_NONE,
+    VK_FSR_RESET_INITIAL,
+    VK_FSR_RESET_CAMERA_CUT,
+    VK_FSR_RESET_RESIZE,
+    VK_FSR_RESET_PAUSE_RESUME,
+    VK_FSR_RESET_CONFIG,
+    VK_FSR_RESET_MOTION_MODE,
+    VK_FSR_RESET_INVALID_JITTER,
+    VK_FSR_RESET_DISPATCH_FAILURE,
+    VK_FSR_RESET_FRAMEGEN_FAILURE,
+    VK_FSR_RESET_RESOURCE_FAILURE,
+} vk_fsr_reset_reason_t;
+
+static const char *vk_fsr_reset_reason_name(vk_fsr_reset_reason_t reason)
+{
+    switch (reason) {
+    case VK_FSR_RESET_INITIAL: return "initial";
+    case VK_FSR_RESET_CAMERA_CUT: return "camera_cut";
+    case VK_FSR_RESET_RESIZE: return "resize";
+    case VK_FSR_RESET_PAUSE_RESUME: return "pause_resume";
+    case VK_FSR_RESET_CONFIG: return "config";
+    case VK_FSR_RESET_MOTION_MODE: return "motion_mode";
+    case VK_FSR_RESET_INVALID_JITTER: return "invalid_jitter";
+    case VK_FSR_RESET_DISPATCH_FAILURE: return "dispatch_failure";
+    case VK_FSR_RESET_FRAMEGEN_FAILURE: return "framegen_failure";
+    case VK_FSR_RESET_RESOURCE_FAILURE: return "resource_failure";
+    case VK_FSR_RESET_NONE:
+    default: return "none";
+    }
+}
+
 
 typedef struct {
     vk_buffer_t vertices;
@@ -1018,6 +1050,10 @@ typedef struct {
     bool fsr_motion_override_logged;
     bool fsr_jitter_ready;
     float fsr_jitter[2];
+    uint32_t fsr_jitter_phase;
+    uint32_t fsr_jitter_phase_count;
+    vk_fsr_reset_reason_t fsr_reset_reason;
+    vk_fsr_reset_reason_t fsr_frame_reset_reason;
     mat4_t fsr_previous_viewproj;
     bool fsr_previous_viewproj_valid;
     refdef_t fsr_previous_fd;
@@ -1397,6 +1433,7 @@ static void vk_fsr_retest_f(void)
     vk_fsr_auto_reset();
     vk.fsr_auto_recreate = true;
     vk.fsr_reset = true;
+    vk.fsr_reset_reason = VK_FSR_RESET_CONFIG;
     Com_Printf("FSR automatic evaluation restarted\n");
 }
 
@@ -1532,7 +1569,7 @@ static bool vk_fsr_scene_paused(void)
     return cl_paused && cl_paused->integer;
 }
 
-static void vk_fsr_invalidate_history(void)
+static void vk_fsr_invalidate_history_reason(vk_fsr_reset_reason_t reason)
 {
     /* History reset is independent from the last completed display image.
      * Keep that image available for a pause/menu frame; dispatch failures
@@ -1547,6 +1584,7 @@ static void vk_fsr_invalidate_history(void)
     vk.fsr_history_count = 0;
     vk.fsr_pending_history_count = 0;
     vk.fsr_motion_initialized = false;
+    vk.fsr_reset_reason = reason;
 }
 
 static const char *vk_fsr_result_name(vk_fsr_result_t result)
@@ -4044,6 +4082,7 @@ static bool vk_create_fsr_resources(void)
     vk.fsr_previous_viewproj_valid = false;
     vk.fsr_previous_fd_valid = false;
     vk.fsr_reset = true;
+    vk.fsr_reset_reason = VK_FSR_RESET_RESIZE;
     vk.fsr_composited = false;
     vk.fsr_output_valid = false;
     vk.fsr_pause_cache_valid = false;
@@ -19464,13 +19503,17 @@ static void vk_log_perf_stats(void)
                vk.wait_usec, vk.acquire_usec, vk.record_usec,
                vk.submit_usec, vk.present_usec, vk.barrier_count);
     if (vk.separate_presentation) {
-        Com_Printf("VK FSR3 frame: id=%llu sdk_id=%llu sdk_valid=%s result=%s reset=%s pause=%s motion=%lluus dispatch=%lluus reuse=%s history=%s target=%s present=%s clear=%s\n",
+        Com_Printf("VK FSR3 frame: id=%llu sdk_id=%llu sdk_valid=%s result=%s reset=%s reset_reason=%s pause=%s jitter_x=%.7f jitter_y=%.7f jitter_phase=%u jitter_phases=%u jitter_ready=%s motion=%lluus dispatch=%lluus reuse=%s history=%s target=%s present=%s clear=%s\n",
                    (unsigned long long)vk.fsr_frame_id,
                    (unsigned long long)vk.fsr_sdk_frame_id,
                    vk.fsr_sdk_frame_id_valid ? "yes" : "no",
                    vk_fsr_result_name(vk.fsr_result),
                    vk.fsr_frame_reset ? "yes" : "no",
+                   vk_fsr_reset_reason_name(vk.fsr_frame_reset_reason),
                    vk.fsr_frame_pause ? "yes" : "no",
+                   vk.fsr_jitter[0], vk.fsr_jitter[1],
+                   vk.fsr_jitter_phase, vk.fsr_jitter_phase_count,
+                   vk.fsr_jitter_ready ? "yes" : "no",
                    (unsigned long long)vk.fsr_motion_record_usec,
                    (unsigned long long)vk.fsr_dispatch_record_usec,
                    vk.fsr_pause_reuse ? "yes" : "no",
@@ -19997,6 +20040,7 @@ void VKR_BeginRegistration(const char *map)
 {
     vk_fsr_auto_reset();
     vk.fsr_reset = true;
+    vk.fsr_reset_reason = VK_FSR_RESET_INITIAL;
     vk.fsr_previous_fd_valid = false;
     vk.fsr_previous_viewproj_valid = false;
     vk.fsr_history_count = 0;
@@ -20173,7 +20217,7 @@ void VKR_RenderFrame(const refdef_t *fd)
             !(fd->rdflags & RDF_NOWORLDMODEL);
         if (!vk.frame_fsr) {
             vk.fsr_reset = true;
-            vk_fsr_invalidate_history();
+            vk_fsr_invalidate_history_reason(VK_FSR_RESET_CONFIG);
         }
         vk.frame_bloom = vk_bloom_enabled_for_frame();
         vk.frame_waterwarp = vk_waterwarp_enabled_for_frame();
@@ -20200,7 +20244,7 @@ void VKR_RenderFrame(const refdef_t *fd)
             vk.fd.frametime > 0.25f ||
             fabsf(vk.fd.time - vk.fsr_previous_fd.time) > 0.5f;
         if (camera_cut) {
-            vk_fsr_invalidate_history();
+            vk_fsr_invalidate_history_reason(VK_FSR_RESET_CAMERA_CUT);
         }
         vk.fsr_last_render_usec = render_now;
     } else if (vk.frame_fsr) {
@@ -20217,14 +20261,23 @@ void VKR_RenderFrame(const refdef_t *fd)
         vk.fsr_jitter_ready = Q2_FSR3_GetJitter(vk.fsr3,
                                                  &vk.fsr_jitter[0],
                                                  &vk.fsr_jitter[1]);
+        if (vk.fsr_jitter_ready && !Q2_FSR3_GetJitterPhase(
+                vk.fsr3, &vk.fsr_jitter_phase, &vk.fsr_jitter_phase_count))
+            vk.fsr_jitter_ready = false;
         if (!vk.fsr_jitter_ready) {
             vk.fsr_jitter[0] = 0.0f;
             vk.fsr_jitter[1] = 0.0f;
+            vk.fsr_jitter_phase = 0;
+            vk.fsr_jitter_phase_count = 0;
             vk.fsr_reset = true;
+            vk.fsr_frame_reset_reason = VK_FSR_RESET_INVALID_JITTER;
+            vk.fsr_reset_reason = VK_FSR_RESET_INVALID_JITTER;
         }
     } else {
         vk.fsr_jitter[0] = 0.0f;
         vk.fsr_jitter[1] = 0.0f;
+        vk.fsr_jitter_phase = 0;
+        vk.fsr_jitter_phase_count = 0;
         vk.fsr_jitter_ready = false;
     }
 #if USE_VULKAN_RAYTRACING
@@ -21406,7 +21459,9 @@ static bool vk_dispatch_fsr(void)
         input_texture->height != vk.render_extent.height ||
         output_width != vk.swapchain_extent.width ||
         output_height != vk.swapchain_extent.height) {
-        vk_fsr_invalidate_history();
+        vk_fsr_invalidate_history_reason(VK_FSR_RESET_RESOURCE_FAILURE);
+        vk.fsr_frame_reset = true;
+        vk.fsr_frame_reset_reason = VK_FSR_RESET_RESOURCE_FAILURE;
         vk.fsr_output_valid = false;
         vk.fsr_result = VK_FSR_RESULT_SPATIAL_FALLBACK;
         if (!vk.fsr_warned) {
@@ -21464,6 +21519,8 @@ static bool vk_dispatch_fsr(void)
     bool generated_frame = false;
     bool frame_reset = vk.fsr_reset;
     vk.fsr_frame_reset = frame_reset;
+    if (frame_reset)
+        vk.fsr_frame_reset_reason = vk.fsr_reset_reason;
     bool frame_generation_prepared = false;
     if (!frame_reset && !vk.fsr_pause_frame && vk.fd_valid &&
         vk_fsr_frame_generation_requested() &&
@@ -21479,10 +21536,11 @@ static bool vk_dispatch_fsr(void)
             max(vk_projection_zfar(vk.fd_valid ? vk.fd.rdflags : 0),
                 (vk_znear ? Cvar_ClampValue(vk_znear, 0.1f, 4095.0f) : 2.0f) + 1.0f));
         if (!frame_generation_prepared) {
-            vk_fsr_invalidate_history();
+            vk_fsr_invalidate_history_reason(VK_FSR_RESET_FRAMEGEN_FAILURE);
             vk_disable_frame_generation("frame-generation preparation failed");
             frame_reset = vk.fsr_reset;
             vk.fsr_frame_reset = frame_reset;
+            vk.fsr_frame_reset_reason = VK_FSR_RESET_FRAMEGEN_FAILURE;
         } else {
             vk_transition_color_target(cmd, &vk.fsr_frame_generation_texture,
                                        &vk.fsr_frame_generation_layout,
@@ -21523,9 +21581,10 @@ static bool vk_dispatch_fsr(void)
     vk.fsr_dispatch_record_usec = vk_time_usec() - dispatch_start;
     vk_write_fsr_timestamp(VK_TIMESTAMP_FSR_END);
     if (!dispatched) {
-        vk_fsr_invalidate_history();
+        vk_fsr_invalidate_history_reason(VK_FSR_RESET_DISPATCH_FAILURE);
         vk.fsr_output_valid = false;
         vk.fsr_frame_reset = true;
+        vk.fsr_frame_reset_reason = VK_FSR_RESET_DISPATCH_FAILURE;
         if (vk_fsr_frame_generation_requested())
             vk_disable_frame_generation("FSR3 upscaler dispatch failed");
         vk.fsr_result = VK_FSR_RESULT_SPATIAL_FALLBACK;
@@ -21570,6 +21629,7 @@ static bool vk_dispatch_fsr(void)
     }
 
     vk.fsr_reset = false;
+    vk.fsr_reset_reason = VK_FSR_RESET_NONE;
     vk.fsr_output_valid = true;
     if (frame_generation_prepared) {
         /* The SDK tracks dynamic-resource states internally. Keep an explicit
@@ -21594,7 +21654,7 @@ static bool vk_dispatch_fsr(void)
             frame_reset);
         vk_write_fsr_timestamp(VK_TIMESTAMP_FRAMEGEN_END);
         if (!generated_frame) {
-            vk_fsr_invalidate_history();
+            vk_fsr_invalidate_history_reason(VK_FSR_RESET_FRAMEGEN_FAILURE);
             vk_disable_frame_generation("frame-generation dispatch failed");
         }
     }
@@ -21931,7 +21991,10 @@ void VKR_BeginFrame(void)
     vk.fsr_result = VK_FSR_RESULT_NATIVE;
     vk.fsr_frame_pause = false;
     vk.fsr_frame_reset = vk.fsr_reset;
+    vk.fsr_frame_reset_reason = vk.fsr_reset ? vk.fsr_reset_reason : VK_FSR_RESET_NONE;
     vk.fsr_timing_discontinuity = false;
+    vk.fsr_jitter_phase = 0;
+    vk.fsr_jitter_phase_count = 0;
     vk.fsr_reactive_draw_count = 0;
     memset(&c, 0, sizeof(c));
     vk.wait_usec = 0;
@@ -21961,12 +22024,14 @@ void VKR_BeginFrame(void)
         if (!vk_recreate_swapchain("FSR automatic performance selection"))
             return;
         vk.fsr_reset = true;
+        vk.fsr_reset_reason = VK_FSR_RESET_CONFIG;
     }
 
     if (vk.separate_presentation != vk_fsr_any_requested()) {
         if (!vk_recreate_swapchain("FSR runtime fallback"))
             return;
         vk.fsr_reset = true;
+        vk.fsr_reset_reason = VK_FSR_RESET_CONFIG;
     }
 
     if ((r_fsr && r_fsr->modified) ||
@@ -22003,6 +22068,7 @@ void VKR_BeginFrame(void)
         if (!vk_recreate_swapchain("FSR configuration change"))
             return;
         vk.fsr_reset = true;
+        vk.fsr_reset_reason = VK_FSR_RESET_CONFIG;
     }
 
     if (gl_bloom && gl_bloom->modified) {
@@ -22199,7 +22265,7 @@ void VKR_BeginFrame(void)
     if (vk.fsr_motion_fast != vk.fsr_motion_fast_last) {
         vk.fsr_motion_fast_last = vk.fsr_motion_fast;
         vk.fsr_reset = true;
-        vk_fsr_invalidate_history();
+        vk_fsr_invalidate_history_reason(VK_FSR_RESET_MOTION_MODE);
         vk.fsr_motion_initialized = false;
     }
     vk.frame_fsr = vk.fsr3 != NULL && vk_fsr_any_requested();
@@ -22208,10 +22274,15 @@ void VKR_BeginFrame(void)
          vk.fsr_history_render_extent.height != vk.render_extent.height ||
          vk.fsr_history_display_extent.width != vk.swapchain_extent.width ||
          vk.fsr_history_display_extent.height != vk.swapchain_extent.height)) {
-        vk_fsr_invalidate_history();
+        vk_fsr_invalidate_history_reason(VK_FSR_RESET_RESIZE);
         vk.fsr_history_render_extent = vk.render_extent;
         vk.fsr_history_display_extent = vk.swapchain_extent;
     }
+    /* Configuration, resize, and motion-mode invalidation happen before the
+     * frame becomes active. Capture their pending reason after all such
+     * changes, rather than only at the top of BeginFrame. */
+    vk.fsr_frame_reset = vk.fsr_reset;
+    vk.fsr_frame_reset_reason = vk.fsr_reset ? vk.fsr_reset_reason : VK_FSR_RESET_NONE;
     vk.fsr_composited = false;
     vk.fsr_scene_direct = false;
     vk.fsr_jitter_ready = false;
@@ -22235,7 +22306,7 @@ void VKR_BeginFrame(void)
             /* The first active frame after pause must not reuse stale
              * temporal history or the paused camera's motion vectors. */
             vk.fsr_reset = true;
-            vk_fsr_invalidate_history();
+            vk_fsr_invalidate_history_reason(VK_FSR_RESET_PAUSE_RESUME);
             vk.fsr_frame_reset = true;
         }
         vk.fsr_paused_last_frame = paused;
@@ -22267,8 +22338,10 @@ void VKR_BeginFrame(void)
             vk.fsr_direct_source_valid = false;
             vk.fsr_reset = true;
             vk.fsr_frame_reset = true;
+            vk.fsr_reset_reason = VK_FSR_RESET_PAUSE_RESUME;
             vk.frame_fsr = false;
         }
+        vk.fsr_frame_reset_reason = vk.fsr_reset ? vk.fsr_reset_reason : VK_FSR_RESET_NONE;
         vk.frame_active = true;
         return;
     }
@@ -22377,7 +22450,7 @@ void VKR_EndFrame(void)
 
     if (vk.separate_presentation && !vk.fd_valid) {
         vk.fsr_reset = true;
-        vk_fsr_invalidate_history();
+        vk_fsr_invalidate_history_reason(VK_FSR_RESET_PAUSE_RESUME);
     }
 
     if (bloom) {

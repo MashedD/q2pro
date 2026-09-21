@@ -752,6 +752,23 @@ extern "C" bool Q2_FSR3_GetJitter(q2_fsr3_context_t *context, float *x, float *y
     return true;
 }
 
+extern "C" bool Q2_FSR3_GetJitterPhase(
+    const q2_fsr3_context_t *context, uint32_t *phase, uint32_t *phase_count)
+{
+    if (!context || !context->frame_started || !phase || !phase_count)
+        return false;
+
+    const int32_t count = ffxFsr3GetJitterPhaseCount(
+        static_cast<int32_t>(context->render_width),
+        static_cast<int32_t>(context->display_width));
+    if (count <= 0)
+        return false;
+
+    *phase_count = static_cast<uint32_t>(count);
+    *phase = static_cast<uint32_t>(context->current_frame_id % count);
+    return true;
+}
+
 extern "C" void Q2_FSR3_BeginFrame(q2_fsr3_context_t *context)
 {
     if (!context)

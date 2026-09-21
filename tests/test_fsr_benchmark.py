@@ -59,6 +59,47 @@ VK FSR3 result: frame=12 result=spatial-fallback
         self.assertIs(second['paused'], True)
         self.assertIs(second['reuse'], False)
 
+    def test_jitter_fields_are_typed_and_reported(self):
+        parsed = fsr_benchmark.parse_benchmark_log(
+            'VK FSR3 frame: id=20 jitter_x=0.125 jitter_y=-0.25 '
+            'jitter_phase=3 jitter_phases=8 jitter_ready=yes '
+            'reset_reason=camera_cut\n'
+            'VK FSR3 frame: id=21 jitter_ready=no reset_reason=pause\n')
+
+        first, second = parsed['jitter']
+        self.assertEqual(first['frame_id'], 20)
+        self.assertAlmostEqual(first['jitter_x'], 0.125)
+        self.assertAlmostEqual(first['jitter_y'], -0.25)
+        self.assertEqual(first['jitter_phase'], 3)
+        self.assertEqual(first['jitter_phases'], 8)
+        self.assertIs(first['jitter_ready'], True)
+        self.assertEqual(first['reset_reason'], 'camera_cut')
+        self.assertIs(second['jitter_ready'], False)
+        self.assertEqual(second['reset_reason'], 'pause')
+        self.assertEqual(parsed['frame_records'][0], first)
+
+    def test_optional_diagnostics_records_are_typed_and_frame_scoped(self):
+        parsed = fsr_benchmark.parse_benchmark_log(
+            'VK FSR3 diagnostics: frame=20 motion_pixels=100 '
+            'motion_nonfinite=2 reactive_coverage=0.18 enabled=yes\n'
+            'VK FSR3 diagnostics: frame=21 status=unavailable\n')
+
+        first, second = parsed['diagnostics']
+        self.assertEqual(first['frame_id'], 20)
+        self.assertEqual(first['motion_pixels'], 100)
+        self.assertEqual(first['motion_nonfinite'], 2)
+        self.assertAlmostEqual(first['reactive_coverage'], 0.18)
+        self.assertIs(first['enabled'], True)
+        self.assertEqual(second, {'frame_id': 21, 'status': 'unavailable'})
+
+    def test_missing_new_telemetry_remains_backward_compatible(self):
+        parsed = fsr_benchmark.parse_benchmark_log(
+            'VK FSR3 frame: id=30 reset=no pause=no\n')
+
+        self.assertEqual(parsed['jitter'], [])
+        self.assertEqual(parsed['diagnostics'], [])
+        self.assertEqual(parsed['frame_records'][0]['frame_id'], 30)
+
     def test_legacy_samples_without_frame_ids_remain_supported(self):
         parsed = fsr_benchmark.parse_benchmark_log(
             'FSR sample: time=2.000 cpu_us=200 gpu_us=150\n'

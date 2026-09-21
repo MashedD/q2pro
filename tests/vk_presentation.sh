@@ -81,6 +81,15 @@ require_contract '!std::isfinite(*x) || !std::isfinite(*y)' \
 require_contract 'context->force_reset = inputs.reset' \
     "$repo_dir/src/refresh/vk_fsr3.cpp"
 require_contract 'Q2_FSR3_GetCurrentFrameId' "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract 'Q2_FSR3_GetJitterPhase' "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract 'jitter_phase=%u jitter_phases=%u' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'reset_reason=%s' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk.fsr_frame_reset_reason = vk.fsr_reset ? vk.fsr_reset_reason' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_fsr_invalidate_history_reason(VK_FSR_RESET_CAMERA_CUT)' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_fsr_invalidate_history_reason(VK_FSR_RESET_PAUSE_RESUME)' \
+    "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'if (error != FFX_OK)' "$repo_dir/src/refresh/vk_fsr3.cpp"
 require_contract 'context->frame_generation_failed = true' "$repo_dir/src/refresh/vk_fsr3.cpp"
 require_contract 'if (!dispatched)' "$repo_dir/src/refresh/vk_backend.c"
