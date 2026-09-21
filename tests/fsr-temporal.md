@@ -72,9 +72,11 @@ Dynamic-resolution groundwork is recommendation-only for now. Set
 `r_fsr_dynamic 1` to collect GPU-time recommendations with hysteresis,
 quantized scale steps, and a cooldown; the backend reports them as
 `VK FSR3 dynamic` telemetry but deliberately keeps `applied=no` until the
-internal-target rebuild path is separated from swapchain recreation. This
-does not change rendering or swapchain lifetime. `r_fsr_dynamic_cpu 1` opts
-into CPU timing only when GPU timestamps are unavailable.
+internal-target rebuild transaction has rollback coverage. The lifecycle is
+now split into a wait-free internal-target destruction stage and a separate
+FSR motion-framebuffer creation stage; this does not yet apply a new scale or
+change swapchain lifetime. `r_fsr_dynamic_cpu 1` opts into CPU timing only
+when GPU timestamps are unavailable.
 
 These are smoke tests, not a long-duration image-quality benchmark. No Vulkan
 validation layer was available for synchronization validation. Windows runtime,

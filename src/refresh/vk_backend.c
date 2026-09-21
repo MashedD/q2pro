@@ -330,6 +330,7 @@ typedef enum {
     VK_FSR_RESET_PAUSE_RESUME,
     VK_FSR_RESET_CONFIG,
     VK_FSR_RESET_MOTION_MODE,
+    VK_FSR_RESET_RENDER_SCALE,
     VK_FSR_RESET_INVALID_JITTER,
     VK_FSR_RESET_DISPATCH_FAILURE,
     VK_FSR_RESET_FRAMEGEN_FAILURE,
@@ -345,6 +346,7 @@ static const char *vk_fsr_reset_reason_name(vk_fsr_reset_reason_t reason)
     case VK_FSR_RESET_PAUSE_RESUME: return "pause_resume";
     case VK_FSR_RESET_CONFIG: return "config";
     case VK_FSR_RESET_MOTION_MODE: return "motion_mode";
+    case VK_FSR_RESET_RENDER_SCALE: return "render_scale";
     case VK_FSR_RESET_INVALID_JITTER: return "invalid_jitter";
     case VK_FSR_RESET_DISPATCH_FAILURE: return "dispatch_failure";
     case VK_FSR_RESET_FRAMEGEN_FAILURE: return "framegen_failure";
@@ -1408,6 +1410,16 @@ static void vk_fsr_dynamic_configure(void)
                          vk.fsr_dynamic_generation);
 }
 
+static void vk_fsr_dynamic_reset_runtime(void)
+{
+    float current_scale = vk.fsr_dynamic.current_scale;
+    if (!(current_scale > 0.0f))
+        current_scale = vk_fsr_quality_scale_for(vk.fsr_auto_quality);
+    vk.fsr_dynamic_generation++;
+    vk_fsr_dynamic_reset(&vk.fsr_dynamic, current_scale,
+                         vk.fsr_dynamic_generation);
+}
+
 static bool vk_fsr_dynamic_cvars_modified(void)
 {
     return (r_fsr_dynamic && r_fsr_dynamic->modified) ||
@@ -1662,7 +1674,7 @@ static void vk_fsr_invalidate_history_reason(vk_fsr_reset_reason_t reason)
     vk.fsr_pending_history_count = 0;
     vk.fsr_motion_initialized = false;
     vk.fsr_reset_reason = reason;
-    vk_fsr_dynamic_configure();
+    vk_fsr_dynamic_reset_runtime();
 }
 
 static const char *vk_fsr_result_name(vk_fsr_result_t result)
@@ -1682,6 +1694,8 @@ static const char *vk_fsr_result_name(vk_fsr_result_t result)
 
 static float vk_fsr_quality_scale(void)
 {
+    if (vk.fsr_dynamic.enabled && vk.fsr_dynamic.current_scale > 0.0f)
+        return vk.fsr_dynamic.current_scale;
     if (vk_fsr_auto_enabled() && vk.fsr_auto_phase != VK_FSR_AUTO_WARMUP)
         return vk_fsr_quality_scale_for(vk.fsr_auto_quality);
     return vk_fsr_quality_scale_for(vk_fsr_quality_from_string(
@@ -1725,6 +1739,7 @@ static void vk_begin_presentation(bool clear);
 static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, const void *pixels,
                                    bool mipmaps);
+static void vk_destroy_texture_resource_nowait(vk_texture_t *texture);
 static void vk_destroy_texture_resource(vk_texture_t *texture);
 static VkShaderModule vk_create_shader_module(const uint32_t *code,
                                               size_t code_size);
@@ -2378,7 +2393,7 @@ static void vk_free_world(void)
         vk.world.cache = NULL;
     }
     vk.fsr_reset = true;
-    vk_fsr_dynamic_configure();
+    vk_fsr_dynamic_reset_runtime();
     vk.fsr_previous_viewproj_valid = false;
     vk.fsr_previous_fd_valid = false;
 }
@@ -3970,18 +3985,18 @@ static bool vk_fsr_format_support(VkFormat format, VkFormatFeatureFlags required
     return false;
 }
 
-static void vk_destroy_fsr_resources(void)
+static void vk_destroy_fsr_resources_nowait(void)
 {
     if (vk.fsr3) {
         Q2_FSR3_Destroy(vk.fsr3);
         vk.fsr3 = NULL;
     }
-    vk_destroy_texture_resource(&vk.fsr_output_texture);
-    vk_destroy_texture_resource(&vk.fsr_frame_generation_texture);
-    vk_destroy_texture_resource(&vk.fsr_pause_texture);
-    vk_destroy_texture_resource(&vk.fsr_motion_texture);
-    vk_destroy_texture_resource(&vk.fsr_reactive_texture);
-    vk_destroy_texture_resource(&vk.fsr_composition_texture);
+    vk_destroy_texture_resource_nowait(&vk.fsr_output_texture);
+    vk_destroy_texture_resource_nowait(&vk.fsr_frame_generation_texture);
+    vk_destroy_texture_resource_nowait(&vk.fsr_pause_texture);
+    vk_destroy_texture_resource_nowait(&vk.fsr_motion_texture);
+    vk_destroy_texture_resource_nowait(&vk.fsr_reactive_texture);
+    vk_destroy_texture_resource_nowait(&vk.fsr_composition_texture);
     vk.fsr_composition_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vk.fsr_output_format = VK_FORMAT_UNDEFINED;
     vk.fsr_output_layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -4001,6 +4016,18 @@ static void vk_destroy_fsr_resources(void)
     vk.fsr_presentation_logged = false;
     vk.fsr_presentation_copy = false;
     vk.render_extent = vk.swapchain_extent;
+}
+
+static void vk_destroy_fsr_resources(void)
+{
+    if (!vk.device)
+        return;
+
+    if (!vk.device_lost && vk.DeviceWaitIdle)
+        vk_handle_device_lost("vkDeviceWaitIdle",
+                              vk.DeviceWaitIdle(vk.device));
+
+    vk_destroy_fsr_resources_nowait();
 }
 
 static bool vk_create_fsr_resources(void)
@@ -5337,18 +5364,14 @@ static bool vk_upload_texture(image_t *image, byte *pic)
     return true;
 }
 
-static void vk_destroy_texture_resource(vk_texture_t *texture)
+static void vk_destroy_texture_resource_nowait(vk_texture_t *texture)
 {
     if (!vk.device)
         return;
 
     if (!texture->image && !texture->view && !texture->memory &&
-        !texture->descriptor_set)
+        !texture->descriptor_set && !texture->fsr_descriptor_set)
         return;
-
-    if (!vk.device_lost && vk.DeviceWaitIdle)
-        vk_handle_device_lost("vkDeviceWaitIdle",
-                              vk.DeviceWaitIdle(vk.device));
 
     if (texture->descriptor_set && vk.descriptor_pool)
         vk.FreeDescriptorSets(vk.device, vk.descriptor_pool, 1,
@@ -5364,6 +5387,22 @@ static void vk_destroy_texture_resource(vk_texture_t *texture)
         vk.FreeMemory(vk.device, texture->memory, NULL);
 
     memset(texture, 0, sizeof(*texture));
+}
+
+static void vk_destroy_texture_resource(vk_texture_t *texture)
+{
+    if (!vk.device)
+        return;
+
+    if (!texture->image && !texture->view && !texture->memory &&
+        !texture->descriptor_set && !texture->fsr_descriptor_set)
+        return;
+
+    if (!vk.device_lost && vk.DeviceWaitIdle)
+        vk_handle_device_lost("vkDeviceWaitIdle",
+                              vk.DeviceWaitIdle(vk.device));
+
+    vk_destroy_texture_resource_nowait(texture);
 }
 
 static void vk_destroy_texture(image_t *image)
@@ -6843,6 +6882,111 @@ static VkExtent2D vk_choose_extent(const VkSurfaceCapabilitiesKHR *caps,
     return extent;
 }
 
+/* Destroy render-sized targets and the FSR resources that own their temporal
+ * state. The caller must have already made the device idle; this helper
+ * deliberately does not wait so a future internal-target rebuild can stage
+ * synchronization in one place. FSR output/frame-generation/pause images are
+ * display-sized but are invalidated here with the FSR context. Display
+ * framebuffers, swapchain images/views, render passes, pipelines, command
+ * buffers, and synchronization objects remain intact. */
+static void vk_destroy_internal_render_targets_nowait(void)
+{
+    if (vk.fsr_depth_descriptor) {
+        vk.FreeDescriptorSets(vk.device, vk.descriptor_pool, 1,
+                              &vk.fsr_depth_descriptor);
+        vk.fsr_depth_descriptor = VK_NULL_HANDLE;
+    }
+
+    if (vk.scene_framebuffer) {
+        vk.DestroyFramebuffer(vk.device, vk.scene_framebuffer, NULL);
+        vk.scene_framebuffer = VK_NULL_HANDLE;
+    }
+    if (vk.bloom_framebuffer) {
+        vk.DestroyFramebuffer(vk.device, vk.bloom_framebuffer, NULL);
+        vk.bloom_framebuffer = VK_NULL_HANDLE;
+    }
+    if (vk.blur_framebuffer) {
+        vk.DestroyFramebuffer(vk.device, vk.blur_framebuffer, NULL);
+        vk.blur_framebuffer = VK_NULL_HANDLE;
+    }
+    if (vk.ssr_framebuffer) {
+        vk.DestroyFramebuffer(vk.device, vk.ssr_framebuffer, NULL);
+        vk.ssr_framebuffer = VK_NULL_HANDLE;
+    }
+    if (vk.ssr_resolve_framebuffer) {
+        vk.DestroyFramebuffer(vk.device, vk.ssr_resolve_framebuffer, NULL);
+        vk.ssr_resolve_framebuffer = VK_NULL_HANDLE;
+    }
+    if (vk.fsr_motion_framebuffer) {
+        vk.DestroyFramebuffer(vk.device, vk.fsr_motion_framebuffer, NULL);
+        vk.fsr_motion_framebuffer = VK_NULL_HANDLE;
+    }
+    if (vk.fsr_input_framebuffer) {
+        vk.DestroyFramebuffer(vk.device, vk.fsr_input_framebuffer, NULL);
+        vk.fsr_input_framebuffer = VK_NULL_HANDLE;
+    }
+
+    vk_destroy_texture_resource_nowait(&vk.scene_texture);
+    vk_destroy_texture_resource_nowait(&vk.bloom_source_texture);
+    vk_destroy_texture_resource_nowait(&vk.bloom_texture);
+    vk_destroy_texture_resource_nowait(&vk.ssr_texture);
+    vk_destroy_texture_resource_nowait(&vk.ssr_resolve_texture);
+    vk_destroy_texture_resource_nowait(&vk.blur_texture);
+    vk_destroy_texture_resource_nowait(&vk.fsr_input_texture);
+    vk_destroy_fsr_resources_nowait();
+    vk.scene_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.bloom_source_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.bloom_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.blur_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.ssr_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.ssr_resolve_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.fsr_input_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.depth_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk.ssr_ready = false;
+
+    if (vk.multisample_view) {
+        vk.DestroyImageView(vk.device, vk.multisample_view, NULL);
+        vk.multisample_view = VK_NULL_HANDLE;
+    }
+    if (vk.multisample_image) {
+        vk.DestroyImage(vk.device, vk.multisample_image, NULL);
+        vk.multisample_image = VK_NULL_HANDLE;
+    }
+    if (vk.multisample_memory) {
+        vk.FreeMemory(vk.device, vk.multisample_memory, NULL);
+        vk.multisample_memory = VK_NULL_HANDLE;
+    }
+    if (vk.bloom_multisample_view) {
+        vk.DestroyImageView(vk.device, vk.bloom_multisample_view, NULL);
+        vk.bloom_multisample_view = VK_NULL_HANDLE;
+    }
+    if (vk.bloom_multisample_image) {
+        vk.DestroyImage(vk.device, vk.bloom_multisample_image, NULL);
+        vk.bloom_multisample_image = VK_NULL_HANDLE;
+    }
+    if (vk.bloom_multisample_memory) {
+        vk.FreeMemory(vk.device, vk.bloom_multisample_memory, NULL);
+        vk.bloom_multisample_memory = VK_NULL_HANDLE;
+    }
+
+    if (vk.depth_view) {
+        vk.DestroyImageView(vk.device, vk.depth_view, NULL);
+        vk.depth_view = VK_NULL_HANDLE;
+    }
+    if (vk.depth_sample_view) {
+        vk.DestroyImageView(vk.device, vk.depth_sample_view, NULL);
+        vk.depth_sample_view = VK_NULL_HANDLE;
+    }
+    if (vk.depth_image) {
+        vk.DestroyImage(vk.device, vk.depth_image, NULL);
+        vk.depth_image = VK_NULL_HANDLE;
+    }
+    if (vk.depth_memory) {
+        vk.FreeMemory(vk.device, vk.depth_memory, NULL);
+        vk.depth_memory = VK_NULL_HANDLE;
+    }
+}
+
 static void vk_destroy_swapchain(void)
 {
     if (vk.device && !vk.device_lost && vk.DeviceWaitIdle)
@@ -7074,10 +7218,6 @@ static void vk_destroy_swapchain(void)
         vk.DestroyPipeline(vk.device, vk.fsr_motion_world_reactive_pipeline, NULL);
         vk.fsr_motion_world_reactive_pipeline = VK_NULL_HANDLE;
     }
-    if (vk.fsr_depth_descriptor) {
-        vk.FreeDescriptorSets(vk.device, vk.descriptor_pool, 1, &vk.fsr_depth_descriptor);
-        vk.fsr_depth_descriptor = VK_NULL_HANDLE;
-    }
     if (vk.fsr_motion_pipeline_layout) {
         vk.DestroyPipelineLayout(vk.device, vk.fsr_motion_pipeline_layout, NULL);
         vk.fsr_motion_pipeline_layout = VK_NULL_HANDLE;
@@ -7130,103 +7270,7 @@ static void vk_destroy_swapchain(void)
         vk.framebuffers = NULL;
     }
 
-    if (vk.scene_framebuffer) {
-        vk.DestroyFramebuffer(vk.device, vk.scene_framebuffer, NULL);
-        vk.scene_framebuffer = VK_NULL_HANDLE;
-    }
-
-    if (vk.bloom_framebuffer) {
-        vk.DestroyFramebuffer(vk.device, vk.bloom_framebuffer, NULL);
-        vk.bloom_framebuffer = VK_NULL_HANDLE;
-    }
-
-    if (vk.blur_framebuffer) {
-        vk.DestroyFramebuffer(vk.device, vk.blur_framebuffer, NULL);
-        vk.blur_framebuffer = VK_NULL_HANDLE;
-    }
-    if (vk.ssr_framebuffer) {
-        vk.DestroyFramebuffer(vk.device, vk.ssr_framebuffer, NULL);
-        vk.ssr_framebuffer = VK_NULL_HANDLE;
-    }
-    if (vk.ssr_resolve_framebuffer) {
-        vk.DestroyFramebuffer(vk.device, vk.ssr_resolve_framebuffer, NULL);
-        vk.ssr_resolve_framebuffer = VK_NULL_HANDLE;
-    }
-    if (vk.fsr_motion_framebuffer) {
-        vk.DestroyFramebuffer(vk.device, vk.fsr_motion_framebuffer, NULL);
-        vk.fsr_motion_framebuffer = VK_NULL_HANDLE;
-    }
-    if (vk.fsr_input_framebuffer) {
-        vk.DestroyFramebuffer(vk.device, vk.fsr_input_framebuffer, NULL);
-        vk.fsr_input_framebuffer = VK_NULL_HANDLE;
-    }
-
-    vk_destroy_texture_resource(&vk.scene_texture);
-    vk_destroy_texture_resource(&vk.bloom_source_texture);
-    vk_destroy_texture_resource(&vk.bloom_texture);
-    vk_destroy_texture_resource(&vk.ssr_texture);
-    vk_destroy_texture_resource(&vk.ssr_resolve_texture);
-    vk_destroy_texture_resource(&vk.blur_texture);
-    vk_destroy_texture_resource(&vk.fsr_input_texture);
-    vk_destroy_fsr_resources();
-    vk.scene_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    vk.bloom_source_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    vk.bloom_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    vk.blur_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    vk.ssr_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    vk.ssr_resolve_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    vk.fsr_input_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    vk.depth_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    vk.ssr_ready = false;
-
-    if (vk.multisample_view) {
-        vk.DestroyImageView(vk.device, vk.multisample_view, NULL);
-        vk.multisample_view = VK_NULL_HANDLE;
-    }
-
-    if (vk.multisample_image) {
-        vk.DestroyImage(vk.device, vk.multisample_image, NULL);
-        vk.multisample_image = VK_NULL_HANDLE;
-    }
-
-    if (vk.multisample_memory) {
-        vk.FreeMemory(vk.device, vk.multisample_memory, NULL);
-        vk.multisample_memory = VK_NULL_HANDLE;
-    }
-
-    if (vk.bloom_multisample_view) {
-        vk.DestroyImageView(vk.device, vk.bloom_multisample_view, NULL);
-        vk.bloom_multisample_view = VK_NULL_HANDLE;
-    }
-
-    if (vk.bloom_multisample_image) {
-        vk.DestroyImage(vk.device, vk.bloom_multisample_image, NULL);
-        vk.bloom_multisample_image = VK_NULL_HANDLE;
-    }
-
-    if (vk.bloom_multisample_memory) {
-        vk.FreeMemory(vk.device, vk.bloom_multisample_memory, NULL);
-        vk.bloom_multisample_memory = VK_NULL_HANDLE;
-    }
-
-    if (vk.depth_view) {
-        vk.DestroyImageView(vk.device, vk.depth_view, NULL);
-        vk.depth_view = VK_NULL_HANDLE;
-    }
-    if (vk.depth_sample_view) {
-        vk.DestroyImageView(vk.device, vk.depth_sample_view, NULL);
-        vk.depth_sample_view = VK_NULL_HANDLE;
-    }
-
-    if (vk.depth_image) {
-        vk.DestroyImage(vk.device, vk.depth_image, NULL);
-        vk.depth_image = VK_NULL_HANDLE;
-    }
-
-    if (vk.depth_memory) {
-        vk.FreeMemory(vk.device, vk.depth_memory, NULL);
-        vk.depth_memory = VK_NULL_HANDLE;
-    }
+    vk_destroy_internal_render_targets_nowait();
 
     if (vk.render_pass) {
         vk.DestroyRenderPass(vk.device, vk.render_pass, NULL);
@@ -7764,6 +7808,62 @@ static bool vk_create_multisample_resources(void)
     return true;
 }
 
+static bool vk_create_fsr_motion_framebuffer(void)
+{
+    if (vk.sample_count != VK_SAMPLE_COUNT_1_BIT || !vk.fsr3 ||
+        !vk.fsr_motion_render_pass || !vk.fsr_motion_texture.view ||
+        !vk.fsr_reactive_texture.view || !vk.depth_view)
+        return true;
+
+    VkImageView attachments[] = {
+        vk.fsr_motion_texture.view,
+        vk.fsr_reactive_texture.view,
+        vk.depth_view,
+        vk.fsr_composition_texture.view,
+    };
+    VkFramebufferCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+        .renderPass = vk.fsr_motion_render_pass,
+        .attachmentCount = vk_fsr_composition_enabled() ? 4 : 3,
+        .pAttachments = attachments,
+        .width = vk.render_extent.width,
+        .height = vk.render_extent.height,
+        .layers = 1,
+    };
+    VkResult result = vk.CreateFramebuffer(vk.device, &create_info, NULL,
+                                           &vk.fsr_motion_framebuffer);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateFramebuffer(FSR motion)", result);
+
+    VkDescriptorSetAllocateInfo allocation = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = vk.descriptor_pool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &vk.texture_set_layout,
+    };
+    result = vk.AllocateDescriptorSets(vk.device, &allocation,
+                                       &vk.fsr_depth_descriptor);
+    if (result != VK_SUCCESS) {
+        vk.DestroyFramebuffer(vk.device, vk.fsr_motion_framebuffer, NULL);
+        vk.fsr_motion_framebuffer = VK_NULL_HANDLE;
+        return vk_fail_result("vkAllocateDescriptorSets(FSR depth)", result);
+    }
+    VkDescriptorImageInfo depth_info = {
+        .sampler = vk.nearest_sampler,
+        .imageView = vk.depth_sample_view,
+        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+    };
+    VkWriteDescriptorSet write = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = vk.fsr_depth_descriptor,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo = &depth_info,
+    };
+    vk.UpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
+    return true;
+}
+
 static bool vk_create_framebuffers(void)
 {
     if (vk.separate_presentation && vk.sample_count != VK_SAMPLE_COUNT_1_BIT) {
@@ -7825,52 +7925,8 @@ static bool vk_create_framebuffers(void)
             return vk_fail_result("vkCreateFramebuffer", result);
     }
 
-    if (vk.sample_count == VK_SAMPLE_COUNT_1_BIT && vk.fsr3 &&
-        vk.fsr_motion_render_pass &&
-        vk.fsr_motion_texture.view && vk.fsr_reactive_texture.view &&
-        vk.depth_view) {
-        VkImageView attachments[] = {
-            vk.fsr_motion_texture.view,
-            vk.fsr_reactive_texture.view,
-            vk.depth_view,
-            vk.fsr_composition_texture.view,
-        };
-        VkFramebufferCreateInfo create_info = {
-            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            .renderPass = vk.fsr_motion_render_pass,
-            .attachmentCount = vk_fsr_composition_enabled() ? 4 : 3,
-            .pAttachments = attachments,
-            .width = vk.render_extent.width,
-            .height = vk.render_extent.height,
-            .layers = 1,
-        };
-        VkResult result = vk.CreateFramebuffer(vk.device, &create_info, NULL,
-                                               &vk.fsr_motion_framebuffer);
-        if (result != VK_SUCCESS)
-            return vk_fail_result("vkCreateFramebuffer(FSR motion)", result);
-        VkDescriptorSetAllocateInfo allocation = {
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            .descriptorPool = vk.descriptor_pool,
-            .descriptorSetCount = 1,
-            .pSetLayouts = &vk.texture_set_layout,
-        };
-        result = vk.AllocateDescriptorSets(vk.device, &allocation, &vk.fsr_depth_descriptor);
-        if (result != VK_SUCCESS)
-            return vk_fail_result("vkAllocateDescriptorSets(FSR depth)", result);
-        VkDescriptorImageInfo depth_info = {
-            .sampler = vk.nearest_sampler,
-            .imageView = vk.depth_sample_view,
-            .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-        };
-        VkWriteDescriptorSet write = {
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = vk.fsr_depth_descriptor,
-            .descriptorCount = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo = &depth_info,
-        };
-        vk.UpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
-    }
+    if (!vk_create_fsr_motion_framebuffer())
+        return false;
 
     if (vk.separate_presentation) {
         Com_Printf("Vulkan framebuffers: display=%ux%u (color only), "
@@ -20370,7 +20426,7 @@ void VKR_RenderFrame(const refdef_t *fd)
             vk.fsr_reset = true;
             vk.fsr_frame_reset_reason = VK_FSR_RESET_INVALID_JITTER;
             vk.fsr_reset_reason = VK_FSR_RESET_INVALID_JITTER;
-            vk_fsr_dynamic_configure();
+            vk_fsr_dynamic_reset_runtime();
         }
     } else {
         vk.fsr_jitter[0] = 0.0f;
@@ -22448,7 +22504,7 @@ void VKR_BeginFrame(void)
             vk.fsr_reset = true;
             vk.fsr_frame_reset = true;
             vk.fsr_reset_reason = VK_FSR_RESET_PAUSE_RESUME;
-            vk_fsr_dynamic_configure();
+            vk_fsr_dynamic_reset_runtime();
             vk.frame_fsr = false;
         }
         vk.fsr_frame_reset_reason = vk.fsr_reset ? vk.fsr_reset_reason : VK_FSR_RESET_NONE;

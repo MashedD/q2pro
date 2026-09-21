@@ -346,6 +346,7 @@ static void check_fsr_temporal_contracts(void)
 {
     assert(!strcmp(vk_fsr_reset_reason_name(VK_FSR_RESET_NONE), "none"));
     assert(!strcmp(vk_fsr_reset_reason_name(VK_FSR_RESET_CAMERA_CUT), "camera_cut"));
+    assert(!strcmp(vk_fsr_reset_reason_name(VK_FSR_RESET_RENDER_SCALE), "render_scale"));
     assert(!strcmp(vk_fsr_reset_reason_name(VK_FSR_RESET_INVALID_JITTER), "invalid_jitter"));
     vk.frame_active = true;
     vk_fsr_invalidate_history_reason(VK_FSR_RESET_RESIZE);
