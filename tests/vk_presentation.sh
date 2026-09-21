@@ -98,6 +98,7 @@ require_contract 'vk_destroy_internal_render_targets_nowait' "$repo_dir/src/refr
 require_contract 'vk_destroy_texture_resource_nowait' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_destroy_fsr_resources_nowait' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_create_fsr_motion_framebuffer' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_destroy_display_framebuffers_nowait' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'VK_FSR_RESET_RENDER_SCALE' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_rebuild_internal_render_targets' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk.frame_active || vk.render_pass_active' "$repo_dir/src/refresh/vk_backend.c"

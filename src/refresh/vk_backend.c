@@ -1820,6 +1820,7 @@ static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    bool mipmaps);
 static void vk_destroy_texture_resource_nowait(vk_texture_t *texture);
 static void vk_destroy_texture_resource(vk_texture_t *texture);
+static void vk_destroy_display_framebuffers_nowait(void);
 static bool vk_create_fsr_motion_pipelines(void);
 static void vk_destroy_fsr_motion_pipelines_nowait(void);
 static VkShaderModule vk_create_shader_module(const uint32_t *code,
@@ -7531,14 +7532,7 @@ static void vk_destroy_swapchain(void)
         vk.alias_line_pipeline = VK_NULL_HANDLE;
     }
 
-    if (vk.framebuffers) {
-        for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
-            if (vk.framebuffers[i])
-                vk.DestroyFramebuffer(vk.device, vk.framebuffers[i], NULL);
-        }
-        Z_Free(vk.framebuffers);
-        vk.framebuffers = NULL;
-    }
+    vk_destroy_display_framebuffers_nowait();
 
     vk_destroy_internal_render_targets_nowait();
 
@@ -8138,6 +8132,25 @@ static bool vk_create_fsr_motion_framebuffer(void)
     return true;
 }
 
+/* Framebuffers that target the swapchain belong to the current swapchain
+ * lifetime, but construction can fail after only a prefix has been created.
+ * Keep this cleanup non-blocking: callers either have already synchronized the
+ * device or are abandoning a not-yet-published candidate bundle. */
+static void vk_destroy_display_framebuffers_nowait(void)
+{
+    if (!vk.framebuffers)
+        return;
+
+    for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
+        if (vk.framebuffers[i]) {
+            vk.DestroyFramebuffer(vk.device, vk.framebuffers[i], NULL);
+            vk.framebuffers[i] = VK_NULL_HANDLE;
+        }
+    }
+    Z_Free(vk.framebuffers);
+    vk.framebuffers = NULL;
+}
+
 static bool vk_create_framebuffers(void)
 {
     if (vk.separate_presentation && vk.sample_count != VK_SAMPLE_COUNT_1_BIT) {
@@ -8195,12 +8208,17 @@ static bool vk_create_framebuffers(void)
         };
 
         VkResult result = vk.CreateFramebuffer(vk.device, &create_info, NULL, &vk.framebuffers[i]);
-        if (result != VK_SUCCESS)
-            return vk_fail_result("vkCreateFramebuffer", result);
+        if (result != VK_SUCCESS) {
+            bool failed = vk_fail_result("vkCreateFramebuffer", result);
+            vk_destroy_display_framebuffers_nowait();
+            return failed;
+        }
     }
 
-    if (!vk_create_fsr_motion_framebuffer())
+    if (!vk_create_fsr_motion_framebuffer()) {
+        vk_destroy_display_framebuffers_nowait();
         return false;
+    }
 
     if (vk.separate_presentation) {
         Com_Printf("Vulkan framebuffers: display=%ux%u (color only), "

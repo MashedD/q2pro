@@ -11,9 +11,12 @@ statCounters_t c;
 cvar_t paused_cvar;
 cvar_t *cl_paused = &paused_cvar;
 cvar_t *sv_paused;
+cvar_t *gl_bloom;
 cmdbuf_t cmd_buffer;
 static char last_error[256];
 static unsigned framebuffer_calls, pass_calls, draw_calls;
+static unsigned destroy_framebuffer_calls;
+static int fail_framebuffer_ordinal;
 static VkRenderPass last_pass;
 static VkExtent2D last_extent;
 static VkViewport last_viewport;
@@ -27,6 +30,11 @@ static VkSubpassDependency clear_dependency;
 void Com_SetLastError(const char *message)
 {
     snprintf(last_error, sizeof(last_error), "%s", message);
+}
+
+const char *Com_GetLastError(void)
+{
+    return last_error;
 }
 
 char *va(const char *format, ...)
@@ -50,6 +58,19 @@ int Q_strcasecmp(const char *s1, const char *s2)
 
 void Com_LPrintf(print_type_t type, const char *format, ...) { }
 void *Z_Mallocz(size_t size) { return calloc(1, size); }
+void Z_Free(void *ptr) { free(ptr); }
+q2_fsr3_context_t *Q2_FSR3_Create(VkPhysicalDevice physical_device,
+    VkDevice device, VkInstance instance,
+    PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+    PFN_vkGetDeviceProcAddr get_device_proc_addr,
+    uint32_t render_width, uint32_t render_height,
+    uint32_t display_width, uint32_t display_height,
+    VkFormat display_format, bool frame_generation,
+    const q2_fsr3_capabilities_t *capabilities)
+{
+    return NULL;
+}
+void Q2_FSR3_Destroy(q2_fsr3_context_t *context) { }
 bool SCR_ParseColor(const char *text, color_t *color) { return false; }
 void Cbuf_AddText(cmdbuf_t *buf, const char *text) { }
 void Cvar_SetByVar(cvar_t *var, const char *value, from_t from) { abort(); }
@@ -93,6 +114,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL create_framebuffer(VkDevice device,
     VkFramebuffer *out)
 {
     framebuffer_calls++;
+    if (fail_framebuffer_ordinal > 0 &&
+        (int)framebuffer_calls == fail_framebuffer_ordinal)
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     assert(info->width == vk.swapchain_extent.width);
     assert(info->height == vk.swapchain_extent.height);
     if (vk.separate_presentation) {
@@ -107,6 +131,13 @@ static VKAPI_ATTR VkResult VKAPI_CALL create_framebuffer(VkDevice device,
     }
     *out = HANDLE(VkFramebuffer, 20 + framebuffer_calls);
     return VK_SUCCESS;
+}
+
+static VKAPI_ATTR void VKAPI_CALL destroy_framebuffer(VkDevice device,
+    VkFramebuffer framebuffer, const VkAllocationCallbacks *allocator)
+{
+    assert(framebuffer != VK_NULL_HANDLE);
+    destroy_framebuffer_calls++;
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL create_shader(VkDevice device,
@@ -300,6 +331,90 @@ static void check_configuration(uint32_t width, uint32_t height, bool bloom,
 }
 
 static unsigned barrier_calls, barrier_images;
+
+static unsigned transaction_wait_idle_calls;
+
+static VKAPI_ATTR VkResult VKAPI_CALL transaction_wait_idle(VkDevice device)
+{
+    transaction_wait_idle_calls++;
+    return VK_SUCCESS;
+}
+
+static void check_fsr_transaction_guards(void)
+{
+    VkFramebuffer display_framebuffer = HANDLE(VkFramebuffer, 700);
+
+    memset(&vk, 0, sizeof(vk));
+    vk.device = HANDLE(VkDevice, 701);
+    vk.separate_presentation = true;
+    vk.swapchain_extent = (VkExtent2D) { 1280, 720 };
+    vk.render_extent = (VkExtent2D) { 640, 360 };
+    vk.framebuffers = &display_framebuffer;
+    vk.fsr_dynamic.current_scale = 1.75f;
+    vk.fsr_output_valid = true;
+    vk.fsr_reset = false;
+    vk.DeviceWaitIdle = transaction_wait_idle;
+
+    /* A transaction is never allowed to mutate state while a frame or render
+     * pass still owns any of the old attachments. */
+    vk.frame_active = true;
+    assert(!vk_rebuild_internal_render_targets(1.5f));
+    vk.frame_active = false;
+    vk.render_pass_active = true;
+    assert(!vk_rebuild_internal_render_targets(1.5f));
+    vk.render_pass_active = false;
+
+    /* Device-loss and malformed recommendations are rejected before waiting
+     * or moving the active bundle. */
+    vk.device_lost = true;
+    assert(!vk_rebuild_internal_render_targets(1.5f));
+    vk.device_lost = false;
+    assert(!vk_rebuild_internal_render_targets(NAN));
+    assert(!vk_rebuild_internal_render_targets(0.5f));
+    assert(transaction_wait_idle_calls == 0);
+
+    /* A missing idle primitive is also a safe no-op; the caller can retry on
+     * the next frame after device setup completes. */
+    vk.DeviceWaitIdle = NULL;
+    assert(!vk_rebuild_internal_render_targets(1.5f));
+    assert(vk.render_extent.width == 640 && vk.render_extent.height == 360);
+    assert(vk.framebuffers == &display_framebuffer);
+    assert(vk.fsr_dynamic.current_scale == 1.75f);
+    assert(vk.fsr_output_valid && !vk.fsr_reset);
+    puts("FSR transaction guards: passed (frame ownership, device loss, input validation)");
+}
+
+static void check_fsr_framebuffer_failure_cleanup(void)
+{
+    VkImageView swapchain_views[] = {
+        HANDLE(VkImageView, 710),
+        HANDLE(VkImageView, 711),
+        HANDLE(VkImageView, 712),
+    };
+
+    memset(&vk, 0, sizeof(vk));
+    vk.device = HANDLE(VkDevice, 713);
+    vk.swapchain_extent = (VkExtent2D) { 1280, 720 };
+    vk.render_extent = vk.swapchain_extent;
+    vk.swapchain_format = VK_FORMAT_B8G8R8A8_UNORM;
+    vk.depth_format = VK_FORMAT_D32_SFLOAT;
+    vk.sample_count = VK_SAMPLE_COUNT_1_BIT;
+    vk.separate_presentation = true;
+    vk.swapchain_image_count = 3;
+    vk.swapchain_views = swapchain_views;
+    vk.CreateFramebuffer = create_framebuffer;
+    vk.DestroyFramebuffer = destroy_framebuffer;
+    fail_framebuffer_ordinal = 2;
+    destroy_framebuffer_calls = 0;
+
+    assert(!vk_create_framebuffers());
+    assert(vk.framebuffers == NULL);
+    assert(destroy_framebuffer_calls == 1);
+
+    fail_framebuffer_ordinal = 0;
+    puts("FSR framebuffer cleanup: passed (partial display build rollback)");
+}
+
 static VKAPI_ATTR void VKAPI_CALL record_barriers(VkCommandBuffer cmd,
     VkPipelineStageFlags src, VkPipelineStageFlags dst, VkDependencyFlags flags,
     uint32_t memory_count, const VkMemoryBarrier *memory,
@@ -645,6 +760,10 @@ int main(void)
     check_fsr_temporal_contracts();
     check_fsr_frame_generation_contracts();
     check_fsr_lifecycle_contracts();
+    check_fsr_transaction_guards();
+    framebuffer_calls = 0;
+    check_fsr_framebuffer_failure_cleanup();
+    framebuffer_calls = 0;
     paused_cvar.integer = 0;
     assert(!vk_fsr_scene_paused());
     paused_cvar.integer = 1;
