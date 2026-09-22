@@ -96,6 +96,9 @@ Q2_VK_PresentationAdapterProviderCapabilities(
             adapter ? &adapter->ops.topology : NULL),
         .sync_contract = adapter ? adapter->ops.topology.sync_contract :
             (q2_vk_presentation_sync_contract_t){0},
+        .native_sync_facts_known = adapter &&
+            adapter->ops.topology.native_sync_facts_known,
+        .native_sync_facts = adapter ? adapter->ops.topology.native_sync_facts : 0,
         .provider_synchronization_ready =
             q2_vk_presentation_provider_sync_ready(adapter),
         .diagnostic = NULL,
@@ -118,7 +121,9 @@ Q2_VK_PresentationAdapterProviderCapabilities(
     } else if (!capabilities.provider_synchronization_ready) {
         const q2_vk_presentation_sync_contract_t *contract =
             &capabilities.sync_contract;
-        if (contract->acquire_signal ==
+        if (!capabilities.native_sync_facts_known) {
+            capabilities.diagnostic = "native synchronization facts are unknown";
+        } else if (contract->acquire_signal ==
                 Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE &&
             contract->render_finished_signal ==
                 Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE &&

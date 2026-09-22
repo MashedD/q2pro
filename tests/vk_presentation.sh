@@ -235,6 +235,14 @@ require_contract 'Q2_VK_PRESENTATION_SYNC_TIMELINE_SEMAPHORE' \
     "$repo_dir/src/refresh/vk_presentation_adapter.h"
 require_contract 'q2_vk_presentation_sync_contract_t' \
     "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'Q2_VK_PRESENTATION_SYNC_IMAGE_FENCE_ALIASES_FRAME' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'native_sync_facts_known' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'native_sync_facts' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'native synchronization facts are unknown' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.c"
 require_contract 'q2_vk_presentation_provider_sync_ready' \
     "$repo_dir/src/refresh/vk_presentation_adapter.c"
 require_contract 'Q2_VK_PRESENTATION_FRAME_INTERPOLATION' \
@@ -269,6 +277,15 @@ require_contract 'VkSubmitInfo submit_info' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk.QueueSubmit' \
     "$repo_dir/src/refresh/vk_backend.c"
+if $fixed_search_command 'VkSubmitInfo2' \
+       "$repo_dir/src/refresh/vk_backend.c" ||
+   $fixed_search_command 'VK_KHR_synchronization2' \
+       "$repo_dir/src/refresh/vk_backend.c" ||
+   $fixed_search_command 'VK_SEMAPHORE_TYPE_TIMELINE' \
+       "$repo_dir/src/refresh/vk_backend.c"; then
+    echo "FSR3 contract: unsupported synchronization2/timeline path is present" >&2
+    exit 2
+fi
 require_contract 'graphics_queue_index' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'present_queue_index' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'queues_same_family' "$repo_dir/src/refresh/vk_backend.c"

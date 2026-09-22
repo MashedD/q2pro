@@ -1344,6 +1344,12 @@ static bool vk_presentation_adapter_ensure(void)
                 .timeline_semaphore_supported = false,
                 .synchronization2_supported = false,
             },
+            .native_sync_facts_known = true,
+            .native_sync_facts =
+                Q2_VK_PRESENTATION_SYNC_ACQUIRE_BINARY |
+                Q2_VK_PRESENTATION_SYNC_RENDER_FINISHED_BINARY |
+                Q2_VK_PRESENTATION_SYNC_FRAME_FENCE |
+                Q2_VK_PRESENTATION_SYNC_IMAGE_FENCE_ALIASES_FRAME,
             /* Native q2pro presentation still owns binary semaphore/fence
              * synchronization; no provider-owned submission contract exists. */
             .provider_synchronization_ready = false,
@@ -2234,7 +2240,8 @@ static void vk_log_fence_wait_failure(const char *what, VkResult result)
     bool image_fence = vk.image_fences &&
         vk.current_image < vk.swapchain_image_count &&
         vk.image_fences[vk.current_image];
-    Com_EPrintf("%s failed: Vulkan error %d frame_slot=%u current_image=%u "
+    Com_EPrintf("%s failed: Vulkan error %d sync_model=binary_legacy "
+                "frame_slot=%u current_image=%u "
                 "frame_fence=%s image_fence=%s image_acquired=%s "
                 "last_submit_result=%d last_submit_frame=%llu\n",
                 what, result, vk.frame_index, vk.current_image,

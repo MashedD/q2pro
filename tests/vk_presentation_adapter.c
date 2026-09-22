@@ -93,6 +93,12 @@ static q2_vk_presentation_adapter_t *make_adapter(
                 .timeline_semaphore_supported = false,
                 .synchronization2_supported = false,
             },
+            .native_sync_facts_known = true,
+            .native_sync_facts =
+                Q2_VK_PRESENTATION_SYNC_ACQUIRE_BINARY |
+                Q2_VK_PRESENTATION_SYNC_RENDER_FINISHED_BINARY |
+                Q2_VK_PRESENTATION_SYNC_FRAME_FENCE |
+                Q2_VK_PRESENTATION_SYNC_IMAGE_FENCE_ALIASES_FRAME,
             .provider_synchronization_ready = true,
         },
         .acquire = mock_acquire,
@@ -157,6 +163,19 @@ static void check_ordering_and_fallback(void)
            Q2_VK_PRESENTATION_SYNC_FENCE);
     assert(!capabilities.sync_contract.timeline_semaphore_supported);
     assert(!capabilities.sync_contract.synchronization2_supported);
+    assert(capabilities.native_sync_facts_known);
+    assert((capabilities.native_sync_facts &
+            (Q2_VK_PRESENTATION_SYNC_ACQUIRE_BINARY |
+             Q2_VK_PRESENTATION_SYNC_RENDER_FINISHED_BINARY |
+             Q2_VK_PRESENTATION_SYNC_FRAME_FENCE |
+             Q2_VK_PRESENTATION_SYNC_IMAGE_FENCE_ALIASES_FRAME)) ==
+           (Q2_VK_PRESENTATION_SYNC_ACQUIRE_BINARY |
+            Q2_VK_PRESENTATION_SYNC_RENDER_FINISHED_BINARY |
+            Q2_VK_PRESENTATION_SYNC_FRAME_FENCE |
+            Q2_VK_PRESENTATION_SYNC_IMAGE_FENCE_ALIASES_FRAME));
+    assert(!(capabilities.native_sync_facts &
+              (Q2_VK_PRESENTATION_SYNC_TIMELINE |
+               Q2_VK_PRESENTATION_SYNC_SYNCHRONIZATION2)));
     assert(capabilities.provider_synchronization_ready);
     assert(capabilities.diagnostic[0] != '\0');
     assert(Q2_VK_PresentationAdapterProviderReady(adapter) ==
@@ -252,6 +271,12 @@ static void check_provider_status_is_not_implied_by_native_adapter(void)
                 .frame_completion = Q2_VK_PRESENTATION_SYNC_FENCE,
                 .image_reuse = Q2_VK_PRESENTATION_SYNC_FENCE,
             },
+            .native_sync_facts_known = true,
+            .native_sync_facts =
+                Q2_VK_PRESENTATION_SYNC_ACQUIRE_BINARY |
+                Q2_VK_PRESENTATION_SYNC_RENDER_FINISHED_BINARY |
+                Q2_VK_PRESENTATION_SYNC_FRAME_FENCE |
+                Q2_VK_PRESENTATION_SYNC_IMAGE_FENCE_ALIASES_FRAME,
             .provider_synchronization_ready = true,
         },
         .acquire = mock_acquire,
@@ -282,6 +307,9 @@ static void check_provider_status_is_not_implied_by_native_adapter(void)
            Q2_VK_PRESENTATION_SYNC_FENCE);
     assert(capabilities.sync_contract.image_reuse ==
            Q2_VK_PRESENTATION_SYNC_FENCE);
+    assert(capabilities.native_sync_facts_known);
+    assert(capabilities.native_sync_facts &
+           Q2_VK_PRESENTATION_SYNC_IMAGE_FENCE_ALIASES_FRAME);
     assert(capabilities.diagnostic[0] != '\0');
     assert(Q2_VK_PresentationAdapterProviderStatus(adapter) ==
            (Q2_VK_PresentationAdapterProviderBuildCompiled() ?
@@ -322,7 +350,7 @@ static void check_topology_readiness_diagnostics(void)
            Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SINGLE_QUEUE);
     assert(!capabilities.provider_synchronization_ready);
     assert(strcmp(capabilities.diagnostic,
-                  "provider synchronization readiness is not declared") == 0);
+                  "native synchronization facts are unknown") == 0);
     assert(!Q2_VK_PresentationAdapterProviderReady(adapter));
     Q2_VK_PresentationAdapterDestroy(adapter,
                                      Q2_VK_PRESENTATION_SHUTDOWN_NORMAL);
