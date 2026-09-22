@@ -1699,8 +1699,10 @@ extern "C" bool Q2_FSR3_ConfigureProvider(
     const FfxErrorCode error = ffxFsr3ConfigureFrameGeneration(
         &context->full_context, &config);
     context->last_error = error;
-    if (error != FFX_OK)
-        context->frame_generation_failed = true;
+    /* Configuration failures are recoverable state changes (for example,
+     * pausing the provider or switching queues). Keep the fatal latch for
+     * failed prepare/dispatch/callback work only, so a later configuration
+     * attempt can recover without recreating the FSR3 context. */
     return error == FFX_OK;
 }
 
