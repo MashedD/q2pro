@@ -223,6 +223,12 @@ require_contract 'provider_swapchain_owned' \
     "$repo_dir/src/refresh/vk_presentation_adapter.h"
 require_contract 'provider-owned presentation swapchain is not installed' \
     "$repo_dir/src/refresh/vk_presentation_adapter.c"
+require_contract 'q2_vk_presentation_provider_queue_contract_t' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'provider_queue_contract_ready' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.c"
+require_contract 'provider queue reservation is incomplete' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.c"
 require_contract 'Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_UNKNOWN' \
     "$repo_dir/src/refresh/vk_presentation_adapter.h"
 require_contract 'Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SHARED_FAMILY' \
@@ -270,6 +276,10 @@ require_contract 'queue_family_facts_known = true' \
 require_contract 'provider_synchronization_ready = false' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'provider_swapchain_owned = false' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'present_queue_reserved = false' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'image_acquire_queue_reserved = false' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'acquire_signal = Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE' \
     "$repo_dir/src/refresh/vk_backend.c"

@@ -67,6 +67,14 @@ static bool q2_vk_presentation_provider_sync_ready(
         adapter->ops.topology.provider_synchronization_ready;
 }
 
+static bool q2_vk_presentation_provider_queue_contract_ready(
+    const q2_vk_presentation_adapter_t *adapter)
+{
+    return adapter &&
+        adapter->ops.topology.provider_queue_contract.present_queue_reserved &&
+        adapter->ops.topology.provider_queue_contract.image_acquire_queue_reserved;
+}
+
 bool Q2_VK_PresentationAdapterProviderBuildCompiled(void)
 {
     return Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED != 0;
@@ -94,10 +102,15 @@ Q2_VK_PresentationAdapterProviderCapabilities(
             adapter->ops.recreate,
         .provider_swapchain_owned = adapter &&
             adapter->ops.provider_swapchain_owned,
+        .provider_queue_contract_ready =
+            q2_vk_presentation_provider_queue_contract_ready(adapter),
         .queue_topology = q2_vk_presentation_queue_topology(
             adapter ? &adapter->ops.topology : NULL),
         .sync_contract = adapter ? adapter->ops.topology.sync_contract :
             (q2_vk_presentation_sync_contract_t){0},
+        .provider_queue_contract = adapter ?
+            adapter->ops.topology.provider_queue_contract :
+            (q2_vk_presentation_provider_queue_contract_t){0},
         .native_sync_facts_known = adapter &&
             adapter->ops.topology.native_sync_facts_known,
         .native_sync_facts = adapter ? adapter->ops.topology.native_sync_facts : 0,
@@ -119,6 +132,9 @@ Q2_VK_PresentationAdapterProviderCapabilities(
     } else if (!capabilities.provider_swapchain_owned) {
         capabilities.diagnostic =
             "provider-owned presentation swapchain is not installed";
+    } else if (!capabilities.provider_queue_contract_ready) {
+        capabilities.diagnostic =
+            "provider queue reservation is incomplete";
     } else if (capabilities.queue_topology ==
                Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_UNKNOWN) {
         capabilities.diagnostic =
@@ -157,6 +173,7 @@ bool Q2_VK_PresentationAdapterProviderReady(
         Q2_VK_PresentationAdapterProviderCapabilities(adapter);
     return capabilities.prerequisites_compiled && capabilities.runtime_ready &&
         capabilities.lifecycle_capable && capabilities.provider_swapchain_owned &&
+        capabilities.provider_queue_contract_ready &&
         capabilities.provider_synchronization_ready;
 }
 

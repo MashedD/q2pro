@@ -94,6 +94,11 @@ static q2_vk_presentation_adapter_t *make_adapter(
                 .timeline_semaphore_supported = false,
                 .synchronization2_supported = false,
             },
+            .provider_queue_contract = {
+                .present_queue_reserved = true,
+                .image_acquire_queue_reserved = true,
+                .async_compute_available = false,
+            },
             .native_sync_facts_known = true,
             .native_sync_facts =
                 Q2_VK_PRESENTATION_SYNC_ACQUIRE_BINARY |
@@ -127,6 +132,11 @@ static q2_vk_presentation_adapter_t *make_capability_adapter(
             .graphics_queue_index = graphics_queue_index,
             .present_queue_family = present_queue_family,
             .present_queue_index = present_queue_index,
+            .provider_queue_contract = {
+                .present_queue_reserved = true,
+                .image_acquire_queue_reserved = true,
+                .async_compute_available = false,
+            },
             .provider_synchronization_ready = synchronization_ready,
         },
         .acquire = mock_acquire,
@@ -154,6 +164,9 @@ static void check_ordering_and_fallback(void)
     assert(capabilities.runtime_ready);
     assert(capabilities.lifecycle_capable);
     assert(capabilities.provider_swapchain_owned);
+    assert(capabilities.provider_queue_contract_ready);
+    assert(capabilities.provider_queue_contract.present_queue_reserved);
+    assert(capabilities.provider_queue_contract.image_acquire_queue_reserved);
     assert(capabilities.queue_topology ==
            Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SEPARATE_PRESENT_QUEUE);
     assert(capabilities.sync_contract.acquire_signal ==
@@ -239,6 +252,7 @@ static void check_frame_generation_gate_and_device_loss(void)
     assert(!capabilities.runtime_ready);
     assert(capabilities.lifecycle_capable);
     assert(capabilities.provider_swapchain_owned);
+    assert(capabilities.provider_queue_contract_ready);
     assert(capabilities.queue_topology ==
            Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SEPARATE_PRESENT_QUEUE);
     assert(capabilities.diagnostic[0] != '\0');
@@ -269,6 +283,10 @@ static void check_provider_status_is_not_implied_by_native_adapter(void)
             .queue_family_facts_known = true,
             .graphics_queue_family = 0,
             .present_queue_family = 0,
+            .provider_queue_contract = {
+                .present_queue_reserved = false,
+                .image_acquire_queue_reserved = false,
+            },
             .sync_contract = {
                 .acquire_signal = Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE,
                 .render_finished_signal =
@@ -301,6 +319,7 @@ static void check_provider_status_is_not_implied_by_native_adapter(void)
            Q2_VK_PresentationAdapterProviderBuildCompiled());
     assert(!capabilities.runtime_ready);
     assert(!capabilities.provider_swapchain_owned);
+    assert(!capabilities.provider_queue_contract_ready);
     assert(capabilities.lifecycle_capable);
     assert(capabilities.queue_topology ==
            Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SINGLE_QUEUE);
@@ -384,6 +403,10 @@ static void check_lifecycle_capability_diagnostic(void)
             .queue_family_facts_known = true,
             .graphics_queue_family = 0,
             .present_queue_family = 1,
+            .provider_queue_contract = {
+                .present_queue_reserved = true,
+                .image_acquire_queue_reserved = true,
+            },
             .provider_synchronization_ready = false,
         },
         .acquire = mock_acquire,

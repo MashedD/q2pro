@@ -50,6 +50,15 @@ typedef struct {
     bool synchronization2_supported;
 } q2_vk_presentation_sync_contract_t;
 
+typedef struct {
+    /* The provider must own these roles rather than racing q2pro's native
+     * presentation path. Async compute is optional, but is reported so the
+     * provider can make an explicit choice. */
+    bool present_queue_reserved;
+    bool image_acquire_queue_reserved;
+    bool async_compute_available;
+} q2_vk_presentation_provider_queue_contract_t;
+
 typedef enum {
     Q2_VK_PRESENTATION_SYNC_ACQUIRE_BINARY = 1u << 0,
     Q2_VK_PRESENTATION_SYNC_RENDER_FINISHED_BINARY = 1u << 1,
@@ -69,6 +78,7 @@ typedef struct {
     uint32_t present_queue_family;
     uint32_t present_queue_index;
     q2_vk_presentation_sync_contract_t sync_contract;
+    q2_vk_presentation_provider_queue_contract_t provider_queue_contract;
     bool native_sync_facts_known;
     uint32_t native_sync_facts;
     bool provider_synchronization_ready;
@@ -79,8 +89,10 @@ typedef struct {
     bool runtime_ready;
     bool lifecycle_capable;
     bool provider_swapchain_owned;
+    bool provider_queue_contract_ready;
     q2_vk_presentation_queue_topology_t queue_topology;
     q2_vk_presentation_sync_contract_t sync_contract;
+    q2_vk_presentation_provider_queue_contract_t provider_queue_contract;
     bool native_sync_facts_known;
     uint32_t native_sync_facts;
     bool provider_synchronization_ready;

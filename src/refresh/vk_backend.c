@@ -1345,6 +1345,11 @@ static bool vk_presentation_adapter_ensure(void)
                 .timeline_semaphore_supported = false,
                 .synchronization2_supported = false,
             },
+            .provider_queue_contract = {
+                .present_queue_reserved = false,
+                .image_acquire_queue_reserved = false,
+                .async_compute_available = false,
+            },
             .native_sync_facts_known = true,
             .native_sync_facts =
                 Q2_VK_PRESENTATION_SYNC_ACQUIRE_BINARY |
