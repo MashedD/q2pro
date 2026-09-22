@@ -131,7 +131,7 @@ VK FSR3 result: frame=12 result=spatial-fallback
         parsed = fsr_benchmark.parse_benchmark_log(
             'VK FSR3 framegen: frame=40 requested=yes prepared=yes '
             'computed=yes presented=yes additional_presented=no fallback=no '
-            'disabled=no fallback_reason=none requested_total=4 '
+            'provider=yes async_workloads=yes disabled=no fallback_reason=none requested_total=4 '
             'prepared_total=3 computed_total=2 presented_total=2 '
             'additional_presented_total=0 fallback_total=1 disabled_total=1\n'
             'VK FSR3 framegen: frame=41 requested=yes prepared=no '
@@ -141,6 +141,8 @@ VK FSR3 result: frame=12 result=spatial-fallback
             'additional_presented_total=0 fallback_total=2 disabled_total=2\n')
 
         self.assertIs(parsed['frame_generation'][0]['requested'], True)
+        self.assertIs(parsed['frame_generation'][0]['provider'], True)
+        self.assertIs(parsed['frame_generation'][0]['async_workloads'], True)
         self.assertEqual(parsed['frame_generation'][1]['frame_id'], 41)
         summary = fsr_benchmark.summarize_frame_generation(
             parsed['frame_generation'])

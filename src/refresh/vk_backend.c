@@ -20960,6 +20960,7 @@ static void vk_log_fsr_frame_generation_telemetry(void)
 {
     Com_Printf("VK FSR3 framegen: frame=%llu requested=%s prepared=%s "
                "computed=%s presented=%s additional_presented=%s "
+               "provider=%s async_workloads=%s "
                "additional_present_interval_us=%llu fallback=%s "
                "disabled=%s fallback_reason=%s "
                "requested_total=%llu prepared_total=%llu "
@@ -20972,6 +20973,10 @@ static void vk_log_fsr_frame_generation_telemetry(void)
                vk.fsr_framegen_computed ? "yes" : "no",
                vk.fsr_framegen_presented ? "yes" : "no",
                vk.fsr_framegen_additional_presented ? "yes" : "no",
+               vk.fsr3_provider_active ? "yes" : "no",
+               (vk.fsr3_provider_active &&
+                vk.fsr3_provider_frame_generation_enabled &&
+                vk_fsr_frame_generation_async_enabled()) ? "yes" : "no",
                (unsigned long long)vk.fsr_framegen_additional_present_interval_us,
                vk.fsr_framegen_fallback ? "yes" : "no",
                vk.fsr_framegen_disabled ? "yes" : "no",
