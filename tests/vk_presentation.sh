@@ -203,6 +203,8 @@ require_contract 'FSR3 compute-only frame generation' \
 require_contract 'r_fsr_frame_generation_compute_only' \
     "$repo_dir/assets/baseq2/q2pro.menu"
 require_contract 'missing Vulkan device function %s' "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract 'FFX_FSR3_ENABLE_ASYNC_WORKLOAD_SUPPORT' \
+    "$repo_dir/src/refresh/vk_fsr3.cpp"
 require_contract 'profile_supported' "$repo_dir/src/refresh/vk_fsr3.cpp"
 require_contract 'max_frame_time_ms' "$repo_dir/src/refresh/vk_fsr3.cpp"
 require_contract 'full_context_initialized' "$repo_dir/src/refresh/vk_fsr3.cpp"

@@ -823,6 +823,11 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
 #if USE_DEBUG
         full_description.flags |= FFX_FSR3_ENABLE_DEBUG_CHECKING;
 #endif
+        /* The provider may switch between graphics and async compute at
+         * runtime. Create the full context with async support even when the
+         * initial provider configuration disables it; otherwise a later
+         * allowAsyncWorkloads=true configuration violates the SDK contract. */
+        full_description.flags |= FFX_FSR3_ENABLE_ASYNC_WORKLOAD_SUPPORT;
         full_description.maxRenderSize = { render_width, render_height };
         full_description.maxUpscaleSize = { display_width, display_height };
         full_description.displaySize = { display_width, display_height };
