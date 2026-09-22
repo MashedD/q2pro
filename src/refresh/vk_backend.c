@@ -1329,6 +1329,7 @@ static bool vk_presentation_adapter_ensure(void)
     const q2_vk_presentation_ops_t ops = {
         .userdata = &vk,
         .frame_generation_ready = false,
+        .provider_swapchain_owned = false,
         .topology = {
             .queue_family_facts_known = true,
             .graphics_queue_family = vk.queues.graphics_family,

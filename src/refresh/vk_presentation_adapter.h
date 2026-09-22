@@ -78,6 +78,7 @@ typedef struct {
     bool prerequisites_compiled;
     bool runtime_ready;
     bool lifecycle_capable;
+    bool provider_swapchain_owned;
     q2_vk_presentation_queue_topology_t queue_topology;
     q2_vk_presentation_sync_contract_t sync_contract;
     bool native_sync_facts_known;
@@ -112,6 +113,7 @@ typedef void (*q2_vk_presentation_shutdown_fn)(
 typedef struct {
     void *userdata;
     bool frame_generation_ready;
+    bool provider_swapchain_owned;
     q2_vk_presentation_topology_t topology;
     q2_vk_presentation_acquire_fn acquire;
     q2_vk_presentation_present_fn present;

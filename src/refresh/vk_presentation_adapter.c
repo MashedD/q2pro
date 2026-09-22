@@ -92,6 +92,8 @@ Q2_VK_PresentationAdapterProviderCapabilities(
         .runtime_ready = Q2_VK_PresentationAdapterFrameGenerationEnabled(adapter),
         .lifecycle_capable = adapter && adapter->ops.wait_idle &&
             adapter->ops.recreate,
+        .provider_swapchain_owned = adapter &&
+            adapter->ops.provider_swapchain_owned,
         .queue_topology = q2_vk_presentation_queue_topology(
             adapter ? &adapter->ops.topology : NULL),
         .sync_contract = adapter ? adapter->ops.topology.sync_contract :
@@ -114,6 +116,9 @@ Q2_VK_PresentationAdapterProviderCapabilities(
     } else if (!capabilities.lifecycle_capable) {
         capabilities.diagnostic =
             "presentation lifecycle callbacks are incomplete";
+    } else if (!capabilities.provider_swapchain_owned) {
+        capabilities.diagnostic =
+            "provider-owned presentation swapchain is not installed";
     } else if (capabilities.queue_topology ==
                Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_UNKNOWN) {
         capabilities.diagnostic =
@@ -151,7 +156,8 @@ bool Q2_VK_PresentationAdapterProviderReady(
     const q2_vk_presentation_provider_capabilities_t capabilities =
         Q2_VK_PresentationAdapterProviderCapabilities(adapter);
     return capabilities.prerequisites_compiled && capabilities.runtime_ready &&
-        capabilities.lifecycle_capable && capabilities.provider_synchronization_ready;
+        capabilities.lifecycle_capable && capabilities.provider_swapchain_owned &&
+        capabilities.provider_synchronization_ready;
 }
 
 q2_vk_presentation_adapter_t *Q2_VK_PresentationAdapterCreate(

@@ -78,6 +78,7 @@ static q2_vk_presentation_adapter_t *make_adapter(
     const q2_vk_presentation_ops_t ops = {
         .userdata = state,
         .frame_generation_ready = frame_generation_ready,
+        .provider_swapchain_owned = true,
         .topology = {
             .queue_family_facts_known = true,
             .graphics_queue_family = 0,
@@ -119,6 +120,7 @@ static q2_vk_presentation_adapter_t *make_capability_adapter(
     const q2_vk_presentation_ops_t ops = {
         .userdata = state,
         .frame_generation_ready = true,
+        .provider_swapchain_owned = true,
         .topology = {
             .queue_family_facts_known = topology_known,
             .graphics_queue_family = graphics_queue_family,
@@ -151,6 +153,7 @@ static void check_ordering_and_fallback(void)
            Q2_VK_PresentationAdapterProviderBuildCompiled());
     assert(capabilities.runtime_ready);
     assert(capabilities.lifecycle_capable);
+    assert(capabilities.provider_swapchain_owned);
     assert(capabilities.queue_topology ==
            Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SEPARATE_PRESENT_QUEUE);
     assert(capabilities.sync_contract.acquire_signal ==
@@ -235,6 +238,7 @@ static void check_frame_generation_gate_and_device_loss(void)
            Q2_VK_PresentationAdapterProviderBuildCompiled());
     assert(!capabilities.runtime_ready);
     assert(capabilities.lifecycle_capable);
+    assert(capabilities.provider_swapchain_owned);
     assert(capabilities.queue_topology ==
            Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SEPARATE_PRESENT_QUEUE);
     assert(capabilities.diagnostic[0] != '\0');
@@ -260,6 +264,7 @@ static void check_provider_status_is_not_implied_by_native_adapter(void)
     const q2_vk_presentation_ops_t ops = {
         .userdata = &state,
         .frame_generation_ready = true,
+        .provider_swapchain_owned = false,
         .topology = {
             .queue_family_facts_known = true,
             .graphics_queue_family = 0,
@@ -295,6 +300,7 @@ static void check_provider_status_is_not_implied_by_native_adapter(void)
     assert(capabilities.prerequisites_compiled ==
            Q2_VK_PresentationAdapterProviderBuildCompiled());
     assert(!capabilities.runtime_ready);
+    assert(!capabilities.provider_swapchain_owned);
     assert(capabilities.lifecycle_capable);
     assert(capabilities.queue_topology ==
            Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SINGLE_QUEUE);
@@ -373,6 +379,7 @@ static void check_lifecycle_capability_diagnostic(void)
     const q2_vk_presentation_ops_t ops = {
         .userdata = &state,
         .frame_generation_ready = true,
+        .provider_swapchain_owned = true,
         .topology = {
             .queue_family_facts_known = true,
             .graphics_queue_family = 0,
