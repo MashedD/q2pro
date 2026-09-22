@@ -1555,6 +1555,7 @@ static cvar_t *r_fsr_motion;
 static cvar_t *r_fsr_mip_bias;
 static cvar_t *r_fsr_frame_generation;
 static cvar_t *r_fsr_frame_generation_compute_only;
+static cvar_t *r_fsr_frame_generation_async;
 static cvar_t *r_fsr_dynamic;
 static cvar_t *r_fsr_dynamic_target_ms;
 static cvar_t *r_fsr_dynamic_min_scale;
@@ -1818,6 +1819,13 @@ static bool vk_fsr_frame_generation_requested(void)
 {
     return vk_fsr_frame_generation_effective() &&
         !vk_fsr_motion_fast_requested();
+}
+
+static bool vk_fsr_frame_generation_async_enabled(void)
+{
+    return vk.provider_async_compute_available &&
+        (!r_fsr_frame_generation_async ||
+         r_fsr_frame_generation_async->integer != 0);
 }
 
 static bool vk_fsr_frame_generation_user_requested(void)
@@ -10799,7 +10807,7 @@ static bool vk_activate_fsr3_provider(
     vk.fsr3_provider_functions = functions;
     vk.fsr3_provider_active = true;
     if (!Q2_FSR3_ConfigureProvider(vk.fsr3, provider, true,
-                                   vk.provider_async_compute_available,
+                                   vk_fsr_frame_generation_async_enabled(),
                                    Q2_FSR3_GetCurrentFrameId(vk.fsr3))) {
         Com_WPrintf("Vulkan FSR3 provider frame-generation configuration failed; using native presentation\n");
         Q2_FSR3_DestroyProvider(vk.fsr3, provider, false);
@@ -10826,7 +10834,7 @@ static bool vk_activate_fsr3_provider(
                vk.provider_present_queue_index,
                vk.provider_image_acquire_queue_family,
                vk.provider_image_acquire_queue_index,
-               vk.provider_async_compute_available ? "reserved" : "disabled");
+               vk_fsr_frame_generation_async_enabled() ? "enabled" : "disabled");
     return true;
 }
 
@@ -10857,11 +10865,13 @@ static bool vk_configure_fsr3_provider_frame_generation(bool enabled)
 
     if (!Q2_FSR3_ConfigureProvider(
             vk.fsr3, vk.fsr3_provider, enabled,
-            enabled && vk.provider_async_compute_available,
+            enabled && vk_fsr_frame_generation_async_enabled(),
             Q2_FSR3_GetCurrentFrameId(vk.fsr3)))
         return false;
 
     vk.fsr3_provider_frame_generation_enabled = enabled;
+    if (r_fsr_frame_generation_async)
+        r_fsr_frame_generation_async->modified = false;
     return true;
 }
 
@@ -21082,6 +21092,8 @@ bool VKR_Init(bool total)
     r_fsr_frame_generation = Cvar_Get("r_fsr_frame_generation", "0", CVAR_ARCHIVE);
     r_fsr_frame_generation_compute_only = Cvar_Get(
         "r_fsr_frame_generation_compute_only", "0", CVAR_ARCHIVE);
+    r_fsr_frame_generation_async = Cvar_Get(
+        "r_fsr_frame_generation_async", "1", CVAR_ARCHIVE);
     r_fsr_dynamic = Cvar_Get("r_fsr_dynamic", "0", CVAR_ARCHIVE);
     r_fsr_dynamic_target_ms = Cvar_Get("r_fsr_dynamic_target_ms", "16.67", CVAR_ARCHIVE);
     r_fsr_dynamic_min_scale = Cvar_Get("r_fsr_dynamic_min_scale", "1.0", CVAR_ARCHIVE);
@@ -23536,6 +23548,11 @@ void VKR_BeginFrame(void)
         vk.fsr_reset = true;
         vk.fsr_reset_reason = VK_FSR_RESET_CONFIG;
     }
+
+    /* Async workload selection is consumed by the provider configuration on
+     * the next active frame. It does not require a swapchain rebuild. */
+    if (r_fsr_frame_generation_async)
+        r_fsr_frame_generation_async->modified = false;
 
     if ((r_fsr && r_fsr->modified) ||
         (r_fsr_auto && r_fsr_auto->modified) ||

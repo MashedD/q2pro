@@ -122,6 +122,12 @@ require_contract 'frame-generation preflight failed; attempting FSR upscaling fa
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'r_fsr_frame_generation_compute_only' \
     "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'r_fsr_frame_generation_async' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'r_fsr_frame_generation_async", "1", CVAR_ARCHIVE' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_fsr_frame_generation_async_enabled' \
+    "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'r_fsr_frame_generation_compute_only", "0", CVAR_ARCHIVE' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_fsr_frame_generation_presentation_adapter_available' \
