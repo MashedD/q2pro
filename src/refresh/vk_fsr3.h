@@ -120,7 +120,7 @@ q2_fsr3_provider_t *Q2_FSR3_CreateProvider(
 bool Q2_FSR3_ConfigureProvider(
     q2_fsr3_context_t *context,
     q2_fsr3_provider_t *provider,
-    bool enabled, uint64_t frame_id);
+    bool enabled, bool allow_async_workloads, uint64_t frame_id);
 bool Q2_FSR3_WaitProvider(q2_fsr3_context_t *context,
                           q2_fsr3_provider_t *provider);
 void Q2_FSR3_DestroyProvider(q2_fsr3_context_t *context,

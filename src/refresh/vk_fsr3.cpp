@@ -1672,7 +1672,7 @@ extern "C" q2_fsr3_provider_t *Q2_FSR3_CreateProvider(
 
 extern "C" bool Q2_FSR3_ConfigureProvider(
     q2_fsr3_context_t *context, q2_fsr3_provider_t *provider,
-    bool enabled, uint64_t frame_id)
+    bool enabled, bool allow_async_workloads, uint64_t frame_id)
 {
     if (!context || !provider || provider->context != context ||
         !provider->swapchain || !context->full_context_created)
@@ -1682,7 +1682,7 @@ extern "C" bool Q2_FSR3_ConfigureProvider(
     FfxFrameGenerationConfig config = {};
     config.swapChain = provider->swapchain;
     config.frameGenerationEnabled = enabled;
-    config.allowAsyncWorkloads = false;
+    config.allowAsyncWorkloads = allow_async_workloads;
     config.frameGenerationCallback = enabled ?
         q2_provider_frame_generation_callback : nullptr;
     config.frameGenerationCallbackContext = enabled ? context : nullptr;
@@ -1742,7 +1742,7 @@ extern "C" q2_fsr3_provider_t *Q2_FSR3_CreateProvider(
 }
 
 extern "C" bool Q2_FSR3_ConfigureProvider(
-    q2_fsr3_context_t *, q2_fsr3_provider_t *, bool, uint64_t)
+    q2_fsr3_context_t *, q2_fsr3_provider_t *, bool, bool, uint64_t)
 {
     return false;
 }

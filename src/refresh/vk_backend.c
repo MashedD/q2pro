@@ -10795,6 +10795,7 @@ static bool vk_activate_fsr3_provider(
     vk.fsr3_provider_functions = functions;
     vk.fsr3_provider_active = true;
     if (!Q2_FSR3_ConfigureProvider(vk.fsr3, provider, true,
+                                   vk.provider_async_compute_available,
                                    Q2_FSR3_GetCurrentFrameId(vk.fsr3))) {
         Com_WPrintf("Vulkan FSR3 provider frame-generation configuration failed; using native presentation\n");
         Q2_FSR3_DestroyProvider(vk.fsr3, provider, false);
@@ -23068,8 +23069,10 @@ static bool vk_dispatch_fsr(void)
 
     if (vk.fsr3_provider_active &&
         !Q2_FSR3_ConfigureProvider(vk.fsr3, vk.fsr3_provider, true,
+                                   vk.provider_async_compute_available,
                                    Q2_FSR3_GetCurrentFrameId(vk.fsr3))) {
         Q2_FSR3_ConfigureProvider(vk.fsr3, vk.fsr3_provider, false,
+                                  false,
                                   Q2_FSR3_GetCurrentFrameId(vk.fsr3));
         vk_log_fsr_frame_generation_failure("provider_configuration");
         vk_disable_frame_generation("provider frame-generation configuration failed");

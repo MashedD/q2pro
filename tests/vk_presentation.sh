@@ -263,6 +263,10 @@ require_contract 'Q2_VK_PresentationAdapterProviderBuildReason' \
     "$repo_dir/src/refresh/vk_presentation_adapter.c"
 require_contract 'Vulkan FSR3 frame-generation provider' \
     "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'config.allowAsyncWorkloads = allow_async_workloads' \
+    "$repo_dir/src/refresh/vk_fsr3.cpp"
+require_contract 'vk.provider_async_compute_available' \
+    "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'Q2_VK_PresentationAdapterProviderBuildPlatform' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'Vulkan FSR3 provider capabilities:' \
