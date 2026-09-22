@@ -116,6 +116,22 @@ require_contract 'vk_log_fence_wait_failure' "$repo_dir/src/refresh/vk_backend.c
 require_contract 'last_submit_result' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_log_fsr_frame_generation_failure' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_create_fsr_context_with_fallback' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'r_fsr_frame_generation_compute_only' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'r_fsr_frame_generation_compute_only", "0", CVAR_ARCHIVE' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_fsr_frame_generation_presentation_adapter_available' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_fsr_frame_generation_compute_only_enabled' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_fsr_frame_generation_effective' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_fsr_frame_generation_effective() &&' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'if (vk_fsr_frame_generation_effective())' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'no_framegen_swapchain' "$repo_dir/src/refresh/vk_backend.c"
+require_contract '#if defined(_WIN32)' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'frame-generation context creation failed; using FSR upscaling' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_disable_frame_generation_during_setup' \
@@ -156,6 +172,10 @@ require_contract 'summarize_frame_generation' "$repo_dir/tests/fsr_benchmark.py"
 require_contract 'generated_fps_from_frame_generation' "$repo_dir/tests/fsr_benchmark.py"
 require_contract 'additional_present_intervals_us' "$repo_dir/tests/fsr_benchmark.py"
 require_contract 'Actively changes internal render resolution' \
+    "$repo_dir/assets/baseq2/q2pro.menu"
+require_contract 'FSR3 compute-only frame generation' \
+    "$repo_dir/assets/baseq2/q2pro.menu"
+require_contract 'r_fsr_frame_generation_compute_only' \
     "$repo_dir/assets/baseq2/q2pro.menu"
 require_contract 'missing Vulkan device function %s' "$repo_dir/src/refresh/vk_fsr3.cpp"
 require_contract 'profile_supported' "$repo_dir/src/refresh/vk_fsr3.cpp"

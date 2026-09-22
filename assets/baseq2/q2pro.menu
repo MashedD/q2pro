@@ -132,6 +132,8 @@ begin video
         "-1.5" -1.5
     toggle --status "Requires Vulkan FSR3; experimental; falls back after GPU errors" \
         "FSR3 frame-generation request" r_fsr_frame_generation
+    toggle --status "Compatibility/debug opt-in: computes an interpolated image without extra presents; Windows only" \
+        "FSR3 compute-only frame generation" r_fsr_frame_generation_compute_only
     toggle --status "Reactive mask is automatic; this adds the composition mask for transparent effects" \
         "FSR3 reactive/composition mask" r_fsr_composition_mask
     pairs --status "FP16 is selected only when enabled by Vulkan" \

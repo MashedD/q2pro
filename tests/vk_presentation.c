@@ -731,7 +731,8 @@ static void check_fsr_frame_generation_contracts(void)
     r_fsr_frame_generation = &frame_generation;
     r_fsr_motion = &motion;
     vk_session_frame_generation_disabled = false;
-    assert(vk_fsr_frame_generation_requested());
+    assert(vk_fsr_frame_generation_user_requested());
+    assert(!vk_fsr_frame_generation_requested());
     assert(vk_fsr_any_requested());
 
     /* Automatic selection owns the temporal path, so explicit frame
@@ -740,11 +741,11 @@ static void check_fsr_frame_generation_contracts(void)
     assert(!vk_fsr_frame_generation_requested());
     auto_fsr.integer = 0;
 
-    /* Fast motion is incompatible with frame generation: the request remains
-     * active, but the backend must force full motion vectors. */
+    /* With no adapter or compute-only opt-in, fast motion remains effective;
+     * the inactive frame-generation request must not override it. */
     motion.string = "fast";
-    assert(!vk_fsr_motion_fast_requested());
-    assert(vk_fsr_frame_generation_requested());
+    assert(vk_fsr_motion_fast_requested());
+    assert(!vk_fsr_frame_generation_requested());
     motion.string = "auto";
 
     vk_disable_frame_generation("test fallback");
@@ -798,6 +799,59 @@ static void check_fsr_setup_fallback_contracts(void)
     r_fsr = r_fsr_frame_generation = NULL;
     vk_session_frame_generation_disabled = false;
     puts("FSR setup fallback: passed (frame generation -> upscaling)");
+}
+
+static void check_fsr_frame_generation_compute_only_gate_contracts(void)
+{
+    cvar_t fsr = { .integer = 1 };
+    cvar_t frame_generation = { .integer = 1 };
+    cvar_t compute_only = { .integer = 0 };
+    cvar_t auto_fsr = { .integer = 0 };
+    cvar_t motion = { .string = "fast" };
+
+    r_fsr = &fsr;
+    r_fsr_frame_generation = &frame_generation;
+    r_fsr_frame_generation_compute_only = &compute_only;
+    r_fsr_auto = &auto_fsr;
+    r_fsr_motion = &motion;
+    vk.frame_fsr = true;
+    vk.fsr3 = HANDLE(q2_fsr3_context_t *, 981);
+    vk_session_frame_generation_disabled = false;
+
+    /* No proxy swapchain is installed, so the normal request must not
+     * allocate or dispatch the expensive compute-only path. */
+    assert(compute_only.integer == 0);
+    assert(!vk_fsr_frame_generation_requested());
+    assert(vk_fsr_motion_fast_requested());
+    assert(vk_fsr_any_requested());
+    vk_reset_fsr_frame_generation_telemetry();
+    vk_begin_fsr_frame_generation_telemetry();
+    assert(vk.fsr_framegen_requested && vk.fsr_framegen_disabled);
+    assert(!strcmp(vk.fsr_framegen_fallback_reason,
+                   "no_framegen_swapchain"));
+    vk_finish_fsr_frame_generation_telemetry(false, false, NULL);
+    assert(!vk_fsr_frame_generation_requested());
+    assert(frame_generation.integer == 1 && !frame_generation.modified);
+
+    /* Linux keeps the manual path disabled even when the compatibility cvar
+     * is explicitly enabled. Windows enables this branch at compile time. */
+    compute_only.integer = 1;
+#if defined(_WIN32)
+    assert(vk_fsr_frame_generation_requested());
+    assert(!vk_fsr_motion_fast_requested());
+#else
+    assert(!vk_fsr_frame_generation_requested());
+    assert(vk_fsr_motion_fast_requested());
+#endif
+
+    r_fsr = r_fsr_frame_generation = NULL;
+    r_fsr_frame_generation_compute_only = NULL;
+    r_fsr_auto = NULL;
+    r_fsr_motion = NULL;
+    vk.frame_fsr = false;
+    vk.fsr3 = NULL;
+    vk_session_frame_generation_disabled = false;
+    puts("FSR compute-only gate: passed (default-off, fallback, cvar preservation)");
 }
 
 static void check_fsr_lifecycle_contracts(void)
@@ -948,6 +1002,10 @@ static void check_fsr_frame_generation_telemetry_contracts(void)
     vk_begin_fsr_frame_generation_telemetry();
     assert(vk.fsr_framegen_requested &&
            vk.fsr_framegen_requested_total == 1);
+    /* Synthetic lifecycle coverage below represents an adapter-backed
+     * generation result; the no-adapter fallback is tested separately. */
+    vk.fsr_framegen_disabled = false;
+    vk.fsr_framegen_fallback_reason = NULL;
     vk.fsr_framegen_prepared = true;
     vk.fsr_framegen_prepared_total++;
     vk.fsr_framegen_computed = true;
@@ -971,6 +1029,8 @@ static void check_fsr_frame_generation_telemetry_contracts(void)
     vk.frame_fsr = true;
 
     vk_begin_fsr_frame_generation_telemetry();
+    vk.fsr_framegen_disabled = false;
+    vk.fsr_framegen_fallback_reason = NULL;
     vk.fsr_framegen_computed = true;
     vk.fsr_framegen_computed_total++;
     vk_finish_fsr_frame_generation_telemetry(true, false,
@@ -981,6 +1041,8 @@ static void check_fsr_frame_generation_telemetry_contracts(void)
            !strcmp(vk.fsr_framegen_fallback_reason, "presentation_failed"));
 
     vk_begin_fsr_frame_generation_telemetry();
+    vk.fsr_framegen_disabled = false;
+    vk.fsr_framegen_fallback_reason = NULL;
     vk.fsr_framegen_computed = true;
     vk.fsr_framegen_computed_total++;
     vk_finish_fsr_frame_generation_telemetry(false, false,
@@ -1016,6 +1078,7 @@ int main(void)
     check_fsr_temporal_contracts();
     check_fsr_frame_generation_contracts();
     check_fsr_setup_fallback_contracts();
+    check_fsr_frame_generation_compute_only_gate_contracts();
     check_fsr_lifecycle_contracts();
     check_fsr_frame_generation_telemetry_contracts();
     check_fsr_transaction_guards();

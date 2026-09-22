@@ -1332,6 +1332,7 @@ static cvar_t *r_fsr_auto;
 static cvar_t *r_fsr_motion;
 static cvar_t *r_fsr_mip_bias;
 static cvar_t *r_fsr_frame_generation;
+static cvar_t *r_fsr_frame_generation_compute_only;
 static cvar_t *r_fsr_dynamic;
 static cvar_t *r_fsr_dynamic_target_ms;
 static cvar_t *r_fsr_dynamic_min_scale;
@@ -1551,14 +1552,17 @@ static void vk_fsr_dynamic_clear_modified(void)
         r_fsr_dynamic_cpu->modified = false;
 }
 
+static bool vk_fsr_frame_generation_user_requested(void);
+static bool vk_fsr_frame_generation_presentation_adapter_available(void);
+static bool vk_fsr_frame_generation_compute_only_enabled(void);
+static bool vk_fsr_frame_generation_effective(void);
+
 static bool vk_fsr_motion_fast_requested(void)
 {
     const char *mode = r_fsr_motion ? r_fsr_motion->string : "auto";
-    bool frame_generation = r_fsr_frame_generation &&
-        r_fsr_frame_generation->integer && !vk_fsr_auto_enabled();
 
     if (!Q_stricmp(mode, "fast")) {
-        if (frame_generation) {
+        if (vk_fsr_frame_generation_effective()) {
             if (!vk.fsr_motion_override_logged) {
                 Com_WPrintf("Vulkan FSR3 frame generation requires full motion vectors; "
                             "ignoring r_fsr_motion fast\n");
@@ -1590,15 +1594,44 @@ static bool vk_fsr_requested(void)
 
 static bool vk_fsr_frame_generation_requested(void)
 {
-    if (vk_session_frame_generation_disabled || vk_fsr_auto_enabled())
-        return false;
-    return r_fsr_frame_generation && r_fsr_frame_generation->integer != 0 &&
+    return vk_fsr_frame_generation_effective() &&
         !vk_fsr_motion_fast_requested();
 }
 
 static bool vk_fsr_frame_generation_user_requested(void)
 {
     return r_fsr_frame_generation && r_fsr_frame_generation->integer != 0;
+}
+
+/* q2pro does not install the FidelityFX frame-interpolation swapchain
+ * adapter. Keep this explicit so the user request cannot silently pay for an
+ * interpolated image that will only be presented once. */
+static bool vk_fsr_frame_generation_presentation_adapter_available(void)
+{
+    return false;
+}
+
+static bool vk_fsr_frame_generation_compute_only_enabled(void)
+{
+#if defined(_WIN32)
+    return r_fsr_frame_generation_compute_only &&
+        r_fsr_frame_generation_compute_only->integer != 0;
+#else
+    /* The manual FSR3 frame-generation path remains unsupported on Linux. */
+    return false;
+#endif
+}
+
+/* This predicate deliberately excludes motion-vector mode. It is the common
+ * capability gate used by both frame-generation request handling and the
+ * motion-mode override, so checking one cannot recurse into the other. */
+static bool vk_fsr_frame_generation_effective(void)
+{
+    if (vk_session_frame_generation_disabled || vk_fsr_auto_enabled() ||
+        !vk_fsr_frame_generation_user_requested())
+        return false;
+    return vk_fsr_frame_generation_presentation_adapter_available() ||
+        vk_fsr_frame_generation_compute_only_enabled();
 }
 
 static void vk_fsr_auto_reset(void)
@@ -4180,6 +4213,10 @@ static void vk_begin_fsr_frame_generation_telemetry(void)
     } else if (vk_fsr_auto_enabled()) {
         vk.fsr_framegen_disabled = true;
         vk.fsr_framegen_fallback_reason = "auto_mode";
+    } else if (!vk_fsr_frame_generation_presentation_adapter_available() &&
+               !vk_fsr_frame_generation_compute_only_enabled()) {
+        vk.fsr_framegen_disabled = true;
+        vk.fsr_framegen_fallback_reason = "no_framegen_swapchain";
     } else if (!vk.frame_fsr) {
         vk.fsr_framegen_disabled = true;
         vk.fsr_framegen_fallback_reason = "fsr_inactive";
@@ -20431,6 +20468,8 @@ bool VKR_Init(bool total)
     vk_fsr_benchmark = Cvar_Get("vk_fsr_benchmark", "0", 0);
     r_fsr_mip_bias = Cvar_Get("r_fsr_mip_bias", "auto", CVAR_ARCHIVE);
     r_fsr_frame_generation = Cvar_Get("r_fsr_frame_generation", "0", CVAR_ARCHIVE);
+    r_fsr_frame_generation_compute_only = Cvar_Get(
+        "r_fsr_frame_generation_compute_only", "0", CVAR_ARCHIVE);
     r_fsr_dynamic = Cvar_Get("r_fsr_dynamic", "0", CVAR_ARCHIVE);
     r_fsr_dynamic_target_ms = Cvar_Get("r_fsr_dynamic_target_ms", "16.67", CVAR_ARCHIVE);
     r_fsr_dynamic_min_scale = Cvar_Get("r_fsr_dynamic_min_scale", "1.0", CVAR_ARCHIVE);
@@ -22877,7 +22916,9 @@ void VKR_BeginFrame(void)
         (vk_fsr_precision && vk_fsr_precision->modified) ||
         (vk_fsr_subgroup && vk_fsr_subgroup->modified) ||
         (r_fsr_quality && r_fsr_quality->modified) ||
-        (r_fsr_frame_generation && r_fsr_frame_generation->modified)) {
+        (r_fsr_frame_generation && r_fsr_frame_generation->modified) ||
+        (r_fsr_frame_generation_compute_only &&
+         r_fsr_frame_generation_compute_only->modified)) {
         vk_fsr_auto_reset();
         if (r_fsr)
             r_fsr->modified = false;
@@ -22899,6 +22940,8 @@ void VKR_BeginFrame(void)
             r_fsr_quality->modified = false;
         if (r_fsr_frame_generation)
             r_fsr_frame_generation->modified = false;
+        if (r_fsr_frame_generation_compute_only)
+            r_fsr_frame_generation_compute_only->modified = false;
         if (!vk_recreate_swapchain("FSR configuration change"))
             return;
         vk.fsr_reset = true;
