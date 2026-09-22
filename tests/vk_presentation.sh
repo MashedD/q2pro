@@ -121,6 +121,42 @@ require_contract 'frame-generation context creation failed; using FSR upscaling'
 require_contract 'vk_disable_frame_generation_during_setup' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract '*frame_generation_requested = false' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'VK FSR3 framegen:' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'fsr_framegen_requested_total' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'fsr_framegen_prepared_total' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'fsr_framegen_computed_total' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'fsr_framegen_presented_total' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'additional_presented_total' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_reset_fsr_frame_generation_telemetry' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_fsr_frame_generation_user_requested' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_finish_fsr_frame_generation_telemetry(' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'submission_completed' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'presentation_failed' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'additional_present_interval_us' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'end_command_buffer_failed' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'reset_fences_failed' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'queue_submit_failed' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_mark_fsr_frame_generation_pause' \
+    "$repo_dir/src/refresh/vk_backend.c"
+if $fixed_search_command 'vk.fsr_framegen_requested_total--' \
+       "$repo_dir/src/refresh/vk_backend.c"; then
+    echo "FSR3 contract: pause must preserve frame-generation request totals" >&2
+    exit 2
+fi
+require_contract 'fallback_reason = "pause_reuse"' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk.fsr_framegen_additional_presented = false' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'frame_generation_telemetry' "$repo_dir/tests/fsr_benchmark.py"
+require_contract 'summarize_frame_generation' "$repo_dir/tests/fsr_benchmark.py"
+require_contract 'generated_fps_from_frame_generation' "$repo_dir/tests/fsr_benchmark.py"
+require_contract 'additional_present_intervals_us' "$repo_dir/tests/fsr_benchmark.py"
+require_contract 'Actively changes internal render resolution' \
+    "$repo_dir/assets/baseq2/q2pro.menu"
 require_contract 'missing Vulkan device function %s' "$repo_dir/src/refresh/vk_fsr3.cpp"
 require_contract 'profile_supported' "$repo_dir/src/refresh/vk_fsr3.cpp"
 require_contract 'max_frame_time_ms' "$repo_dir/src/refresh/vk_fsr3.cpp"

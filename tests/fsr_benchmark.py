@@ -27,6 +27,7 @@ FRAME = re.compile(r'VK FSR3 frame: (?P<telemetry>.*)')
 FRAME_RESULT = re.compile(r'VK FSR3 result: (?P<telemetry>.*)')
 DIAGNOSTICS = re.compile(r'VK FSR3 diagnostics: (?P<telemetry>.*)')
 DYNAMIC = re.compile(r'VK FSR3 dynamic: (?P<telemetry>.*)')
+FRAMEGEN = re.compile(r'VK FSR3 framegen: (?P<telemetry>.*)')
 DEVICE = re.compile(r'(?:Using Vulkan device:|Vulkan FSR3 enabled capabilities:).*')
 FALLBACK = re.compile(
     r'(?:spatial-fallback|resources are incomplete|dispatch failed|'
@@ -100,6 +101,7 @@ def parse_benchmark_log(log):
     jitter_records = []
     diagnostics = []
     dynamic = []
+    frame_generation = []
     presentations = []
     for line in log.splitlines():
         sample = SAMPLE.search(line)
@@ -159,6 +161,12 @@ def parse_benchmark_log(log):
         match = DYNAMIC.search(line)
         if match:
             dynamic.append(_typed_fields(match.group('telemetry')))
+        match = FRAMEGEN.search(line)
+        if match:
+            fields = _typed_fields(match.group('telemetry'))
+            if 'frame' in fields:
+                fields['frame_id'] = fields.pop('frame')
+            frame_generation.append(fields)
         match = GPU_TIMING.search(line)
         if match:
             metadata = _typed_fields(match.group('timings'))
@@ -198,9 +206,56 @@ def parse_benchmark_log(log):
         'jitter': jitter_records,
         'diagnostics': diagnostics,
         'dynamic': dynamic,
+        'frame_generation': frame_generation,
+        'framegen': frame_generation,
         'gpu_timings': gpu_timings,
         'result': result,
     }
+
+
+def summarize_frame_generation(records, frame_ids=None):
+    """Summarize truthful FSR3 frame-generation lifecycle telemetry.
+
+    Older logs have no framegen records; return a stable empty result so
+    callers can consume reports from both old and new binaries.
+    """
+    if frame_ids is not None:
+        records = [record for record in records
+                   if record.get('frame_id') in frame_ids]
+    if not records:
+        return {'count': 0}
+    boolean_fields = ('requested', 'prepared', 'computed', 'presented',
+                      'additional_presented', 'fallback', 'disabled')
+    summary = {'count': len(records)}
+    for field in boolean_fields:
+        summary[field] = sum(1 for record in records if record.get(field) is True)
+    for field in ('requested_total', 'prepared_total', 'computed_total',
+                  'presented_total', 'additional_presented_total',
+                  'fallback_total', 'disabled_total'):
+        values = [record[field] for record in records if field in record and
+                  isinstance(record[field], int)]
+        if values:
+            summary[field] = values[-1]
+    summary['fallback_reasons'] = sorted({record['fallback_reason']
+                                          for record in records
+                                          if record.get('fallback_reason') not in
+                                          (None, 'none')})
+    summary['additional_present_intervals_us'] = [
+        record['additional_present_interval_us'] for record in records
+        if record.get('additional_presented') is True and
+        isinstance(record.get('additional_present_interval_us'), (int, float)) and
+        record['additional_present_interval_us'] > 0]
+    summary['last'] = records[-1]
+    return summary
+
+
+def generated_fps_from_frame_generation(records, frame_ids=None):
+    """Return FPS only from measured additional-present intervals."""
+    summary = summarize_frame_generation(records, frame_ids)
+    intervals = summary.get('additional_present_intervals_us', [])
+    if not intervals:
+        return None
+    return round(1000000.0 / statistics.mean(intervals), 3)
 
 
 def summarize_gpu_timings(timings, frame_ids=None):
@@ -322,6 +377,7 @@ def main():
                     'jitter': parsed['jitter'],
                     'diagnostics': parsed['diagnostics'],
                     'dynamic': parsed['dynamic'],
+                    'frame_generation': parsed['frame_generation'],
                     'gpu_timings': parsed['gpu_timings'],
                     'fallback': bool(fallback_reasons),
                     'fallback_reasons': fallback_reasons,
@@ -347,6 +403,8 @@ def main():
                     'fallback': captured[mode]['fallback'],
                     'fallback_reasons': captured[mode]['fallback_reasons'],
                     'fallback_reason': captured[mode]['fallback_reason'],
+                    'frame_generation': summarize_frame_generation(
+                        captured[mode]['frame_generation']),
                 } for mode in captured
             },
         }
@@ -373,8 +431,7 @@ def main():
             run[mode]['native_fps'] = run[mode]['fps'] if mode == 'native' else None
             run[mode]['upscaled_fps'] = (
                 run[mode]['fps'] if mode == 'fsr' else None)
-            run[mode]['generated_fps'] = (
-                run[mode]['fps'] if captured[mode]['result'] == 'framegen' else None)
+            run[mode]['generated_fps'] = None
             run[mode]['frame_pacing'] = run['frame_pacing'][mode]
             run[mode]['renderer_completion_pacing'] = run['frame_pacing'][mode]
             run[mode]['simulation_time_pacing'] = run['simulation_time_pacing']
@@ -384,9 +441,14 @@ def main():
             run[mode]['jitter_telemetry'] = captured[mode]['jitter']
             run[mode]['diagnostics'] = captured[mode]['diagnostics']
             run[mode]['dynamic_telemetry'] = captured[mode]['dynamic']
+            run[mode]['frame_generation_telemetry'] = captured[mode]['frame_generation']
             frame_ids = {captured[mode]['samples'][time][3]
                          for time in times
                          if captured[mode]['samples'][time][3] is not None}
+            run[mode]['frame_generation'] = summarize_frame_generation(
+                captured[mode]['frame_generation'], frame_ids)
+            run[mode]['generated_fps'] = generated_fps_from_frame_generation(
+                captured[mode]['frame_generation'], frame_ids)
             run[mode]['gpu_pass_timings'] = summarize_gpu_timings(
                 captured[mode]['gpu_timings'], frame_ids)
         run['native_fps'] = run['native'].get('native_fps')

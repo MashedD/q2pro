@@ -1121,6 +1121,22 @@ typedef struct {
     bool fsr_direct_source_valid;
     uint32_t fsr_direct_source_image;
     bool fsr_motion_override_logged;
+    bool fsr_framegen_requested;
+    bool fsr_framegen_prepared;
+    bool fsr_framegen_computed;
+    bool fsr_framegen_presented;
+    bool fsr_framegen_additional_presented;
+    uint64_t fsr_framegen_additional_present_interval_us;
+    bool fsr_framegen_fallback;
+    bool fsr_framegen_disabled;
+    const char *fsr_framegen_fallback_reason;
+    uint64_t fsr_framegen_requested_total;
+    uint64_t fsr_framegen_prepared_total;
+    uint64_t fsr_framegen_computed_total;
+    uint64_t fsr_framegen_presented_total;
+    uint64_t fsr_framegen_additional_presented_total;
+    uint64_t fsr_framegen_fallback_total;
+    uint64_t fsr_framegen_disabled_total;
     bool fsr_jitter_ready;
     float fsr_jitter[2];
     uint32_t fsr_jitter_phase;
@@ -1578,6 +1594,11 @@ static bool vk_fsr_frame_generation_requested(void)
         return false;
     return r_fsr_frame_generation && r_fsr_frame_generation->integer != 0 &&
         !vk_fsr_motion_fast_requested();
+}
+
+static bool vk_fsr_frame_generation_user_requested(void)
+{
+    return r_fsr_frame_generation && r_fsr_frame_generation->integer != 0;
 }
 
 static void vk_fsr_auto_reset(void)
@@ -4122,8 +4143,105 @@ static bool vk_fsr_format_support(VkFormat format, VkFormatFeatureFlags required
     return false;
 }
 
+static void vk_reset_fsr_frame_generation_telemetry(void)
+{
+    vk.fsr_framegen_requested = false;
+    vk.fsr_framegen_prepared = false;
+    vk.fsr_framegen_computed = false;
+    vk.fsr_framegen_presented = false;
+    vk.fsr_framegen_additional_presented = false;
+    vk.fsr_framegen_additional_present_interval_us = 0;
+    vk.fsr_framegen_fallback = false;
+    vk.fsr_framegen_disabled = false;
+    vk.fsr_framegen_fallback_reason = NULL;
+    vk.fsr_framegen_requested_total = 0;
+    vk.fsr_framegen_prepared_total = 0;
+    vk.fsr_framegen_computed_total = 0;
+    vk.fsr_framegen_presented_total = 0;
+    vk.fsr_framegen_additional_presented_total = 0;
+    vk.fsr_framegen_fallback_total = 0;
+    vk.fsr_framegen_disabled_total = 0;
+}
+
+static void vk_begin_fsr_frame_generation_telemetry(void)
+{
+    vk.fsr_framegen_requested = vk_fsr_frame_generation_user_requested();
+    vk.fsr_framegen_prepared = false;
+    vk.fsr_framegen_computed = false;
+    vk.fsr_framegen_presented = false;
+    vk.fsr_framegen_additional_presented = false;
+    vk.fsr_framegen_additional_present_interval_us = 0;
+    vk.fsr_framegen_fallback = false;
+    vk.fsr_framegen_disabled = false;
+    vk.fsr_framegen_fallback_reason = NULL;
+    if (vk_session_frame_generation_disabled) {
+        vk.fsr_framegen_disabled = true;
+        vk.fsr_framegen_fallback_reason = "session_disabled";
+    } else if (vk_fsr_auto_enabled()) {
+        vk.fsr_framegen_disabled = true;
+        vk.fsr_framegen_fallback_reason = "auto_mode";
+    } else if (!vk.frame_fsr) {
+        vk.fsr_framegen_disabled = true;
+        vk.fsr_framegen_fallback_reason = "fsr_inactive";
+    } else if (!vk.fsr3) {
+        vk.fsr_framegen_disabled = true;
+        vk.fsr_framegen_fallback_reason = "context_unavailable";
+    } else if (vk_fsr_motion_fast_requested()) {
+        vk.fsr_framegen_disabled = true;
+        vk.fsr_framegen_fallback_reason = "motion_mode";
+    }
+    if (vk.fsr_framegen_requested)
+        vk.fsr_framegen_requested_total++;
+}
+
+static void vk_mark_fsr_frame_generation_pause(void)
+{
+    if (!vk.fsr_framegen_requested)
+        return;
+    vk.fsr_framegen_disabled = true;
+    vk.fsr_framegen_fallback_reason = "pause_reuse";
+}
+
+static void vk_finish_fsr_frame_generation_telemetry(bool submission_completed,
+                                                     bool present_success,
+                                                     const char *failure_reason)
+{
+    if (!vk.fsr_framegen_requested)
+        return;
+
+    if (!submission_completed && vk.fsr_framegen_computed) {
+        /* Dispatch only records GPU work. A failed command-buffer end/submit
+         * cannot be reported as computed generation. */
+        vk.fsr_framegen_computed = false;
+        if (vk.fsr_framegen_computed_total)
+            vk.fsr_framegen_computed_total--;
+    }
+    if (vk.fsr_framegen_computed) {
+        vk.fsr_framegen_presented = present_success;
+        if (present_success)
+            vk.fsr_framegen_presented_total++;
+        else {
+            vk.fsr_framegen_fallback = true;
+            vk.fsr_framegen_fallback_reason = failure_reason ?
+                failure_reason : "presentation_failed";
+            vk.fsr_framegen_fallback_total++;
+        }
+    } else {
+        vk.fsr_framegen_fallback = true;
+        if (failure_reason)
+            vk.fsr_framegen_fallback_reason = failure_reason;
+        else if (!vk.fsr_framegen_fallback_reason)
+            vk.fsr_framegen_fallback_reason = vk.fsr_frame_reset ?
+                "reset" : "not_computed";
+        vk.fsr_framegen_fallback_total++;
+    }
+    if (vk.fsr_framegen_disabled)
+        vk.fsr_framegen_disabled_total++;
+}
+
 static void vk_destroy_fsr_resources_nowait(void)
 {
+    vk_reset_fsr_frame_generation_telemetry();
     if (vk.fsr3) {
         Q2_FSR3_Destroy(vk.fsr3);
         vk.fsr3 = NULL;
@@ -20179,6 +20297,36 @@ static void vk_log_perf_stats(void)
     }
 }
 
+static void vk_log_fsr_frame_generation_telemetry(void)
+{
+    Com_Printf("VK FSR3 framegen: frame=%llu requested=%s prepared=%s "
+               "computed=%s presented=%s additional_presented=%s "
+               "additional_present_interval_us=%llu fallback=%s "
+               "disabled=%s fallback_reason=%s "
+               "requested_total=%llu prepared_total=%llu "
+               "computed_total=%llu presented_total=%llu "
+               "additional_presented_total=%llu fallback_total=%llu "
+               "disabled_total=%llu\n",
+               (unsigned long long)vk.fsr_frame_id,
+               vk.fsr_framegen_requested ? "yes" : "no",
+               vk.fsr_framegen_prepared ? "yes" : "no",
+               vk.fsr_framegen_computed ? "yes" : "no",
+               vk.fsr_framegen_presented ? "yes" : "no",
+               vk.fsr_framegen_additional_presented ? "yes" : "no",
+               (unsigned long long)vk.fsr_framegen_additional_present_interval_us,
+               vk.fsr_framegen_fallback ? "yes" : "no",
+               vk.fsr_framegen_disabled ? "yes" : "no",
+               vk.fsr_framegen_fallback_reason ?
+                   vk.fsr_framegen_fallback_reason : "none",
+               (unsigned long long)vk.fsr_framegen_requested_total,
+               (unsigned long long)vk.fsr_framegen_prepared_total,
+               (unsigned long long)vk.fsr_framegen_computed_total,
+               (unsigned long long)vk.fsr_framegen_presented_total,
+               (unsigned long long)vk.fsr_framegen_additional_presented_total,
+               (unsigned long long)vk.fsr_framegen_fallback_total,
+               (unsigned long long)vk.fsr_framegen_disabled_total);
+}
+
 bool VKR_Init(bool total)
 {
     if (!total) {
@@ -22194,10 +22342,14 @@ static bool vk_dispatch_fsr(void)
             vk_log_fsr_frame_generation_failure("preparation");
             vk_fsr_invalidate_history_reason(VK_FSR_RESET_FRAMEGEN_FAILURE);
             vk_disable_frame_generation("frame-generation preparation failed");
+            vk.fsr_framegen_disabled = true;
+            vk.fsr_framegen_fallback_reason = "preparation_failed";
             frame_reset = vk.fsr_reset;
             vk.fsr_frame_reset = frame_reset;
             vk.fsr_frame_reset_reason = VK_FSR_RESET_FRAMEGEN_FAILURE;
         } else {
+            vk.fsr_framegen_prepared = true;
+            vk.fsr_framegen_prepared_total++;
             vk_transition_color_target(cmd, &vk.fsr_frame_generation_texture,
                                        &vk.fsr_frame_generation_layout,
                                        VK_IMAGE_LAYOUT_GENERAL,
@@ -22313,6 +22465,11 @@ static bool vk_dispatch_fsr(void)
             vk_log_fsr_frame_generation_failure("dispatch");
             vk_fsr_invalidate_history_reason(VK_FSR_RESET_FRAMEGEN_FAILURE);
             vk_disable_frame_generation("frame-generation dispatch failed");
+            vk.fsr_framegen_disabled = true;
+            vk.fsr_framegen_fallback_reason = "dispatch_failed";
+        } else {
+            vk.fsr_framegen_computed = true;
+            vk.fsr_framegen_computed_total++;
         }
     }
     vk.fsr_result = generated_frame ? VK_FSR_RESULT_FRAMEGEN : VK_FSR_RESULT_FSR3;
@@ -22646,6 +22803,14 @@ void VKR_BeginFrame(void)
     vk.fsr_frame_id++;
     vk.fsr_sdk_frame_id_valid = false;
     vk.fsr_result = VK_FSR_RESULT_NATIVE;
+    vk.fsr_framegen_requested = false;
+    vk.fsr_framegen_prepared = false;
+    vk.fsr_framegen_computed = false;
+    vk.fsr_framegen_presented = false;
+    vk.fsr_framegen_additional_presented = false;
+    vk.fsr_framegen_fallback = false;
+    vk.fsr_framegen_disabled = false;
+    vk.fsr_framegen_fallback_reason = NULL;
     vk.fsr_frame_pause = false;
     vk.fsr_frame_reset = vk.fsr_reset;
     vk.fsr_frame_reset_reason = vk.fsr_reset ? vk.fsr_reset_reason : VK_FSR_RESET_NONE;
@@ -22971,6 +23136,7 @@ void VKR_BeginFrame(void)
         vk.fsr_motion_initialized = false;
     }
     vk.frame_fsr = vk.fsr3 != NULL && vk_fsr_any_requested();
+    vk_begin_fsr_frame_generation_telemetry();
     if (vk.frame_fsr &&
         (vk.fsr_history_render_extent.width != vk.render_extent.width ||
          vk.fsr_history_render_extent.height != vk.render_extent.height ||
@@ -23030,6 +23196,7 @@ void VKR_BeginFrame(void)
              * camera jitter and animated interpolation from changing the
              * paused scene while keeping menus and HUD live. */
             vk.fsr_pause_reuse = true;
+            vk_mark_fsr_frame_generation_pause();
             vk.frame_fsr = false;
             vk_composite_presentation_texture(&vk.fsr_output_texture);
             vk.fsr_composited = true;
@@ -23042,6 +23209,7 @@ void VKR_BeginFrame(void)
             vk.fsr_frame_reset = true;
             vk.fsr_reset_reason = VK_FSR_RESET_PAUSE_RESUME;
             vk_fsr_dynamic_reset_runtime();
+            vk_mark_fsr_frame_generation_pause();
             vk.frame_fsr = false;
         }
         vk.fsr_frame_reset_reason = vk.fsr_reset ? vk.fsr_reset_reason : VK_FSR_RESET_NONE;
@@ -23311,6 +23479,11 @@ void VKR_EndFrame(void)
     if (result != VK_SUCCESS) {
         vk_handle_device_lost("vkEndCommandBuffer", result);
         Com_EPrintf("vkEndCommandBuffer failed: Vulkan error %d\n", result);
+        vk_finish_fsr_frame_generation_telemetry(false, false,
+                                                  "end_command_buffer_failed");
+        if ((vk_perf_stats && vk_perf_stats->integer && vk.separate_presentation) ||
+            (vk_fsr_benchmark && vk_fsr_benchmark->integer))
+            vk_log_fsr_frame_generation_telemetry();
         vk.frame_active = false;
         return;
     }
@@ -23339,6 +23512,11 @@ void VKR_EndFrame(void)
     if (result != VK_SUCCESS) {
         vk_handle_device_lost("vkResetFences", result);
         Com_EPrintf("vkResetFences failed: Vulkan error %d\n", result);
+        vk_finish_fsr_frame_generation_telemetry(false, false,
+                                                  "reset_fences_failed");
+        if ((vk_perf_stats && vk_perf_stats->integer && vk.separate_presentation) ||
+            (vk_fsr_benchmark && vk_fsr_benchmark->integer))
+            vk_log_fsr_frame_generation_telemetry();
         vk.frame_active = false;
         return;
     }
@@ -23351,6 +23529,11 @@ void VKR_EndFrame(void)
     if (result != VK_SUCCESS) {
         vk_handle_device_lost("vkQueueSubmit", result);
         Com_EPrintf("vkQueueSubmit failed: Vulkan error %d\n", result);
+        vk_finish_fsr_frame_generation_telemetry(false, false,
+                                                  "queue_submit_failed");
+        if ((vk_perf_stats && vk_perf_stats->integer && vk.separate_presentation) ||
+            (vk_fsr_benchmark && vk_fsr_benchmark->integer))
+            vk_log_fsr_frame_generation_telemetry();
         if (!vk.device_lost)
             vk_recreate_signaled_frame_fence();
         vk.frame_active = false;
@@ -23409,7 +23592,16 @@ void VKR_EndFrame(void)
     start = vk_time_usec();
     result = vk.QueuePresentKHR(vk.present_queue, &present_info);
     vk.present_usec = vk_time_usec() - start;
-    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+    bool present_success = result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR;
+    bool recreate_swapchain = result == VK_ERROR_OUT_OF_DATE_KHR ||
+        result == VK_SUBOPTIMAL_KHR;
+    vk_finish_fsr_frame_generation_telemetry(
+        true, present_success, present_success ? NULL : "presentation_failed");
+    if (recreate_swapchain &&
+        ((vk_perf_stats && vk_perf_stats->integer && vk.separate_presentation) ||
+         (vk_fsr_benchmark && vk_fsr_benchmark->integer)))
+        vk_log_fsr_frame_generation_telemetry();
+    if (recreate_swapchain) {
         vk_recreate_swapchain(result == VK_ERROR_OUT_OF_DATE_KHR ?
                               "presentation out of date" :
                               "presentation suboptimal");
@@ -23417,7 +23609,6 @@ void VKR_EndFrame(void)
         vk_handle_device_lost("vkQueuePresentKHR", result);
         Com_EPrintf("vkQueuePresentKHR failed: Vulkan error %d\n", result);
     }
-
     if (vk_finish && vk_finish->integer && !vk.device_lost) {
         result = vk.DeviceWaitIdle(vk.device);
         if (result != VK_SUCCESS)
@@ -23425,6 +23616,10 @@ void VKR_EndFrame(void)
     }
 
     vk_log_perf_stats();
+    if (!recreate_swapchain &&
+        ((vk_perf_stats && vk_perf_stats->integer && vk.separate_presentation) ||
+         (vk_fsr_benchmark && vk_fsr_benchmark->integer)))
+        vk_log_fsr_frame_generation_telemetry();
     if ((vk_perf_stats && vk_perf_stats->integer && vk.separate_presentation) ||
         (vk_fsr_benchmark && vk_fsr_benchmark->integer))
         Com_Printf("VK FSR3 result: frame=%llu result=%s reset=%s pause=%s reuse=%s output=%s\n",

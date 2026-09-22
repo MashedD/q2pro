@@ -112,7 +112,7 @@ begin video
         "FSR3 sharpening" r_fsr_sharpness 0 1
     toggle --status "Keeps selected quality only if at least 5% faster than native" \
         "FSR3 automatic performance" r_fsr_auto
-    toggle --status "Recommendation-only telemetry; internal resolution is not changed yet" \
+    toggle --status "Actively changes internal render resolution to meet the target frame time" \
         "FSR3 dynamic resolution" r_fsr_dynamic
     range --status "Target GPU frame time for dynamic-resolution recommendations" \
         "FSR3 dynamic target (ms)" r_fsr_dynamic_target_ms 8 33

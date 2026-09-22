@@ -768,6 +768,7 @@ static void check_fsr_setup_fallback_contracts(void)
 {
     cvar_t fsr = { .integer = 1 };
     cvar_t frame_generation = { .integer = 1 };
+    cvar_t auto_fsr = { .integer = 1 };
     bool frame_generation_requested = true;
 
     r_fsr = &fsr;
@@ -912,6 +913,103 @@ static void check_fsr_lifecycle_contracts(void)
     puts("FSR lifecycle contracts: passed (reset gate, pause reuse, fallback, device loss)");
 }
 
+static void check_fsr_frame_generation_telemetry_contracts(void)
+{
+    cvar_t fsr = { .integer = 1 };
+    cvar_t frame_generation = { .integer = 1 };
+    cvar_t auto_fsr = { .integer = 1 };
+
+    vk_reset_fsr_frame_generation_telemetry();
+    vk.fsr_framegen_requested_total = 9;
+    vk.fsr_framegen_computed = true;
+    vk.fsr_framegen_additional_presented = true;
+    vk_reset_fsr_frame_generation_telemetry();
+    assert(!vk.fsr_framegen_computed &&
+           !vk.fsr_framegen_additional_presented &&
+           vk.fsr_framegen_requested_total == 0 &&
+           vk.fsr_framegen_computed_total == 0);
+
+    r_fsr = &fsr;
+    r_fsr_frame_generation = &frame_generation;
+    r_fsr_auto = &auto_fsr;
+    vk.frame_fsr = false;
+    vk.fsr3 = NULL;
+    vk_session_frame_generation_disabled = false;
+    vk_begin_fsr_frame_generation_telemetry();
+    assert(vk.fsr_framegen_requested && vk.fsr_framegen_disabled &&
+           !strcmp(vk.fsr_framegen_fallback_reason, "auto_mode"));
+    vk_finish_fsr_frame_generation_telemetry(false, false, "auto_mode");
+    vk_reset_fsr_frame_generation_telemetry();
+    r_fsr_auto = NULL;
+
+    vk.frame_fsr = true;
+    vk.fsr3 = HANDLE(q2_fsr3_context_t *, 980);
+    vk_session_frame_generation_disabled = false;
+    vk_begin_fsr_frame_generation_telemetry();
+    assert(vk.fsr_framegen_requested &&
+           vk.fsr_framegen_requested_total == 1);
+    vk.fsr_framegen_prepared = true;
+    vk.fsr_framegen_prepared_total++;
+    vk.fsr_framegen_computed = true;
+    vk.fsr_framegen_computed_total++;
+    vk_finish_fsr_frame_generation_telemetry(true, true, NULL);
+    assert(vk.fsr_framegen_presented &&
+           !vk.fsr_framegen_additional_presented &&
+           vk.fsr_framegen_presented_total == 1 &&
+           vk.fsr_framegen_fallback_total == 0);
+
+    vk.fsr_framegen_requested = true;
+    vk.fsr_framegen_requested_total = 1;
+    vk.frame_fsr = false;
+    vk.fsr_pause_reuse = true;
+    vk_mark_fsr_frame_generation_pause();
+    assert(vk.fsr_framegen_requested &&
+           vk.fsr_framegen_requested_total == 1 &&
+           vk.fsr_framegen_disabled &&
+           !strcmp(vk.fsr_framegen_fallback_reason, "pause_reuse"));
+    vk.fsr_pause_reuse = false;
+    vk.frame_fsr = true;
+
+    vk_begin_fsr_frame_generation_telemetry();
+    vk.fsr_framegen_computed = true;
+    vk.fsr_framegen_computed_total++;
+    vk_finish_fsr_frame_generation_telemetry(true, false,
+                                              "presentation_failed");
+    assert(vk.fsr_framegen_computed &&
+           !vk.fsr_framegen_presented &&
+           vk.fsr_framegen_computed_total == 2 &&
+           !strcmp(vk.fsr_framegen_fallback_reason, "presentation_failed"));
+
+    vk_begin_fsr_frame_generation_telemetry();
+    vk.fsr_framegen_computed = true;
+    vk.fsr_framegen_computed_total++;
+    vk_finish_fsr_frame_generation_telemetry(false, false,
+                                              "end_command_buffer_failed");
+    assert(!vk.fsr_framegen_computed &&
+           vk.fsr_framegen_computed_total == 2 &&
+           vk.fsr_framegen_fallback_total == 2);
+
+    /* Session fallback must not hide the still-enabled user request. */
+    vk_session_frame_generation_disabled = true;
+    assert(vk_fsr_frame_generation_user_requested());
+    vk_begin_fsr_frame_generation_telemetry();
+    assert(vk.fsr_framegen_requested && vk.fsr_framegen_disabled);
+    vk_finish_fsr_frame_generation_telemetry(false, false,
+                                              "queue_submit_failed");
+    assert(vk.fsr_framegen_fallback);
+    assert(!vk.fsr_framegen_presented);
+    assert(!vk.fsr_framegen_computed);
+    assert(!strcmp(vk.fsr_framegen_fallback_reason, "queue_submit_failed"));
+    assert(vk.fsr_framegen_fallback_total == 3);
+    assert(vk.fsr_framegen_disabled_total == 1);
+
+    r_fsr = r_fsr_frame_generation = NULL;
+    vk.frame_fsr = false;
+    vk.fsr3 = NULL;
+    vk_session_frame_generation_disabled = false;
+    puts("FSR frame-generation telemetry: passed (lifecycle, fallback, no extra present)");
+}
+
 int main(void)
 {
     check_fsr_barriers();
@@ -919,6 +1017,7 @@ int main(void)
     check_fsr_frame_generation_contracts();
     check_fsr_setup_fallback_contracts();
     check_fsr_lifecycle_contracts();
+    check_fsr_frame_generation_telemetry_contracts();
     check_fsr_transaction_guards();
     check_fsr_transaction_resource_rollback();
     framebuffer_calls = 0;

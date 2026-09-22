@@ -127,6 +127,70 @@ VK FSR3 result: frame=12 result=spatial-fallback
         self.assertIs(record['applied'], True)
         self.assertEqual(record['transaction'], 12)
 
+    def test_frame_generation_telemetry_is_typed_and_summarized(self):
+        parsed = fsr_benchmark.parse_benchmark_log(
+            'VK FSR3 framegen: frame=40 requested=yes prepared=yes '
+            'computed=yes presented=yes additional_presented=no fallback=no '
+            'disabled=no fallback_reason=none requested_total=4 '
+            'prepared_total=3 computed_total=2 presented_total=2 '
+            'additional_presented_total=0 fallback_total=1 disabled_total=1\n'
+            'VK FSR3 framegen: frame=41 requested=yes prepared=no '
+            'computed=no presented=no additional_presented=no fallback=yes '
+            'disabled=yes fallback_reason=dispatch_failed requested_total=5 '
+            'prepared_total=3 computed_total=2 presented_total=2 '
+            'additional_presented_total=0 fallback_total=2 disabled_total=2\n')
+
+        self.assertIs(parsed['frame_generation'][0]['requested'], True)
+        self.assertEqual(parsed['frame_generation'][1]['frame_id'], 41)
+        summary = fsr_benchmark.summarize_frame_generation(
+            parsed['frame_generation'])
+        self.assertEqual(summary['count'], 2)
+        self.assertEqual(summary['requested'], 2)
+        self.assertEqual(summary['computed'], 1)
+        self.assertEqual(summary['presented'], 1)
+        self.assertEqual(summary['additional_presented'], 0)
+        self.assertEqual(summary['presented_total'], 2)
+        self.assertEqual(summary['fallback_reasons'], ['dispatch_failed'])
+        self.assertIsNone(fsr_benchmark.generated_fps_from_frame_generation(
+            parsed['frame_generation'], {40, 41}))
+
+    def test_generated_fps_requires_additional_present(self):
+        self.assertIsNone(fsr_benchmark.generated_fps_from_frame_generation([]))
+        self.assertIsNone(fsr_benchmark.generated_fps_from_frame_generation(
+            [{'frame_id': 1, 'additional_presented': True,
+              'additional_present_interval_us': 8000}], {2}))
+
+        records = [
+            {'frame_id': 10, 'presented': True,
+             'additional_presented': False},
+            {'frame_id': 11, 'presented': True,
+             'additional_presented': True,
+             'additional_present_interval_us': 8000},
+        ]
+
+        self.assertIsNone(fsr_benchmark.generated_fps_from_frame_generation(
+            records, {10}))
+        self.assertEqual(fsr_benchmark.generated_fps_from_frame_generation(
+            records, {11}), 125.0)
+        self.assertIsNone(fsr_benchmark.generated_fps_from_frame_generation(
+            [{'frame_id': 12, 'result': 'framegen',
+              'additional_presented': True}], {12}))
+        timed = fsr_benchmark.parse_benchmark_log(
+            'VK FSR3 framegen: frame=13 requested=yes prepared=yes '
+            'computed=yes presented=yes additional_presented=yes '
+            'additional_present_interval_us=8000 fallback=no disabled=no\n')
+        self.assertEqual(fsr_benchmark.generated_fps_from_frame_generation(
+            timed['frame_generation'], {13}), 125.0)
+
+    def test_frame_generation_telemetry_is_optional(self):
+        parsed = fsr_benchmark.parse_benchmark_log(
+            'VK FSR3 frame: id=30 reset=no pause=no\n')
+
+        self.assertEqual(parsed['frame_generation'], [])
+        self.assertEqual(parsed['framegen'], [])
+        self.assertEqual(fsr_benchmark.summarize_frame_generation([]),
+                         {'count': 0})
+
     def test_legacy_samples_without_frame_ids_remain_supported(self):
         parsed = fsr_benchmark.parse_benchmark_log(
             'FSR sample: time=2.000 cpu_us=200 gpu_us=150\n'
