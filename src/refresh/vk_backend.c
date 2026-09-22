@@ -6699,9 +6699,11 @@ static bool vk_create_device(void)
 
     uint32_t *queue_counts = family_count ?
         Z_Mallocz(sizeof(*queue_counts) * family_count) : NULL;
-    bool provider_requested =
-        Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED &&
-        vk_fsr_frame_generation_user_requested();
+    /* Reserve provider queues for the lifetime of the device, not only when
+     * the cvar happens to be enabled during startup. The setting is runtime
+     * configurable and swapchain recreation may enable frame generation
+     * later without recreating the Vulkan device. */
+    bool provider_available = Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED;
     bool provider_reserved = false;
     bool provider_async_available = false;
 
@@ -6734,7 +6736,7 @@ static bool vk_create_device(void)
             queue_counts[vk.queues.present_family] = 1;
         }
 
-        if (provider_requested) {
+        if (provider_available) {
             uint32_t provider_present_family = vk.queues.present_family;
             uint32_t provider_present_index = 0;
             uint32_t provider_image_family = UINT32_MAX;
