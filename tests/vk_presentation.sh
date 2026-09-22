@@ -122,6 +122,16 @@ require_contract 'r_fsr_frame_generation_compute_only", "0", CVAR_ARCHIVE' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_fsr_frame_generation_presentation_adapter_available' \
     "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_presentation_adapter_ensure' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'Q2_VK_PresentationAdapterAcquire' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'Q2_VK_PresentationAdapterPresent' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'Q2_VK_PresentationAdapterMarkRecreated' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'Q2_VK_PresentationAdapterAbortFrame' \
+    "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_fsr_frame_generation_compute_only_enabled' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_fsr_frame_generation_effective' \
@@ -217,7 +227,19 @@ if test -n "$sdl_cflags"; then
     # shellcheck disable=SC2086
     set -- "$@" $sdl_cflags
 fi
-set -- "$@" "$repo_dir/tests/vk_presentation.c" -Wl,--gc-sections -lm \
+set -- "$@" "$repo_dir/tests/vk_presentation.c" \
+    "$repo_dir/src/refresh/vk_presentation_adapter.c" \
+    -Wl,--gc-sections -lm \
     -o "$build_dir/vk_presentation_test"
 "$cc" "$@"
 "$build_dir/vk_presentation_test"
+
+# The presentation adapter is intentionally GPU-free. Compile its state
+# machine independently so acquire/present/recreate ordering stays covered
+# even on systems without a Vulkan device.
+"$cc" -std=c11 -O1 -g -fms-extensions -ffunction-sections -fdata-sections \
+    -D_GNU_SOURCE -I"$repo_dir" \
+    "$repo_dir/src/refresh/vk_presentation_adapter.c" \
+    "$repo_dir/tests/vk_presentation_adapter.c" \
+    -Wl,--gc-sections -o "$build_dir/vk_presentation_adapter_test"
+"$build_dir/vk_presentation_adapter_test"

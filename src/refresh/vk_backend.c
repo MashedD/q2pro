@@ -29,6 +29,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include "vk_backend.h"
 #include "vk_fsr3.h"
 #include "vk_fsr_dynamic.h"
+#include "vk_presentation_adapter.h"
 
 #if USE_VULKAN
 
@@ -1017,6 +1018,7 @@ typedef struct {
     VkPipeline alias_line_pipeline;
     VkQueryPool timestamp_query_pool;
     VkSwapchainKHR swapchain;
+    q2_vk_presentation_adapter_t *presentation_adapter;
     VkRenderPass render_pass;
     VkRenderPass bloom_render_pass;
     VkRenderPass presentation_load_pass;
@@ -1281,6 +1283,57 @@ typedef struct {
 static vk_state_t vk;
 static bool vk_session_frame_generation_disabled;
 static bool vk_device_lost_recovery_queued;
+
+static VkResult vk_presentation_native_acquire(
+    void *userdata, uint64_t timeout, VkSemaphore semaphore, VkFence fence,
+    uint32_t *image_index)
+{
+    vk_state_t *state = (vk_state_t *)userdata;
+    if (!state || !state->device || !state->swapchain ||
+        !state->AcquireNextImageKHR)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    return state->AcquireNextImageKHR(state->device, state->swapchain,
+                                       timeout, semaphore, fence, image_index);
+}
+
+static VkResult vk_presentation_native_present(
+    void *userdata, VkQueue queue, const VkPresentInfoKHR *present_info)
+{
+    vk_state_t *state = (vk_state_t *)userdata;
+    if (!state || !state->QueuePresentKHR || !present_info)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    return state->QueuePresentKHR(queue, present_info);
+}
+
+static void vk_presentation_native_shutdown(
+    void *userdata, q2_vk_presentation_shutdown_t reason)
+{
+    /* The native swapchain is owned and destroyed by q2pro. In particular,
+     * never wait here: device-loss shutdown must remain GPU-independent. */
+    (void)userdata;
+    (void)reason;
+}
+
+static bool vk_presentation_adapter_ensure(void)
+{
+    if (vk.presentation_adapter)
+        return true;
+    if (!vk.device || !vk.swapchain || !vk.AcquireNextImageKHR ||
+        !vk.QueuePresentKHR)
+        return false;
+
+    const q2_vk_presentation_ops_t ops = {
+        .userdata = &vk,
+        .frame_generation_ready = false,
+        .acquire = vk_presentation_native_acquire,
+        .present = vk_presentation_native_present,
+        .shutdown = vk_presentation_native_shutdown,
+    };
+    vk.presentation_adapter = Q2_VK_PresentationAdapterCreate(
+        Q2_VK_PRESENTATION_NATIVE, &ops);
+    return vk.presentation_adapter != NULL;
+}
+
 static cvar_t *vk_drawentities;
 static cvar_t *vk_drawsky;
 static cvar_t *vk_swapinterval;
@@ -2095,6 +2148,9 @@ static void vk_handle_device_lost(const char *what, VkResult result)
         return;
 
     vk.device_lost = true;
+    if (vk.presentation_adapter)
+        Q2_VK_PresentationAdapterShutdown(
+            vk.presentation_adapter, Q2_VK_PRESENTATION_SHUTDOWN_DEVICE_LOST);
     vk_session_frame_generation_disabled = true;
     Com_EPrintf("Vulkan device lost during %s; disabling FSR3 frame generation "
                 "for this session and restarting the video subsystem\n", what);
@@ -7776,6 +7832,9 @@ static void vk_destroy_swapchain(void)
         vk.DestroySwapchainKHR(vk.device, vk.swapchain, NULL);
         vk.swapchain = VK_NULL_HANDLE;
     }
+
+    if (vk.presentation_adapter)
+        Q2_VK_PresentationAdapterMarkRecreated(vk.presentation_adapter);
 
     vk.swapchain_image_count = 0;
 }
@@ -20716,6 +20775,14 @@ void VKR_Shutdown(bool total)
     vk_destroy_texture_resource(&vk.shockwave_texture);
     vk_destroy_texture_resource(&vk.impact_texture);
 
+    if (vk.presentation_adapter) {
+        Q2_VK_PresentationAdapterDestroy(
+            vk.presentation_adapter,
+            vk.device_lost ? Q2_VK_PRESENTATION_SHUTDOWN_DEVICE_LOST :
+                              Q2_VK_PRESENTATION_SHUTDOWN_NORMAL);
+        vk.presentation_adapter = NULL;
+    }
+
     vk_destroy_swapchain();
 
     if (vk.device && !vk.device_lost && vk.DeviceWaitIdle)
@@ -23101,9 +23168,15 @@ void VKR_BeginFrame(void)
     }
     if (!vk.image_acquired) {
         start = vk_time_usec();
-        result = vk.AcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX,
-                                        image_available, VK_NULL_HANDLE,
-                                        &vk.current_image);
+        if (vk_presentation_adapter_ensure()) {
+            result = Q2_VK_PresentationAdapterAcquire(
+                vk.presentation_adapter, UINT64_MAX, image_available,
+                VK_NULL_HANDLE, &vk.current_image);
+        } else {
+            result = vk.AcquireNextImageKHR(vk.device, vk.swapchain,
+                                            UINT64_MAX, image_available,
+                                            VK_NULL_HANDLE, &vk.current_image);
+        }
         vk.acquire_usec = vk_time_usec() - start;
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
             vk_recreate_swapchain("image acquisition out of date");
@@ -23633,11 +23706,17 @@ void VKR_EndFrame(void)
     };
 
     start = vk_time_usec();
-    result = vk.QueuePresentKHR(vk.present_queue, &present_info);
+    if (vk_presentation_adapter_ensure())
+        result = Q2_VK_PresentationAdapterPresent(
+            vk.presentation_adapter, vk.present_queue, &present_info);
+    else
+        result = vk.QueuePresentKHR(vk.present_queue, &present_info);
     vk.present_usec = vk_time_usec() - start;
     bool present_success = result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR;
     bool recreate_swapchain = result == VK_ERROR_OUT_OF_DATE_KHR ||
         result == VK_SUBOPTIMAL_KHR;
+    if (!present_success && !recreate_swapchain && vk.presentation_adapter)
+        Q2_VK_PresentationAdapterAbortFrame(vk.presentation_adapter);
     vk_finish_fsr_frame_generation_telemetry(
         true, present_success, present_success ? NULL : "presentation_failed");
     if (recreate_swapchain &&

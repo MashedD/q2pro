@@ -465,7 +465,8 @@ if vulkan.found()
   refresh_src += fsr3.get_variable('fsr3_sources')
   refresh_src += 'src/refresh/vk_fsr3.cpp'
   common_deps += vulkan.partial_dependency(compile_args: true, includes: true)
-  refresh_src += ['src/refresh/vk_backend.c', vk_shader_headers]
+  refresh_src += ['src/refresh/vk_backend.c',
+                  'src/refresh/vk_presentation_adapter.c', vk_shader_headers]
   config.set10('USE_VULKAN', true)
 endif
 
