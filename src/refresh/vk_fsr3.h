@@ -11,6 +11,9 @@ the Free Software Foundation; either version 2 of the License, or
 
 #include "config.h"
 #include <vulkan/vulkan.h>
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
 
 #if USE_VULKAN
 #ifdef __cplusplus
@@ -21,6 +24,25 @@ typedef struct {
     bool fp16;
     uint32_t subgroup_size; /* 0 = native; otherwise enabled required size */
 } q2_fsr3_capabilities_t;
+
+/* The reason is a stable, read-only string literal owned by the library. */
+typedef struct {
+    bool supported;
+    const char *reason;
+    const char *missing_function;
+    q2_fsr3_capabilities_t capabilities;
+} q2_fsr3_preflight_result_t;
+
+/* Performs only local handle/dimension/proc-address validation. It does not
+ * create an SDK context, dispatch work, or query a swapchain provider. */
+q2_fsr3_preflight_result_t Q2_FSR3_Preflight(
+    VkPhysicalDevice physical_device, VkDevice device, VkInstance instance,
+    PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+    PFN_vkGetDeviceProcAddr get_device_proc_addr,
+    uint32_t render_width, uint32_t render_height,
+    uint32_t display_width, uint32_t display_height,
+    VkFormat display_format, bool frame_generation,
+    const q2_fsr3_capabilities_t *capabilities);
 
 q2_fsr3_context_t *Q2_FSR3_Create(VkPhysicalDevice physical_device,
                                    VkDevice device,

@@ -20,6 +20,11 @@ static int fail_framebuffer_ordinal;
 static q2_fsr3_context_t *test_fsr_context;
 static unsigned fsr_create_calls;
 static unsigned fsr_frame_generation_calls;
+static unsigned fsr_preflight_calls;
+static q2_fsr3_preflight_result_t fsr_preflight_result = {
+    .supported = true,
+    .reason = "ok",
+};
 static bool fail_frame_generation_create;
 static unsigned test_image_calls, destroyed_image_calls;
 static VkRenderPass last_pass;
@@ -80,6 +85,30 @@ q2_fsr3_context_t *Q2_FSR3_Create(VkPhysicalDevice physical_device,
             return NULL;
     }
     return test_fsr_context;
+}
+q2_fsr3_preflight_result_t Q2_FSR3_Preflight(
+    VkPhysicalDevice physical_device, VkDevice device, VkInstance instance,
+    PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+    PFN_vkGetDeviceProcAddr get_device_proc_addr,
+    uint32_t render_width, uint32_t render_height,
+    uint32_t display_width, uint32_t display_height,
+    VkFormat display_format, bool frame_generation,
+    const q2_fsr3_capabilities_t *capabilities)
+{
+    (void)physical_device;
+    (void)device;
+    (void)instance;
+    (void)get_instance_proc_addr;
+    (void)get_device_proc_addr;
+    (void)render_width;
+    (void)render_height;
+    (void)display_width;
+    (void)display_height;
+    (void)display_format;
+    (void)frame_generation;
+    (void)capabilities;
+    fsr_preflight_calls++;
+    return fsr_preflight_result;
 }
 void Q2_FSR3_Destroy(q2_fsr3_context_t *context) { }
 bool SCR_ParseColor(const char *text, color_t *color) { return false; }
@@ -781,12 +810,14 @@ static void check_fsr_setup_fallback_contracts(void)
     fail_frame_generation_create = true;
     fsr_create_calls = 0;
     fsr_frame_generation_calls = 0;
+    fsr_preflight_calls = 0;
 
     q2_fsr3_context_t *context = vk_create_fsr_context_with_fallback(
         &frame_generation_requested, VK_FORMAT_R8G8B8A8_UNORM);
     assert(context == test_fsr_context);
     assert(fsr_create_calls == 2);
     assert(fsr_frame_generation_calls == 1);
+    assert(fsr_preflight_calls == 1);
     assert(!frame_generation_requested);
     assert(frame_generation.integer == 1);
     assert(!frame_generation.modified);
@@ -799,6 +830,49 @@ static void check_fsr_setup_fallback_contracts(void)
     r_fsr = r_fsr_frame_generation = NULL;
     vk_session_frame_generation_disabled = false;
     puts("FSR setup fallback: passed (frame generation -> upscaling)");
+}
+
+static void check_fsr_preflight_fallback_contracts(void)
+{
+    cvar_t fsr = { .integer = 1 };
+    cvar_t frame_generation = { .integer = 1 };
+    bool frame_generation_requested = true;
+
+    r_fsr = &fsr;
+    r_fsr_frame_generation = &frame_generation;
+    vk_session_frame_generation_disabled = false;
+    vk.render_extent = (VkExtent2D){ 640, 360 };
+    vk.swapchain_extent = (VkExtent2D){ 1280, 720 };
+    test_fsr_context = NULL;
+    fail_frame_generation_create = false;
+    fsr_create_calls = 0;
+    fsr_frame_generation_calls = 0;
+    fsr_preflight_calls = 0;
+    fsr_preflight_result = (q2_fsr3_preflight_result_t) {
+        .supported = false,
+        .reason = "missing Vulkan device function",
+        .missing_function = "vkCreateComputePipelines",
+    };
+
+    q2_fsr3_context_t *context = vk_create_fsr_context_with_fallback(
+        &frame_generation_requested, VK_FORMAT_R8G8B8A8_UNORM);
+    assert(context == NULL);
+    assert(fsr_preflight_calls == 1);
+    assert(fsr_create_calls == 1);
+    assert(fsr_frame_generation_calls == 0);
+    assert(!frame_generation_requested);
+    assert(frame_generation.integer == 1);
+    assert(!frame_generation.modified);
+    assert(vk_session_frame_generation_disabled);
+
+    fsr_preflight_result = (q2_fsr3_preflight_result_t) {
+        .supported = true,
+        .reason = "ok",
+    };
+    test_fsr_context = NULL;
+    r_fsr = r_fsr_frame_generation = NULL;
+    vk_session_frame_generation_disabled = false;
+    puts("FSR preflight fallback: passed (provider failure -> upscaling attempt)");
 }
 
 static void check_fsr_frame_generation_compute_only_gate_contracts(void)
@@ -1078,6 +1152,7 @@ int main(void)
     check_fsr_temporal_contracts();
     check_fsr_frame_generation_contracts();
     check_fsr_setup_fallback_contracts();
+    check_fsr_preflight_fallback_contracts();
     check_fsr_frame_generation_compute_only_gate_contracts();
     check_fsr_lifecycle_contracts();
     check_fsr_frame_generation_telemetry_contracts();

@@ -333,29 +333,16 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL q2_fsr3_get_device_proc(
     return function;
 }
 
-static bool q2_fsr3_has_instance_functions(void)
-{
-    static const char *const names[] = {
+static const char *const q2_fsr3_instance_function_names[] = {
         "vkEnumerateDeviceExtensionProperties",
         "vkGetPhysicalDeviceProperties",
         "vkGetPhysicalDeviceProperties2",
         "vkGetPhysicalDeviceFeatures",
         "vkGetPhysicalDeviceFeatures2",
         "vkGetPhysicalDeviceMemoryProperties",
-    };
+};
 
-    for (const char *name : names) {
-        if (!q2_fsr3_get_instance_proc(name)) {
-            Com_WPrintf("FSR3 unavailable: missing Vulkan instance function %s\n", name);
-            return false;
-        }
-    }
-    return true;
-}
-
-static bool q2_fsr3_has_device_functions(VkDevice device)
-{
-    static const char *const names[] = {
+static const char *const q2_fsr3_device_function_names[] = {
         "vkCreateDescriptorPool",
         "vkDestroyDescriptorPool",
         "vkCreateBuffer",
@@ -395,17 +382,132 @@ static bool q2_fsr3_has_device_functions(VkDevice device)
         "vkCmdCopyBufferToImage",
         "vkCmdClearColorImage",
         "vkCmdFillBuffer",
-    };
+};
 
-    if (!q2_callback_context || !q2_callback_context->get_device_proc_addr || !device)
+static bool q2_fsr3_has_instance_functions(
+    PFN_vkGetInstanceProcAddr get_instance_proc_addr, VkInstance instance,
+    const char **missing_name)
+{
+    if (missing_name)
+        *missing_name = nullptr;
+    if (!get_instance_proc_addr || !instance)
         return false;
-    for (const char *name : names) {
-        if (!q2_fsr3_get_device_proc(device, name)) {
-            Com_WPrintf("FSR3 unavailable: missing Vulkan device function %s\n", name);
+    for (const char *name : q2_fsr3_instance_function_names) {
+        if (!get_instance_proc_addr(instance, name)) {
+            if (missing_name)
+                *missing_name = name;
             return false;
         }
     }
     return true;
+}
+
+static PFN_vkVoidFunction q2_fsr3_resolve_device_proc(
+    PFN_vkGetDeviceProcAddr get_device_proc_addr, VkDevice device,
+    const char *name)
+{
+    PFN_vkVoidFunction function = get_device_proc_addr && device ?
+        get_device_proc_addr(device, name) : nullptr;
+    if (!function && !std::strcmp(name, "vkGetBufferMemoryRequirements2KHR"))
+        function = get_device_proc_addr && device ?
+            get_device_proc_addr(device, "vkGetBufferMemoryRequirements2") : nullptr;
+    return function;
+}
+
+static bool q2_fsr3_has_device_functions(
+    PFN_vkGetDeviceProcAddr get_device_proc_addr, VkDevice device,
+    const char **missing_name)
+{
+    if (missing_name)
+        *missing_name = nullptr;
+
+    if (!get_device_proc_addr || !device)
+        return false;
+    for (const char *name : q2_fsr3_device_function_names) {
+        if (!q2_fsr3_resolve_device_proc(get_device_proc_addr, device, name)) {
+            if (missing_name)
+                *missing_name = name;
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool q2_fsr3_has_instance_functions(void)
+{
+    const char *missing_name = nullptr;
+    const bool available = q2_fsr3_has_instance_functions(
+        q2_callback_context ? q2_callback_context->get_instance_proc_addr : nullptr,
+        q2_callback_context ? q2_callback_context->instance : VK_NULL_HANDLE,
+        &missing_name);
+    if (!available && missing_name)
+        Com_WPrintf("FSR3 unavailable: missing Vulkan instance function %s\n", missing_name);
+    return available;
+}
+
+static bool q2_fsr3_has_device_functions(VkDevice device)
+{
+    const char *missing_name = nullptr;
+    const bool available = q2_fsr3_has_device_functions(
+        q2_callback_context ? q2_callback_context->get_device_proc_addr : nullptr,
+        device, &missing_name);
+    if (!available && missing_name)
+        Com_WPrintf("FSR3 unavailable: missing Vulkan device function %s\n", missing_name);
+    return available;
+}
+
+extern "C" q2_fsr3_preflight_result_t Q2_FSR3_Preflight(
+    VkPhysicalDevice physical_device, VkDevice device,
+    VkInstance instance,
+    PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+    PFN_vkGetDeviceProcAddr get_device_proc_addr,
+    uint32_t render_width, uint32_t render_height,
+    uint32_t display_width, uint32_t display_height,
+    VkFormat display_format, bool frame_generation,
+    const q2_fsr3_capabilities_t *capabilities)
+{
+    (void)display_format;
+    (void)frame_generation;
+
+    q2_fsr3_preflight_result_t result = {};
+    result.capabilities = capabilities ? *capabilities : q2_fsr3_capabilities_t{};
+    result.reason = "ok";
+
+    if (!physical_device || !device || !instance) {
+        result.reason = "invalid Vulkan handle";
+        return result;
+    }
+    if (!q2_fsr3_valid_dimensions(render_width, render_height) ||
+        !q2_fsr3_valid_dimensions(display_width, display_height)) {
+        result.reason = "invalid dimensions";
+        return result;
+    }
+    if (!get_instance_proc_addr) {
+        result.reason = "missing Vulkan instance proc address loader";
+        return result;
+    }
+    if (!get_device_proc_addr) {
+        result.reason = "missing Vulkan device proc address loader";
+        return result;
+    }
+
+    const char *missing_name = nullptr;
+    if (!q2_fsr3_has_instance_functions(
+            get_instance_proc_addr, instance, &missing_name)) {
+        result.reason = "missing Vulkan instance function";
+        result.missing_function = missing_name;
+        return result;
+    }
+    missing_name = nullptr;
+    if (!q2_fsr3_has_device_functions(
+            get_device_proc_addr, device, &missing_name)) {
+        result.reason = "missing Vulkan device function";
+        result.missing_function = missing_name;
+        return result;
+    }
+
+    result.supported = true;
+    return result;
 }
 
 extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(

@@ -116,6 +116,10 @@ require_contract 'vk_log_fence_wait_failure' "$repo_dir/src/refresh/vk_backend.c
 require_contract 'last_submit_result' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_log_fsr_frame_generation_failure' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_create_fsr_context_with_fallback' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'Q2_FSR3_Preflight' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'preflight.missing_function' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'frame-generation preflight failed; attempting FSR upscaling fallback' \
+    "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'r_fsr_frame_generation_compute_only' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'r_fsr_frame_generation_compute_only", "0", CVAR_ARCHIVE' \
@@ -267,3 +271,22 @@ set -- "$@" "$repo_dir/tests/vk_presentation.c" \
     "$repo_dir/tests/vk_presentation_adapter.c" \
     -Wl,--gc-sections -o "$build_dir/vk_presentation_adapter_test"
 "$build_dir/vk_presentation_adapter_test"
+
+# Exercise the actual C++ preflight implementation with fake Vulkan loaders;
+# the backend harness above intentionally stubs this ABI and cannot validate
+# function-name resolution or C/C++ struct-return compatibility.
+cxx=${CXX:-c++}
+"$cxx" -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
+    -DFFX_GCC -D_GNU_SOURCE -DHAVE_CONFIG_H \
+    -I"$build_dir" -I"$repo_dir" -I"$repo_dir/inc" \
+    -I"$repo_dir/subprojects/FidelityFX-SDK-1.1.4/sdk/include" \
+    -I"$repo_dir/subprojects/FidelityFX-SDK-1.1.4/sdk/src/shared" \
+    -I"$repo_dir/subprojects/FidelityFX-SDK-1.1.4/sdk/src/backends/shared" \
+    -I"$repo_dir/subprojects/FidelityFX-SDK-1.1.4/sdk/src/backends/shared/blob_accessors" \
+    -I"$repo_dir/subprojects/FidelityFX-SDK-1.1.4/sdk/src/components" \
+    -I"$repo_dir/subprojects/FidelityFX-SDK-1.1.4" \
+    -include "$repo_dir/src/refresh/vk_fsr3_compat.h" \
+    "$repo_dir/tests/vk_fsr3_preflight.cpp" \
+    "$repo_dir/src/refresh/vk_fsr3.cpp" \
+    -pthread -Wl,--gc-sections -o "$build_dir/vk_fsr3_preflight_test"
+"$build_dir/vk_fsr3_preflight_test"

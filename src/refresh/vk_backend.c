@@ -1845,6 +1845,25 @@ static bool vk_fsr_frame_generation_backend_supported(void)
 static q2_fsr3_context_t *vk_create_fsr_context_with_fallback(
     bool *frame_generation_requested, VkFormat output_format)
 {
+    if (*frame_generation_requested) {
+        const q2_fsr3_preflight_result_t preflight = Q2_FSR3_Preflight(
+            vk.physical_device, vk.device, vk.instance,
+            vk.GetInstanceProcAddr, vk.GetDeviceProcAddr,
+            vk.render_extent.width, vk.render_extent.height,
+            vk.swapchain_extent.width, vk.swapchain_extent.height,
+            output_format, true, &vk.fsr_capabilities);
+        if (!preflight.supported) {
+            Com_WPrintf("Vulkan FSR3 frame-generation preflight failed: %s%s%s%s\n",
+                        preflight.reason ? preflight.reason : "unknown reason",
+                        preflight.missing_function ? " (" : "",
+                        preflight.missing_function ? preflight.missing_function : "",
+                        preflight.missing_function ? ")" : "");
+            vk_disable_frame_generation_during_setup(
+                "frame-generation preflight failed; attempting FSR upscaling fallback");
+            *frame_generation_requested = false;
+        }
+    }
+
     q2_fsr3_context_t *context = Q2_FSR3_Create(
         vk.physical_device, vk.device, vk.instance,
         vk.GetInstanceProcAddr, vk.GetDeviceProcAddr,
