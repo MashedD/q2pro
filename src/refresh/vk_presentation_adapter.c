@@ -60,11 +60,43 @@ const char *Q2_VK_PresentationAdapterProviderBuildReason(void)
     return Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_REASON;
 }
 
+q2_vk_presentation_provider_capabilities_t
+Q2_VK_PresentationAdapterProviderCapabilities(
+    const q2_vk_presentation_adapter_t *adapter)
+{
+    q2_vk_presentation_provider_capabilities_t capabilities = {
+        .prerequisites_compiled =
+            Q2_VK_PresentationAdapterProviderBuildCompiled(),
+        .runtime_ready = Q2_VK_PresentationAdapterFrameGenerationEnabled(adapter),
+        .lifecycle_capable = adapter && adapter->ops.wait_idle &&
+            adapter->ops.recreate,
+        .diagnostic = NULL,
+    };
+
+    if (!capabilities.prerequisites_compiled) {
+        capabilities.diagnostic =
+            Q2_VK_PresentationAdapterProviderBuildReason();
+    } else if (!adapter) {
+        capabilities.diagnostic = "presentation adapter is not created";
+    } else if (!capabilities.runtime_ready) {
+        capabilities.diagnostic = "frame-generation runtime is not ready";
+    } else if (!capabilities.lifecycle_capable) {
+        capabilities.diagnostic =
+            "presentation lifecycle callbacks are incomplete";
+    } else {
+        capabilities.diagnostic =
+            "provider prerequisites and presentation lifecycle are ready";
+    }
+    return capabilities;
+}
+
 bool Q2_VK_PresentationAdapterProviderReady(
     const q2_vk_presentation_adapter_t *adapter)
 {
-    return Q2_VK_PresentationAdapterFrameGenerationEnabled(adapter) &&
-        Q2_VK_PresentationAdapterProviderBuildCompiled();
+    const q2_vk_presentation_provider_capabilities_t capabilities =
+        Q2_VK_PresentationAdapterProviderCapabilities(adapter);
+    return capabilities.prerequisites_compiled && capabilities.runtime_ready &&
+        capabilities.lifecycle_capable;
 }
 
 q2_vk_presentation_adapter_t *Q2_VK_PresentationAdapterCreate(

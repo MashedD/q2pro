@@ -27,6 +27,13 @@ typedef enum {
     Q2_VK_PRESENTATION_PROVIDER_ACTIVE = 2
 } q2_vk_presentation_provider_status_t;
 
+typedef struct {
+    bool prerequisites_compiled;
+    bool runtime_ready;
+    bool lifecycle_capable;
+    const char *diagnostic;
+} q2_vk_presentation_provider_capabilities_t;
+
 typedef enum {
     Q2_VK_PRESENTATION_SHUTDOWN_NORMAL = 0,
     Q2_VK_PRESENTATION_SHUTDOWN_DEVICE_LOST = 1
@@ -66,6 +73,9 @@ q2_vk_presentation_adapter_t *Q2_VK_PresentationAdapterCreate(
 bool Q2_VK_PresentationAdapterProviderBuildCompiled(void);
 const char *Q2_VK_PresentationAdapterProviderBuildPlatform(void);
 const char *Q2_VK_PresentationAdapterProviderBuildReason(void);
+q2_vk_presentation_provider_capabilities_t
+Q2_VK_PresentationAdapterProviderCapabilities(
+    const q2_vk_presentation_adapter_t *adapter);
 bool Q2_VK_PresentationAdapterProviderReady(
     const q2_vk_presentation_adapter_t *adapter);
 q2_vk_presentation_provider_status_t

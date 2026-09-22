@@ -213,6 +213,12 @@ require_contract 'Q2_VK_PresentationAdapterProviderBuildCompiled' \
     "$repo_dir/src/refresh/vk_presentation_adapter.c"
 require_contract 'Q2_VK_PresentationAdapterProviderReady' \
     "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'q2_vk_presentation_provider_capabilities_t' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'Q2_VK_PresentationAdapterProviderCapabilities' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'lifecycle_capable' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.c"
 require_contract 'Q2_VK_PresentationAdapterProviderBuildCompiled()' \
     "$repo_dir/src/refresh/vk_presentation_adapter.c"
 require_contract 'Q2_VK_PresentationAdapterProviderBuildReason' \
@@ -220,6 +226,12 @@ require_contract 'Q2_VK_PresentationAdapterProviderBuildReason' \
 require_contract 'Vulkan FSR3 frame-generation provider' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'Q2_VK_PresentationAdapterProviderBuildPlatform' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'Vulkan FSR3 provider capabilities:' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'Vulkan FSR3 provider capability detail:' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'Q2_VK_PresentationAdapterProviderCapabilities' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'sharedResourceCreated' \
     "$repo_dir/subprojects/packagefiles/fidelityfx-fsr3/tools/q2_fsr3_sdk_hardening.py"
@@ -271,6 +283,17 @@ set -- "$@" "$repo_dir/tests/vk_presentation.c" \
     "$repo_dir/tests/vk_presentation_adapter.c" \
     -Wl,--gc-sections -o "$build_dir/vk_presentation_adapter_test"
 "$build_dir/vk_presentation_adapter_test"
+
+# Repeat the adapter state-machine test with a compiled provider so the
+# positive readiness path is covered independently of the current no-provider
+# build configuration.
+"$cc" -std=c11 -O1 -g -fms-extensions -ffunction-sections -fdata-sections \
+    -D_GNU_SOURCE -DQ2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED=1 \
+    -I"$build_dir" -I"$repo_dir" \
+    "$repo_dir/src/refresh/vk_presentation_adapter.c" \
+    "$repo_dir/tests/vk_presentation_adapter.c" \
+    -Wl,--gc-sections -o "$build_dir/vk_presentation_adapter_compiled_test"
+"$build_dir/vk_presentation_adapter_compiled_test"
 
 # Exercise the actual C++ preflight implementation with fake Vulkan loaders;
 # the backend harness above intentionally stubs this ABI and cannot validate

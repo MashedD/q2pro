@@ -6277,6 +6277,15 @@ static void vk_strings_f(void)
                Q2_VK_PresentationAdapterProviderBuildPlatform());
     Com_Printf("Vulkan FSR3 frame-generation provider reason: %s\n",
                Q2_VK_PresentationAdapterProviderBuildReason());
+    const q2_vk_presentation_provider_capabilities_t provider_capabilities =
+        Q2_VK_PresentationAdapterProviderCapabilities(vk.presentation_adapter);
+    Com_Printf("Vulkan FSR3 provider capabilities: compiled=%s runtime=%s lifecycle=%s\n",
+               provider_capabilities.prerequisites_compiled ? "yes" : "no",
+               provider_capabilities.runtime_ready ? "yes" : "no",
+               provider_capabilities.lifecycle_capable ? "yes" : "no");
+    Com_Printf("Vulkan FSR3 provider capability detail: %s\n",
+               provider_capabilities.diagnostic ?
+                   provider_capabilities.diagnostic : "unknown");
     Com_Printf("Vulkan swapchain: %ux%u, %u images\n",
                vk.swapchain_extent.width, vk.swapchain_extent.height,
                vk.swapchain_image_count);
