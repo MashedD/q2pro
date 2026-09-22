@@ -84,6 +84,15 @@ static q2_vk_presentation_adapter_t *make_adapter(
             .graphics_queue_index = 0,
             .present_queue_family = 1,
             .present_queue_index = 0,
+            .sync_contract = {
+                .acquire_signal = Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE,
+                .render_finished_signal =
+                    Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE,
+                .frame_completion = Q2_VK_PRESENTATION_SYNC_FENCE,
+                .image_reuse = Q2_VK_PRESENTATION_SYNC_FENCE,
+                .timeline_semaphore_supported = false,
+                .synchronization2_supported = false,
+            },
             .provider_synchronization_ready = true,
         },
         .acquire = mock_acquire,
@@ -138,6 +147,16 @@ static void check_ordering_and_fallback(void)
     assert(capabilities.lifecycle_capable);
     assert(capabilities.queue_topology ==
            Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SEPARATE_PRESENT_QUEUE);
+    assert(capabilities.sync_contract.acquire_signal ==
+           Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE);
+    assert(capabilities.sync_contract.render_finished_signal ==
+           Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE);
+    assert(capabilities.sync_contract.frame_completion ==
+           Q2_VK_PRESENTATION_SYNC_FENCE);
+    assert(capabilities.sync_contract.image_reuse ==
+           Q2_VK_PRESENTATION_SYNC_FENCE);
+    assert(!capabilities.sync_contract.timeline_semaphore_supported);
+    assert(!capabilities.sync_contract.synchronization2_supported);
     assert(capabilities.provider_synchronization_ready);
     assert(capabilities.diagnostic[0] != '\0');
     assert(Q2_VK_PresentationAdapterProviderReady(adapter) ==
@@ -226,6 +245,13 @@ static void check_provider_status_is_not_implied_by_native_adapter(void)
             .queue_family_facts_known = true,
             .graphics_queue_family = 0,
             .present_queue_family = 0,
+            .sync_contract = {
+                .acquire_signal = Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE,
+                .render_finished_signal =
+                    Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE,
+                .frame_completion = Q2_VK_PRESENTATION_SYNC_FENCE,
+                .image_reuse = Q2_VK_PRESENTATION_SYNC_FENCE,
+            },
             .provider_synchronization_ready = true,
         },
         .acquire = mock_acquire,
@@ -248,6 +274,14 @@ static void check_provider_status_is_not_implied_by_native_adapter(void)
     assert(capabilities.queue_topology ==
            Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SINGLE_QUEUE);
     assert(!capabilities.provider_synchronization_ready);
+    assert(capabilities.sync_contract.acquire_signal ==
+           Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE);
+    assert(capabilities.sync_contract.render_finished_signal ==
+           Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE);
+    assert(capabilities.sync_contract.frame_completion ==
+           Q2_VK_PRESENTATION_SYNC_FENCE);
+    assert(capabilities.sync_contract.image_reuse ==
+           Q2_VK_PRESENTATION_SYNC_FENCE);
     assert(capabilities.diagnostic[0] != '\0');
     assert(Q2_VK_PresentationAdapterProviderStatus(adapter) ==
            (Q2_VK_PresentationAdapterProviderBuildCompiled() ?

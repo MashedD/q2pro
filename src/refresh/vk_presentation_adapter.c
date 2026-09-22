@@ -94,6 +94,8 @@ Q2_VK_PresentationAdapterProviderCapabilities(
             adapter->ops.recreate,
         .queue_topology = q2_vk_presentation_queue_topology(
             adapter ? &adapter->ops.topology : NULL),
+        .sync_contract = adapter ? adapter->ops.topology.sync_contract :
+            (q2_vk_presentation_sync_contract_t){0},
         .provider_synchronization_ready =
             q2_vk_presentation_provider_sync_ready(adapter),
         .diagnostic = NULL,
@@ -114,8 +116,23 @@ Q2_VK_PresentationAdapterProviderCapabilities(
         capabilities.diagnostic =
             "provider queue-family topology is unknown";
     } else if (!capabilities.provider_synchronization_ready) {
-        capabilities.diagnostic =
-            "provider synchronization readiness is not declared";
+        const q2_vk_presentation_sync_contract_t *contract =
+            &capabilities.sync_contract;
+        if (contract->acquire_signal ==
+                Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE &&
+            contract->render_finished_signal ==
+                Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE &&
+            contract->frame_completion == Q2_VK_PRESENTATION_SYNC_FENCE &&
+            contract->image_reuse == Q2_VK_PRESENTATION_SYNC_FENCE &&
+            !contract->timeline_semaphore_supported &&
+            !contract->synchronization2_supported) {
+            capabilities.diagnostic =
+                "provider synchronization readiness is not declared "
+                "(native binary semaphore/fence lifecycle)";
+        } else {
+            capabilities.diagnostic =
+                "provider synchronization readiness is not declared";
+        }
     } else {
         capabilities.diagnostic =
             "provider prerequisites and presentation lifecycle are ready";

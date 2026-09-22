@@ -1335,6 +1335,15 @@ static bool vk_presentation_adapter_ensure(void)
             .graphics_queue_index = vk.graphics_queue_index,
             .present_queue_family = vk.queues.present_family,
             .present_queue_index = vk.present_queue_index,
+            .sync_contract = {
+                .acquire_signal = Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE,
+                .render_finished_signal =
+                    Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE,
+                .frame_completion = Q2_VK_PRESENTATION_SYNC_FENCE,
+                .image_reuse = Q2_VK_PRESENTATION_SYNC_FENCE,
+                .timeline_semaphore_supported = false,
+                .synchronization2_supported = false,
+            },
             /* Native q2pro presentation still owns binary semaphore/fence
              * synchronization; no provider-owned submission contract exists. */
             .provider_synchronization_ready = false,

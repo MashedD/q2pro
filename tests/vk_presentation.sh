@@ -229,6 +229,12 @@ require_contract 'present_queue_index' \
     "$repo_dir/src/refresh/vk_presentation_adapter.h"
 require_contract 'provider_synchronization_ready' \
     "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'Q2_VK_PRESENTATION_SYNC_TIMELINE_SEMAPHORE' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'q2_vk_presentation_sync_contract_t' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
 require_contract 'q2_vk_presentation_provider_sync_ready' \
     "$repo_dir/src/refresh/vk_presentation_adapter.c"
 require_contract 'Q2_VK_PRESENTATION_FRAME_INTERPOLATION' \
@@ -250,6 +256,18 @@ require_contract 'Q2_VK_PresentationAdapterProviderCapabilities' \
 require_contract 'queue_family_facts_known = true' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'provider_synchronization_ready = false' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'acquire_signal = Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'render_finished_signal =' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'frame_completion = Q2_VK_PRESENTATION_SYNC_FENCE' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'image_reuse = Q2_VK_PRESENTATION_SYNC_FENCE' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'VkSubmitInfo submit_info' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk.QueueSubmit' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'graphics_queue_index' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'present_queue_index' "$repo_dir/src/refresh/vk_backend.c"

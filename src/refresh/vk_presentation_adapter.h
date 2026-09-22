@@ -34,6 +34,22 @@ typedef enum {
     Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SEPARATE_PRESENT_QUEUE = 3
 } q2_vk_presentation_queue_topology_t;
 
+typedef enum {
+    Q2_VK_PRESENTATION_SYNC_UNKNOWN = 0,
+    Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE = 1,
+    Q2_VK_PRESENTATION_SYNC_FENCE = 2,
+    Q2_VK_PRESENTATION_SYNC_TIMELINE_SEMAPHORE = 3
+} q2_vk_presentation_sync_kind_t;
+
+typedef struct {
+    q2_vk_presentation_sync_kind_t acquire_signal;
+    q2_vk_presentation_sync_kind_t render_finished_signal;
+    q2_vk_presentation_sync_kind_t frame_completion;
+    q2_vk_presentation_sync_kind_t image_reuse;
+    bool timeline_semaphore_supported;
+    bool synchronization2_supported;
+} q2_vk_presentation_sync_contract_t;
+
 /* CPU-side facts supplied by a future provider integration. This deliberately
  * contains no Vulkan handles or synchronization objects: native presentation
  * can leave it unknown until the provider owns the queue-family contract. */
@@ -43,6 +59,7 @@ typedef struct {
     uint32_t graphics_queue_index;
     uint32_t present_queue_family;
     uint32_t present_queue_index;
+    q2_vk_presentation_sync_contract_t sync_contract;
     bool provider_synchronization_ready;
 } q2_vk_presentation_topology_t;
 
@@ -51,6 +68,7 @@ typedef struct {
     bool runtime_ready;
     bool lifecycle_capable;
     q2_vk_presentation_queue_topology_t queue_topology;
+    q2_vk_presentation_sync_contract_t sync_contract;
     bool provider_synchronization_ready;
     const char *diagnostic;
 } q2_vk_presentation_provider_capabilities_t;
