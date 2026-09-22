@@ -247,6 +247,10 @@ require_contract 'Vulkan FSR3 provider capability detail:' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'Q2_VK_PresentationAdapterProviderCapabilities' \
     "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'queue_family_facts_known = true' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'provider_synchronization_ready = false' \
+    "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'graphics_queue_index' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'present_queue_index' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'queues_same_family' "$repo_dir/src/refresh/vk_backend.c"

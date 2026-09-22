@@ -1329,6 +1329,16 @@ static bool vk_presentation_adapter_ensure(void)
     const q2_vk_presentation_ops_t ops = {
         .userdata = &vk,
         .frame_generation_ready = false,
+        .topology = {
+            .queue_family_facts_known = true,
+            .graphics_queue_family = vk.queues.graphics_family,
+            .graphics_queue_index = vk.graphics_queue_index,
+            .present_queue_family = vk.queues.present_family,
+            .present_queue_index = vk.present_queue_index,
+            /* Native q2pro presentation still owns binary semaphore/fence
+             * synchronization; no provider-owned submission contract exists. */
+            .provider_synchronization_ready = false,
+        },
         .acquire = vk_presentation_native_acquire,
         .present = vk_presentation_native_present,
         .shutdown = vk_presentation_native_shutdown,
