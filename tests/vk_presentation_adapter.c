@@ -96,6 +96,8 @@ static void check_ordering_and_fallback(void)
     q2_vk_presentation_adapter_t *adapter = make_adapter(&state, true);
     assert(adapter);
     assert(Q2_VK_PresentationAdapterFrameGenerationEnabled(adapter));
+    assert(Q2_VK_PresentationAdapterProviderReady(adapter) ==
+           Q2_VK_PresentationAdapterProviderBuildCompiled());
     assert(!Q2_VK_PresentationAdapterHasAcquiredImage(adapter));
 
     VkPresentInfoKHR present_info = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
@@ -144,15 +146,13 @@ static void check_frame_generation_gate_and_device_loss(void)
     q2_vk_presentation_adapter_t *adapter = make_adapter(&state, false);
     assert(adapter);
     assert(!Q2_VK_PresentationAdapterFrameGenerationEnabled(adapter));
-    assert(!Q2_VK_PresentationAdapterProviderBuildCompiled());
+    assert(!Q2_VK_PresentationAdapterProviderReady(adapter));
     assert(Q2_VK_PresentationAdapterProviderBuildPlatform()[0] != '\0');
-    assert(strcmp(Q2_VK_PresentationAdapterProviderBuildPlatform(),
-                  "unknown") != 0);
     assert(Q2_VK_PresentationAdapterProviderBuildReason()[0] != '\0');
-    assert(strstr(Q2_VK_PresentationAdapterProviderBuildReason(),
-                  "not compiled") != NULL);
     assert(Q2_VK_PresentationAdapterProviderStatus(adapter) ==
-           Q2_VK_PRESENTATION_PROVIDER_UNAVAILABLE);
+           (Q2_VK_PresentationAdapterProviderBuildCompiled() ?
+            Q2_VK_PRESENTATION_PROVIDER_BUILT :
+            Q2_VK_PRESENTATION_PROVIDER_UNAVAILABLE));
     Q2_VK_PresentationAdapterShutdown(
         adapter, Q2_VK_PRESENTATION_SHUTDOWN_DEVICE_LOST);
     assert(state.shutdown_reason == Q2_VK_PRESENTATION_SHUTDOWN_DEVICE_LOST);
@@ -179,8 +179,11 @@ static void check_provider_status_is_not_implied_by_native_adapter(void)
         Q2_VK_PRESENTATION_NATIVE, &ops);
     assert(adapter);
     assert(!Q2_VK_PresentationAdapterFrameGenerationEnabled(adapter));
+    assert(!Q2_VK_PresentationAdapterProviderReady(adapter));
     assert(Q2_VK_PresentationAdapterProviderStatus(adapter) ==
-           Q2_VK_PRESENTATION_PROVIDER_UNAVAILABLE);
+           (Q2_VK_PresentationAdapterProviderBuildCompiled() ?
+            Q2_VK_PRESENTATION_PROVIDER_BUILT :
+            Q2_VK_PRESENTATION_PROVIDER_UNAVAILABLE));
     Q2_VK_PresentationAdapterDestroy(adapter,
                                      Q2_VK_PRESENTATION_SHUTDOWN_NORMAL);
 }

@@ -60,6 +60,13 @@ const char *Q2_VK_PresentationAdapterProviderBuildReason(void)
     return Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_REASON;
 }
 
+bool Q2_VK_PresentationAdapterProviderReady(
+    const q2_vk_presentation_adapter_t *adapter)
+{
+    return Q2_VK_PresentationAdapterFrameGenerationEnabled(adapter) &&
+        Q2_VK_PresentationAdapterProviderBuildCompiled();
+}
+
 q2_vk_presentation_adapter_t *Q2_VK_PresentationAdapterCreate(
     q2_vk_presentation_mode_t mode,
     const q2_vk_presentation_ops_t *ops)
@@ -82,7 +89,7 @@ q2_vk_presentation_provider_status_t
 Q2_VK_PresentationAdapterProviderStatus(
     const q2_vk_presentation_adapter_t *adapter)
 {
-    if (Q2_VK_PresentationAdapterFrameGenerationEnabled(adapter))
+    if (Q2_VK_PresentationAdapterProviderReady(adapter))
         return Q2_VK_PRESENTATION_PROVIDER_ACTIVE;
     if (Q2_VK_PresentationAdapterProviderBuildCompiled())
         return Q2_VK_PRESENTATION_PROVIDER_BUILT;

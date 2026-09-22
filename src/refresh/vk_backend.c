@@ -1334,6 +1334,24 @@ static bool vk_presentation_adapter_ensure(void)
     return vk.presentation_adapter != NULL;
 }
 
+/* Keep every swapchain acquisition visible to the presentation adapter. In
+ * particular, VKR_VideoSync can acquire an image before VKR_BeginFrame; a
+ * direct call here would leave the adapter's acquire latch clear and make the
+ * matching present fail its ordering check. */
+static VkResult vk_presentation_acquire(
+    uint64_t timeout,
+    VkSemaphore semaphore,
+    VkFence fence,
+    uint32_t *image_index)
+{
+    if (vk_presentation_adapter_ensure())
+        return Q2_VK_PresentationAdapterAcquire(
+            vk.presentation_adapter, timeout, semaphore, fence, image_index);
+
+    return vk.AcquireNextImageKHR(vk.device, vk.swapchain, timeout,
+                                  semaphore, fence, image_index);
+}
+
 static cvar_t *vk_drawentities;
 static cvar_t *vk_drawsky;
 static cvar_t *vk_swapinterval;
@@ -1661,7 +1679,8 @@ static bool vk_fsr_frame_generation_user_requested(void)
  * interpolated image that will only be presented once. */
 static bool vk_fsr_frame_generation_presentation_adapter_available(void)
 {
-    return false;
+    return vk_presentation_adapter_ensure() &&
+        Q2_VK_PresentationAdapterProviderReady(vk.presentation_adapter);
 }
 
 static bool vk_fsr_frame_generation_compute_only_enabled(void)
@@ -23179,15 +23198,8 @@ void VKR_BeginFrame(void)
     }
     if (!vk.image_acquired) {
         start = vk_time_usec();
-        if (vk_presentation_adapter_ensure()) {
-            result = Q2_VK_PresentationAdapterAcquire(
-                vk.presentation_adapter, UINT64_MAX, image_available,
-                VK_NULL_HANDLE, &vk.current_image);
-        } else {
-            result = vk.AcquireNextImageKHR(vk.device, vk.swapchain,
-                                            UINT64_MAX, image_available,
-                                            VK_NULL_HANDLE, &vk.current_image);
-        }
+        result = vk_presentation_acquire(UINT64_MAX, image_available,
+                                         VK_NULL_HANDLE, &vk.current_image);
         vk.acquire_usec = vk_time_usec() - start;
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
             vk_recreate_swapchain("image acquisition out of date");
@@ -23805,9 +23817,8 @@ bool VKR_VideoSync(void)
     }
 
     if (!vk.image_acquired) {
-        result = vk.AcquireNextImageKHR(vk.device, vk.swapchain, 0,
-                                        image_available, VK_NULL_HANDLE,
-                                        &vk.current_image);
+        result = vk_presentation_acquire(0, image_available, VK_NULL_HANDLE,
+                                         &vk.current_image);
         if (result == VK_NOT_READY || result == VK_TIMEOUT)
             return false;
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {

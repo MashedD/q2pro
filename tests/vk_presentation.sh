@@ -124,6 +124,10 @@ require_contract 'vk_fsr_frame_generation_presentation_adapter_available' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_presentation_adapter_ensure' \
     "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_presentation_acquire' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'Q2_VK_PresentationAdapterProviderReady' \
+    "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'Q2_VK_PresentationAdapterAcquire' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'Q2_VK_PresentationAdapterPresent' \
@@ -202,6 +206,10 @@ require_contract 'Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_REASON' \
 require_contract 'Q2_VK_PRESENTATION_PROVIDER_UNAVAILABLE' \
     "$repo_dir/src/refresh/vk_presentation_adapter.h"
 require_contract 'Q2_VK_PresentationAdapterProviderBuildCompiled' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.c"
+require_contract 'Q2_VK_PresentationAdapterProviderReady' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'Q2_VK_PresentationAdapterProviderBuildCompiled()' \
     "$repo_dir/src/refresh/vk_presentation_adapter.c"
 require_contract 'Q2_VK_PresentationAdapterProviderBuildReason' \
     "$repo_dir/src/refresh/vk_presentation_adapter.c"

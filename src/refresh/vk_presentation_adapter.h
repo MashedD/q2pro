@@ -66,6 +66,8 @@ q2_vk_presentation_adapter_t *Q2_VK_PresentationAdapterCreate(
 bool Q2_VK_PresentationAdapterProviderBuildCompiled(void);
 const char *Q2_VK_PresentationAdapterProviderBuildPlatform(void);
 const char *Q2_VK_PresentationAdapterProviderBuildReason(void);
+bool Q2_VK_PresentationAdapterProviderReady(
+    const q2_vk_presentation_adapter_t *adapter);
 q2_vk_presentation_provider_status_t
 Q2_VK_PresentationAdapterProviderStatus(
     const q2_vk_presentation_adapter_t *adapter);
