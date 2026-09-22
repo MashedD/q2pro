@@ -1,5 +1,20 @@
 project('fidelityfx-fsr3', 'cpp', version: '3.1.4')
 
+fsr3_cpp = meson.get_compiler('cpp')
+fsr3_frame_interpolation_provider_compiled = false
+fsr3_frame_interpolation_provider_platform = host_machine.system()
+fsr3_frame_interpolation_provider_reason = 'real FidelityFX frame-interpolation swapchain provider is disabled; q2pro uses the no-op Vulkan stub'
+
+if host_machine.system() == 'windows'
+  fsr3_toolchain = fsr3_cpp.get_id()
+  fsr3_arch = host_machine.cpu_family()
+  fsr3_frame_interpolation_provider_reason = '@0@/@1@: real FidelityFX frame-interpolation swapchain provider is not compiled; q2pro currently uses the no-op Vulkan stub'.format(fsr3_arch, fsr3_toolchain)
+elif host_machine.system() == 'linux'
+  fsr3_frame_interpolation_provider_reason = 'linux/@0@: real FidelityFX frame-interpolation swapchain provider is not compiled; the vendored provider requires Win32 synchronization and presentation APIs'.format(fsr3_cpp.get_id())
+else
+  fsr3_frame_interpolation_provider_reason = '@0@/@1@: real FidelityFX frame-interpolation swapchain provider is not compiled for this q2pro integration; the no-op Vulkan stub remains selected'.format(host_machine.system(), fsr3_cpp.get_id())
+endif
+
 fsr3_root = meson.current_source_dir()
 fsr3_include = include_directories(
   'sdk/include',
@@ -90,3 +105,12 @@ fsr3_sources = files(
 fsr3_dep = declare_dependency(
   include_directories: fsr3_include,
 )
+
+# Export diagnostics explicitly. Subproject locals are not part of the
+# parent project's public variable surface unless exported with set_variable.
+set_variable('fsr3_frame_interpolation_provider_compiled',
+             fsr3_frame_interpolation_provider_compiled)
+set_variable('fsr3_frame_interpolation_provider_platform',
+             fsr3_frame_interpolation_provider_platform)
+set_variable('fsr3_frame_interpolation_provider_reason',
+             fsr3_frame_interpolation_provider_reason)

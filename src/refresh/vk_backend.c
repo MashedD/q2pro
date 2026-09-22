@@ -6228,6 +6228,17 @@ static void vk_strings_f(void)
                props->vendorID, props->deviceID);
     Com_Printf("Vulkan queue families: graphics=%u present=%u\n",
                vk.queues.graphics_family, vk.queues.present_family);
+    const q2_vk_presentation_provider_status_t provider_status =
+        Q2_VK_PresentationAdapterProviderStatus(vk.presentation_adapter);
+    const char *provider_status_name =
+        provider_status == Q2_VK_PRESENTATION_PROVIDER_ACTIVE ? "active" :
+        provider_status == Q2_VK_PRESENTATION_PROVIDER_BUILT ? "built" :
+        "unavailable";
+    Com_Printf("Vulkan FSR3 frame-generation provider: %s (platform=%s)\n",
+               provider_status_name,
+               Q2_VK_PresentationAdapterProviderBuildPlatform());
+    Com_Printf("Vulkan FSR3 frame-generation provider reason: %s\n",
+               Q2_VK_PresentationAdapterProviderBuildReason());
     Com_Printf("Vulkan swapchain: %ux%u, %u images\n",
                vk.swapchain_extent.width, vk.swapchain_extent.height,
                vk.swapchain_image_count);

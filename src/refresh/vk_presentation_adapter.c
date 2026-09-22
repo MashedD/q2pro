@@ -12,6 +12,21 @@ later version.
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(HAVE_CONFIG_H)
+#include "config.h"
+#endif
+
+#ifndef Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
+#define Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED 0
+#endif
+#ifndef Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_PLATFORM
+#define Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_PLATFORM "unknown"
+#endif
+#ifndef Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_REASON
+#define Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_REASON \
+    "real FidelityFX frame-interpolation swapchain provider is not compiled"
+#endif
+
 struct q2_vk_presentation_adapter {
     q2_vk_presentation_mode_t mode;
     q2_vk_presentation_ops_t ops;
@@ -30,6 +45,21 @@ static bool q2_vk_presentation_ops_valid(const q2_vk_presentation_ops_t *ops)
     return ops && ops->acquire && ops->present && ops->shutdown;
 }
 
+bool Q2_VK_PresentationAdapterProviderBuildCompiled(void)
+{
+    return Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED != 0;
+}
+
+const char *Q2_VK_PresentationAdapterProviderBuildPlatform(void)
+{
+    return Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_PLATFORM;
+}
+
+const char *Q2_VK_PresentationAdapterProviderBuildReason(void)
+{
+    return Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_REASON;
+}
+
 q2_vk_presentation_adapter_t *Q2_VK_PresentationAdapterCreate(
     q2_vk_presentation_mode_t mode,
     const q2_vk_presentation_ops_t *ops)
@@ -46,6 +76,17 @@ q2_vk_presentation_adapter_t *Q2_VK_PresentationAdapterCreate(
     adapter->ops = *ops;
     adapter->active = true;
     return adapter;
+}
+
+q2_vk_presentation_provider_status_t
+Q2_VK_PresentationAdapterProviderStatus(
+    const q2_vk_presentation_adapter_t *adapter)
+{
+    if (Q2_VK_PresentationAdapterFrameGenerationEnabled(adapter))
+        return Q2_VK_PRESENTATION_PROVIDER_ACTIVE;
+    if (Q2_VK_PresentationAdapterProviderBuildCompiled())
+        return Q2_VK_PRESENTATION_PROVIDER_BUILT;
+    return Q2_VK_PRESENTATION_PROVIDER_UNAVAILABLE;
 }
 
 void Q2_VK_PresentationAdapterShutdown(

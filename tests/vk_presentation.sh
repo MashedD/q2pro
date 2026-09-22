@@ -193,6 +193,22 @@ require_contract 'max_frame_time_ms' "$repo_dir/src/refresh/vk_fsr3.cpp"
 require_contract 'full_context_initialized' "$repo_dir/src/refresh/vk_fsr3.cpp"
 require_contract 'q2_fsr3_sdk_hardening.py' \
     "$repo_dir/subprojects/packagefiles/fidelityfx-fsr3/meson.build"
+require_contract 'fsr3_frame_interpolation_provider_compiled = false' \
+    "$repo_dir/subprojects/packagefiles/fidelityfx-fsr3/meson.build"
+require_contract 'Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED' \
+    "$repo_dir/meson.build"
+require_contract 'Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_REASON' \
+    "$repo_dir/meson.build"
+require_contract 'Q2_VK_PRESENTATION_PROVIDER_UNAVAILABLE' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'Q2_VK_PresentationAdapterProviderBuildCompiled' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.c"
+require_contract 'Q2_VK_PresentationAdapterProviderBuildReason' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.c"
+require_contract 'Vulkan FSR3 frame-generation provider' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'Q2_VK_PresentationAdapterProviderBuildPlatform' \
+    "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'sharedResourceCreated' \
     "$repo_dir/subprojects/packagefiles/fidelityfx-fsr3/tools/q2_fsr3_sdk_hardening.py"
 require_contract 'frameInterpolationContextCreated' \
@@ -238,7 +254,7 @@ set -- "$@" "$repo_dir/tests/vk_presentation.c" \
 # machine independently so acquire/present/recreate ordering stays covered
 # even on systems without a Vulkan device.
 "$cc" -std=c11 -O1 -g -fms-extensions -ffunction-sections -fdata-sections \
-    -D_GNU_SOURCE -I"$repo_dir" \
+    -DHAVE_CONFIG_H -D_GNU_SOURCE -I"$build_dir" -I"$repo_dir" \
     "$repo_dir/src/refresh/vk_presentation_adapter.c" \
     "$repo_dir/tests/vk_presentation_adapter.c" \
     -Wl,--gc-sections -o "$build_dir/vk_presentation_adapter_test"

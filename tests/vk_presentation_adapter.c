@@ -144,6 +144,15 @@ static void check_frame_generation_gate_and_device_loss(void)
     q2_vk_presentation_adapter_t *adapter = make_adapter(&state, false);
     assert(adapter);
     assert(!Q2_VK_PresentationAdapterFrameGenerationEnabled(adapter));
+    assert(!Q2_VK_PresentationAdapterProviderBuildCompiled());
+    assert(Q2_VK_PresentationAdapterProviderBuildPlatform()[0] != '\0');
+    assert(strcmp(Q2_VK_PresentationAdapterProviderBuildPlatform(),
+                  "unknown") != 0);
+    assert(Q2_VK_PresentationAdapterProviderBuildReason()[0] != '\0');
+    assert(strstr(Q2_VK_PresentationAdapterProviderBuildReason(),
+                  "not compiled") != NULL);
+    assert(Q2_VK_PresentationAdapterProviderStatus(adapter) ==
+           Q2_VK_PRESENTATION_PROVIDER_UNAVAILABLE);
     Q2_VK_PresentationAdapterShutdown(
         adapter, Q2_VK_PRESENTATION_SHUTDOWN_DEVICE_LOST);
     assert(state.shutdown_reason == Q2_VK_PRESENTATION_SHUTDOWN_DEVICE_LOST);
@@ -152,10 +161,35 @@ static void check_frame_generation_gate_and_device_loss(void)
                                      Q2_VK_PRESENTATION_SHUTDOWN_DEVICE_LOST);
 }
 
+static void check_provider_status_is_not_implied_by_native_adapter(void)
+{
+    mock_state_t state = {.acquire_result = VK_SUCCESS,
+                          .present_result = VK_SUCCESS,
+                          .wait_result = VK_SUCCESS};
+    const q2_vk_presentation_ops_t ops = {
+        .userdata = &state,
+        .frame_generation_ready = true,
+        .acquire = mock_acquire,
+        .present = mock_present,
+        .wait_idle = mock_wait,
+        .recreate = mock_recreate,
+        .shutdown = mock_shutdown,
+    };
+    q2_vk_presentation_adapter_t *adapter = Q2_VK_PresentationAdapterCreate(
+        Q2_VK_PRESENTATION_NATIVE, &ops);
+    assert(adapter);
+    assert(!Q2_VK_PresentationAdapterFrameGenerationEnabled(adapter));
+    assert(Q2_VK_PresentationAdapterProviderStatus(adapter) ==
+           Q2_VK_PRESENTATION_PROVIDER_UNAVAILABLE);
+    Q2_VK_PresentationAdapterDestroy(adapter,
+                                     Q2_VK_PRESENTATION_SHUTDOWN_NORMAL);
+}
+
 int main(void)
 {
     check_ordering_and_fallback();
     check_frame_generation_gate_and_device_loss();
+    check_provider_status_is_not_implied_by_native_adapter();
     puts("Vulkan presentation adapter contracts: passed");
     return 0;
 }
