@@ -23555,9 +23555,14 @@ void VKR_BeginFrame(void)
     }
 
     /* Async workload selection is consumed by the provider configuration on
-     * the next active frame. It does not require a swapchain rebuild. */
-    if (r_fsr_frame_generation_async)
+     * the next active frame. It does not require a swapchain rebuild, but the
+     * queue change must invalidate temporal/interpolation history. */
+    if (r_fsr_frame_generation_async &&
+        r_fsr_frame_generation_async->modified) {
         r_fsr_frame_generation_async->modified = false;
+        vk.fsr_reset = true;
+        vk_fsr_invalidate_history_reason(VK_FSR_RESET_CONFIG);
+    }
 
     if ((r_fsr && r_fsr->modified) ||
         (r_fsr_auto && r_fsr_auto->modified) ||
