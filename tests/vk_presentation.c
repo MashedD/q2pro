@@ -111,6 +111,13 @@ q2_fsr3_preflight_result_t Q2_FSR3_Preflight(
     return fsr_preflight_result;
 }
 void Q2_FSR3_Destroy(q2_fsr3_context_t *context) { }
+bool Q2_FSR3_WaitProvider(q2_fsr3_context_t *context,
+                          q2_fsr3_provider_t *provider)
+{
+    (void)context;
+    (void)provider;
+    return false;
+}
 bool SCR_ParseColor(const char *text, color_t *color) { return false; }
 void Cbuf_AddText(cmdbuf_t *buf, const char *text) { }
 void Cvar_SetByVar(cvar_t *var, const char *value, from_t from) { abort(); }

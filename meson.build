@@ -462,7 +462,7 @@ if vulkan.found()
   fsr3_provider_platform = host_machine.system()
   fsr3_provider_compiler = meson.get_compiler('cpp').get_id()
   if host_machine.system() == 'windows'
-    fsr3_provider_reason = '@0@/@1@: real FidelityFX frame-interpolation swapchain provider is not compiled; q2pro currently uses the no-op Vulkan stub'.format(host_machine.cpu_family(), fsr3_provider_compiler)
+    fsr3_provider_reason = '@0@/@1@: real FidelityFX frame-interpolation swapchain provider is compiled for Windows'.format(host_machine.cpu_family(), fsr3_provider_compiler)
   elif host_machine.system() == 'linux'
     fsr3_provider_reason = 'linux/@0@: real FidelityFX frame-interpolation swapchain provider is not compiled; the vendored provider requires Win32 synchronization and presentation APIs'.format(fsr3_provider_compiler)
   else
@@ -477,6 +477,20 @@ if vulkan.found()
   add_project_arguments('-DFFX_GCC', '-include',
                         meson.project_source_root() / 'src/refresh/vk_fsr3_compat.h',
                         language: 'cpp')
+  if fsr3_provider_compiler in ['gcc', 'clang']
+    add_project_arguments(
+      '-Wno-class-memaccess',
+      '-Wno-pointer-arith',
+      '-Wno-sign-compare',
+      '-Wno-strict-aliasing',
+      '-Wno-unknown-pragmas',
+      '-Wno-unused-but-set-variable',
+      '-Wno-unused-function',
+      '-Wno-unused-variable',
+      '-Wno-write-strings',
+      language: 'cpp',
+    )
+  endif
   refresh_src += fsr3.get_variable('fsr3_sources')
   refresh_src += 'src/refresh/vk_fsr3.cpp'
   common_deps += vulkan.partial_dependency(compile_args: true, includes: true)

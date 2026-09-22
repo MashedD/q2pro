@@ -312,7 +312,7 @@ require_contract 'VK_SHARING_MODE_EXCLUSIVE' "$repo_dir/src/refresh/vk_backend.c
 sharing_line=$(grep -n 'vk.swapchain_sharing_mode = VK_SHARING_MODE' \
     "$repo_dir/src/refresh/vk_backend.c" | head -n 1 | cut -d: -f1)
 swapchain_create_line=$(grep -n 'vk.CreateSwapchainKHR' \
-    "$repo_dir/src/refresh/vk_backend.c" | head -n 1 | cut -d: -f1)
+    "$repo_dir/src/refresh/vk_backend.c" | tail -n 1 | cut -d: -f1)
 test -n "$sharing_line" -a -n "$swapchain_create_line" &&
 test "$sharing_line" -lt "$swapchain_create_line" || {
     echo "FSR3 contract: swapchain sharing mode must be recorded before creation" >&2

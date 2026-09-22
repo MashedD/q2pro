@@ -80,10 +80,33 @@ struct q2_fsr3_context {
     FfxErrorCode last_error = FFX_OK;
 };
 
+struct q2_fsr3_provider {
+    FfxSwapchain swapchain = nullptr;
+    FfxSwapchainReplacementFunctions replacement = {};
+    q2_fsr3_context_t *context = nullptr;
+};
+
 /* The SDK callback signatures do not carry an opaque context. Keep the
  * callback binding thread-local and scope it around every SDK call instead of
  * storing a process-global device/context pair. */
 static thread_local q2_fsr3_context_t *q2_callback_context;
+
+#if defined(_WIN32) && Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
+/* The SDK's provider worker thread calls Vulkan entry points directly. Keep
+ * its device context available when that thread is outside q2pro's normal
+ * FSR3 callback scope. q2pro creates one provider per Vulkan device. */
+static q2_fsr3_context_t *q2_provider_context;
+#endif
+
+static q2_fsr3_context_t *q2_fsr3_active_context(void)
+{
+    q2_fsr3_context_t *context = q2_callback_context;
+#if defined(_WIN32) && Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
+    if (!context)
+        context = q2_provider_context;
+#endif
+    return context;
+}
 
 struct q2_fsr3_dispatch_inputs {
     float jitter_x;
@@ -286,7 +309,7 @@ extern "C" void Q2_FSR3_ProfileBegin(q2_fsr3_context_t *context, VkCommandBuffer
 
 static PFN_vkVoidFunction q2_fsr3_get_instance_proc(const char *name)
 {
-    auto *context = q2_callback_context;
+    auto *context = q2_fsr3_active_context();
     return context && context->get_instance_proc_addr && context->instance ?
         context->get_instance_proc_addr(context->instance, name) : nullptr;
 }
@@ -318,7 +341,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL q2_fsr3_create_compute_pipelines(
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL q2_fsr3_get_device_proc(
     VkDevice device, const char *name)
 {
-    auto *context = q2_callback_context;
+    auto *context = q2_fsr3_active_context();
     PFN_vkVoidFunction function = context && context->get_device_proc_addr && device ?
         context->get_device_proc_addr(device, name) : nullptr;
     if (function && !strcmp(name, "vkCreateComputePipelines"))
@@ -520,7 +543,8 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(
     VkPhysicalDevice device, const char *layer, uint32_t *count,
     VkExtensionProperties *properties)
 {
-    auto function = q2_callback_context ?
+    auto *context = q2_fsr3_active_context();
+    auto function = context ?
         reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
             q2_fsr3_get_instance_proc("vkEnumerateDeviceExtensionProperties")) : nullptr;
     if (!function || !count)
@@ -536,9 +560,9 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(
     uint32_t written = 0, capacity = properties ? *count : 0;
     for (uint32_t i = 0; i < available; i++) {
         const char *name = list[i].extensionName;
-        if ((!q2_callback_context->capabilities.fp16 &&
+        if ((!context->capabilities.fp16 &&
              !strcmp(name, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME)) ||
-            (!q2_callback_context->capabilities.subgroup_size &&
+            (!context->capabilities.subgroup_size &&
              !strcmp(name, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME)))
             continue;
         if (properties && written < capacity)
@@ -552,7 +576,7 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(
 extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties(
     VkPhysicalDevice device, VkPhysicalDeviceProperties *properties)
 {
-    auto function = q2_callback_context ?
+    auto function = q2_fsr3_active_context() ?
         reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
             q2_fsr3_get_instance_proc("vkGetPhysicalDeviceProperties")) : nullptr;
     if (function)
@@ -562,7 +586,7 @@ extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties(
 extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties2(
     VkPhysicalDevice device, VkPhysicalDeviceProperties2 *properties)
 {
-    auto function = q2_callback_context ?
+    auto function = q2_fsr3_active_context() ?
         reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
             q2_fsr3_get_instance_proc("vkGetPhysicalDeviceProperties2")) : nullptr;
     if (function)
@@ -572,7 +596,7 @@ extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties2(
 extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures2(
     VkPhysicalDevice device, VkPhysicalDeviceFeatures2 *features)
 {
-    auto function = q2_callback_context ?
+    auto function = q2_fsr3_active_context() ?
         reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
             q2_fsr3_get_instance_proc("vkGetPhysicalDeviceFeatures2")) : nullptr;
     if (function)
@@ -582,7 +606,7 @@ extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures2(
 extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures(
     VkPhysicalDevice device, VkPhysicalDeviceFeatures *features)
 {
-    auto function = q2_callback_context ?
+    auto function = q2_fsr3_active_context() ?
         reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(
             q2_fsr3_get_instance_proc("vkGetPhysicalDeviceFeatures")) : nullptr;
     if (function)
@@ -592,7 +616,7 @@ extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures(
 extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties(
     VkPhysicalDevice device, VkPhysicalDeviceMemoryProperties *properties)
 {
-    auto function = q2_callback_context ?
+    auto function = q2_fsr3_active_context() ?
         reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
             q2_fsr3_get_instance_proc("vkGetPhysicalDeviceMemoryProperties")) : nullptr;
     if (function)
@@ -603,7 +627,7 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateBuffer(
     VkDevice device, const VkBufferCreateInfo *create_info,
     const VkAllocationCallbacks *allocator, VkBuffer *buffer)
 {
-    auto function = q2_callback_context ?
+    auto function = q2_fsr3_active_context() ?
         reinterpret_cast<PFN_vkCreateBuffer>(
             q2_fsr3_get_device_proc(device, "vkCreateBuffer")) : nullptr;
     return function ? function(device, create_info, allocator, buffer) :
@@ -820,15 +844,23 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
         result->full_context_created = true;
 
         FfxFrameGenerationConfig config = {};
+#if defined(_WIN32) && Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
+        /* The real Windows swapchain does not exist until q2pro replaces the
+         * native swapchain. Enable the FSR3 context after that replacement. */
+        config.frameGenerationEnabled = false;
+#else
         config.frameGenerationEnabled = true;
+#endif
         config.allowAsyncWorkloads = false;
         config.frameGenerationCallback = nullptr;
         error = ffxFsr3ConfigureFrameGeneration(&result->full_context, &config);
+#if !(defined(_WIN32) && Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED)
         if (error != FFX_OK) {
             Com_WPrintf("Vulkan FSR3 frame-generation configuration failed (error %d)\n",
                         static_cast<int>(error));
             goto fail;
         }
+#endif
     }
     return result;
 
@@ -1147,5 +1179,585 @@ extern "C" bool Q2_FSR3_FrameGenerationFailed(
 {
     return context && context->frame_generation_failed;
 }
+
+#if defined(_WIN32) && Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
+
+/* The SDK callback ABI does not carry a Vulkan queue handle. q2pro has one
+ * provider per device, so keep the bound queue-submit table process-local and
+ * clear it only after the provider has stopped its presentation threads. */
+static PFN_vkQueueSubmit q2_provider_queue_submit;
+static VkQueue q2_provider_game_queue;
+static VkQueue q2_provider_async_queue;
+static VkQueue q2_provider_present_queue;
+static VkQueue q2_provider_image_acquire_queue;
+
+static void q2_fsr3_provider_clear_binding(void)
+{
+    q2_provider_context = nullptr;
+    q2_provider_queue_submit = nullptr;
+    q2_provider_game_queue = VK_NULL_HANDLE;
+    q2_provider_async_queue = VK_NULL_HANDLE;
+    q2_provider_present_queue = VK_NULL_HANDLE;
+    q2_provider_image_acquire_queue = VK_NULL_HANDLE;
+}
+
+static q2_fsr3_context_t *q2_fsr3_provider_active_context()
+{
+    return q2_callback_context ? q2_callback_context : q2_provider_context;
+}
+
+static PFN_vkVoidFunction q2_fsr3_provider_get_device_proc(const char *name)
+{
+    q2_fsr3_context_t *context = q2_fsr3_provider_active_context();
+    return context && context->get_device_proc_addr &&
+            context->device_context.vkDevice ?
+        context->get_device_proc_addr(context->device_context.vkDevice, name) :
+        nullptr;
+}
+
+static PFN_vkVoidFunction q2_fsr3_provider_get_instance_proc(const char *name)
+{
+    q2_fsr3_context_t *context = q2_fsr3_provider_active_context();
+    return context && context->get_instance_proc_addr && context->instance ?
+        context->get_instance_proc_addr(context->instance, name) : nullptr;
+}
+
+#define Q2_FSR3_FORWARD_DEVICE_RESULT(name, params, args) \
+    extern "C" VKAPI_ATTR VkResult VKAPI_CALL name params \
+    { \
+        auto function = reinterpret_cast<PFN_##name>( \
+            q2_fsr3_provider_get_device_proc(#name)); \
+        return function ? function args : VK_ERROR_INITIALIZATION_FAILED; \
+    }
+
+#define Q2_FSR3_FORWARD_DEVICE_VOID(name, params, args) \
+    extern "C" VKAPI_ATTR void VKAPI_CALL name params \
+    { \
+        auto function = reinterpret_cast<PFN_##name>( \
+            q2_fsr3_provider_get_device_proc(#name)); \
+        if (function) \
+            function args; \
+    }
+
+#define Q2_FSR3_FORWARD_INSTANCE_VOID(name, params, args) \
+    extern "C" VKAPI_ATTR void VKAPI_CALL name params \
+    { \
+        auto function = reinterpret_cast<PFN_##name>( \
+            q2_fsr3_provider_get_instance_proc(#name)); \
+        if (function) \
+            function args; \
+    }
+
+#define Q2_FSR3_FORWARD_INSTANCE_RESULT(name, params, args) \
+    extern "C" VKAPI_ATTR VkResult VKAPI_CALL name params \
+    { \
+        auto function = reinterpret_cast<PFN_##name>( \
+            q2_fsr3_provider_get_instance_proc(#name)); \
+        return function ? function args : VK_ERROR_INITIALIZATION_FAILED; \
+    }
+
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkAcquireNextImageKHR,
+    (VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout,
+     VkSemaphore semaphore, VkFence fence, uint32_t *image_index),
+    (device, swapchain, timeout, semaphore, fence, image_index))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkAllocateCommandBuffers,
+    (VkDevice device, const VkCommandBufferAllocateInfo *allocate_info,
+     VkCommandBuffer *command_buffers),
+    (device, allocate_info, command_buffers))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkAllocateDescriptorSets,
+    (VkDevice device, const VkDescriptorSetAllocateInfo *allocate_info,
+     VkDescriptorSet *descriptor_sets),
+    (device, allocate_info, descriptor_sets))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkAllocateMemory,
+    (VkDevice device, const VkMemoryAllocateInfo *allocate_info,
+     const VkAllocationCallbacks *allocator, VkDeviceMemory *memory),
+    (device, allocate_info, allocator, memory))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkBeginCommandBuffer,
+    (VkCommandBuffer command_buffer,
+     const VkCommandBufferBeginInfo *begin_info),
+    (command_buffer, begin_info))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkBindImageMemory,
+    (VkDevice device, VkImage image, VkDeviceMemory memory,
+     VkDeviceSize memory_offset),
+    (device, image, memory, memory_offset))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkCreateCommandPool,
+    (VkDevice device, const VkCommandPoolCreateInfo *create_info,
+     const VkAllocationCallbacks *allocator, VkCommandPool *command_pool),
+    (device, create_info, allocator, command_pool))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkCreateDescriptorPool,
+    (VkDevice device, const VkDescriptorPoolCreateInfo *create_info,
+     const VkAllocationCallbacks *allocator, VkDescriptorPool *descriptor_pool),
+    (device, create_info, allocator, descriptor_pool))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkCreateDescriptorSetLayout,
+    (VkDevice device, const VkDescriptorSetLayoutCreateInfo *create_info,
+     const VkAllocationCallbacks *allocator,
+     VkDescriptorSetLayout *set_layout),
+    (device, create_info, allocator, set_layout))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkCreateFramebuffer,
+    (VkDevice device, const VkFramebufferCreateInfo *create_info,
+     const VkAllocationCallbacks *allocator, VkFramebuffer *framebuffer),
+    (device, create_info, allocator, framebuffer))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkCreateGraphicsPipelines,
+    (VkDevice device, VkPipelineCache pipeline_cache, uint32_t count,
+     const VkGraphicsPipelineCreateInfo *create_infos,
+     const VkAllocationCallbacks *allocator, VkPipeline *pipelines),
+    (device, pipeline_cache, count, create_infos, allocator, pipelines))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkCreateImage,
+    (VkDevice device, const VkImageCreateInfo *create_info,
+     const VkAllocationCallbacks *allocator, VkImage *image),
+    (device, create_info, allocator, image))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkCreateImageView,
+    (VkDevice device, const VkImageViewCreateInfo *create_info,
+     const VkAllocationCallbacks *allocator, VkImageView *view),
+    (device, create_info, allocator, view))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkCreatePipelineLayout,
+    (VkDevice device, const VkPipelineLayoutCreateInfo *create_info,
+     const VkAllocationCallbacks *allocator, VkPipelineLayout *layout),
+    (device, create_info, allocator, layout))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkCreateRenderPass,
+    (VkDevice device, const VkRenderPassCreateInfo *create_info,
+     const VkAllocationCallbacks *allocator, VkRenderPass *render_pass),
+    (device, create_info, allocator, render_pass))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkCreateSemaphore,
+    (VkDevice device, const VkSemaphoreCreateInfo *create_info,
+     const VkAllocationCallbacks *allocator, VkSemaphore *semaphore),
+    (device, create_info, allocator, semaphore))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkCreateShaderModule,
+    (VkDevice device, const VkShaderModuleCreateInfo *create_info,
+     const VkAllocationCallbacks *allocator, VkShaderModule *shader_module),
+    (device, create_info, allocator, shader_module))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkCreateSwapchainKHR,
+    (VkDevice device, const VkSwapchainCreateInfoKHR *create_info,
+     const VkAllocationCallbacks *allocator, VkSwapchainKHR *swapchain),
+    (device, create_info, allocator, swapchain))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkDeviceWaitIdle,
+    (VkDevice device), (device))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkFreeDescriptorSets,
+    (VkDevice device, VkDescriptorPool descriptor_pool, uint32_t count,
+     const VkDescriptorSet *descriptor_sets),
+    (device, descriptor_pool, count, descriptor_sets))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkGetSemaphoreCounterValue,
+    (VkDevice device, VkSemaphore semaphore, uint64_t *value),
+    (device, semaphore, value))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkGetSwapchainImagesKHR,
+    (VkDevice device, VkSwapchainKHR swapchain, uint32_t *count,
+     VkImage *images),
+    (device, swapchain, count, images))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkQueuePresentKHR,
+    (VkQueue queue, const VkPresentInfoKHR *present_info),
+    (queue, present_info))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkQueueSubmit,
+    (VkQueue queue, uint32_t submit_count, const VkSubmitInfo *submits,
+     VkFence fence),
+    (queue, submit_count, submits, fence))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkQueueWaitIdle,
+    (VkQueue queue), (queue))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkResetCommandBuffer,
+    (VkCommandBuffer command_buffer, VkCommandBufferResetFlags flags),
+    (command_buffer, flags))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkResetCommandPool,
+    (VkDevice device, VkCommandPool command_pool,
+     VkCommandPoolResetFlags flags),
+    (device, command_pool, flags))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkWaitSemaphores,
+    (VkDevice device, const VkSemaphoreWaitInfo *wait_info,
+     uint64_t timeout),
+    (device, wait_info, timeout))
+
+Q2_FSR3_FORWARD_DEVICE_VOID(vkDestroyCommandPool,
+    (VkDevice device, VkCommandPool command_pool,
+     const VkAllocationCallbacks *allocator),
+    (device, command_pool, allocator))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkDestroyDescriptorPool,
+    (VkDevice device, VkDescriptorPool descriptor_pool,
+     const VkAllocationCallbacks *allocator),
+    (device, descriptor_pool, allocator))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkDestroyDescriptorSetLayout,
+    (VkDevice device, VkDescriptorSetLayout set_layout,
+     const VkAllocationCallbacks *allocator),
+    (device, set_layout, allocator))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkDestroyFramebuffer,
+    (VkDevice device, VkFramebuffer framebuffer,
+     const VkAllocationCallbacks *allocator),
+    (device, framebuffer, allocator))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkDestroyImage,
+    (VkDevice device, VkImage image, const VkAllocationCallbacks *allocator),
+    (device, image, allocator))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkDestroyImageView,
+    (VkDevice device, VkImageView view, const VkAllocationCallbacks *allocator),
+    (device, view, allocator))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkDestroyPipeline,
+    (VkDevice device, VkPipeline pipeline,
+     const VkAllocationCallbacks *allocator),
+    (device, pipeline, allocator))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkDestroyPipelineLayout,
+    (VkDevice device, VkPipelineLayout layout,
+     const VkAllocationCallbacks *allocator),
+    (device, layout, allocator))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkDestroyRenderPass,
+    (VkDevice device, VkRenderPass render_pass,
+     const VkAllocationCallbacks *allocator),
+    (device, render_pass, allocator))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkDestroySemaphore,
+    (VkDevice device, VkSemaphore semaphore,
+     const VkAllocationCallbacks *allocator),
+    (device, semaphore, allocator))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkDestroyShaderModule,
+    (VkDevice device, VkShaderModule shader_module,
+     const VkAllocationCallbacks *allocator),
+    (device, shader_module, allocator))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkDestroySwapchainKHR,
+    (VkDevice device, VkSwapchainKHR swapchain,
+     const VkAllocationCallbacks *allocator),
+    (device, swapchain, allocator))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkFreeCommandBuffers,
+    (VkDevice device, VkCommandPool command_pool, uint32_t count,
+     const VkCommandBuffer *command_buffers),
+    (device, command_pool, count, command_buffers))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkFreeMemory,
+    (VkDevice device, VkDeviceMemory memory,
+     const VkAllocationCallbacks *allocator),
+    (device, memory, allocator))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkGetImageMemoryRequirements,
+    (VkDevice device, VkImage image, VkMemoryRequirements *memory_requirements),
+    (device, image, memory_requirements))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkUpdateDescriptorSets,
+    (VkDevice device, uint32_t descriptor_write_count,
+     const VkWriteDescriptorSet *descriptor_writes,
+     uint32_t descriptor_copy_count,
+     const VkCopyDescriptorSet *descriptor_copies),
+    (device, descriptor_write_count, descriptor_writes,
+     descriptor_copy_count, descriptor_copies))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkCmdBeginRenderPass,
+    (VkCommandBuffer command_buffer, const VkRenderPassBeginInfo *render_pass_begin,
+     VkSubpassContents contents),
+    (command_buffer, render_pass_begin, contents))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkCmdBindDescriptorSets,
+    (VkCommandBuffer command_buffer, VkPipelineBindPoint pipeline_bind_point,
+     VkPipelineLayout layout, uint32_t first_set, uint32_t descriptor_set_count,
+     const VkDescriptorSet *descriptor_sets, uint32_t dynamic_offset_count,
+     const uint32_t *dynamic_offsets),
+    (command_buffer, pipeline_bind_point, layout, first_set,
+     descriptor_set_count, descriptor_sets, dynamic_offset_count,
+     dynamic_offsets))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkCmdBindPipeline,
+    (VkCommandBuffer command_buffer, VkPipelineBindPoint pipeline_bind_point,
+     VkPipeline pipeline),
+    (command_buffer, pipeline_bind_point, pipeline))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkCmdCopyImage,
+    (VkCommandBuffer command_buffer, VkImage src_image,
+     VkImageLayout src_image_layout, VkImage dst_image,
+     VkImageLayout dst_image_layout, uint32_t region_count,
+     const VkImageCopy *regions),
+    (command_buffer, src_image, src_image_layout, dst_image,
+     dst_image_layout, region_count, regions))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkCmdDraw,
+    (VkCommandBuffer command_buffer, uint32_t vertex_count,
+     uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance),
+    (command_buffer, vertex_count, instance_count, first_vertex, first_instance))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkCmdEndRenderPass,
+    (VkCommandBuffer command_buffer), (command_buffer))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkCmdPipelineBarrier,
+    (VkCommandBuffer command_buffer, VkPipelineStageFlags src_stage_mask,
+     VkPipelineStageFlags dst_stage_mask, VkDependencyFlags dependency_flags,
+     uint32_t memory_barrier_count, const VkMemoryBarrier *memory_barriers,
+     uint32_t buffer_memory_barrier_count,
+     const VkBufferMemoryBarrier *buffer_memory_barriers,
+     uint32_t image_memory_barrier_count,
+     const VkImageMemoryBarrier *image_memory_barriers),
+    (command_buffer, src_stage_mask, dst_stage_mask, dependency_flags,
+     memory_barrier_count, memory_barriers, buffer_memory_barrier_count,
+     buffer_memory_barriers, image_memory_barrier_count,
+     image_memory_barriers))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkCmdPushConstants,
+    (VkCommandBuffer command_buffer, VkPipelineLayout layout,
+     VkShaderStageFlags stage_flags, uint32_t offset, uint32_t size,
+     const void *values),
+    (command_buffer, layout, stage_flags, offset, size, values))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkCmdSetScissor,
+    (VkCommandBuffer command_buffer, uint32_t first_scissor,
+     uint32_t scissor_count, const VkRect2D *scissors),
+    (command_buffer, first_scissor, scissor_count, scissors))
+Q2_FSR3_FORWARD_DEVICE_VOID(vkCmdSetViewport,
+    (VkCommandBuffer command_buffer, uint32_t first_viewport,
+     uint32_t viewport_count, const VkViewport *viewports),
+    (command_buffer, first_viewport, viewport_count, viewports))
+Q2_FSR3_FORWARD_DEVICE_RESULT(vkEndCommandBuffer,
+    (VkCommandBuffer command_buffer), (command_buffer))
+
+Q2_FSR3_FORWARD_INSTANCE_VOID(vkGetPhysicalDeviceQueueFamilyProperties,
+    (VkPhysicalDevice physical_device, uint32_t *property_count,
+     VkQueueFamilyProperties *properties),
+    (physical_device, property_count, properties))
+Q2_FSR3_FORWARD_INSTANCE_RESULT(vkGetPhysicalDeviceSurfaceSupportKHR,
+    (VkPhysicalDevice physical_device, uint32_t queue_family_index,
+     VkSurfaceKHR surface, VkBool32 *supported),
+    (physical_device, queue_family_index, surface, supported))
+
+#undef Q2_FSR3_FORWARD_DEVICE_RESULT
+#undef Q2_FSR3_FORWARD_DEVICE_VOID
+#undef Q2_FSR3_FORWARD_INSTANCE_VOID
+#undef Q2_FSR3_FORWARD_INSTANCE_RESULT
+
+static VkResult q2_provider_submit(PFN_vkQueueSubmit submit,
+                                   VkQueue queue, uint32_t submit_count,
+                                   const VkSubmitInfo *submits, VkFence fence)
+{
+    return submit && queue ? submit(queue, submit_count, submits, fence) :
+        VK_ERROR_INITIALIZATION_FAILED;
+}
+
+static VkResult q2_provider_submit_game(uint32_t count,
+                                        const VkSubmitInfo *submits,
+                                        VkFence fence)
+{
+    return q2_provider_submit(q2_provider_queue_submit,
+                              q2_provider_game_queue, count, submits, fence);
+}
+
+static VkResult q2_provider_submit_async(uint32_t count,
+                                         const VkSubmitInfo *submits,
+                                         VkFence fence)
+{
+    return q2_provider_submit(q2_provider_queue_submit,
+                              q2_provider_async_queue, count, submits, fence);
+}
+
+static VkResult q2_provider_submit_present(uint32_t count,
+                                           const VkSubmitInfo *submits,
+                                           VkFence fence)
+{
+    return q2_provider_submit(q2_provider_queue_submit,
+                              q2_provider_present_queue, count, submits, fence);
+}
+
+static VkResult q2_provider_submit_image_acquire(uint32_t count,
+                                                 const VkSubmitInfo *submits,
+                                                 VkFence fence)
+{
+    return q2_provider_submit(q2_provider_queue_submit,
+                              q2_provider_image_acquire_queue,
+                              count, submits, fence);
+}
+
+static FfxErrorCode q2_provider_frame_generation_callback(
+    const FfxFrameGenerationDispatchDescription *description, void *userdata)
+{
+    q2_fsr3_context_t *context = static_cast<q2_fsr3_context_t *>(userdata);
+    if (!context || !description || !context->full_context_created ||
+        context->frame_generation_failed)
+        return FFX_ERROR_INVALID_POINTER;
+
+    q2_fsr3_context_scope scope(context);
+    const FfxErrorCode error = ffxFsr3DispatchFrameGeneration(description);
+    context->last_error = error;
+    if (error != FFX_OK)
+        context->frame_generation_failed = true;
+    return error;
+}
+
+extern "C" q2_fsr3_provider_t *Q2_FSR3_CreateProvider(
+    q2_fsr3_context_t *context,
+    VkSwapchainKHR native_swapchain,
+    const VkSwapchainCreateInfoKHR *create_info,
+    VkQueue game_queue, uint32_t game_queue_family,
+    VkQueue async_compute_queue, uint32_t async_compute_queue_family,
+    VkQueue present_queue, uint32_t present_queue_family,
+    VkQueue image_acquire_queue, uint32_t image_acquire_queue_family,
+    VkSwapchainKHR *provider_swapchain,
+    q2_fsr3_provider_functions_t *functions,
+    const char **failure_reason)
+{
+    static const char *invalid_argument = "invalid provider argument";
+    static const char *missing_submit = "vkQueueSubmit is unavailable";
+    static const char *replacement_failed = "FSR3 swapchain replacement failed";
+    static const char *function_query_failed =
+        "FSR3 swapchain replacement functions unavailable";
+
+    if (provider_swapchain)
+        *provider_swapchain = VK_NULL_HANDLE;
+    if (functions)
+        *functions = {};
+    if (failure_reason)
+        *failure_reason = nullptr;
+
+    if (!context || !context->device_context.vkDevice || !native_swapchain ||
+        !create_info || !game_queue || !present_queue ||
+        !image_acquire_queue || !provider_swapchain || !functions) {
+        if (failure_reason)
+            *failure_reason = invalid_argument;
+        return nullptr;
+    }
+
+    q2_fsr3_context_scope scope(context);
+    auto submit = reinterpret_cast<PFN_vkQueueSubmit>(
+        context->get_device_proc_addr(context->device_context.vkDevice,
+                                      "vkQueueSubmit"));
+    if (!submit) {
+        if (failure_reason)
+            *failure_reason = missing_submit;
+        return nullptr;
+    }
+
+    FfxDevice device = ffxGetDeviceVK(&context->device_context);
+    q2_fsr3_provider_t *provider = new q2_fsr3_provider;
+    provider->context = context;
+    if (ffxGetSwapchainReplacementFunctionsVK(device,
+                                               &provider->replacement) != FFX_OK) {
+        delete provider;
+        if (failure_reason)
+            *failure_reason = function_query_failed;
+        return nullptr;
+    }
+
+    q2_provider_queue_submit = submit;
+    q2_provider_game_queue = game_queue;
+    q2_provider_async_queue = async_compute_queue;
+    q2_provider_present_queue = present_queue;
+    q2_provider_image_acquire_queue = image_acquire_queue;
+
+    VkFrameInterpolationInfoFFX info = {};
+    info.physicalDevice = context->device_context.vkPhysicalDevice;
+    info.device = context->device_context.vkDevice;
+    info.gameQueue = {
+        game_queue, game_queue_family, q2_provider_submit_game
+    };
+    info.asyncComputeQueue = {
+        async_compute_queue, async_compute_queue_family,
+        async_compute_queue ? q2_provider_submit_async : nullptr
+    };
+    info.presentQueue = {
+        present_queue, present_queue_family, q2_provider_submit_present
+    };
+    info.imageAcquireQueue = {
+        image_acquire_queue, image_acquire_queue_family,
+        q2_provider_submit_image_acquire
+    };
+    info.compositionMode = VK_COMPOSITION_MODE_NOT_FORCED_FFX;
+
+    provider->swapchain = ffxGetSwapchainVK(native_swapchain);
+    q2_provider_context = context;
+    const FfxErrorCode error = ffxReplaceSwapchainForFrameinterpolationVK(
+        ffxGetCommandQueueVK(game_queue), provider->swapchain,
+        create_info, &info);
+    if (error != FFX_OK || !provider->swapchain) {
+        q2_fsr3_provider_clear_binding();
+        delete provider;
+        if (failure_reason)
+            *failure_reason = replacement_failed;
+        return nullptr;
+    }
+
+    *provider_swapchain = ffxGetVKSwapchain(provider->swapchain);
+    *functions = {
+        provider->replacement.destroySwapchainKHR,
+        provider->replacement.getSwapchainImagesKHR,
+        provider->replacement.acquireNextImageKHR,
+        provider->replacement.queuePresentKHR,
+        provider->replacement.setHdrMetadataEXT,
+    };
+    if (!functions->destroy_swapchain || !functions->get_swapchain_images ||
+        !functions->acquire_next_image || !functions->queue_present) {
+        provider->replacement.destroySwapchainKHR(
+            context->device_context.vkDevice, *provider_swapchain, nullptr);
+        *provider_swapchain = VK_NULL_HANDLE;
+        q2_fsr3_provider_clear_binding();
+        delete provider;
+        if (failure_reason)
+            *failure_reason = function_query_failed;
+        return nullptr;
+    }
+    return provider;
+}
+
+extern "C" bool Q2_FSR3_ConfigureProvider(
+    q2_fsr3_context_t *context, q2_fsr3_provider_t *provider,
+    bool enabled, uint64_t frame_id)
+{
+    if (!context || !provider || provider->context != context ||
+        !provider->swapchain || !context->full_context_created)
+        return false;
+
+    q2_fsr3_context_scope scope(context);
+    FfxFrameGenerationConfig config = {};
+    config.swapChain = provider->swapchain;
+    config.frameGenerationEnabled = enabled;
+    config.allowAsyncWorkloads = false;
+    config.frameGenerationCallback = enabled ?
+        q2_provider_frame_generation_callback : nullptr;
+    config.frameGenerationCallbackContext = enabled ? context : nullptr;
+    config.frameID = frame_id;
+    config.interpolationRect = {
+        0, 0, static_cast<int32_t>(context->display_width),
+        static_cast<int32_t>(context->display_height)
+    };
+    const FfxErrorCode error = ffxFsr3ConfigureFrameGeneration(
+        &context->full_context, &config);
+    context->last_error = error;
+    if (error != FFX_OK)
+        context->frame_generation_failed = true;
+    return error == FFX_OK;
+}
+
+extern "C" bool Q2_FSR3_WaitProvider(q2_fsr3_context_t *context,
+                                      q2_fsr3_provider_t *provider)
+{
+    if (!context || !provider || provider->context != context ||
+        !provider->swapchain)
+        return false;
+    q2_fsr3_context_scope scope(context);
+    const FfxErrorCode error = ffxWaitForPresents(provider->swapchain);
+    context->last_error = error;
+    return error == FFX_OK;
+}
+
+extern "C" void Q2_FSR3_DestroyProvider(q2_fsr3_context_t *context,
+                                         q2_fsr3_provider_t *provider,
+                                         bool device_lost)
+{
+    if (!provider)
+        return;
+    if (!device_lost && context && provider->context == context) {
+        q2_fsr3_context_scope scope(context);
+        ffxWaitForPresents(provider->swapchain);
+        provider->replacement.destroySwapchainKHR(
+            context->device_context.vkDevice,
+            ffxGetVKSwapchain(provider->swapchain), nullptr);
+    }
+    if (q2_provider_context == context || q2_provider_game_queue ||
+        q2_provider_present_queue || q2_provider_image_acquire_queue)
+        q2_fsr3_provider_clear_binding();
+    delete provider;
+}
+
+#else
+
+extern "C" q2_fsr3_provider_t *Q2_FSR3_CreateProvider(
+    q2_fsr3_context_t *, VkSwapchainKHR, const VkSwapchainCreateInfoKHR *,
+    VkQueue, uint32_t, VkQueue, uint32_t, VkQueue, uint32_t,
+    VkQueue, uint32_t, VkSwapchainKHR *, q2_fsr3_provider_functions_t *,
+    const char **)
+{
+    return nullptr;
+}
+
+extern "C" bool Q2_FSR3_ConfigureProvider(
+    q2_fsr3_context_t *, q2_fsr3_provider_t *, bool, uint64_t)
+{
+    return false;
+}
+
+extern "C" bool Q2_FSR3_WaitProvider(q2_fsr3_context_t *,
+                                      q2_fsr3_provider_t *)
+{
+    return false;
+}
+
+extern "C" void Q2_FSR3_DestroyProvider(q2_fsr3_context_t *,
+                                         q2_fsr3_provider_t *, bool)
+{
+}
+
+#endif
 
 #endif

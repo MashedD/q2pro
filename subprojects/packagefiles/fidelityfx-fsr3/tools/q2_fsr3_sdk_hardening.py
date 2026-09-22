@@ -11,11 +11,133 @@ def replace_once(text, old, new, label):
     return text.replace(old, new, 1)
 
 
+def harden_vulkan_frame_interpolation_source(root):
+    """Keep the Windows Vulkan provider buildable with GCC/MinGW."""
+
+    source_path = root / "sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK.cpp"
+    source = source_path.read_text()
+
+    source = source.replace("#pragma once\n", "", 1)
+
+    if "reinterpret_cast<FfxWaitCallbackFunc>(valuePtr)" not in source:
+        source = replace_once(
+            source,
+            "pSwapChainVK->setWaitCallback(static_cast<FfxWaitCallbackFunc>(valuePtr));",
+            "pSwapChainVK->setWaitCallback(reinterpret_cast<FfxWaitCallbackFunc>(valuePtr));",
+            "GCC function-pointer conversion",
+        )
+
+    if "reinterpret_cast<PFN_vkDestroySwapchainKHR>(vkDestroySwapchainFFX)" not in source:
+        source = source.replace(
+            "functions->destroySwapchainKHR   = vkDestroySwapchainFFX;",
+            "functions->destroySwapchainKHR   = reinterpret_cast<PFN_vkDestroySwapchainKHR>(vkDestroySwapchainFFX);",
+        )
+        source = source.replace(
+            "functions->getSwapchainImagesKHR = vkGetSwapchainImagesFFX;",
+            "functions->getSwapchainImagesKHR = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(vkGetSwapchainImagesFFX);",
+        )
+        source = source.replace(
+            "functions->acquireNextImageKHR   = vkAcquireNextImageFFX;",
+            "functions->acquireNextImageKHR   = reinterpret_cast<PFN_vkAcquireNextImageKHR>(vkAcquireNextImageFFX);",
+        )
+        source = source.replace(
+            "functions->queuePresentKHR       = vkQueuePresentFFX;",
+            "functions->queuePresentKHR       = reinterpret_cast<PFN_vkQueuePresentKHR>(vkQueuePresentFFX);",
+        )
+        source = source.replace(
+            "functions->setHdrMetadataEXT = vkSetHdrMetadataFFX;",
+            "functions->setHdrMetadataEXT = reinterpret_cast<PFN_vkSetHdrMetadataEXT>(vkSetHdrMetadataFFX);",
+        )
+
+    source = source.replace(
+        "gameSwapChain = reinterpret_cast<VkSwapchainKHR>(pSwapChainVK);",
+        "gameSwapChain = reinterpret_cast<FfxSwapchain>(pSwapChainVK);",
+    )
+
+    if "SubmissionSemaphores emptySignals;" not in source:
+        source = replace_once(
+            source,
+            "presenter->presentQueue.submit(VK_NULL_HANDLE, toWait, SubmissionSemaphores());",
+            "SubmissionSemaphores emptySignals;\n"
+            "                        presenter->presentQueue.submit(VK_NULL_HANDLE, toWait, emptySignals);",
+            "presenter empty semaphore temporary",
+        )
+        source = replace_once(
+            source,
+            "res = presentInfo.gameQueue.submit(VK_NULL_HANDLE, toWait, SubmissionSemaphores());",
+            "SubmissionSemaphores emptySignals;\n"
+            "            res = presentInfo.gameQueue.submit(VK_NULL_HANDLE, toWait, emptySignals);",
+            "game queue empty semaphore temporary",
+        )
+
+    if "q2_fsr3_vk_image_from_resource(frameInfo.resource.resource)" not in source:
+        source = source.replace(
+            "static_cast<VkImage>(frameInfo.resource.resource)",
+            "q2_fsr3_vk_image_from_resource(frameInfo.resource.resource)",
+        )
+        source = source.replace(
+            "static_cast<VkImage>(interpolatedResource.resource)",
+            "q2_fsr3_vk_image_from_resource(interpolatedResource.resource)",
+        )
+        source = source.replace(
+            "static_cast<VkImage>(resource.resource)",
+            "q2_fsr3_vk_image_from_resource(resource.resource)",
+        )
+        source = source.replace(
+            "static_cast<VkImage>(presentInfo.currentUiSurface.resource)",
+            "q2_fsr3_vk_image_from_resource(presentInfo.currentUiSurface.resource)",
+        )
+
+    for expression in [
+        "resource.image",
+        "semaphore",
+        "presentInfo.presentQueue.queue",
+        "presentInfo.asyncComputeQueue.queue",
+        "imageAcquireQueue.queue",
+        "presentInfo.realSwapchainImages[i]",
+    ]:
+        source = source.replace(
+            f"debugNameSetter.setDebugName({expression},",
+            f"debugNameSetter.setDebugName(q2_fsr3_vk_handle_as_resource({expression}),",
+        )
+
+    ui_composition_path = root / "sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK_UiComposition.cpp"
+    ui_composition = ui_composition_path.read_text()
+    ui_composition = ui_composition.replace(
+        "s_uiCompositionRenderPass = nullptr;",
+        "s_uiCompositionRenderPass = VK_NULL_HANDLE;",
+    )
+    ui_composition_path.write_text(ui_composition)
+
+    debug_pacing_path = root / "sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK_DebugPacing.cpp"
+    debug_pacing = debug_pacing_path.read_text()
+    debug_pacing = debug_pacing.replace(
+        "s_debugPacingRenderPass = nullptr;",
+        "s_debugPacingRenderPass = VK_NULL_HANDLE;",
+    )
+    debug_pacing_path.write_text(debug_pacing)
+
+    source_path.write_text(source)
+
+
+def harden_breadcrumb_uint64_format(root):
+    """Use a format that matches the SDK's explicitly 64-bit values."""
+
+    header_path = root / "sdk/src/shared/ffx_breadcrumbs_list.h"
+    header = header_path.read_text()
+    old = '#define FFX_BREADCRUMBS_APPEND_UINT64(buff, count, number) \\\n    FFX_BREADCRUMBS_APPEND_NUMBER(buff, count, number, 21, "%zu")'
+    new = '#define FFX_BREADCRUMBS_APPEND_UINT64(buff, count, number) \\\n    FFX_BREADCRUMBS_APPEND_NUMBER(buff, count, static_cast<unsigned long long>(number), 21, "%llu")'
+    if old in header:
+        header_path.write_text(header.replace(old, new, 1))
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit("usage: q2_fsr3_sdk_hardening.py <fsr3-root>")
 
     root = Path(sys.argv[1])
+    harden_vulkan_frame_interpolation_source(root)
+    harden_breadcrumb_uint64_format(root)
     private_path = root / "sdk/src/components/fsr3/ffx_fsr3_private.h"
     source_path = root / "sdk/src/components/fsr3/ffx_fsr3.cpp"
 

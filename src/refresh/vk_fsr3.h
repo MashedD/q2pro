@@ -20,6 +20,15 @@ the Free Software Foundation; either version 2 of the License, or
 extern "C" {
 #endif
 typedef struct q2_fsr3_context q2_fsr3_context_t;
+typedef struct q2_fsr3_provider q2_fsr3_provider_t;
+
+typedef struct {
+    PFN_vkDestroySwapchainKHR destroy_swapchain;
+    PFN_vkGetSwapchainImagesKHR get_swapchain_images;
+    PFN_vkAcquireNextImageKHR acquire_next_image;
+    PFN_vkQueuePresentKHR queue_present;
+    PFN_vkSetHdrMetadataEXT set_hdr_metadata;
+} q2_fsr3_provider_functions_t;
 typedef struct {
     bool fp16;
     uint32_t subgroup_size; /* 0 = native; otherwise enabled required size */
@@ -92,6 +101,31 @@ bool Q2_FSR3_DispatchFrameGeneration(q2_fsr3_context_t *context,
                                      bool reset);
 bool Q2_FSR3_FrameGenerationEnabled(const q2_fsr3_context_t *context);
 bool Q2_FSR3_FrameGenerationFailed(const q2_fsr3_context_t *context);
+
+/* The Windows FSR3 frame-interpolation provider owns a pseudo swapchain and
+ * its acquire/present implementation. These calls keep the C Vulkan backend
+ * independent of the SDK's C++ reference APIs. Non-Windows builds return
+ * NULL/false and retain the native swapchain path. */
+q2_fsr3_provider_t *Q2_FSR3_CreateProvider(
+    q2_fsr3_context_t *context,
+    VkSwapchainKHR native_swapchain,
+    const VkSwapchainCreateInfoKHR *create_info,
+    VkQueue game_queue, uint32_t game_queue_family,
+    VkQueue async_compute_queue, uint32_t async_compute_queue_family,
+    VkQueue present_queue, uint32_t present_queue_family,
+    VkQueue image_acquire_queue, uint32_t image_acquire_queue_family,
+    VkSwapchainKHR *provider_swapchain,
+    q2_fsr3_provider_functions_t *functions,
+    const char **failure_reason);
+bool Q2_FSR3_ConfigureProvider(
+    q2_fsr3_context_t *context,
+    q2_fsr3_provider_t *provider,
+    bool enabled, uint64_t frame_id);
+bool Q2_FSR3_WaitProvider(q2_fsr3_context_t *context,
+                          q2_fsr3_provider_t *provider);
+void Q2_FSR3_DestroyProvider(q2_fsr3_context_t *context,
+                             q2_fsr3_provider_t *provider,
+                             bool device_lost);
 
 #ifdef __cplusplus
 }

@@ -3,12 +3,13 @@ project('fidelityfx-fsr3', 'cpp', version: '3.1.4')
 fsr3_cpp = meson.get_compiler('cpp')
 fsr3_frame_interpolation_provider_compiled = false
 fsr3_frame_interpolation_provider_platform = host_machine.system()
-fsr3_frame_interpolation_provider_reason = 'real FidelityFX frame-interpolation swapchain provider is disabled; q2pro uses the no-op Vulkan stub'
+fsr3_frame_interpolation_provider_reason = 'real FidelityFX frame-interpolation swapchain provider is not compiled'
 
 if host_machine.system() == 'windows'
   fsr3_toolchain = fsr3_cpp.get_id()
   fsr3_arch = host_machine.cpu_family()
-  fsr3_frame_interpolation_provider_reason = '@0@/@1@: real FidelityFX frame-interpolation swapchain provider is not compiled; q2pro currently uses the no-op Vulkan stub'.format(fsr3_arch, fsr3_toolchain)
+  fsr3_frame_interpolation_provider_compiled = true
+  fsr3_frame_interpolation_provider_reason = '@0@/@1@: real FidelityFX frame-interpolation swapchain provider is compiled for Windows'.format(fsr3_arch, fsr3_toolchain)
 elif host_machine.system() == 'linux'
   fsr3_frame_interpolation_provider_reason = 'linux/@0@: real FidelityFX frame-interpolation swapchain provider is not compiled; the vendored provider requires Win32 synchronization and presentation APIs'.format(fsr3_cpp.get_id())
 else
@@ -17,6 +18,7 @@ endif
 
 fsr3_root = meson.current_source_dir()
 fsr3_include = include_directories(
+  '.',
   'sdk/include',
   'sdk/src/shared',
   'sdk/src/backends/shared',
@@ -99,8 +101,18 @@ fsr3_sources = files(
   'sdk/src/components/frameinterpolation/ffx_frameinterpolation.cpp',
   'sdk/src/components/opticalflow/ffx_opticalflow.cpp',
   'src/backends/shared/ffx_shader_blobs.cpp',
-  'src/backends/vk/ffx_vk_stubs.cpp',
 ) + [vk_backend_source, shader_header]
+
+if host_machine.system() == 'windows'
+  fsr3_sources += files(
+    'sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK.cpp',
+    'sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK_Helpers.cpp',
+    'sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK_UiComposition.cpp',
+    'sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK_DebugPacing.cpp',
+  )
+else
+  fsr3_sources += files('src/backends/vk/ffx_vk_stubs.cpp')
+endif
 
 fsr3_dep = declare_dependency(
   include_directories: fsr3_include,

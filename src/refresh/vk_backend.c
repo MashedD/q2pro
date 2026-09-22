@@ -936,8 +936,19 @@ typedef struct {
     bool device_lost;
     VkQueue graphics_queue;
     VkQueue present_queue;
+    VkQueue provider_present_queue;
+    VkQueue provider_image_acquire_queue;
+    VkQueue provider_async_compute_queue;
     uint32_t graphics_queue_index;
     uint32_t present_queue_index;
+    uint32_t provider_present_queue_family;
+    uint32_t provider_present_queue_index;
+    uint32_t provider_image_acquire_queue_family;
+    uint32_t provider_image_acquire_queue_index;
+    uint32_t provider_async_compute_queue_family;
+    uint32_t provider_async_compute_queue_index;
+    bool provider_queues_reserved;
+    bool provider_async_compute_available;
     bool queues_same_family;
     VkSharingMode swapchain_sharing_mode;
     VkCommandPool command_pool;
@@ -1158,6 +1169,9 @@ typedef struct {
     uint32_t fsr_history_count;
     uint32_t fsr_pending_history_count;
     q2_fsr3_context_t *fsr3;
+    q2_fsr3_provider_t *fsr3_provider;
+    q2_fsr3_provider_functions_t fsr3_provider_functions;
+    bool fsr3_provider_active;
     bool ssr_ready;
     float scale;
     color_t color;
@@ -1318,13 +1332,114 @@ static void vk_presentation_native_shutdown(
     (void)reason;
 }
 
+static VkResult vk_presentation_provider_acquire(
+    void *userdata, uint64_t timeout, VkSemaphore semaphore, VkFence fence,
+    uint32_t *image_index)
+{
+    vk_state_t *state = (vk_state_t *)userdata;
+    if (!state || !state->device || !state->fsr3_provider_active ||
+        !state->fsr3_provider_functions.acquire_next_image ||
+        !state->swapchain)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    return state->fsr3_provider_functions.acquire_next_image(
+        state->device, state->swapchain, timeout, semaphore, fence,
+        image_index);
+}
+
+static VkResult vk_presentation_provider_present(
+    void *userdata, VkQueue queue, const VkPresentInfoKHR *present_info)
+{
+    vk_state_t *state = (vk_state_t *)userdata;
+    (void)queue;
+    if (!state || !state->fsr3_provider_active || !present_info ||
+        !state->fsr3_provider_functions.queue_present ||
+        !state->provider_present_queue)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    return state->fsr3_provider_functions.queue_present(
+        state->provider_present_queue, present_info);
+}
+
+static VkResult vk_presentation_provider_wait(void *userdata)
+{
+    vk_state_t *state = (vk_state_t *)userdata;
+    if (!state || !state->fsr3_provider_active || !state->fsr3)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    return Q2_FSR3_WaitProvider(state->fsr3, state->fsr3_provider) ?
+        VK_SUCCESS : VK_ERROR_DEVICE_LOST;
+}
+
+static VkResult vk_presentation_provider_recreate(
+    void *userdata, VkSwapchainKHR old_swapchain)
+{
+    (void)old_swapchain;
+    return vk_presentation_provider_wait(userdata);
+}
+
+static void vk_presentation_provider_shutdown(
+    void *userdata, q2_vk_presentation_shutdown_t reason)
+{
+    /* Swapchain ownership is released by vk_destroy_swapchain, after all
+     * q2pro image views and command buffers have been retired. Device-loss
+     * shutdown intentionally does not call into the provider. */
+    (void)userdata;
+    (void)reason;
+}
+
 static bool vk_presentation_adapter_ensure(void)
 {
-    if (vk.presentation_adapter)
+    if (vk.presentation_adapter && !vk.fsr3_provider_active)
         return true;
+    if (vk.presentation_adapter && vk.fsr3_provider_active) {
+        Q2_VK_PresentationAdapterDestroy(vk.presentation_adapter,
+                                         Q2_VK_PRESENTATION_SHUTDOWN_NORMAL);
+        vk.presentation_adapter = NULL;
+    }
     if (!vk.device || !vk.swapchain || !vk.AcquireNextImageKHR ||
         !vk.QueuePresentKHR)
         return false;
+
+    if (vk.fsr3_provider_active) {
+        const q2_vk_presentation_ops_t ops = {
+            .userdata = &vk,
+            .frame_generation_ready = true,
+            .provider_swapchain_owned = true,
+            .topology = {
+                .queue_family_facts_known = true,
+                .graphics_queue_family = vk.queues.graphics_family,
+                .graphics_queue_index = vk.graphics_queue_index,
+                .present_queue_family = vk.provider_present_queue_family,
+                .present_queue_index = vk.provider_present_queue_index,
+                .sync_contract = {
+                    .acquire_signal = Q2_VK_PRESENTATION_SYNC_TIMELINE_SEMAPHORE,
+                    .render_finished_signal = Q2_VK_PRESENTATION_SYNC_TIMELINE_SEMAPHORE,
+                    .frame_completion = Q2_VK_PRESENTATION_SYNC_TIMELINE_SEMAPHORE,
+                    .image_reuse = Q2_VK_PRESENTATION_SYNC_TIMELINE_SEMAPHORE,
+                    .timeline_semaphore_supported = true,
+                    .synchronization2_supported = false,
+                },
+                .provider_queue_contract = {
+                    .present_queue_reserved = true,
+                    .image_acquire_queue_reserved = true,
+                    .async_compute_available = vk.provider_async_compute_available,
+                },
+                .native_sync_facts_known = true,
+                .native_sync_facts =
+                    Q2_VK_PRESENTATION_SYNC_ACQUIRE_BINARY |
+                    Q2_VK_PRESENTATION_SYNC_RENDER_FINISHED_BINARY |
+                    Q2_VK_PRESENTATION_SYNC_FRAME_FENCE |
+                    Q2_VK_PRESENTATION_SYNC_IMAGE_FENCE_ALIASES_FRAME,
+                .provider_synchronization_ready = true,
+            },
+            .acquire = vk_presentation_provider_acquire,
+            .present = vk_presentation_provider_present,
+            .wait_idle = vk_presentation_provider_wait,
+            .recreate = vk_presentation_provider_recreate,
+            .shutdown = vk_presentation_provider_shutdown,
+        };
+        vk.presentation_adapter = Q2_VK_PresentationAdapterCreate(
+            Q2_VK_PRESENTATION_FRAME_INTERPOLATION, &ops);
+        return vk.presentation_adapter != NULL;
+    }
 
     const q2_vk_presentation_ops_t ops = {
         .userdata = &vk,
@@ -1709,11 +1824,17 @@ static bool vk_fsr_frame_generation_user_requested(void)
     return r_fsr_frame_generation && r_fsr_frame_generation->integer != 0;
 }
 
-/* q2pro does not install the FidelityFX frame-interpolation swapchain
- * adapter. Keep this explicit so the user request cannot silently pay for an
- * interpolated image that will only be presented once. */
+/* Before the provider swapchain exists, queue reservation is the setup
+ * capability that allows FSR3 context creation to proceed. After replacement
+ * this predicate is backed by the fully configured presentation adapter. */
 static bool vk_fsr_frame_generation_presentation_adapter_available(void)
 {
+    if (vk.fsr3_provider_active)
+        return vk_presentation_adapter_ensure() &&
+            Q2_VK_PresentationAdapterProviderReady(vk.presentation_adapter);
+    if (Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED &&
+        vk.provider_queues_reserved)
+        return true;
     return vk_presentation_adapter_ensure() &&
         Q2_VK_PresentationAdapterProviderReady(vk.presentation_adapter);
 }
@@ -2055,6 +2176,8 @@ static void vk_entity_axis(const entity_t *ent, vec3_t axis[3]);
 static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
                           const entity_t *ent, const vec3_t axis[3]);
 static bool vk_create_swapchain(int width, int height);
+static void vk_release_swapchain_images_nowait(void);
+static void vk_destroy_fsr3_provider_nowait(void);
 static bool vk_recreate_swapchain(const char *reason);
 static VkFormat vk_fsr_output_format(VkFormat format);
 static const char *vk_device_type_string(VkPhysicalDeviceType type);
@@ -6469,8 +6592,8 @@ static void vk_probe_raytracing(void)
 
 static bool vk_create_device(void)
 {
-    float priorities[2] = { 1.0f, 1.0f };
-    VkDeviceQueueCreateInfo queue_infos[2];
+    float priorities[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    VkDeviceQueueCreateInfo queue_infos[16];
     uint32_t queue_info_count = 0;
     const char *extensions[4
 #if USE_VULKAN_RAYTRACING
@@ -6573,32 +6696,160 @@ static bool vk_create_device(void)
     if (families)
         vk.GetPhysicalDeviceQueueFamilyProperties(vk.physical_device,
                                                    &family_count, families);
-    bool separate_shared_present_queue =
-        vk.queues.present_family == vk.queues.graphics_family && families &&
-        vk.queues.graphics_family < family_count &&
-        families[vk.queues.graphics_family].queueCount > 1;
-    if (families)
-        Z_Free(families);
-    vk.graphics_queue_index = 0;
+
+    uint32_t *queue_counts = family_count ?
+        Z_Mallocz(sizeof(*queue_counts) * family_count) : NULL;
+    bool provider_requested =
+        Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED &&
+        vk_fsr_frame_generation_user_requested();
+    bool provider_reserved = false;
+    bool provider_async_available = false;
+
+    vk.provider_present_queue_family = 0;
+    vk.provider_present_queue_index = 0;
+    vk.provider_image_acquire_queue_family = 0;
+    vk.provider_image_acquire_queue_index = 0;
+    vk.provider_async_compute_queue_family = 0;
+    vk.provider_async_compute_queue_index = 0;
+    vk.provider_present_queue = VK_NULL_HANDLE;
+    vk.provider_image_acquire_queue = VK_NULL_HANDLE;
+    vk.provider_async_compute_queue = VK_NULL_HANDLE;
+    vk.provider_queues_reserved = false;
+    vk.provider_async_compute_available = false;
+
     vk.queues_same_family =
         vk.queues.graphics_family == vk.queues.present_family;
-    vk.present_queue_index = separate_shared_present_queue ? 1 : 0;
+    vk.graphics_queue_index = 0;
+    vk.present_queue_index = 0;
 
-    queue_infos[queue_info_count++] = (VkDeviceQueueCreateInfo) {
-        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        .queueFamilyIndex = vk.queues.graphics_family,
-        .queueCount = separate_shared_present_queue ? 2 : 1,
-        .pQueuePriorities = priorities,
-    };
+    if (queue_counts && families && vk.queues.graphics_family < family_count &&
+        vk.queues.present_family < family_count) {
+        queue_counts[vk.queues.graphics_family] = 1;
+        if (vk.queues_same_family) {
+            if (families[vk.queues.graphics_family].queueCount > 1)
+                vk.present_queue_index = 1;
+            queue_counts[vk.queues.graphics_family] =
+                vk.present_queue_index + 1;
+        } else {
+            queue_counts[vk.queues.present_family] = 1;
+        }
 
-    if (vk.queues.present_family != vk.queues.graphics_family) {
+        if (provider_requested) {
+            uint32_t provider_present_family = vk.queues.present_family;
+            uint32_t provider_present_index = 0;
+            uint32_t provider_image_family = UINT32_MAX;
+            uint32_t provider_image_index = 0;
+
+            if (vk.queues_same_family) {
+                /* Keep q2pro on queue 0 and reserve two independent queues
+                 * for the provider. The native fallback also uses queue 0. */
+                if (families[vk.queues.graphics_family].queueCount >= 3) {
+                    provider_present_family = vk.queues.graphics_family;
+                    provider_present_index = 1;
+                    provider_image_family = vk.queues.graphics_family;
+                    provider_image_index = 2;
+                    vk.present_queue_index = 0;
+                    queue_counts[vk.queues.graphics_family] = 3;
+                    provider_reserved = true;
+                }
+            } else {
+                /* Keep the engine's native present queue separate from the
+                 * provider queue. The SDK explicitly forbids sharing its
+                 * present queue with the engine, even when both queues are in
+                 * the same family. */
+                if (families[vk.queues.present_family].queueCount >= 2) {
+                    provider_present_index = 1;
+                    /* Prefer an additional graphics-family queue for image
+                     * acquisition; it does not need any queue capability. */
+                    if (families[vk.queues.graphics_family].queueCount >= 2) {
+                        provider_image_family = vk.queues.graphics_family;
+                        provider_image_index = 1;
+                    } else if (families[vk.queues.present_family].queueCount >= 3) {
+                        provider_image_family = vk.queues.present_family;
+                        provider_image_index = 2;
+                    }
+                    if (provider_image_family == UINT32_MAX) {
+                        for (uint32_t i = 0; i < family_count; i++) {
+                            if (i == vk.queues.graphics_family ||
+                                i == vk.queues.present_family ||
+                                !families[i].queueCount)
+                                continue;
+                            provider_image_family = i;
+                            provider_image_index = 0;
+                            break;
+                        }
+                    }
+                }
+                if (provider_present_index &&
+                    provider_image_family != UINT32_MAX) {
+                    queue_counts[provider_present_family] = max(
+                        queue_counts[provider_present_family],
+                        provider_present_index + 1);
+                    queue_counts[provider_image_family] = max(
+                        queue_counts[provider_image_family],
+                        provider_image_index + 1);
+                    provider_reserved = true;
+                }
+            }
+
+            if (provider_reserved) {
+                vk.provider_present_queue_family = provider_present_family;
+                vk.provider_present_queue_index = provider_present_index;
+                vk.provider_image_acquire_queue_family = provider_image_family;
+                vk.provider_image_acquire_queue_index = provider_image_index;
+
+                /* Async compute is optional. Only reserve it when the device
+                 * exposes another compute-capable queue that is not one of
+                 * the three mandatory provider roles. */
+                for (uint32_t i = 0; i < family_count && !provider_async_available; i++) {
+                    if (!families[i].queueCount ||
+                        !(families[i].queueFlags & VK_QUEUE_COMPUTE_BIT))
+                        continue;
+                    uint32_t index = queue_counts[i];
+                    if (i == vk.queues.graphics_family && index == 0)
+                        index = 1;
+                    if (index >= families[i].queueCount)
+                        continue;
+                    if ((i == provider_present_family && index == provider_present_index) ||
+                        (i == provider_image_family && index == provider_image_index))
+                        continue;
+                    queue_counts[i] = index + 1;
+                    vk.provider_async_compute_queue_family = i;
+                    vk.provider_async_compute_queue_index = index;
+                    provider_async_available = true;
+                }
+                vk.provider_queues_reserved = true;
+                vk.provider_async_compute_available = provider_async_available;
+            } else {
+                Com_WPrintf("Vulkan FSR3 frame generation requested, but dedicated provider queues are unavailable; using native presentation\n");
+            }
+        }
+    }
+
+    if (!queue_counts || !families) {
+        if (queue_counts)
+            Z_Free(queue_counts);
+        if (families)
+            Z_Free(families);
+        return vk_fail_result("Vulkan queue family enumeration", VK_ERROR_INITIALIZATION_FAILED);
+    }
+
+    for (uint32_t i = 0; i < family_count; i++) {
+        if (!queue_counts[i])
+            continue;
         queue_infos[queue_info_count++] = (VkDeviceQueueCreateInfo) {
             .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            .queueFamilyIndex = vk.queues.present_family,
-            .queueCount = 1,
+            .queueFamilyIndex = i,
+            .queueCount = queue_counts[i],
             .pQueuePriorities = priorities,
         };
     }
+
+    Z_Free(queue_counts);
+    Z_Free(families);
+
+    if (!queue_info_count)
+        return vk_fail_result("Vulkan queue family selection", VK_ERROR_INITIALIZATION_FAILED);
 
     if (vk.physical_device_features.samplerAnisotropy)
         features.samplerAnisotropy = VK_TRUE;
@@ -6646,10 +6897,33 @@ static bool vk_create_device(void)
                       vk.graphics_queue_index, &vk.graphics_queue);
     vk.GetDeviceQueue(vk.device, vk.queues.present_family,
                       vk.present_queue_index, &vk.present_queue);
+    if (vk.provider_queues_reserved) {
+        vk.GetDeviceQueue(vk.device, vk.provider_present_queue_family,
+                          vk.provider_present_queue_index,
+                          &vk.provider_present_queue);
+        vk.GetDeviceQueue(vk.device, vk.provider_image_acquire_queue_family,
+                          vk.provider_image_acquire_queue_index,
+                          &vk.provider_image_acquire_queue);
+        if (vk.provider_async_compute_available)
+            vk.GetDeviceQueue(vk.device, vk.provider_async_compute_queue_family,
+                              vk.provider_async_compute_queue_index,
+                              &vk.provider_async_compute_queue);
+    }
     Com_Printf("Vulkan queues: graphics %u:%u, present %u:%u, same_family=%s\n",
                vk.queues.graphics_family, vk.graphics_queue_index,
                vk.queues.present_family, vk.present_queue_index,
                vk.queues_same_family ? "yes" : "no");
+    if (vk.provider_queues_reserved) {
+        Com_Printf("Vulkan FSR3 queues: present %u:%u, image-acquire %u:%u, async-compute %s%s\n",
+                   vk.provider_present_queue_family,
+                   vk.provider_present_queue_index,
+                   vk.provider_image_acquire_queue_family,
+                   vk.provider_image_acquire_queue_index,
+                   vk.provider_async_compute_available ? "reserved" : "unavailable",
+                   vk.provider_async_compute_available ? va(" %u:%u",
+                       vk.provider_async_compute_queue_family,
+                       vk.provider_async_compute_queue_index) : "");
+    }
     return true;
 }
 
@@ -7617,6 +7891,11 @@ static void vk_destroy_swapchain(void)
         vk_handle_device_lost("vkDeviceWaitIdle",
                               vk.DeviceWaitIdle(vk.device));
 
+    /* Destroy q2pro's views before retiring the provider swapchain images;
+     * then stop the provider while the FSR context and device are alive. */
+    vk_release_swapchain_images_nowait();
+    vk_destroy_fsr3_provider_nowait();
+
     vk.render_pass_active = false;
     vk.active_render_pass = VK_NULL_HANDLE;
     vk.active_target_extent = (VkExtent2D) { 0, 0 };
@@ -7908,32 +8187,15 @@ static void vk_destroy_swapchain(void)
         vk.fsr_motion_render_pass = VK_NULL_HANDLE;
     }
 
-    if (vk.swapchain_views) {
-        for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
-            if (vk.swapchain_views[i])
-                vk.DestroyImageView(vk.device, vk.swapchain_views[i], NULL);
-        }
-        Z_Free(vk.swapchain_views);
-        vk.swapchain_views = NULL;
-    }
-
-    if (vk.swapchain_images) {
-        Z_Free(vk.swapchain_images);
-        vk.swapchain_images = NULL;
-    }
-
-    if (vk.swapchain_layouts) {
-        Z_Free(vk.swapchain_layouts);
-        vk.swapchain_layouts = NULL;
-    }
-
-    if (vk.image_fences) {
-        Z_Free(vk.image_fences);
-        vk.image_fences = NULL;
-    }
+    vk_release_swapchain_images_nowait();
 
     if (vk.swapchain) {
-        vk.DestroySwapchainKHR(vk.device, vk.swapchain, NULL);
+        if (vk.fsr3_provider_active &&
+            vk.fsr3_provider_functions.destroy_swapchain)
+            vk.fsr3_provider_functions.destroy_swapchain(
+                vk.device, vk.swapchain, NULL);
+        else
+            vk.DestroySwapchainKHR(vk.device, vk.swapchain, NULL);
         vk.swapchain = VK_NULL_HANDLE;
     }
 
@@ -10403,6 +10665,198 @@ static VkPipelineDepthStencilStateCreateInfo vk_shadow_depth_stencil_state(void)
     };
 }
 
+static void vk_release_swapchain_images_nowait(void)
+{
+    if (!vk.device)
+        return;
+    if (vk.swapchain_views) {
+        for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
+            if (vk.swapchain_views[i])
+                vk.DestroyImageView(vk.device, vk.swapchain_views[i], NULL);
+        }
+        Z_Free(vk.swapchain_views);
+        vk.swapchain_views = NULL;
+    }
+    if (vk.swapchain_images) {
+        Z_Free(vk.swapchain_images);
+        vk.swapchain_images = NULL;
+    }
+    if (vk.swapchain_layouts) {
+        Z_Free(vk.swapchain_layouts);
+        vk.swapchain_layouts = NULL;
+    }
+    if (vk.image_fences) {
+        Z_Free(vk.image_fences);
+        vk.image_fences = NULL;
+    }
+    vk.swapchain_image_count = 0;
+}
+
+static bool vk_query_swapchain_images_and_views(void)
+{
+    PFN_vkGetSwapchainImagesKHR get_images = vk.fsr3_provider_active ?
+        vk.fsr3_provider_functions.get_swapchain_images :
+        vk.GetSwapchainImagesKHR;
+    if (!vk.swapchain || !get_images)
+        return false;
+
+    VkResult result = get_images(vk.device, vk.swapchain,
+                                 &vk.swapchain_image_count, NULL);
+    if (result != VK_SUCCESS || !vk.swapchain_image_count)
+        return vk_fail_result("vkGetSwapchainImagesKHR", result);
+
+    vk.swapchain_images = Z_Malloc(sizeof(*vk.swapchain_images) *
+                                   vk.swapchain_image_count);
+    result = get_images(vk.device, vk.swapchain, &vk.swapchain_image_count,
+                        vk.swapchain_images);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkGetSwapchainImagesKHR", result);
+
+    vk.swapchain_views = Z_Mallocz(sizeof(*vk.swapchain_views) *
+                                   vk.swapchain_image_count);
+    vk.swapchain_layouts = Z_Malloc(sizeof(*vk.swapchain_layouts) *
+                                    vk.swapchain_image_count);
+    vk.image_fences = Z_Mallocz(sizeof(*vk.image_fences) *
+                                vk.swapchain_image_count);
+    for (uint32_t i = 0; i < vk.swapchain_image_count; i++)
+        vk.swapchain_layouts[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
+        VkImageViewCreateInfo view_info = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = vk.swapchain_images[i],
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = vk.swapchain_format,
+            .components = {
+                .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        result = vk.CreateImageView(vk.device, &view_info, NULL,
+                                    &vk.swapchain_views[i]);
+        if (result != VK_SUCCESS)
+            return vk_fail_result("vkCreateImageView", result);
+    }
+    return true;
+}
+
+static bool vk_activate_fsr3_provider(
+    const VkSwapchainCreateInfoKHR *create_info)
+{
+    if (!create_info || !vk.fsr3 || !vk.provider_queues_reserved ||
+        !Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED ||
+        vk.fsr3_provider_active)
+        return vk.fsr3_provider_active;
+
+    /* Views must be gone before the provider retires the native swapchain. */
+    vk_release_swapchain_images_nowait();
+
+    VkSwapchainKHR provider_swapchain = VK_NULL_HANDLE;
+    q2_fsr3_provider_functions_t functions = {};
+    const char *failure_reason = NULL;
+    q2_fsr3_provider_t *provider = Q2_FSR3_CreateProvider(
+        vk.fsr3, vk.swapchain, create_info,
+        vk.graphics_queue, vk.queues.graphics_family,
+        vk.provider_async_compute_queue, vk.provider_async_compute_queue_family,
+        vk.provider_present_queue, vk.provider_present_queue_family,
+        vk.provider_image_acquire_queue,
+        vk.provider_image_acquire_queue_family,
+        &provider_swapchain, &functions, &failure_reason);
+    if (!provider) {
+        vk.fsr3_provider_functions = (q2_fsr3_provider_functions_t) { 0 };
+        vk.fsr3_provider_active = false;
+        vk.swapchain = VK_NULL_HANDLE;
+        VkResult result = vk.CreateSwapchainKHR(vk.device, create_info, NULL,
+                                                 &vk.swapchain);
+        if (result != VK_SUCCESS) {
+            vk_handle_device_lost("vkCreateSwapchainKHR", result);
+            Com_EPrintf("Vulkan FSR3 provider failed (%s) and native swapchain recreation failed (error %d)\n",
+                        failure_reason ? failure_reason : "unknown", result);
+            return false;
+        }
+        Com_WPrintf("Vulkan FSR3 frame-interpolation provider unavailable (%s); using native presentation\n",
+                    failure_reason ? failure_reason : "unknown");
+        vk_disable_frame_generation_during_setup(
+            "frame-interpolation swapchain provider creation failed");
+        return false;
+    }
+
+    vk.swapchain = provider_swapchain;
+    vk.fsr3_provider = provider;
+    vk.fsr3_provider_functions = functions;
+    vk.fsr3_provider_active = true;
+    if (!Q2_FSR3_ConfigureProvider(vk.fsr3, provider, true,
+                                   Q2_FSR3_GetCurrentFrameId(vk.fsr3))) {
+        Com_WPrintf("Vulkan FSR3 provider frame-generation configuration failed; using native presentation\n");
+        Q2_FSR3_DestroyProvider(vk.fsr3, provider, false);
+        vk.fsr3_provider = NULL;
+        vk.fsr3_provider_functions = (q2_fsr3_provider_functions_t) { 0 };
+        vk.fsr3_provider_active = false;
+        vk.swapchain = VK_NULL_HANDLE;
+        VkResult result = vk.CreateSwapchainKHR(vk.device, create_info, NULL,
+                                                 &vk.swapchain);
+        if (result != VK_SUCCESS) {
+            vk_handle_device_lost("vkCreateSwapchainKHR", result);
+            return false;
+        }
+        vk_disable_frame_generation_during_setup(
+            "frame-interpolation provider configuration failed");
+        return false;
+    }
+
+    Com_Printf("Vulkan FSR3 frame-interpolation provider active: swapchain=%s, present=%u:%u, image-acquire=%u:%u, async-compute=%s\n",
+               vk.fsr3_provider_active ? "owned" : "native",
+               vk.provider_present_queue_family,
+               vk.provider_present_queue_index,
+               vk.provider_image_acquire_queue_family,
+               vk.provider_image_acquire_queue_index,
+               vk.provider_async_compute_available ? "reserved" : "disabled");
+    return true;
+}
+
+static void vk_destroy_fsr3_provider_nowait(void)
+{
+    if (!vk.fsr3_provider)
+        return;
+    Q2_FSR3_DestroyProvider(vk.fsr3, vk.fsr3_provider, vk.device_lost);
+    /* The provider handle is a C++ pseudo-handle and must never reach the
+     * native Vulkan destroy entry point. */
+    vk.swapchain = VK_NULL_HANDLE;
+    vk.fsr3_provider = NULL;
+    vk.fsr3_provider_functions = (q2_fsr3_provider_functions_t) { 0 };
+    vk.fsr3_provider_active = false;
+}
+
+static bool vk_create_fsr_resources_and_provider(
+    const VkSwapchainCreateInfoKHR *create_info)
+{
+    if (!vk_create_fsr_resources(0.0f))
+        return false;
+
+    if (vk_fsr_frame_generation_requested() &&
+        !vk_activate_fsr3_provider(create_info)) {
+        /* Provider creation can retire the native swapchain before returning
+         * an error. vk_activate_fsr3_provider recreates it and disables frame
+         * generation when that fallback is possible. */
+        if (!vk.swapchain || !vk_query_swapchain_images_and_views())
+            return false;
+    } else if (vk.fsr3_provider_active) {
+        vk_release_swapchain_images_nowait();
+        if (!vk_query_swapchain_images_and_views())
+            return false;
+    }
+    return true;
+}
+
 static bool vk_create_swapchain(int width, int height)
 {
     VkSurfaceCapabilitiesKHR caps;
@@ -10548,51 +11002,8 @@ static bool vk_create_swapchain(int width, int height)
                (unsigned)vk.sample_count);
     vk.swapchain_extent = extent;
 
-    result = vk.GetSwapchainImagesKHR(vk.device, vk.swapchain, &vk.swapchain_image_count, NULL);
-    if (result != VK_SUCCESS)
-        return vk_fail_result("vkGetSwapchainImagesKHR", result);
-    if (!vk.swapchain_image_count) {
-        Com_SetLastError("Vulkan swapchain has no images");
+    if (!vk_query_swapchain_images_and_views())
         return false;
-    }
-
-    vk.swapchain_images = Z_Malloc(sizeof(*vk.swapchain_images) * vk.swapchain_image_count);
-    result = vk.GetSwapchainImagesKHR(vk.device, vk.swapchain,
-                                      &vk.swapchain_image_count, vk.swapchain_images);
-    if (result != VK_SUCCESS)
-        return vk_fail_result("vkGetSwapchainImagesKHR", result);
-
-    vk.swapchain_views = Z_Mallocz(sizeof(*vk.swapchain_views) * vk.swapchain_image_count);
-    vk.swapchain_layouts = Z_Malloc(sizeof(*vk.swapchain_layouts) * vk.swapchain_image_count);
-    vk.image_fences = Z_Mallocz(sizeof(*vk.image_fences) * vk.swapchain_image_count);
-    for (uint32_t i = 0; i < vk.swapchain_image_count; i++)
-        vk.swapchain_layouts[i] = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
-        VkImageViewCreateInfo view_info = {
-            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            .image = vk.swapchain_images[i],
-            .viewType = VK_IMAGE_VIEW_TYPE_2D,
-            .format = vk.swapchain_format,
-            .components = {
-                .r = VK_COMPONENT_SWIZZLE_IDENTITY,
-                .g = VK_COMPONENT_SWIZZLE_IDENTITY,
-                .b = VK_COMPONENT_SWIZZLE_IDENTITY,
-                .a = VK_COMPONENT_SWIZZLE_IDENTITY,
-            },
-            .subresourceRange = {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-        };
-
-        result = vk.CreateImageView(vk.device, &view_info, NULL, &vk.swapchain_views[i]);
-        if (result != VK_SUCCESS)
-            return vk_fail_result("vkCreateImageView", result);
-    }
 
     VkExtent2D bloom_extent = {
         max(vk.swapchain_extent.width / vk_bloom_downsample_value(), 1),
@@ -10706,7 +11117,7 @@ static bool vk_create_swapchain(int width, int height)
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
-        !vk_create_fsr_resources(0.0f) ||
+        !vk_create_fsr_resources_and_provider(&create_info) ||
         !vk_create_fsr_motion_pipelines() ||
         !vk_create_depth_resources() ||
         !vk_create_multisample_resources() ||
@@ -12151,6 +12562,13 @@ static bool vk_create_particle_buffer(void)
         vk_destroy_buffer(&vk.particle_vertices);
         return false;
     }
+
+    /* The replacement retires the native swapchain and exposes a new
+     * provider-owned pseudo-swapchain. Rebuild q2pro's image/view tables from
+     * the provider callbacks before creating any framebuffer that references
+     * them. */
+    if (vk.fsr3_provider_active && !vk_query_swapchain_images_and_views())
+        return false;
 
     return true;
 }
@@ -22648,6 +23066,17 @@ static bool vk_dispatch_fsr(void)
         return false;
     }
 
+    if (vk.fsr3_provider_active &&
+        !Q2_FSR3_ConfigureProvider(vk.fsr3, vk.fsr3_provider, true,
+                                   Q2_FSR3_GetCurrentFrameId(vk.fsr3))) {
+        Q2_FSR3_ConfigureProvider(vk.fsr3, vk.fsr3_provider, false,
+                                  Q2_FSR3_GetCurrentFrameId(vk.fsr3));
+        vk_log_fsr_frame_generation_failure("provider_configuration");
+        vk_disable_frame_generation("provider frame-generation configuration failed");
+        vk.fsr_framegen_disabled = true;
+        vk.fsr_framegen_fallback_reason = "provider_configuration_failed";
+    }
+
     vk.fsr_reset = false;
     vk.fsr_reset_reason = VK_FSR_RESET_NONE;
     vk.fsr_output_valid = true;
@@ -22663,6 +23092,7 @@ static bool vk_dispatch_fsr(void)
                                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     }
     if (!frame_reset && frame_generation_prepared &&
+        !vk.fsr3_provider_active &&
         vk.fsr_frame_generation_texture.image &&
         vk.fsr_frame_generation_texture.view &&
         vk.fsr_frame_generation_layout == VK_IMAGE_LAYOUT_GENERAL) {
