@@ -75,6 +75,7 @@ struct q2_fsr3_context {
     bool frame_generation_failed = false;
     bool profile_supported = true;
     bool force_reset = false;
+    bool full_context_initialized = false;
     bool full_context_created = false;
     FfxErrorCode last_error = FFX_OK;
 };
@@ -704,6 +705,10 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
         full_description.backendInterfaceFrameInterpolation = result->frame_interpolation_interface;
         full_description.fpMessage = q2_fsr3_message;
         full_description.backBufferFormat = ffxGetSurfaceFormatVK(display_format);
+        /* The SDK can allocate one of the composite contexts before a later
+         * frame-generation component fails. Mark it initialized before the
+         * call so the failure path runs the SDK's composite destructor. */
+        result->full_context_initialized = true;
         error = ffxFsr3ContextCreate(&result->full_context, &full_description);
         if (error != FFX_OK) {
             Com_WPrintf("Vulkan FSR3 frame-generation context creation failed (error %d)\n",
@@ -728,7 +733,7 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
 fail:
     if (result->shared_resources_count)
         q2_fsr3_destroy_shared_resources(result);
-    if (result->full_context_created)
+    if (result->full_context_initialized)
         ffxFsr3ContextDestroy(&result->full_context);
     else if (context_created)
         ffxFsr3UpscalerContextDestroy(&result->context);

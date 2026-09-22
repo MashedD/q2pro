@@ -1694,6 +1694,15 @@ static void vk_disable_frame_generation(const char *reason)
                 reason ? ": " : "", reason ? reason : "");
 }
 
+static void vk_disable_frame_generation_during_setup(const char *reason)
+{
+    bool modified = r_fsr_frame_generation &&
+        r_fsr_frame_generation->modified;
+    vk_disable_frame_generation(reason);
+    if (r_fsr_frame_generation)
+        r_fsr_frame_generation->modified = modified;
+}
+
 /* The vendored 1.1.4 manual frame-generation integration is not safe on the
  * Linux Vulkan/RADV path. Keep the explicit request from taking down the
  * device; the upscaler remains available and the Windows path stays enabled
@@ -1705,6 +1714,32 @@ static bool vk_fsr_frame_generation_backend_supported(void)
 #else
     return false;
 #endif
+}
+
+static q2_fsr3_context_t *vk_create_fsr_context_with_fallback(
+    bool *frame_generation_requested, VkFormat output_format)
+{
+    q2_fsr3_context_t *context = Q2_FSR3_Create(
+        vk.physical_device, vk.device, vk.instance,
+        vk.GetInstanceProcAddr, vk.GetDeviceProcAddr,
+        vk.render_extent.width, vk.render_extent.height,
+        vk.swapchain_extent.width, vk.swapchain_extent.height,
+        output_format, *frame_generation_requested,
+        &vk.fsr_capabilities);
+
+    if (!context && *frame_generation_requested) {
+        vk_disable_frame_generation_during_setup(
+            "frame-generation context creation failed; using FSR upscaling");
+        *frame_generation_requested = false;
+        context = Q2_FSR3_Create(
+            vk.physical_device, vk.device, vk.instance,
+            vk.GetInstanceProcAddr, vk.GetDeviceProcAddr,
+            vk.render_extent.width, vk.render_extent.height,
+            vk.swapchain_extent.width, vk.swapchain_extent.height,
+            output_format, false, &vk.fsr_capabilities);
+    }
+
+    return context;
 }
 
 static bool vk_fsr_any_requested(void)
@@ -4170,13 +4205,8 @@ static bool vk_create_fsr_resources(float scale_override)
         return true;
     }
 
-    vk.fsr3 = Q2_FSR3_Create(vk.physical_device, vk.device, vk.instance,
-                             vk.GetInstanceProcAddr, vk.GetDeviceProcAddr,
-                             vk.render_extent.width, vk.render_extent.height,
-                             vk.swapchain_extent.width, vk.swapchain_extent.height,
-                             output_format,
-                             vk_fsr_frame_generation_requested(),
-                             &vk.fsr_capabilities);
+    vk.fsr3 = vk_create_fsr_context_with_fallback(
+        &frame_generation_requested, output_format);
     if (!vk.fsr3) {
         if (!vk.fsr_warned) {
             Com_WPrintf("Vulkan FSR3 is unavailable on this device; rendering at native resolution\n");
@@ -4201,7 +4231,7 @@ static bool vk_create_fsr_resources(float scale_override)
         vk_destroy_fsr_resources_nowait();
         return true;
     }
-    if (vk_fsr_frame_generation_requested() &&
+    if (frame_generation_requested &&
         !vk_create_image_target(&vk.fsr_frame_generation_texture,
                                 vk.swapchain_extent.width,
                                 vk.swapchain_extent.height,

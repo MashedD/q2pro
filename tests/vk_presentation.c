@@ -18,6 +18,9 @@ static unsigned framebuffer_calls, pass_calls, draw_calls;
 static unsigned destroy_framebuffer_calls;
 static int fail_framebuffer_ordinal;
 static q2_fsr3_context_t *test_fsr_context;
+static unsigned fsr_create_calls;
+static unsigned fsr_frame_generation_calls;
+static bool fail_frame_generation_create;
 static unsigned test_image_calls, destroyed_image_calls;
 static VkRenderPass last_pass;
 static VkExtent2D last_extent;
@@ -70,6 +73,12 @@ q2_fsr3_context_t *Q2_FSR3_Create(VkPhysicalDevice physical_device,
     VkFormat display_format, bool frame_generation,
     const q2_fsr3_capabilities_t *capabilities)
 {
+    fsr_create_calls++;
+    if (frame_generation) {
+        fsr_frame_generation_calls++;
+        if (fail_frame_generation_create)
+            return NULL;
+    }
     return test_fsr_context;
 }
 void Q2_FSR3_Destroy(q2_fsr3_context_t *context) { }
@@ -755,6 +764,41 @@ static void check_fsr_frame_generation_contracts(void)
     puts("FSR frame-generation contracts: passed (request, auto, motion, fallback)");
 }
 
+static void check_fsr_setup_fallback_contracts(void)
+{
+    cvar_t fsr = { .integer = 1 };
+    cvar_t frame_generation = { .integer = 1 };
+    bool frame_generation_requested = true;
+
+    r_fsr = &fsr;
+    r_fsr_frame_generation = &frame_generation;
+    vk_session_frame_generation_disabled = false;
+    vk.render_extent = (VkExtent2D){ 640, 360 };
+    vk.swapchain_extent = (VkExtent2D){ 1280, 720 };
+    test_fsr_context = HANDLE(q2_fsr3_context_t *, 950);
+    fail_frame_generation_create = true;
+    fsr_create_calls = 0;
+    fsr_frame_generation_calls = 0;
+
+    q2_fsr3_context_t *context = vk_create_fsr_context_with_fallback(
+        &frame_generation_requested, VK_FORMAT_R8G8B8A8_UNORM);
+    assert(context == test_fsr_context);
+    assert(fsr_create_calls == 2);
+    assert(fsr_frame_generation_calls == 1);
+    assert(!frame_generation_requested);
+    assert(frame_generation.integer == 1);
+    assert(!frame_generation.modified);
+    assert(vk_session_frame_generation_disabled);
+    assert(!vk_fsr_frame_generation_requested());
+    assert(vk_fsr_requested());
+
+    fail_frame_generation_create = false;
+    test_fsr_context = NULL;
+    r_fsr = r_fsr_frame_generation = NULL;
+    vk_session_frame_generation_disabled = false;
+    puts("FSR setup fallback: passed (frame generation -> upscaling)");
+}
+
 static void check_fsr_lifecycle_contracts(void)
 {
     cvar_t fsr = { .integer = 1 };
@@ -873,6 +917,7 @@ int main(void)
     check_fsr_barriers();
     check_fsr_temporal_contracts();
     check_fsr_frame_generation_contracts();
+    check_fsr_setup_fallback_contracts();
     check_fsr_lifecycle_contracts();
     check_fsr_transaction_guards();
     check_fsr_transaction_resource_rollback();
