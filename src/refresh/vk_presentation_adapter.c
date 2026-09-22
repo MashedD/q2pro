@@ -45,6 +45,28 @@ static bool q2_vk_presentation_ops_valid(const q2_vk_presentation_ops_t *ops)
     return ops && ops->acquire && ops->present && ops->shutdown;
 }
 
+static q2_vk_presentation_queue_topology_t
+q2_vk_presentation_queue_topology(
+    const q2_vk_presentation_topology_t *topology)
+{
+    if (!topology || !topology->queue_family_facts_known)
+        return Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_UNKNOWN;
+    if (topology->graphics_queue_family != topology->present_queue_family)
+        return Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SEPARATE_PRESENT_QUEUE;
+    return topology->graphics_queue_index == topology->present_queue_index ?
+        Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SINGLE_QUEUE :
+        Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SHARED_FAMILY;
+}
+
+static bool q2_vk_presentation_provider_sync_ready(
+    const q2_vk_presentation_adapter_t *adapter)
+{
+    return adapter &&
+        adapter->mode == Q2_VK_PRESENTATION_FRAME_INTERPOLATION &&
+        adapter->ops.topology.queue_family_facts_known &&
+        adapter->ops.topology.provider_synchronization_ready;
+}
+
 bool Q2_VK_PresentationAdapterProviderBuildCompiled(void)
 {
     return Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED != 0;
@@ -70,6 +92,10 @@ Q2_VK_PresentationAdapterProviderCapabilities(
         .runtime_ready = Q2_VK_PresentationAdapterFrameGenerationEnabled(adapter),
         .lifecycle_capable = adapter && adapter->ops.wait_idle &&
             adapter->ops.recreate,
+        .queue_topology = q2_vk_presentation_queue_topology(
+            adapter ? &adapter->ops.topology : NULL),
+        .provider_synchronization_ready =
+            q2_vk_presentation_provider_sync_ready(adapter),
         .diagnostic = NULL,
     };
 
@@ -83,6 +109,13 @@ Q2_VK_PresentationAdapterProviderCapabilities(
     } else if (!capabilities.lifecycle_capable) {
         capabilities.diagnostic =
             "presentation lifecycle callbacks are incomplete";
+    } else if (capabilities.queue_topology ==
+               Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_UNKNOWN) {
+        capabilities.diagnostic =
+            "provider queue-family topology is unknown";
+    } else if (!capabilities.provider_synchronization_ready) {
+        capabilities.diagnostic =
+            "provider synchronization readiness is not declared";
     } else {
         capabilities.diagnostic =
             "provider prerequisites and presentation lifecycle are ready";
@@ -96,7 +129,7 @@ bool Q2_VK_PresentationAdapterProviderReady(
     const q2_vk_presentation_provider_capabilities_t capabilities =
         Q2_VK_PresentationAdapterProviderCapabilities(adapter);
     return capabilities.prerequisites_compiled && capabilities.runtime_ready &&
-        capabilities.lifecycle_capable;
+        capabilities.lifecycle_capable && capabilities.provider_synchronization_ready;
 }
 
 q2_vk_presentation_adapter_t *Q2_VK_PresentationAdapterCreate(

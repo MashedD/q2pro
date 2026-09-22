@@ -219,6 +219,20 @@ require_contract 'Q2_VK_PresentationAdapterProviderCapabilities' \
     "$repo_dir/src/refresh/vk_presentation_adapter.h"
 require_contract 'lifecycle_capable' \
     "$repo_dir/src/refresh/vk_presentation_adapter.c"
+require_contract 'Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_UNKNOWN' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SHARED_FAMILY' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'graphics_queue_index' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'present_queue_index' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'provider_synchronization_ready' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.h"
+require_contract 'q2_vk_presentation_provider_sync_ready' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.c"
+require_contract 'Q2_VK_PRESENTATION_FRAME_INTERPOLATION' \
+    "$repo_dir/src/refresh/vk_presentation_adapter.c"
 require_contract 'Q2_VK_PresentationAdapterProviderBuildCompiled()' \
     "$repo_dir/src/refresh/vk_presentation_adapter.c"
 require_contract 'Q2_VK_PresentationAdapterProviderBuildReason' \
@@ -233,6 +247,22 @@ require_contract 'Vulkan FSR3 provider capability detail:' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'Q2_VK_PresentationAdapterProviderCapabilities' \
     "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'graphics_queue_index' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'present_queue_index' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'queues_same_family' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'swapchain_sharing_mode' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'Vulkan queue topology:' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'VK_SHARING_MODE_CONCURRENT' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'VK_SHARING_MODE_EXCLUSIVE' "$repo_dir/src/refresh/vk_backend.c"
+sharing_line=$(grep -n 'vk.swapchain_sharing_mode = VK_SHARING_MODE' \
+    "$repo_dir/src/refresh/vk_backend.c" | head -n 1 | cut -d: -f1)
+swapchain_create_line=$(grep -n 'vk.CreateSwapchainKHR' \
+    "$repo_dir/src/refresh/vk_backend.c" | head -n 1 | cut -d: -f1)
+test -n "$sharing_line" -a -n "$swapchain_create_line" &&
+test "$sharing_line" -lt "$swapchain_create_line" || {
+    echo "FSR3 contract: swapchain sharing mode must be recorded before creation" >&2
+    exit 2
+}
 require_contract 'sharedResourceCreated' \
     "$repo_dir/subprojects/packagefiles/fidelityfx-fsr3/tools/q2_fsr3_sdk_hardening.py"
 require_contract 'frameInterpolationContextCreated' \

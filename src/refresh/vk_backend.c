@@ -936,6 +936,10 @@ typedef struct {
     bool device_lost;
     VkQueue graphics_queue;
     VkQueue present_queue;
+    uint32_t graphics_queue_index;
+    uint32_t present_queue_index;
+    bool queues_same_family;
+    VkSharingMode swapchain_sharing_mode;
     VkCommandPool command_pool;
     VkDescriptorSetLayout texture_set_layout;
     VkDescriptorSetLayout ssr_set_layout;
@@ -6266,6 +6270,13 @@ static void vk_strings_f(void)
                props->vendorID, props->deviceID);
     Com_Printf("Vulkan queue families: graphics=%u present=%u\n",
                vk.queues.graphics_family, vk.queues.present_family);
+    const char *swapchain_sharing = !vk.swapchain ? "pending" :
+        (vk.swapchain_sharing_mode == VK_SHARING_MODE_CONCURRENT ?
+         "concurrent" : "exclusive");
+    Com_Printf("Vulkan queue topology: graphics=%u:%u present=%u:%u same_family=%s swapchain_sharing=%s\n",
+               vk.queues.graphics_family, vk.graphics_queue_index,
+               vk.queues.present_family, vk.present_queue_index,
+               vk.queues_same_family ? "yes" : "no", swapchain_sharing);
     const q2_vk_presentation_provider_status_t provider_status =
         Q2_VK_PresentationAdapterProviderStatus(vk.presentation_adapter);
     const char *provider_status_name =
@@ -6429,7 +6440,6 @@ static bool vk_create_device(void)
     float priorities[2] = { 1.0f, 1.0f };
     VkDeviceQueueCreateInfo queue_infos[2];
     uint32_t queue_info_count = 0;
-    uint32_t present_queue_index = 0;
     const char *extensions[4
 #if USE_VULKAN_RAYTRACING
                            + VK_RT_REQUIRED_EXTENSION_COUNT
@@ -6537,8 +6547,10 @@ static bool vk_create_device(void)
         families[vk.queues.graphics_family].queueCount > 1;
     if (families)
         Z_Free(families);
-    if (separate_shared_present_queue)
-        present_queue_index = 1;
+    vk.graphics_queue_index = 0;
+    vk.queues_same_family =
+        vk.queues.graphics_family == vk.queues.present_family;
+    vk.present_queue_index = separate_shared_present_queue ? 1 : 0;
 
     queue_infos[queue_info_count++] = (VkDeviceQueueCreateInfo) {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -6598,12 +6610,14 @@ static bool vk_create_device(void)
     if (!vk_load_device())
         return false;
 
-    vk.GetDeviceQueue(vk.device, vk.queues.graphics_family, 0, &vk.graphics_queue);
+    vk.GetDeviceQueue(vk.device, vk.queues.graphics_family,
+                      vk.graphics_queue_index, &vk.graphics_queue);
     vk.GetDeviceQueue(vk.device, vk.queues.present_family,
-                      present_queue_index, &vk.present_queue);
-    Com_Printf("Vulkan queues: graphics %u:0, present %u:%u\n",
-               vk.queues.graphics_family, vk.queues.present_family,
-               present_queue_index);
+                      vk.present_queue_index, &vk.present_queue);
+    Com_Printf("Vulkan queues: graphics %u:%u, present %u:%u, same_family=%s\n",
+               vk.queues.graphics_family, vk.graphics_queue_index,
+               vk.queues.present_family, vk.present_queue_index,
+               vk.queues_same_family ? "yes" : "no");
     return true;
 }
 
@@ -10465,12 +10479,14 @@ static bool vk_create_swapchain(int width, int height)
         .oldSwapchain = VK_NULL_HANDLE,
     };
 
-    if (vk.queues.graphics_family != vk.queues.present_family) {
-        create_info.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+    if (!vk.queues_same_family) {
+        vk.swapchain_sharing_mode = VK_SHARING_MODE_CONCURRENT;
+        create_info.imageSharingMode = vk.swapchain_sharing_mode;
         create_info.queueFamilyIndexCount = q_countof(queue_indices);
         create_info.pQueueFamilyIndices = queue_indices;
     } else {
-        create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        vk.swapchain_sharing_mode = VK_SHARING_MODE_EXCLUSIVE;
+        create_info.imageSharingMode = vk.swapchain_sharing_mode;
     }
 
     result = vk.CreateSwapchainKHR(vk.device, &create_info, NULL, &vk.swapchain);

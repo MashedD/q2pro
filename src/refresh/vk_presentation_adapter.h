@@ -27,10 +27,31 @@ typedef enum {
     Q2_VK_PRESENTATION_PROVIDER_ACTIVE = 2
 } q2_vk_presentation_provider_status_t;
 
+typedef enum {
+    Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_UNKNOWN = 0,
+    Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SINGLE_QUEUE = 1,
+    Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SHARED_FAMILY = 2,
+    Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SEPARATE_PRESENT_QUEUE = 3
+} q2_vk_presentation_queue_topology_t;
+
+/* CPU-side facts supplied by a future provider integration. This deliberately
+ * contains no Vulkan handles or synchronization objects: native presentation
+ * can leave it unknown until the provider owns the queue-family contract. */
+typedef struct {
+    bool queue_family_facts_known;
+    uint32_t graphics_queue_family;
+    uint32_t graphics_queue_index;
+    uint32_t present_queue_family;
+    uint32_t present_queue_index;
+    bool provider_synchronization_ready;
+} q2_vk_presentation_topology_t;
+
 typedef struct {
     bool prerequisites_compiled;
     bool runtime_ready;
     bool lifecycle_capable;
+    q2_vk_presentation_queue_topology_t queue_topology;
+    bool provider_synchronization_ready;
     const char *diagnostic;
 } q2_vk_presentation_provider_capabilities_t;
 
@@ -60,6 +81,7 @@ typedef void (*q2_vk_presentation_shutdown_fn)(
 typedef struct {
     void *userdata;
     bool frame_generation_ready;
+    q2_vk_presentation_topology_t topology;
     q2_vk_presentation_acquire_fn acquire;
     q2_vk_presentation_present_fn present;
     q2_vk_presentation_wait_fn wait_idle;

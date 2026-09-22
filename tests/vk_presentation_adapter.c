@@ -78,6 +78,40 @@ static q2_vk_presentation_adapter_t *make_adapter(
     const q2_vk_presentation_ops_t ops = {
         .userdata = state,
         .frame_generation_ready = frame_generation_ready,
+        .topology = {
+            .queue_family_facts_known = true,
+            .graphics_queue_family = 0,
+            .graphics_queue_index = 0,
+            .present_queue_family = 1,
+            .present_queue_index = 0,
+            .provider_synchronization_ready = true,
+        },
+        .acquire = mock_acquire,
+        .present = mock_present,
+        .wait_idle = mock_wait,
+        .recreate = mock_recreate,
+        .shutdown = mock_shutdown,
+    };
+    return Q2_VK_PresentationAdapterCreate(
+        Q2_VK_PRESENTATION_FRAME_INTERPOLATION, &ops);
+}
+
+static q2_vk_presentation_adapter_t *make_capability_adapter(
+    mock_state_t *state, bool topology_known, bool synchronization_ready,
+    uint32_t graphics_queue_family, uint32_t graphics_queue_index,
+    uint32_t present_queue_family, uint32_t present_queue_index)
+{
+    const q2_vk_presentation_ops_t ops = {
+        .userdata = state,
+        .frame_generation_ready = true,
+        .topology = {
+            .queue_family_facts_known = topology_known,
+            .graphics_queue_family = graphics_queue_family,
+            .graphics_queue_index = graphics_queue_index,
+            .present_queue_family = present_queue_family,
+            .present_queue_index = present_queue_index,
+            .provider_synchronization_ready = synchronization_ready,
+        },
         .acquire = mock_acquire,
         .present = mock_present,
         .wait_idle = mock_wait,
@@ -102,6 +136,9 @@ static void check_ordering_and_fallback(void)
            Q2_VK_PresentationAdapterProviderBuildCompiled());
     assert(capabilities.runtime_ready);
     assert(capabilities.lifecycle_capable);
+    assert(capabilities.queue_topology ==
+           Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SEPARATE_PRESENT_QUEUE);
+    assert(capabilities.provider_synchronization_ready);
     assert(capabilities.diagnostic[0] != '\0');
     assert(Q2_VK_PresentationAdapterProviderReady(adapter) ==
            Q2_VK_PresentationAdapterProviderBuildCompiled());
@@ -160,6 +197,8 @@ static void check_frame_generation_gate_and_device_loss(void)
            Q2_VK_PresentationAdapterProviderBuildCompiled());
     assert(!capabilities.runtime_ready);
     assert(capabilities.lifecycle_capable);
+    assert(capabilities.queue_topology ==
+           Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SEPARATE_PRESENT_QUEUE);
     assert(capabilities.diagnostic[0] != '\0');
     assert(Q2_VK_PresentationAdapterProviderBuildPlatform()[0] != '\0');
     assert(Q2_VK_PresentationAdapterProviderBuildReason()[0] != '\0');
@@ -183,6 +222,12 @@ static void check_provider_status_is_not_implied_by_native_adapter(void)
     const q2_vk_presentation_ops_t ops = {
         .userdata = &state,
         .frame_generation_ready = true,
+        .topology = {
+            .queue_family_facts_known = true,
+            .graphics_queue_family = 0,
+            .present_queue_family = 0,
+            .provider_synchronization_ready = true,
+        },
         .acquire = mock_acquire,
         .present = mock_present,
         .wait_idle = mock_wait,
@@ -200,11 +245,60 @@ static void check_provider_status_is_not_implied_by_native_adapter(void)
            Q2_VK_PresentationAdapterProviderBuildCompiled());
     assert(!capabilities.runtime_ready);
     assert(capabilities.lifecycle_capable);
+    assert(capabilities.queue_topology ==
+           Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SINGLE_QUEUE);
+    assert(!capabilities.provider_synchronization_ready);
     assert(capabilities.diagnostic[0] != '\0');
     assert(Q2_VK_PresentationAdapterProviderStatus(adapter) ==
            (Q2_VK_PresentationAdapterProviderBuildCompiled() ?
             Q2_VK_PRESENTATION_PROVIDER_BUILT :
             Q2_VK_PRESENTATION_PROVIDER_UNAVAILABLE));
+    Q2_VK_PresentationAdapterDestroy(adapter,
+                                     Q2_VK_PRESENTATION_SHUTDOWN_NORMAL);
+}
+
+static void check_topology_readiness_diagnostics(void)
+{
+    if (!Q2_VK_PresentationAdapterProviderBuildCompiled())
+        return;
+
+    mock_state_t state = {.acquire_result = VK_SUCCESS,
+                          .present_result = VK_SUCCESS,
+                          .wait_result = VK_SUCCESS};
+    q2_vk_presentation_adapter_t *adapter = make_capability_adapter(
+        &state, false, true, 0, 0, 0, 0);
+    assert(adapter);
+    q2_vk_presentation_provider_capabilities_t capabilities =
+        Q2_VK_PresentationAdapterProviderCapabilities(adapter);
+    assert(capabilities.runtime_ready && capabilities.lifecycle_capable);
+    assert(capabilities.queue_topology ==
+           Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_UNKNOWN);
+    assert(!capabilities.provider_synchronization_ready);
+    assert(strcmp(capabilities.diagnostic,
+                  "provider queue-family topology is unknown") == 0);
+    assert(!Q2_VK_PresentationAdapterProviderReady(adapter));
+    Q2_VK_PresentationAdapterDestroy(adapter,
+                                     Q2_VK_PRESENTATION_SHUTDOWN_NORMAL);
+
+    adapter = make_capability_adapter(&state, true, false, 0, 0, 0, 0);
+    assert(adapter);
+    capabilities = Q2_VK_PresentationAdapterProviderCapabilities(adapter);
+    assert(capabilities.runtime_ready && capabilities.lifecycle_capable);
+    assert(capabilities.queue_topology ==
+           Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SINGLE_QUEUE);
+    assert(!capabilities.provider_synchronization_ready);
+    assert(strcmp(capabilities.diagnostic,
+                  "provider synchronization readiness is not declared") == 0);
+    assert(!Q2_VK_PresentationAdapterProviderReady(adapter));
+    Q2_VK_PresentationAdapterDestroy(adapter,
+                                     Q2_VK_PRESENTATION_SHUTDOWN_NORMAL);
+
+    adapter = make_capability_adapter(&state, true, true, 0, 0, 0, 1);
+    assert(adapter);
+    capabilities = Q2_VK_PresentationAdapterProviderCapabilities(adapter);
+    assert(capabilities.queue_topology ==
+           Q2_VK_PRESENTATION_QUEUE_TOPOLOGY_SHARED_FAMILY);
+    assert(Q2_VK_PresentationAdapterProviderReady(adapter));
     Q2_VK_PresentationAdapterDestroy(adapter,
                                      Q2_VK_PRESENTATION_SHUTDOWN_NORMAL);
 }
@@ -217,6 +311,12 @@ static void check_lifecycle_capability_diagnostic(void)
     const q2_vk_presentation_ops_t ops = {
         .userdata = &state,
         .frame_generation_ready = true,
+        .topology = {
+            .queue_family_facts_known = true,
+            .graphics_queue_family = 0,
+            .present_queue_family = 1,
+            .provider_synchronization_ready = false,
+        },
         .acquire = mock_acquire,
         .present = mock_present,
         .shutdown = mock_shutdown,
@@ -245,6 +345,7 @@ int main(void)
     check_frame_generation_gate_and_device_loss();
     check_provider_status_is_not_implied_by_native_adapter();
     check_lifecycle_capability_diagnostic();
+    check_topology_readiness_diagnostics();
     puts("Vulkan presentation adapter contracts: passed");
     return 0;
 }
