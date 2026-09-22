@@ -276,6 +276,12 @@ require_contract 'config.allowAsyncWorkloads = allow_async_workloads' \
     "$repo_dir/src/refresh/vk_fsr3.cpp"
 require_contract 'vk.provider_async_compute_available' \
     "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'fsr3_provider_async_workloads_failed' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'retrying provider on the graphics queue' \
+    "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_configure_fsr3_provider_frame_generation_mode(true, false)' \
+    "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_configure_fsr3_provider_frame_generation(false)' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'pause provider configuration' "$repo_dir/src/refresh/vk_backend.c"

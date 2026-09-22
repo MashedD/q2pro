@@ -949,6 +949,7 @@ typedef struct {
     uint32_t provider_async_compute_queue_index;
     bool provider_queues_reserved;
     bool provider_async_compute_available;
+    bool fsr3_provider_async_workloads_failed;
     bool queues_same_family;
     VkSharingMode swapchain_sharing_mode;
     VkCommandPool command_pool;
@@ -1824,6 +1825,7 @@ static bool vk_fsr_frame_generation_requested(void)
 static bool vk_fsr_frame_generation_async_enabled(void)
 {
     return vk.provider_async_compute_available &&
+        !vk.fsr3_provider_async_workloads_failed &&
         (!r_fsr_frame_generation_async ||
          r_fsr_frame_generation_async->integer != 0);
 }
@@ -10760,6 +10762,9 @@ static bool vk_query_swapchain_images_and_views(void)
     return true;
 }
 
+static bool vk_configure_fsr3_provider_frame_generation_mode(
+    bool enabled, bool allow_async_workloads);
+
 static bool vk_activate_fsr3_provider(
     const VkSwapchainCreateInfoKHR *create_info)
 {
@@ -10786,6 +10791,7 @@ static bool vk_activate_fsr3_provider(
         vk.fsr3_provider_functions = (q2_fsr3_provider_functions_t) { 0 };
         vk.fsr3_provider_active = false;
         vk.fsr3_provider_frame_generation_enabled = false;
+        vk.fsr3_provider_async_workloads_failed = false;
         vk.swapchain = VK_NULL_HANDLE;
         VkResult result = vk.CreateSwapchainKHR(vk.device, create_info, NULL,
                                                  &vk.swapchain);
@@ -10806,15 +10812,29 @@ static bool vk_activate_fsr3_provider(
     vk.fsr3_provider = provider;
     vk.fsr3_provider_functions = functions;
     vk.fsr3_provider_active = true;
-    if (!Q2_FSR3_ConfigureProvider(vk.fsr3, provider, true,
-                                   vk_fsr_frame_generation_async_enabled(),
-                                   Q2_FSR3_GetCurrentFrameId(vk.fsr3))) {
+    vk.fsr3_provider_async_workloads_failed = false;
+    bool async_requested = vk_fsr_frame_generation_async_enabled();
+    bool configured = vk_configure_fsr3_provider_frame_generation_mode(
+        true, async_requested);
+    if (!configured && async_requested) {
+        /* A provider can be usable on its graphics queue even when its
+         * optional async queue path rejects configuration. Keep frame
+         * generation alive and avoid repeating the failing async setup on
+         * every frame until the user toggles the cvar or recreates the
+         * provider. */
+        vk.fsr3_provider_async_workloads_failed = true;
+        Com_WPrintf("Vulkan FSR3 async workloads unavailable; retrying provider on the graphics queue\n");
+        configured = vk_configure_fsr3_provider_frame_generation_mode(
+            true, false);
+    }
+    if (!configured) {
         Com_WPrintf("Vulkan FSR3 provider frame-generation configuration failed; using native presentation\n");
         Q2_FSR3_DestroyProvider(vk.fsr3, provider, false);
         vk.fsr3_provider = NULL;
         vk.fsr3_provider_functions = (q2_fsr3_provider_functions_t) { 0 };
         vk.fsr3_provider_active = false;
         vk.fsr3_provider_frame_generation_enabled = false;
+        vk.fsr3_provider_async_workloads_failed = false;
         vk.swapchain = VK_NULL_HANDLE;
         VkResult result = vk.CreateSwapchainKHR(vk.device, create_info, NULL,
                                                  &vk.swapchain);
@@ -10850,9 +10870,11 @@ static void vk_destroy_fsr3_provider_nowait(void)
     vk.fsr3_provider_functions = (q2_fsr3_provider_functions_t) { 0 };
     vk.fsr3_provider_active = false;
     vk.fsr3_provider_frame_generation_enabled = false;
+    vk.fsr3_provider_async_workloads_failed = false;
 }
 
-static bool vk_configure_fsr3_provider_frame_generation(bool enabled)
+static bool vk_configure_fsr3_provider_frame_generation_mode(
+    bool enabled, bool allow_async_workloads)
 {
     if (!vk.fsr3_provider_active || !vk.fsr3_provider || !vk.fsr3)
         return false;
@@ -10865,7 +10887,7 @@ static bool vk_configure_fsr3_provider_frame_generation(bool enabled)
 
     if (!Q2_FSR3_ConfigureProvider(
             vk.fsr3, vk.fsr3_provider, enabled,
-            enabled && vk_fsr_frame_generation_async_enabled(),
+            enabled && allow_async_workloads,
             Q2_FSR3_GetCurrentFrameId(vk.fsr3)))
         return false;
 
@@ -10873,6 +10895,12 @@ static bool vk_configure_fsr3_provider_frame_generation(bool enabled)
     if (r_fsr_frame_generation_async)
         r_fsr_frame_generation_async->modified = false;
     return true;
+}
+
+static bool vk_configure_fsr3_provider_frame_generation(bool enabled)
+{
+    return vk_configure_fsr3_provider_frame_generation_mode(
+        enabled, vk_fsr_frame_generation_async_enabled());
 }
 
 static bool vk_create_fsr_resources_and_provider(
@@ -23112,13 +23140,23 @@ static bool vk_dispatch_fsr(void)
         return false;
     }
 
-    if (vk.fsr3_provider_active &&
-        !vk_configure_fsr3_provider_frame_generation(true)) {
-        vk_configure_fsr3_provider_frame_generation(false);
-        vk_log_fsr_frame_generation_failure("provider_configuration");
-        vk_disable_frame_generation("provider frame-generation configuration failed");
-        vk.fsr_framegen_disabled = true;
-        vk.fsr_framegen_fallback_reason = "provider_configuration_failed";
+    if (vk.fsr3_provider_active) {
+        bool async_requested = vk_fsr_frame_generation_async_enabled();
+        bool provider_configured =
+            vk_configure_fsr3_provider_frame_generation(true);
+        if (!provider_configured && async_requested) {
+            vk.fsr3_provider_async_workloads_failed = true;
+            Com_WPrintf("Vulkan FSR3 async workloads failed at runtime; retrying provider on the graphics queue\n");
+            provider_configured =
+                vk_configure_fsr3_provider_frame_generation_mode(true, false);
+        }
+        if (!provider_configured) {
+            vk_configure_fsr3_provider_frame_generation(false);
+            vk_log_fsr_frame_generation_failure("provider_configuration");
+            vk_disable_frame_generation("provider frame-generation configuration failed");
+            vk.fsr_framegen_disabled = true;
+            vk.fsr_framegen_fallback_reason = "provider_configuration_failed";
+        }
     }
 
     vk.fsr_reset = false;
@@ -23560,6 +23598,7 @@ void VKR_BeginFrame(void)
     if (r_fsr_frame_generation_async &&
         r_fsr_frame_generation_async->modified) {
         r_fsr_frame_generation_async->modified = false;
+        vk.fsr3_provider_async_workloads_failed = false;
         vk.fsr_reset = true;
         vk_fsr_invalidate_history_reason(VK_FSR_RESET_CONFIG);
     }
