@@ -20988,7 +20988,7 @@ static void vk_log_fsr_frame_generation_telemetry(void)
 {
     Com_Printf("VK FSR3 framegen: frame=%llu requested=%s prepared=%s "
                "computed=%s presented=%s additional_presented=%s "
-               "provider=%s async_workloads=%s "
+               "provider=%s async_workloads=%s async_fallback=%s "
                "additional_present_interval_us=%llu fallback=%s "
                "disabled=%s fallback_reason=%s "
                "requested_total=%llu prepared_total=%llu "
@@ -21005,6 +21005,7 @@ static void vk_log_fsr_frame_generation_telemetry(void)
                (vk.fsr3_provider_active &&
                 vk.fsr3_provider_frame_generation_enabled &&
                 vk_fsr_frame_generation_async_enabled()) ? "yes" : "no",
+               vk.fsr3_provider_async_workloads_failed ? "yes" : "no",
                (unsigned long long)vk.fsr_framegen_additional_present_interval_us,
                vk.fsr_framegen_fallback ? "yes" : "no",
                vk.fsr_framegen_disabled ? "yes" : "no",
@@ -23024,6 +23025,7 @@ static bool vk_dispatch_fsr(void)
     vk_image_barrier_batch_submit(cmd, &pre_fsr_barriers);
 
     bool generated_frame = false;
+    bool provider_async_fallback = false;
     bool frame_reset = vk.fsr_reset;
     vk.fsr_frame_reset = frame_reset;
     if (frame_reset)
@@ -23149,6 +23151,7 @@ static bool vk_dispatch_fsr(void)
             Com_WPrintf("Vulkan FSR3 async workloads failed at runtime; retrying provider on the graphics queue\n");
             provider_configured =
                 vk_configure_fsr3_provider_frame_generation_mode(true, false);
+            provider_async_fallback = provider_configured;
         }
         if (!provider_configured) {
             vk_configure_fsr3_provider_frame_generation(false);
@@ -23161,6 +23164,8 @@ static bool vk_dispatch_fsr(void)
 
     vk.fsr_reset = false;
     vk.fsr_reset_reason = VK_FSR_RESET_NONE;
+    if (provider_async_fallback)
+        vk_fsr_invalidate_history_reason(VK_FSR_RESET_CONFIG);
     vk.fsr_output_valid = true;
     if (frame_generation_prepared) {
         /* The SDK tracks dynamic-resource states internally. Keep an explicit
