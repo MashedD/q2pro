@@ -102,9 +102,9 @@ bool Q2_FSR3_DispatchFrameGeneration(q2_fsr3_context_t *context,
 bool Q2_FSR3_FrameGenerationEnabled(const q2_fsr3_context_t *context);
 bool Q2_FSR3_FrameGenerationFailed(const q2_fsr3_context_t *context);
 
-/* The Windows FSR3 frame-interpolation provider owns a pseudo swapchain and
- * its acquire/present implementation. These calls keep the C Vulkan backend
- * independent of the SDK's C++ reference APIs. Non-Windows builds return
+/* The FSR3 frame-interpolation provider owns a pseudo swapchain and its
+ * acquire/present implementation. These calls keep the C Vulkan backend
+ * independent of the SDK's C++ reference APIs. Unsupported builds return
  * NULL/false and retain the native swapchain path. */
 q2_fsr3_provider_t *Q2_FSR3_CreateProvider(
     q2_fsr3_context_t *context,

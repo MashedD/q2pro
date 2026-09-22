@@ -464,7 +464,7 @@ if vulkan.found()
   if host_machine.system() == 'windows'
     fsr3_provider_reason = '@0@/@1@: real FidelityFX frame-interpolation swapchain provider is compiled for Windows'.format(host_machine.cpu_family(), fsr3_provider_compiler)
   elif host_machine.system() == 'linux'
-    fsr3_provider_reason = 'linux/@0@: real FidelityFX frame-interpolation swapchain provider is not compiled; the vendored provider requires Win32 synchronization and presentation APIs'.format(fsr3_provider_compiler)
+    fsr3_provider_reason = 'linux/@0@: real FidelityFX frame-interpolation swapchain provider is compiled with the q2pro POSIX synchronization layer'.format(fsr3_provider_compiler)
   else
     fsr3_provider_reason = '@0@/@1@: real FidelityFX frame-interpolation swapchain provider is not compiled for this q2pro integration; the no-op Vulkan stub remains selected'.format(host_machine.system(), fsr3_provider_compiler)
   endif

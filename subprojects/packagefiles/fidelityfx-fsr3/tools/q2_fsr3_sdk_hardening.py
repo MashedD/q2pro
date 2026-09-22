@@ -12,17 +12,110 @@ def replace_once(text, old, new, label):
 
 
 def write_if_changed(path, text):
-    if path.read_text() != text:
+    if not path.exists() or path.read_text() != text:
         path.write_text(text)
 
 
+def guard_once(text, body, macro):
+    """Wrap an SDK fragment exactly once, even across repeated configure runs."""
+
+    guard = f"#ifdef {macro}\n"
+    wrapped = guard + body + "#endif\n"
+    if wrapped in text:
+        return text
+    if body not in text:
+        return text
+    return text.replace(body, wrapped, 1)
+
+
 def harden_vulkan_frame_interpolation_source(root):
-    """Keep the Windows Vulkan provider buildable with GCC/MinGW."""
+    """Keep the Vulkan provider buildable with GCC/MinGW and Linux."""
 
     source_path = root / "sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK.cpp"
     source = source_path.read_text()
 
+    platform_header = root / "q2_fsr3_sdk_platform.h"
+    packaged_platform_header = root.parent / "packagefiles/fidelityfx-fsr3/q2_fsr3_sdk_platform.h"
+    if packaged_platform_header.exists():
+        write_if_changed(platform_header, packaged_platform_header.read_text())
+
     source = source.replace("#pragma once\n", "", 1)
+
+    # The SDK's provider is shared by Windows and Linux. The tracked q2pro
+    # platform layer supplies synchronization/timing primitives on Linux.
+    for path in [
+        root / "sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK.cpp",
+        root / "sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK.h",
+        root / "sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK_Helpers.h",
+    ]:
+        text = path.read_text()
+        text = text.replace(
+            '#include <Windows.h>\n#include <synchapi.h>\n',
+            '#include <q2_fsr3_sdk_platform.h>\n',
+        )
+        text = text.replace(
+            '#include <Windows.h>\n',
+            '#include <q2_fsr3_sdk_platform.h>\n',
+        )
+        write_if_changed(path, text)
+
+    source = source_path.read_text()
+    source = source.replace(
+        '#ifdef VK_USE_PLATFORM_WIN32_KHR\n'
+        '#ifdef VK_USE_PLATFORM_WIN32_KHR\n'
+        '    VkSurfaceFullScreenExclusiveInfoEXT      surfaceFullScreenExclusive;\n'
+        '    VkSurfaceFullScreenExclusiveWin32InfoEXT surfaceFullScreenExclusiveWin32;\n'
+        '#endif\n'
+        '#endif\n'
+        '#endif\n',
+        '#ifdef VK_USE_PLATFORM_WIN32_KHR\n'
+        '    VkSurfaceFullScreenExclusiveInfoEXT      surfaceFullScreenExclusive;\n'
+        '    VkSurfaceFullScreenExclusiveWin32InfoEXT surfaceFullScreenExclusiveWin32;\n'
+        '#endif\n',
+    )
+    source = source.replace(
+        '#ifdef VK_USE_PLATFORM_WIN32_KHR\n'
+        '    VkSurfaceFullScreenExclusiveInfoEXT      surfaceFullScreenExclusive;\n'
+        '    VkSurfaceFullScreenExclusiveWin32InfoEXT surfaceFullScreenExclusiveWin32;\n'
+        '#endif\n'
+        '#endif\n'
+        '#endif\n',
+        '#ifdef VK_USE_PLATFORM_WIN32_KHR\n'
+        '    VkSurfaceFullScreenExclusiveInfoEXT      surfaceFullScreenExclusive;\n'
+        '    VkSurfaceFullScreenExclusiveWin32InfoEXT surfaceFullScreenExclusiveWin32;\n'
+        '#endif\n',
+    )
+    source = guard_once(
+        source,
+        '    VkSurfaceFullScreenExclusiveInfoEXT      surfaceFullScreenExclusive;\n'
+        '    VkSurfaceFullScreenExclusiveWin32InfoEXT surfaceFullScreenExclusiveWin32;\n',
+        'VK_USE_PLATFORM_WIN32_KHR',
+    )
+    fullscreen_info = (
+        '        case VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT:\n'
+        '            realSwapchainCreateInfo.surfaceFullScreenExclusive       = *reinterpret_cast<const VkSurfaceFullScreenExclusiveInfoEXT*>(pCurrent);\n'
+        '            realSwapchainCreateInfo.surfaceFullScreenExclusive.pNext = const_cast<void*>(realSwapchainCreateInfo.swapchain.pNext);  // because pNext is void* instead of const void* in vulkan header\n'
+        '            realSwapchainCreateInfo.swapchain.pNext                  = &realSwapchainCreateInfo.surfaceFullScreenExclusive;\n'
+        '            break;\n'
+    )
+    source = source.replace(
+        '#ifdef VK_USE_PLATFORM_WIN32_KHR\n' + fullscreen_info +
+        '#endif\n#endif\n#endif\n',
+        '#ifdef VK_USE_PLATFORM_WIN32_KHR\n' + fullscreen_info + '#endif\n',
+    )
+    source = guard_once(source, fullscreen_info, 'VK_USE_PLATFORM_WIN32_KHR')
+    fullscreen_win32 = (
+        '        case VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT:\n'
+        '            FFX_USE_PNEXT_AS_IS(surfaceFullScreenExclusiveWin32, VkSurfaceFullScreenExclusiveWin32InfoEXT);\n'
+        '            break;\n'
+    )
+    source = source.replace(
+        '#ifdef VK_USE_PLATFORM_WIN32_KHR\n'
+        '#ifdef VK_USE_PLATFORM_WIN32_KHR\n' + fullscreen_win32 +
+        '#endif\n#endif\n#endif\n#endif\n',
+        '#ifdef VK_USE_PLATFORM_WIN32_KHR\n' + fullscreen_win32 + '#endif\n',
+    )
+    source = guard_once(source, fullscreen_win32, 'VK_USE_PLATFORM_WIN32_KHR')
 
     if "reinterpret_cast<FfxWaitCallbackFunc>(valuePtr)" not in source:
         source = replace_once(

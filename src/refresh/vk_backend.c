@@ -1996,17 +1996,12 @@ static void vk_disable_frame_generation_during_setup(const char *reason)
         r_fsr_frame_generation->modified = modified;
 }
 
-/* The vendored 1.1.4 manual frame-generation integration is not safe on the
- * Linux Vulkan/RADV path. Keep the explicit request from taking down the
- * device; the upscaler remains available and the Windows path stays enabled
- * for platforms where this SDK integration is supported. */
+/* The explicit request is valid only when the real provider was compiled.
+ * Runtime initialization still performs the queue/synchronization checks and
+ * falls back to ordinary FSR3 upscaling if the provider cannot start. */
 static bool vk_fsr_frame_generation_backend_supported(void)
 {
-#if defined(_WIN32)
-    return true;
-#else
-    return false;
-#endif
+    return Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED != 0;
 }
 
 static q2_fsr3_context_t *vk_create_fsr_context_with_fallback(
@@ -6606,7 +6601,7 @@ static bool vk_create_device(void)
     float priorities[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
     VkDeviceQueueCreateInfo queue_infos[16];
     uint32_t queue_info_count = 0;
-    const char *extensions[4
+    const char *extensions[5
 #if USE_VULKAN_RAYTRACING
                            + VK_RT_REQUIRED_EXTENSION_COUNT
 #endif
@@ -6619,6 +6614,9 @@ static bool vk_create_device(void)
     };
     VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroup = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT,
+    };
+    VkPhysicalDeviceTimelineSemaphoreFeatures timeline = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
     };
     void *fsr_features = NULL;
     bool want_half = !vk_fsr_precision || Q_stricmp(vk_fsr_precision->string, "fp32");
@@ -6662,6 +6660,33 @@ static bool vk_create_device(void)
         Com_WPrintf("Vulkan FSR3: requested subgroup unavailable; using native\n");
     Com_Printf("Vulkan FSR3 enabled capabilities: precision=%s subgroup=%u (0=native)\n",
                vk.fsr_capabilities.fp16 ? "fp16" : "fp32", vk.fsr_capabilities.subgroup_size);
+
+    /* The SDK frame-interpolation provider allocates and waits on timeline
+     * semaphores internally. Enable the feature explicitly instead of
+     * assuming that a Vulkan 1.2 device enables it implicitly. The extension
+     * remains valid for Vulkan 1.1 devices that expose it. */
+    const bool timeline_core =
+        vk.physical_device_properties.apiVersion >= VK_API_VERSION_1_2;
+    const bool timeline_extension = vk_has_device_extension(
+        vk.physical_device, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+    bool timeline_supported = false;
+    if ((timeline_core || timeline_extension) && vk.GetPhysicalDeviceFeatures2) {
+        VkPhysicalDeviceFeatures2 query = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            .pNext = &timeline,
+        };
+        vk.GetPhysicalDeviceFeatures2(vk.physical_device, &query);
+        timeline_supported = timeline.timelineSemaphore == VK_TRUE;
+    }
+    if (timeline_supported) {
+        timeline.timelineSemaphore = VK_TRUE;
+        timeline.pNext = fsr_features;
+        fsr_features = &timeline;
+        if (!timeline_core)
+            extensions[extension_count++] = VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME;
+    } else if (Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED) {
+        Com_WPrintf("Vulkan FSR3 frame generation unavailable: timeline semaphores are unsupported\n");
+    }
     const uint32_t raster_extension_count = extension_count;
     VkPhysicalDeviceFeatures features = { 0 };
 #if USE_VULKAN_RAYTRACING
@@ -6714,7 +6739,8 @@ static bool vk_create_device(void)
      * the cvar happens to be enabled during startup. The setting is runtime
      * configurable and swapchain recreation may enable frame generation
      * later without recreating the Vulkan device. */
-    bool provider_available = Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED;
+    bool provider_available = Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED &&
+        timeline_supported;
     bool provider_reserved = false;
     bool provider_async_available = false;
 

@@ -214,6 +214,13 @@ require_contract 'q2_fsr3_sdk_hardening.py' \
     "$repo_dir/subprojects/packagefiles/fidelityfx-fsr3/meson.build"
 require_contract 'fsr3_frame_interpolation_provider_compiled = false' \
     "$repo_dir/subprojects/packagefiles/fidelityfx-fsr3/meson.build"
+require_contract "host_machine.system() in ['windows', 'linux']" \
+    "$repo_dir/subprojects/packagefiles/fidelityfx-fsr3/meson.build"
+require_contract 'q2_fsr3_sdk_platform.h' \
+    "$repo_dir/subprojects/packagefiles/fidelityfx-fsr3/tools/q2_fsr3_sdk_hardening.py"
+require_contract 'timelineSemaphore' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME' \
+    "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED' \
     "$repo_dir/meson.build"
 require_contract 'Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_REASON' \

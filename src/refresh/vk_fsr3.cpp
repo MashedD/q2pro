@@ -91,7 +91,7 @@ struct q2_fsr3_provider {
  * storing a process-global device/context pair. */
 static thread_local q2_fsr3_context_t *q2_callback_context;
 
-#if defined(_WIN32) && Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
+#if Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
 /* The SDK's provider worker thread calls Vulkan entry points directly. Keep
  * its device context available when that thread is outside q2pro's normal
  * FSR3 callback scope. q2pro creates one provider per Vulkan device. */
@@ -101,7 +101,7 @@ static q2_fsr3_context_t *q2_provider_context;
 static q2_fsr3_context_t *q2_fsr3_active_context(void)
 {
     q2_fsr3_context_t *context = q2_callback_context;
-#if defined(_WIN32) && Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
+#if Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
     if (!context)
         context = q2_provider_context;
 #endif
@@ -849,8 +849,8 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
         result->full_context_created = true;
 
         FfxFrameGenerationConfig config = {};
-#if defined(_WIN32) && Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
-        /* The real Windows swapchain does not exist until q2pro replaces the
+#if Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
+        /* The real provider swapchain does not exist until q2pro replaces the
          * native swapchain. Enable the FSR3 context after that replacement. */
         config.frameGenerationEnabled = false;
 #else
@@ -859,7 +859,7 @@ extern "C" q2_fsr3_context_t *Q2_FSR3_Create(
         config.allowAsyncWorkloads = false;
         config.frameGenerationCallback = nullptr;
         error = ffxFsr3ConfigureFrameGeneration(&result->full_context, &config);
-#if !(defined(_WIN32) && Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED)
+#if !Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
         if (error != FFX_OK) {
             Com_WPrintf("Vulkan FSR3 frame-generation configuration failed (error %d)\n",
                         static_cast<int>(error));
@@ -1185,7 +1185,7 @@ extern "C" bool Q2_FSR3_FrameGenerationFailed(
     return context && context->frame_generation_failed;
 }
 
-#if defined(_WIN32) && Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
+#if Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
 
 /* The SDK callback ABI does not carry a Vulkan queue handle. q2pro has one
  * provider per device, so keep the bound queue-submit table process-local and

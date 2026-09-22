@@ -11,7 +11,8 @@ if host_machine.system() == 'windows'
   fsr3_frame_interpolation_provider_compiled = true
   fsr3_frame_interpolation_provider_reason = '@0@/@1@: real FidelityFX frame-interpolation swapchain provider is compiled for Windows'.format(fsr3_arch, fsr3_toolchain)
 elif host_machine.system() == 'linux'
-  fsr3_frame_interpolation_provider_reason = 'linux/@0@: real FidelityFX frame-interpolation swapchain provider is not compiled; the vendored provider requires Win32 synchronization and presentation APIs'.format(fsr3_cpp.get_id())
+  fsr3_frame_interpolation_provider_compiled = true
+  fsr3_frame_interpolation_provider_reason = 'linux/@0@: real FidelityFX frame-interpolation swapchain provider is compiled with the q2pro POSIX synchronization layer'.format(fsr3_cpp.get_id())
 else
   fsr3_frame_interpolation_provider_reason = '@0@/@1@: real FidelityFX frame-interpolation swapchain provider is not compiled for this q2pro integration; the no-op Vulkan stub remains selected'.format(host_machine.system(), fsr3_cpp.get_id())
 endif
@@ -25,6 +26,8 @@ fsr3_include = include_directories(
   'sdk/src/backends/shared/blob_accessors',
   'sdk/src/components',
 )
+
+fsr3_threads = dependency('threads')
 
 python = find_program('python3')
 sdk_hardening = files('tools/q2_fsr3_sdk_hardening.py')
@@ -103,7 +106,7 @@ fsr3_sources = files(
   'src/backends/shared/ffx_shader_blobs.cpp',
 ) + [vk_backend_source, shader_header]
 
-if host_machine.system() == 'windows'
+if host_machine.system() in ['windows', 'linux']
   fsr3_sources += files(
     'sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK.cpp',
     'sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK_Helpers.cpp',
@@ -116,6 +119,7 @@ endif
 
 fsr3_dep = declare_dependency(
   include_directories: fsr3_include,
+  dependencies: fsr3_threads,
 )
 
 # Export diagnostics explicitly. Subproject locals are not part of the
