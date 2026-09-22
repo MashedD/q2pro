@@ -1172,6 +1172,7 @@ typedef struct {
     q2_fsr3_provider_t *fsr3_provider;
     q2_fsr3_provider_functions_t fsr3_provider_functions;
     bool fsr3_provider_active;
+    bool fsr3_provider_frame_generation_enabled;
     bool ssr_ready;
     float scale;
     color_t color;
@@ -10776,6 +10777,7 @@ static bool vk_activate_fsr3_provider(
     if (!provider) {
         vk.fsr3_provider_functions = (q2_fsr3_provider_functions_t) { 0 };
         vk.fsr3_provider_active = false;
+        vk.fsr3_provider_frame_generation_enabled = false;
         vk.swapchain = VK_NULL_HANDLE;
         VkResult result = vk.CreateSwapchainKHR(vk.device, create_info, NULL,
                                                  &vk.swapchain);
@@ -10804,6 +10806,7 @@ static bool vk_activate_fsr3_provider(
         vk.fsr3_provider = NULL;
         vk.fsr3_provider_functions = (q2_fsr3_provider_functions_t) { 0 };
         vk.fsr3_provider_active = false;
+        vk.fsr3_provider_frame_generation_enabled = false;
         vk.swapchain = VK_NULL_HANDLE;
         VkResult result = vk.CreateSwapchainKHR(vk.device, create_info, NULL,
                                                  &vk.swapchain);
@@ -10815,6 +10818,7 @@ static bool vk_activate_fsr3_provider(
             "frame-interpolation provider configuration failed");
         return false;
     }
+    vk.fsr3_provider_frame_generation_enabled = true;
 
     Com_Printf("Vulkan FSR3 frame-interpolation provider active: swapchain=%s, present=%u:%u, image-acquire=%u:%u, async-compute=%s\n",
                vk.fsr3_provider_active ? "owned" : "native",
@@ -10837,6 +10841,28 @@ static void vk_destroy_fsr3_provider_nowait(void)
     vk.fsr3_provider = NULL;
     vk.fsr3_provider_functions = (q2_fsr3_provider_functions_t) { 0 };
     vk.fsr3_provider_active = false;
+    vk.fsr3_provider_frame_generation_enabled = false;
+}
+
+static bool vk_configure_fsr3_provider_frame_generation(bool enabled)
+{
+    if (!vk.fsr3_provider_active || !vk.fsr3_provider || !vk.fsr3)
+        return false;
+
+    /* Reconfiguration is needed for every active frame because frameID is
+     * part of the provider configuration. Avoid repeatedly toggling the
+     * provider while paused, where the retained output is presented as-is. */
+    if (!enabled && !vk.fsr3_provider_frame_generation_enabled)
+        return true;
+
+    if (!Q2_FSR3_ConfigureProvider(
+            vk.fsr3, vk.fsr3_provider, enabled,
+            enabled && vk.provider_async_compute_available,
+            Q2_FSR3_GetCurrentFrameId(vk.fsr3)))
+        return false;
+
+    vk.fsr3_provider_frame_generation_enabled = enabled;
+    return true;
 }
 
 static bool vk_create_fsr_resources_and_provider(
@@ -23070,12 +23096,8 @@ static bool vk_dispatch_fsr(void)
     }
 
     if (vk.fsr3_provider_active &&
-        !Q2_FSR3_ConfigureProvider(vk.fsr3, vk.fsr3_provider, true,
-                                   vk.provider_async_compute_available,
-                                   Q2_FSR3_GetCurrentFrameId(vk.fsr3))) {
-        Q2_FSR3_ConfigureProvider(vk.fsr3, vk.fsr3_provider, false,
-                                  false,
-                                  Q2_FSR3_GetCurrentFrameId(vk.fsr3));
+        !vk_configure_fsr3_provider_frame_generation(true)) {
+        vk_configure_fsr3_provider_frame_generation(false);
         vk_log_fsr_frame_generation_failure("provider_configuration");
         vk_disable_frame_generation("provider frame-generation configuration failed");
         vk.fsr_framegen_disabled = true;
@@ -23862,6 +23884,9 @@ void VKR_BeginFrame(void)
             vk_mark_fsr_frame_generation_pause();
             vk.frame_fsr = false;
         }
+        if (paused && vk.fsr3_provider_active &&
+            !vk_configure_fsr3_provider_frame_generation(false))
+            vk_log_fsr_frame_generation_failure("pause provider configuration");
         vk.fsr_frame_reset_reason = vk.fsr_reset ? vk.fsr_reset_reason : VK_FSR_RESET_NONE;
         vk.frame_active = true;
         return;

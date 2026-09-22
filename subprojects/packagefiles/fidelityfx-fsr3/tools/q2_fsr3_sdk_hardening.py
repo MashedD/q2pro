@@ -11,6 +11,11 @@ def replace_once(text, old, new, label):
     return text.replace(old, new, 1)
 
 
+def write_if_changed(path, text):
+    if path.read_text() != text:
+        path.write_text(text)
+
+
 def harden_vulkan_frame_interpolation_source(root):
     """Keep the Windows Vulkan provider buildable with GCC/MinGW."""
 
@@ -107,7 +112,7 @@ def harden_vulkan_frame_interpolation_source(root):
         "s_uiCompositionRenderPass = nullptr;",
         "s_uiCompositionRenderPass = VK_NULL_HANDLE;",
     )
-    ui_composition_path.write_text(ui_composition)
+    write_if_changed(ui_composition_path, ui_composition)
 
     debug_pacing_path = root / "sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK_DebugPacing.cpp"
     debug_pacing = debug_pacing_path.read_text()
@@ -115,9 +120,9 @@ def harden_vulkan_frame_interpolation_source(root):
         "s_debugPacingRenderPass = nullptr;",
         "s_debugPacingRenderPass = VK_NULL_HANDLE;",
     )
-    debug_pacing_path.write_text(debug_pacing)
+    write_if_changed(debug_pacing_path, debug_pacing)
 
-    source_path.write_text(source)
+    write_if_changed(source_path, source)
 
 
 def harden_breadcrumb_uint64_format(root):
@@ -128,7 +133,7 @@ def harden_breadcrumb_uint64_format(root):
     old = '#define FFX_BREADCRUMBS_APPEND_UINT64(buff, count, number) \\\n    FFX_BREADCRUMBS_APPEND_NUMBER(buff, count, number, 21, "%zu")'
     new = '#define FFX_BREADCRUMBS_APPEND_UINT64(buff, count, number) \\\n    FFX_BREADCRUMBS_APPEND_NUMBER(buff, count, static_cast<unsigned long long>(number), 21, "%llu")'
     if old in header:
-        header_path.write_text(header.replace(old, new, 1))
+        write_if_changed(header_path, header.replace(old, new, 1))
 
 
 def main():
@@ -154,7 +159,7 @@ def main():
             "    bool                                    sharedResourceCreated[FFX_FSR3_RESOURCE_IDENTIFIER_COUNT];\n",
             "partial-cleanup state",
         )
-        private_path.write_text(private)
+        write_if_changed(private_path, private)
 
     source = source_path.read_text()
     if "sharedBackendContextCreated" not in source:
@@ -242,7 +247,7 @@ def main():
             "    if (!upscalingOnly && contextPrivate->frameInterpolationContextCreated)\n    {\n        FFX_VALIDATE(ffxFrameInterpolationContextDestroy(&contextPrivate->fiContext));\n    }\n    if (!upscalingOnly && contextPrivate->opticalflowContextCreated)\n    {\n        FFX_VALIDATE(ffxOpticalflowContextDestroy(&contextPrivate->ofContext));\n    }\n        \n    if (!interpolationOnly && contextPrivate->upscalerContextCreated)\n    {\n        FFX_VALIDATE(ffxFsr3UpscalerContextDestroy(&contextPrivate->upscalerContext));\n    }\n",
             "component cleanup",
         )
-        source_path.write_text(source)
+        write_if_changed(source_path, source)
 
     components = [
         (
@@ -302,8 +307,8 @@ def main():
             component_source = replace_once(
                 component_source, wrapper_old, wrapper_new,
                 f"{source_rel} failure cleanup")
-            component_private_path.write_text(component_private)
-            component_source_path.write_text(component_source)
+            write_if_changed(component_private_path, component_private)
+            write_if_changed(component_source_path, component_source)
 
     if "sharedResourceCreated" not in private_path.read_text():
         raise RuntimeError("FSR3 SDK hardening did not update the private context")
