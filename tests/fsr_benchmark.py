@@ -229,6 +229,10 @@ def summarize_frame_generation(records, frame_ids=None):
     summary = {'count': len(records)}
     for field in boolean_fields:
         summary[field] = sum(1 for record in records if record.get(field) is True)
+    for field in ('provider', 'async_workloads', 'async_fallback'):
+        if any(field in record for record in records):
+            summary[field] = sum(1 for record in records
+                                 if record.get(field) is True)
     for field in ('requested_total', 'prepared_total', 'computed_total',
                   'presented_total', 'additional_presented_total',
                   'fallback_total', 'disabled_total'):

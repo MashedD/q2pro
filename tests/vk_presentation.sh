@@ -193,6 +193,7 @@ require_contract 'vk.fsr_framegen_additional_presented = false' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'frame_generation_telemetry' "$repo_dir/tests/fsr_benchmark.py"
 require_contract 'summarize_frame_generation' "$repo_dir/tests/fsr_benchmark.py"
+require_contract "'async_fallback'" "$repo_dir/tests/fsr_benchmark.py"
 require_contract 'generated_fps_from_frame_generation' "$repo_dir/tests/fsr_benchmark.py"
 require_contract 'additional_present_intervals_us' "$repo_dir/tests/fsr_benchmark.py"
 require_contract 'async_workloads=%s' "$repo_dir/src/refresh/vk_backend.c"
