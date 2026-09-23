@@ -1729,7 +1729,9 @@ extern "C" q2_fsr3_provider_t *Q2_FSR3_CreateProvider(
 
 extern "C" bool Q2_FSR3_ConfigureProvider(
     q2_fsr3_context_t *context, q2_fsr3_provider_t *provider,
-    bool enabled, bool allow_async_workloads, uint64_t frame_id)
+    bool enabled, bool allow_async_workloads, uint64_t frame_id,
+    VkImage hudless_color, VkFormat hudless_color_format,
+    uint32_t hudless_color_width, uint32_t hudless_color_height)
 {
     if (!context || !provider || provider->context != context ||
         !provider->swapchain || !context->full_context_created)
@@ -1751,6 +1753,14 @@ extern "C" bool Q2_FSR3_ConfigureProvider(
     config.frameGenerationCallback = enabled ?
         q2_provider_frame_generation_callback : nullptr;
     config.frameGenerationCallbackContext = enabled ? context : nullptr;
+    if (enabled && hudless_color != VK_NULL_HANDLE &&
+        hudless_color_format != VK_FORMAT_UNDEFINED &&
+        hudless_color_width != 0 && hudless_color_height != 0) {
+        config.HUDLessColor = q2_fsr3_resource(
+            hudless_color, hudless_color_format,
+            hudless_color_width, hudless_color_height,
+            FFX_RESOURCE_USAGE_READ_ONLY, FFX_RESOURCE_STATE_COMPUTE_READ);
+    }
     config.frameID = frame_id;
     config.interpolationRect = {
         0, 0, static_cast<int32_t>(context->display_width),
@@ -1809,7 +1819,8 @@ extern "C" q2_fsr3_provider_t *Q2_FSR3_CreateProvider(
 }
 
 extern "C" bool Q2_FSR3_ConfigureProvider(
-    q2_fsr3_context_t *, q2_fsr3_provider_t *, bool, bool, uint64_t)
+    q2_fsr3_context_t *, q2_fsr3_provider_t *, bool, bool, uint64_t,
+    VkImage, VkFormat, uint32_t, uint32_t)
 {
     return false;
 }

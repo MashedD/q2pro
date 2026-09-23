@@ -1843,11 +1843,10 @@ static bool vk_fsr_frame_generation_requested(void)
 
 static bool vk_fsr_frame_generation_async_enabled(void)
 {
-    return vk.provider_async_compute_available &&
-        vk.provider_async_compute_queue_family == vk.queues.graphics_family &&
-        !vk.fsr3_provider_async_workloads_failed &&
-        (!r_fsr_frame_generation_async ||
-         r_fsr_frame_generation_async->integer != 0);
+    /* HUDLessColor currently uses one scene image. The next game frame can
+     * overwrite it before an asynchronous interpolation queue finishes
+     * sampling it, so keep the two users serialized on the graphics queue. */
+    return false;
 }
 
 static bool vk_fsr_frame_generation_user_requested(void)
@@ -10896,7 +10895,8 @@ static bool vk_activate_fsr3_provider(
     /* Startup/menu presentation has no prepared scene. Configure passthrough
      * explicitly; interpolation is enabled only for a complete scene frame. */
     bool configured = Q2_FSR3_ConfigureProvider(
-        vk.fsr3, provider, false, false, Q2_FSR3_GetCurrentFrameId(vk.fsr3));
+        vk.fsr3, provider, false, false, Q2_FSR3_GetCurrentFrameId(vk.fsr3),
+        VK_NULL_HANDLE, VK_FORMAT_UNDEFINED, 0, 0);
     if (!configured) {
         Com_WPrintf("Vulkan FSR3 provider frame-generation configuration failed; using native presentation\n");
         Q2_FSR3_DestroyProvider(vk.fsr3, provider, false);
@@ -10958,7 +10958,11 @@ static bool vk_configure_fsr3_provider_frame_generation_mode(
     if (!Q2_FSR3_ConfigureProvider(
             vk.fsr3, vk.fsr3_provider, enabled,
             enabled && allow_async_workloads,
-            Q2_FSR3_GetCurrentFrameId(vk.fsr3)))
+            Q2_FSR3_GetCurrentFrameId(vk.fsr3),
+            enabled ? vk.fsr_output_texture.image : VK_NULL_HANDLE,
+            enabled ? vk.fsr_output_format : VK_FORMAT_UNDEFINED,
+            enabled ? vk.fsr_output_texture.width : 0,
+            enabled ? vk.fsr_output_texture.height : 0))
         return false;
 
     vk.fsr3_provider_frame_generation_enabled = enabled;
@@ -23017,7 +23021,9 @@ static bool vk_configure_fsr3_provider_for_present(void)
         !(vk.fd.rdflags & RDF_NOWORLDMODEL) && vk.fsr_framegen_prepared &&
         vk.fsr_output_valid && !vk.fsr_frame_reset &&
         !vk.fsr_pause_frame && !vk.fsr_pause_reuse &&
-        vk.fsr_result == VK_FSR_RESULT_FSR3;
+        vk.fsr_result == VK_FSR_RESULT_FSR3 &&
+        vk.fsr_output_texture.image &&
+        vk.fsr_output_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (vk_configure_fsr3_provider_frame_generation(enabled))
         return true;
 
@@ -23324,6 +23330,14 @@ static bool vk_dispatch_fsr(void)
     vk_write_fsr_timestamp(VK_TIMESTAMP_PRESENT_BEGIN);
     bool presentation_copy = vk_copy_presentation_texture(
         cmd, presentation_texture, presentation_layout);
+    /* The SDK uses this scene-only output to separate the HUD from generated
+     * frames. It samples the image after the game submission completes. */
+    if (vk.fsr3_provider_active && frame_generation_prepared)
+        vk_transition_color_target(cmd, &vk.fsr_output_texture,
+                                   &vk.fsr_output_layout,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_ACCESS_SHADER_READ_BIT,
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     /* The non-generated FSR output is also retained for pause reuse. The
      * frame-generation output is only the current presentation image. */
     if (!presentation_copy)

@@ -16,6 +16,55 @@ def write_if_changed(path, text):
         path.write_text(text)
 
 
+def harden_vulkan_frame_interpolation_wait(root):
+    """Use a hybrid wait on Linux to reduce presenter CPU use."""
+
+    helper_path = root / "sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK_Helpers.cpp"
+    helper = helper_path.read_text()
+    marker = "// Q2PRO_LINUX_HYBRID_WAIT"
+    if marker in helper:
+        return
+
+    old = (
+        "void waitForPerformanceCount(const int64_t targetCount)\n"
+        "{\n"
+        "    int64_t currentCount = 0;\n"
+        "    do\n"
+        "    {\n"
+        "        QueryPerformanceCounter(reinterpret_cast<LARGE_INTEGER*>(&currentCount));\n"
+        "    } while (currentCount < targetCount);\n"
+        "}\n"
+    )
+    new = (
+        "void waitForPerformanceCount(const int64_t targetCount)\n"
+        "{\n"
+        "#ifdef _WIN32\n"
+        "    int64_t currentCount = 0;\n"
+        "    do\n"
+        "    {\n"
+        "        QueryPerformanceCounter(reinterpret_cast<LARGE_INTEGER*>(&currentCount));\n"
+        "    } while (currentCount < targetCount);\n"
+        "#else\n"
+        "    // Q2PRO_LINUX_HYBRID_WAIT: sleep for the coarse interval, then spin\n"
+        "    // during the final 0.5ms so the present deadline stays precise. The\n"
+        "    // Linux platform shim reports QPC in nanoseconds.\n"
+        "    constexpr int64_t spinWindow = 500000;\n"
+        "    int64_t currentCount = 0;\n"
+        "    for (;;)\n"
+        "    {\n"
+        "        QueryPerformanceCounter(reinterpret_cast<LARGE_INTEGER*>(&currentCount));\n"
+        "        const int64_t remaining = targetCount - currentCount;\n"
+        "        if (remaining <= 0)\n"
+        "            break;\n"
+        "        if (remaining > spinWindow)\n"
+        "            std::this_thread::sleep_for(std::chrono::nanoseconds(remaining - spinWindow));\n"
+        "    }\n"
+        "#endif\n"
+        "}\n"
+    )
+    write_if_changed(helper_path, replace_once(helper, old, new, "Vulkan hybrid presenter wait"))
+
+
 def guard_once(text, body, macro):
     """Wrap an SDK fragment exactly once, even across repeated configure runs."""
 
@@ -39,8 +88,6 @@ def harden_vulkan_frame_interpolation_source(root):
     if packaged_platform_header.exists():
         write_if_changed(platform_header, packaged_platform_header.read_text())
 
-    source = source.replace("#pragma once\n", "", 1)
-
     # The SDK's provider is shared by Windows and Linux. The tracked q2pro
     # platform layer supplies synchronization/timing primitives on Linux.
     for path in [
@@ -60,6 +107,7 @@ def harden_vulkan_frame_interpolation_source(root):
         write_if_changed(path, text)
 
     source = source_path.read_text()
+    source = source.replace("#pragma once\n", "", 1)
     source = source.replace(
         '#ifdef VK_USE_PLATFORM_WIN32_KHR\n'
         '#ifdef VK_USE_PLATFORM_WIN32_KHR\n'
@@ -234,6 +282,7 @@ def main():
         raise SystemExit("usage: q2_fsr3_sdk_hardening.py <fsr3-root>")
 
     root = Path(sys.argv[1])
+    harden_vulkan_frame_interpolation_wait(root)
     harden_vulkan_frame_interpolation_source(root)
     harden_breadcrumb_uint64_format(root)
     private_path = root / "sdk/src/components/fsr3/ffx_fsr3_private.h"
