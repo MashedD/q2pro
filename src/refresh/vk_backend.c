@@ -1029,6 +1029,7 @@ typedef struct {
     VkPipeline alias_alpha_pipeline;
     VkPipeline alias_depth_pipeline;
     VkPipeline alias_blend_pipeline;
+    VkPipeline alias_glow_pipeline;
     VkPipeline alias_shadow_pipeline;
     VkPipeline alias_cel_pipeline;
     VkPipeline alias_line_pipeline;
@@ -8291,6 +8292,10 @@ static void vk_destroy_swapchain(void)
         vk.DestroyPipeline(vk.device, vk.alias_blend_pipeline, NULL);
         vk.alias_blend_pipeline = VK_NULL_HANDLE;
     }
+    if (vk.alias_glow_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_glow_pipeline, NULL);
+        vk.alias_glow_pipeline = VK_NULL_HANDLE;
+    }
 
     if (vk.alias_shadow_pipeline) {
         vk.DestroyPipeline(vk.device, vk.alias_shadow_pipeline, NULL);
@@ -10712,13 +10717,14 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .rasterizationSamples = vk.sample_count,
     };
+    bool additive_glow = pipeline == &vk.alias_glow_pipeline;
     VkPipelineColorBlendAttachmentState color_blend_attachment[2] = { [0] = {
         .blendEnable = blend,
-        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
-        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .srcColorBlendFactor = additive_glow ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = additive_glow ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .colorBlendOp = VK_BLEND_OP_ADD,
-        .srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
-        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .srcAlphaBlendFactor = additive_glow ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstAlphaBlendFactor = additive_glow ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .alphaBlendOp = VK_BLEND_OP_ADD,
         .colorWriteMask = color_write ?
             (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
@@ -11311,6 +11317,8 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_alias_pipeline(&vk.alias_depth_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
+        !vk_create_alias_pipeline(&vk.alias_glow_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_bloom_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
@@ -15744,7 +15752,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
             vk_draw_alias_pass(cmd, pipeline, buffers, offsets, model, batch,
                                texture, &push);
         if (skin->texnum2 && skin->texnum2 < MAX_RIMAGES &&
-            vk.alias_blend_pipeline) {
+            (vk.drawing_bloom ? vk.alias_bloom_pipeline : vk.alias_glow_pipeline)) {
             const vk_texture_t *glow = vk_texture_for_index(skin->texnum2, false);
 
             if (glow) {
@@ -15752,7 +15760,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 
                 glow_push.intensity = vk_glowmap_intensity();
                 vk_draw_alias_pass(cmd, vk.drawing_bloom ? vk.alias_bloom_pipeline :
-                                   vk.alias_blend_pipeline, buffers, offsets,
+                                   vk.alias_glow_pipeline, buffers, offsets,
                                    model, batch, glow, &glow_push);
             }
         }
