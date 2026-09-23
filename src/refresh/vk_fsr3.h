@@ -28,6 +28,7 @@ typedef struct {
     PFN_vkAcquireNextImageKHR acquire_next_image;
     PFN_vkQueuePresentKHR queue_present;
     PFN_vkSetHdrMetadataEXT set_hdr_metadata;
+    uint64_t (*get_last_present_count)(VkSwapchainKHR swapchain);
 } q2_fsr3_provider_functions_t;
 typedef struct {
     bool fp16;
@@ -77,6 +78,10 @@ bool Q2_FSR3_GetJitterPhase(const q2_fsr3_context_t *context,
 uint64_t Q2_FSR3_GetCurrentFrameId(const q2_fsr3_context_t *context);
 /* Number of provider callbacks that recorded interpolation work successfully. */
 uint64_t Q2_FSR3_GetProviderDispatchCount(const q2_fsr3_context_t *context);
+/* Makes SDK-owned resources usable by the optional interpolation queue when
+ * it belongs to a different Vulkan queue family. */
+void Q2_FSR3_SetResourceQueueFamilies(uint32_t game_family,
+                                       uint32_t async_family);
 int Q2_FSR3_GetLastError(const q2_fsr3_context_t *context);
 bool Q2_FSR3_Dispatch(q2_fsr3_context_t *context, VkCommandBuffer command_buffer,
                       VkImage color, VkImageView color_view, VkFormat color_format,

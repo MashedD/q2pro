@@ -1123,6 +1123,10 @@ typedef struct {
     uint64_t fsr_motion_record_usec;
     uint64_t fsr_dispatch_record_usec;
     uint64_t fsr_frame_id;
+    uint64_t fsr_source_presented_total;
+    uint64_t fsr_present_sample_usec;
+    uint64_t fsr_present_sample_source;
+    uint64_t fsr_present_sample_output;
     uint64_t fsr_sdk_frame_id;
     bool fsr_sdk_frame_id_valid;
     bool fsr_frame_reset;
@@ -1580,6 +1584,7 @@ static cvar_t *vk_fsr_profile;
 static cvar_t *vk_fsr_debug;
 static cvar_t *vk_fsr_benchmark;
 static cvar_t *vk_perf_stats;
+static cvar_t *vk_fsr_cadence;
 static cvar_t *vk_frames_in_flight;
 static cvar_t *vk_device;
 static cvar_t *vk_devicelist;
@@ -1843,10 +1848,16 @@ static bool vk_fsr_frame_generation_requested(void)
 
 static bool vk_fsr_frame_generation_async_enabled(void)
 {
-    /* HUDLessColor currently uses one scene image. The next game frame can
-     * overwrite it before an asynchronous interpolation queue finishes
-     * sampling it, so keep the two users serialized on the graphics queue. */
-    return false;
+    /* The provider keeps replacement buffers alive until its timeline
+     * semaphores allow them to be reused. Async interpolation is also safe
+     * because the async configuration does not bind the single renderer-owned
+     * HUD-less target (see vk_configure_fsr3_provider_frame_generation_mode).
+     * Putting interpolation on the game queue serializes optical flow with
+     * rendering and can cut the source rate roughly in half. */
+    return vk.provider_async_compute_available &&
+        !vk.fsr3_provider_async_workloads_failed &&
+        (!r_fsr_frame_generation_async ||
+         r_fsr_frame_generation_async->integer != 0);
 }
 
 static bool vk_fsr_frame_generation_user_requested(void)
@@ -4643,6 +4654,10 @@ static bool vk_create_fsr_resources(float scale_override)
         return true;
     }
 
+    Q2_FSR3_SetResourceQueueFamilies(
+        vk.queues.graphics_family,
+        vk.provider_async_compute_available ?
+            vk.provider_async_compute_queue_family : VK_QUEUE_FAMILY_IGNORED);
     vk.fsr3 = vk_create_fsr_context_with_fallback(
         &frame_generation_requested, output_format);
     if (!vk.fsr3) {
@@ -6846,70 +6861,109 @@ static bool vk_create_device(void)
                 }
             }
 
-            /* Find a third, distinct queue handle for image acquisition. The
-             * provider accepts any submit-capable family here; graphics and
-             * native-present families are preferred to avoid manufacturing a
-             * queue on an otherwise unrelated family. */
             if (provider_present_family != UINT32_MAX) {
+                /* Reserve a spare graphics-family queue for interpolation
+                 * before choosing image acquisition. The latter only submits
+                 * semaphore operations and can use another family; choosing
+                 * it first otherwise consumes the queue that makes async
+                 * interpolation possible. */
+                if (families[vk.queues.graphics_family].queueCount &&
+                    (families[vk.queues.graphics_family].queueFlags &
+                     VK_QUEUE_COMPUTE_BIT)) {
+                    uint32_t index = queue_counts[vk.queues.graphics_family];
+                    if (index < families[vk.queues.graphics_family].queueCount) {
+                        vk.provider_async_compute_queue_family =
+                            vk.queues.graphics_family;
+                        vk.provider_async_compute_queue_index = index;
+                        queue_counts[vk.queues.graphics_family] = index + 1;
+                        provider_async_available = true;
+                    }
+                }
+                /* Some drivers expose only one graphics queue but expose a
+                 * second compute-capable queue in the provider's present
+                 * family. The SDK can compose on the game queue when the
+                 * present family is compute-only; queue-family ownership
+                 * transfers cover that path. Reserve it here and put image
+                 * acquisition on a different family when possible. */
+                if (!provider_async_available &&
+                    provider_present_family != vk.queues.graphics_family &&
+                    (families[provider_present_family].queueFlags &
+                     VK_QUEUE_COMPUTE_BIT)) {
+                    uint32_t index = queue_counts[provider_present_family];
+                    if (index < families[provider_present_family].queueCount) {
+                        vk.provider_async_compute_queue_family =
+                            provider_present_family;
+                        vk.provider_async_compute_queue_index = index;
+                        queue_counts[provider_present_family] = index + 1;
+                        provider_async_available = true;
+                    }
+                }
+
+                /* Find a distinct queue handle for image acquisition. The
+                 * provider accepts any submit-capable family; prefer the
+                 * graphics/present families, then fall back to any family.
+                 * This queue does not access the renderer's images. */
                 const uint32_t preferred_families[] = {
                     vk.queues.graphics_family,
                     vk.queues.present_family,
                 };
-                for (uint32_t pass = 0; pass < 3 &&
-                                          provider_image_family == UINT32_MAX; pass++) {
-                    uint32_t begin = pass < 2 ? pass : 0;
-                    uint32_t end = pass < 2 ? pass + 1 : family_count;
-                    for (uint32_t n = begin; n < end; n++) {
-                        uint32_t i = pass < 2 ? preferred_families[n] : n;
-                        if (i >= family_count || !families[i].queueCount)
-                            continue;
-                        for (uint32_t index = 0;
-                             index < families[i].queueCount; index++) {
-                            if ((i == vk.queues.graphics_family &&
-                                 index == vk.graphics_queue_index) ||
-                                (i == provider_present_family &&
-                                 index == provider_present_index))
+                for (uint32_t attempt = 0;
+                     attempt < 2 && provider_image_family == UINT32_MAX;
+                     attempt++) {
+                    for (uint32_t pass = 0; pass < 3 &&
+                                              provider_image_family == UINT32_MAX; pass++) {
+                        uint32_t begin = pass < 2 ? pass : 0;
+                        uint32_t end = pass < 2 ? pass + 1 : family_count;
+                        for (uint32_t n = begin; n < end; n++) {
+                            uint32_t i = pass < 2 ? preferred_families[n] : n;
+                            if (i >= family_count || !families[i].queueCount ||
+                                !(families[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT |
+                                                            VK_QUEUE_COMPUTE_BIT |
+                                                            VK_QUEUE_TRANSFER_BIT)))
                                 continue;
-                            provider_image_family = i;
-                            provider_image_index = index;
-                            queue_counts[i] = max(queue_counts[i], index + 1);
-                            break;
+                            for (uint32_t index = 0;
+                                 index < families[i].queueCount; index++) {
+                                if ((i == vk.queues.graphics_family &&
+                                     index == vk.graphics_queue_index) ||
+                                    (i == provider_present_family &&
+                                     index == provider_present_index) ||
+                                    (attempt == 0 && provider_async_available &&
+                                     i == vk.provider_async_compute_queue_family &&
+                                     index == vk.provider_async_compute_queue_index))
+                                    continue;
+                                provider_image_family = i;
+                                provider_image_index = index;
+                                queue_counts[i] = max(queue_counts[i], index + 1);
+                                break;
+                            }
+                            if (provider_image_family != UINT32_MAX)
+                                break;
                         }
-                        if (provider_image_family != UINT32_MAX)
-                            break;
+                    }
+                    if (provider_image_family == UINT32_MAX &&
+                        attempt == 0 && provider_async_available) {
+                        /* If there is no fourth queue, the provider's image
+                         * acquire path only submits semaphore operations and
+                         * can share the async queue. The SDK bridge serializes
+                         * those submissions. */
+                        provider_image_family =
+                            vk.provider_async_compute_queue_family;
+                        provider_image_index =
+                            vk.provider_async_compute_queue_index;
                     }
                 }
                 provider_reserved = provider_image_family != UINT32_MAX;
+
+                if (provider_reserved) {
+                    vk.provider_present_queue_family = provider_present_family;
+                    vk.provider_present_queue_index = provider_present_index;
+                    vk.provider_image_acquire_queue_family = provider_image_family;
+                    vk.provider_image_acquire_queue_index = provider_image_index;
+                    vk.provider_queues_reserved = true;
+                }
             }
 
             if (provider_reserved) {
-                vk.provider_present_queue_family = provider_present_family;
-                vk.provider_present_queue_index = provider_present_index;
-                vk.provider_image_acquire_queue_family = provider_image_family;
-                vk.provider_image_acquire_queue_index = provider_image_index;
-
-                /* SDK shared buffers and images use exclusive sharing, with
-                 * no ownership transfers between upscale and interpolation.
-                 * An optional async queue must therefore share the game's
-                 * graphics family. */
-                for (uint32_t i = 0; i < family_count && !provider_async_available; i++) {
-                    if (i != vk.queues.graphics_family || !families[i].queueCount ||
-                        !(families[i].queueFlags & VK_QUEUE_COMPUTE_BIT))
-                        continue;
-                    uint32_t index = queue_counts[i];
-                    if (i == vk.queues.graphics_family && index == 0)
-                        index = 1;
-                    if (index >= families[i].queueCount)
-                        continue;
-                    if ((i == provider_present_family && index == provider_present_index) ||
-                        (i == provider_image_family && index == provider_image_index))
-                        continue;
-                    queue_counts[i] = index + 1;
-                    vk.provider_async_compute_queue_family = i;
-                    vk.provider_async_compute_queue_index = index;
-                    provider_async_available = true;
-                }
-                vk.provider_queues_reserved = true;
                 vk.provider_async_compute_available = provider_async_available;
                 if (!provider_async_available &&
                     (!r_fsr_frame_generation_async || r_fsr_frame_generation_async->integer))
@@ -10892,6 +10946,7 @@ static bool vk_activate_fsr3_provider(
     vk.fsr3_provider_functions = functions;
     vk.fsr3_provider_active = true;
     vk.fsr3_provider_async_workloads_failed = false;
+    vk.fsr_present_sample_usec = 0;
     /* Startup/menu presentation has no prepared scene. Configure passthrough
      * explicitly; interpolation is enabled only for a complete scene frame. */
     bool configured = Q2_FSR3_ConfigureProvider(
@@ -10941,6 +10996,7 @@ static void vk_destroy_fsr3_provider_nowait(void)
     vk.fsr3_provider_active = false;
     vk.fsr3_provider_frame_generation_enabled = false;
     vk.fsr3_provider_async_workloads_failed = false;
+    vk.fsr_present_sample_usec = 0;
 }
 
 static bool vk_configure_fsr3_provider_frame_generation_mode(
@@ -10955,14 +11011,20 @@ static bool vk_configure_fsr3_provider_frame_generation_mode(
     if (!enabled && !vk.fsr3_provider_frame_generation_enabled)
         return true;
 
+    /* HUDLessColor is the upscaled image for this frame. It is a single
+     * renderer target, so it cannot be sampled by an async interpolation
+     * dispatch while the next frame overwrites it. In the async case the
+     * provider's replacement backbuffer is the safe source instead. The
+     * graphics-queue path is ordered and can retain the HUD-less image. */
+    bool async_workloads = enabled && allow_async_workloads;
     if (!Q2_FSR3_ConfigureProvider(
             vk.fsr3, vk.fsr3_provider, enabled,
-            enabled && allow_async_workloads,
+            async_workloads,
             Q2_FSR3_GetCurrentFrameId(vk.fsr3),
-            enabled ? vk.fsr_output_texture.image : VK_NULL_HANDLE,
-            enabled ? vk.fsr_output_format : VK_FORMAT_UNDEFINED,
-            enabled ? vk.fsr_output_texture.width : 0,
-            enabled ? vk.fsr_output_texture.height : 0))
+            enabled && !async_workloads ? vk.fsr_output_texture.image : VK_NULL_HANDLE,
+            enabled && !async_workloads ? vk.fsr_output_format : VK_FORMAT_UNDEFINED,
+            enabled && !async_workloads ? vk.fsr_output_texture.width : 0,
+            enabled && !async_workloads ? vk.fsr_output_texture.height : 0))
         return false;
 
     vk.fsr3_provider_frame_generation_enabled = enabled;
@@ -21058,6 +21120,43 @@ static void vk_log_perf_stats(void)
     }
 }
 
+static void vk_log_fsr_cadence(void)
+{
+    if (!vk_fsr_cadence || !vk_fsr_cadence->integer ||
+        !vk.fsr3_provider_active ||
+        !vk.fsr3_provider_functions.get_last_present_count) {
+        vk.fsr_present_sample_usec = 0;
+        return;
+    }
+
+    const uint64_t now = vk_time_usec();
+    if (vk.fsr_present_sample_usec &&
+        now - vk.fsr_present_sample_usec < 1000000)
+        return;
+
+    const uint64_t output =
+        vk.fsr3_provider_functions.get_last_present_count(vk.swapchain);
+    if (vk.fsr_present_sample_usec &&
+        now > vk.fsr_present_sample_usec &&
+        output >= vk.fsr_present_sample_output &&
+        vk.fsr_source_presented_total >= vk.fsr_present_sample_source) {
+        const double seconds =
+            (now - vk.fsr_present_sample_usec) / 1000000.0;
+        Com_Printf("VK FSR3 cadence: async=%s source_submit_fps=%.1f output_submit_fps=%.1f source_submits=%llu output_submits=%llu\n",
+                   vk_fsr_frame_generation_async_enabled() ? "yes" : "no",
+                   (vk.fsr_source_presented_total - vk.fsr_present_sample_source) /
+                       seconds,
+                   (output - vk.fsr_present_sample_output) / seconds,
+                   (unsigned long long)(vk.fsr_source_presented_total -
+                       vk.fsr_present_sample_source),
+                   (unsigned long long)(output -
+                       vk.fsr_present_sample_output));
+    }
+    vk.fsr_present_sample_usec = now;
+    vk.fsr_present_sample_source = vk.fsr_source_presented_total;
+    vk.fsr_present_sample_output = output;
+}
+
 static void vk_log_fsr_frame_generation_telemetry(void)
 {
     Com_Printf("VK FSR3 framegen: frame=%llu requested=%s prepared=%s "
@@ -21213,6 +21312,7 @@ bool VKR_Init(bool total)
     r_fsr_dynamic_cpu = Cvar_Get("r_fsr_dynamic_cpu", "0", CVAR_ARCHIVE);
     vk_fsr_auto_reset();
     vk_perf_stats = Cvar_Get("vk_perf_stats", "0", 0);
+    vk_fsr_cadence = Cvar_Get("vk_fsr_cadence", "0", 0);
     vk_frames_in_flight = Cvar_Get("vk_frames_in_flight", "2", CVAR_ARCHIVE);
     vk_device = Cvar_Get("vk_device", "", CVAR_ARCHIVE | CVAR_REFRESH);
     vk_devicelist = Cvar_Get("vk_devicelist", "\"automatic\" \"\"", CVAR_ROM);
@@ -23674,7 +23774,10 @@ void VKR_BeginFrame(void)
             return;
     }
 
-    if (vk_fsr_dynamic_cvars_modified()) {
+    if (vk_fsr_dynamic_cvars_modified() ||
+        (r_fsr && r_fsr->modified) ||
+        (r_fsr_auto && r_fsr_auto->modified) ||
+        (r_fsr_frame_generation && r_fsr_frame_generation->modified)) {
         bool dynamic_was_enabled = vk.fsr_dynamic.enabled;
         vk_fsr_dynamic_configure();
         vk_fsr_dynamic_clear_modified();
@@ -24507,6 +24610,8 @@ void VKR_EndFrame(void)
         vk.fsr_framegen_computed_total++;
     }
     bool present_success = result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR;
+    if (present_success && vk.fsr3_provider_active)
+        vk.fsr_source_presented_total++;
     bool recreate_swapchain = result == VK_ERROR_OUT_OF_DATE_KHR ||
         result == VK_SUBOPTIMAL_KHR;
     if (!present_success && !recreate_swapchain && vk.presentation_adapter)
@@ -24532,6 +24637,7 @@ void VKR_EndFrame(void)
     }
 
     vk_log_perf_stats();
+    vk_log_fsr_cadence();
     if (!recreate_swapchain &&
         ((vk_perf_stats && vk_perf_stats->integer && vk.separate_presentation) ||
          (vk_fsr_benchmark && vk_fsr_benchmark->integer)))

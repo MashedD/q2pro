@@ -18,6 +18,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <vector>
 #include <map>
 
@@ -75,10 +76,13 @@ struct q2_fsr3_context {
     bool frame_started = false;
     bool frame_generation = false;
     bool frame_generation_failed = false;
-    bool prepared_frame_valid = false;
-    bool upscaled_frame_valid = false;
-    uint64_t prepared_frame_id = 0;
-    uint64_t upscaled_frame_id = 0;
+    /* The provider callback can run after BeginFrame has advanced to the next
+     * renderer frame. Keep the two SDK resource slots independently valid
+     * instead of invalidating the previous slot on every BeginFrame. */
+    bool prepared_frame_valid[2] = {};
+    bool upscaled_frame_valid[2] = {};
+    uint64_t prepared_frame_id[2] = {};
+    uint64_t upscaled_frame_id[2] = {};
     bool profile_supported = true;
     bool force_reset = false;
     bool full_context_initialized = false;
@@ -953,8 +957,6 @@ extern "C" void Q2_FSR3_BeginFrame(q2_fsr3_context_t *context)
     context->current_frame_id = context->next_frame_id++;
     context->frame_started = true;
     context->force_reset = false;
-    context->prepared_frame_valid = false;
-    context->upscaled_frame_valid = false;
 }
 
 extern "C" uint64_t Q2_FSR3_GetCurrentFrameId(
@@ -968,6 +970,22 @@ extern "C" uint64_t Q2_FSR3_GetProviderDispatchCount(
 {
     return context ? context->provider_dispatch_count.load(
                          std::memory_order_relaxed) : 0;
+}
+
+#if Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
+extern "C" void q2_fsr3_set_resource_queue_families(
+    uint32_t game_family, uint32_t async_family);
+#endif
+
+extern "C" void Q2_FSR3_SetResourceQueueFamilies(
+    uint32_t game_family, uint32_t async_family)
+{
+#if Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED
+    q2_fsr3_set_resource_queue_families(game_family, async_family);
+#else
+    (void)game_family;
+    (void)async_family;
+#endif
 }
 
 extern "C" int Q2_FSR3_GetLastError(const q2_fsr3_context_t *context)
@@ -995,9 +1013,11 @@ extern "C" bool Q2_FSR3_Dispatch(
     (void)output_view;
     if (!context || !context->frame_started)
         return false;
-    /* A failed upscale must never leave the previous successful frame
-     * eligible for the provider callback. */
-    context->upscaled_frame_valid = false;
+    /* A failed upscale must never leave this frame's slot eligible for the
+     * provider callback. The other slot may still be completing async work. */
+    const uint32_t frame_slot = static_cast<uint32_t>(
+        context->current_frame_id & 1u);
+    context->upscaled_frame_valid[frame_slot] = false;
     q2_fsr3_context_scope scope(context);
     if (!command_buffer || !color || !depth || !motion ||
         !output || (!context->full_context_created &&
@@ -1101,8 +1121,8 @@ extern "C" bool Q2_FSR3_Dispatch(
     }
     if (context->last_error != FFX_OK)
         return false;
-    context->upscaled_frame_id = context->current_frame_id;
-    context->upscaled_frame_valid = true;
+    context->upscaled_frame_id[frame_slot] = context->current_frame_id;
+    context->upscaled_frame_valid[frame_slot] = true;
     return true;
 }
 
@@ -1115,8 +1135,11 @@ extern "C" bool Q2_FSR3_PrepareFrameGeneration(
     if (!context || !context->frame_started)
         return false;
     /* Preparation is a per-frame prerequisite. A retry starts with no
-     * eligibility and records it only after the SDK accepts the work. */
-    context->prepared_frame_valid = false;
+     * eligibility in this frame's SDK resource slot and records it only
+     * after the SDK accepts the work. */
+    const uint32_t frame_slot = static_cast<uint32_t>(
+        context->current_frame_id & 1u);
+    context->prepared_frame_valid[frame_slot] = false;
     if (!context->frame_generation ||
         context->frame_generation_failed ||
         !context->full_context_created || !command_buffer ||
@@ -1159,8 +1182,8 @@ extern "C" bool Q2_FSR3_PrepareFrameGeneration(
     if (error != FFX_OK)
         context->frame_generation_failed = true;
     else {
-        context->prepared_frame_id = context->current_frame_id;
-        context->prepared_frame_valid = true;
+        context->prepared_frame_id[frame_slot] = context->current_frame_id;
+        context->prepared_frame_valid[frame_slot] = true;
     }
     return error == FFX_OK;
 }
@@ -1174,8 +1197,10 @@ extern "C" bool Q2_FSR3_DispatchFrameGeneration(
         return false;
     /* A failed frame-generation dispatch also invalidates the source frame
      * for any provider callback that may still be pending. */
-    context->upscaled_frame_valid = false;
-    context->prepared_frame_valid = false;
+    const uint32_t frame_slot = static_cast<uint32_t>(
+        context->current_frame_id & 1u);
+    context->upscaled_frame_valid[frame_slot] = false;
+    context->prepared_frame_valid[frame_slot] = false;
     if (!context->frame_generation ||
         context->frame_generation_failed ||
         !context->full_context_created || !command_buffer ||
@@ -1230,6 +1255,7 @@ static VkQueue q2_provider_game_queue;
 static VkQueue q2_provider_async_queue;
 static VkQueue q2_provider_present_queue;
 static VkQueue q2_provider_image_acquire_queue;
+static std::mutex q2_provider_queue_submit_mutex;
 
 static void q2_fsr3_provider_clear_binding(void)
 {
@@ -1244,12 +1270,14 @@ static void q2_fsr3_provider_clear_binding(void)
 static bool q2_fsr3_provider_frame_ready(
     const q2_fsr3_context_t *context, uint64_t frame_id)
 {
-    return context && context->frame_started && context->frame_generation &&
-        context->full_context_created && !context->frame_generation_failed &&
-        context->prepared_frame_valid && context->upscaled_frame_valid &&
-        context->prepared_frame_id == frame_id &&
-        context->upscaled_frame_id == frame_id &&
-        context->current_frame_id == frame_id;
+    if (!context || !context->frame_started || !context->frame_generation ||
+        !context->full_context_created || context->frame_generation_failed)
+        return false;
+    const uint32_t frame_slot = static_cast<uint32_t>(frame_id & 1u);
+    return context->prepared_frame_valid[frame_slot] &&
+        context->upscaled_frame_valid[frame_slot] &&
+        context->prepared_frame_id[frame_slot] == frame_id &&
+        context->upscaled_frame_id[frame_slot] == frame_id;
 }
 
 static q2_fsr3_context_t *q2_fsr3_provider_active_context()
@@ -1554,8 +1582,13 @@ static VkResult q2_provider_submit(PFN_vkQueueSubmit submit,
                                    VkQueue queue, uint32_t submit_count,
                                    const VkSubmitInfo *submits, VkFence fence)
 {
-    return submit && queue ? submit(queue, submit_count, submits, fence) :
-        VK_ERROR_INITIALIZATION_FAILED;
+    if (!submit || !queue)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    /* The optional image-acquire and async roles may share one queue when a
+     * device exposes only one spare provider queue. Vulkan externally
+     * synchronizes queue operations, so serialize all provider submissions. */
+    std::lock_guard<std::mutex> lock(q2_provider_queue_submit_mutex);
+    return submit(queue, submit_count, submits, fence);
 }
 
 static VkResult q2_provider_submit_game(uint32_t count,
@@ -1607,8 +1640,10 @@ static FfxErrorCode q2_provider_frame_generation_callback(
                                                    std::memory_order_relaxed);
     else {
         context->frame_generation_failed = true;
-        context->prepared_frame_valid = false;
-        context->upscaled_frame_valid = false;
+        const uint32_t frame_slot = static_cast<uint32_t>(
+            description->frameID & 1u);
+        context->prepared_frame_valid[frame_slot] = false;
+        context->upscaled_frame_valid[frame_slot] = false;
     }
     return error;
 }
@@ -1712,6 +1747,7 @@ extern "C" q2_fsr3_provider_t *Q2_FSR3_CreateProvider(
         provider->replacement.acquireNextImageKHR,
         provider->replacement.queuePresentKHR,
         provider->replacement.setHdrMetadataEXT,
+        provider->replacement.getLastPresentCountFFX,
     };
     if (!functions->destroy_swapchain || !functions->get_swapchain_images ||
         !functions->acquire_next_image || !functions->queue_present) {

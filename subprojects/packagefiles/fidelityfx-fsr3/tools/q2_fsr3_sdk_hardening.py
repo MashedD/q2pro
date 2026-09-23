@@ -16,6 +16,90 @@ def write_if_changed(path, text):
         path.write_text(text)
 
 
+def harden_vulkan_backend_resource_sharing(root):
+    """Allow FSR resources to be accessed by a separate interpolation family."""
+
+    source_path = root / "sdk/src/backends/vk/ffx_vk.cpp"
+    source = source_path.read_text()
+    marker = "// Q2PRO_FSR3_RESOURCE_QUEUE_SHARING"
+    if marker not in source:
+        declaration = "static VkDeviceContext sVkDeviceContext = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };\n"
+        helpers = (
+            declaration + "\n"
+            "// Q2PRO_FSR3_RESOURCE_QUEUE_SHARING\n"
+            "static uint32_t q2_fsr3_resource_queue_family_count;\n"
+            "static uint32_t q2_fsr3_resource_queue_families[2];\n\n"
+            "extern \"C\" void q2_fsr3_set_resource_queue_families(\n"
+            "    uint32_t game_family, uint32_t async_family)\n"
+            "{\n"
+            "    if (async_family == VK_QUEUE_FAMILY_IGNORED ||\n"
+            "        async_family == game_family) {\n"
+            "        q2_fsr3_resource_queue_family_count = 0;\n"
+            "        return;\n"
+            "    }\n"
+            "    q2_fsr3_resource_queue_families[0] = game_family;\n"
+            "    q2_fsr3_resource_queue_families[1] = async_family;\n"
+            "    q2_fsr3_resource_queue_family_count = 2;\n"
+            "}\n\n"
+            "static void q2_fsr3_apply_buffer_queue_sharing(\n"
+            "    VkBufferCreateInfo *info)\n"
+            "{\n"
+            "    if (!q2_fsr3_resource_queue_family_count)\n"
+            "        return;\n"
+            "    info->sharingMode = VK_SHARING_MODE_CONCURRENT;\n"
+            "    info->queueFamilyIndexCount = q2_fsr3_resource_queue_family_count;\n"
+            "    info->pQueueFamilyIndices = q2_fsr3_resource_queue_families;\n"
+            "}\n\n"
+            "static void q2_fsr3_apply_image_queue_sharing(\n"
+            "    VkImageCreateInfo *info)\n"
+            "{\n"
+            "    if (!q2_fsr3_resource_queue_family_count)\n"
+            "        return;\n"
+            "    info->sharingMode = VK_SHARING_MODE_CONCURRENT;\n"
+            "    info->queueFamilyIndexCount = q2_fsr3_resource_queue_family_count;\n"
+            "    info->pQueueFamilyIndices = q2_fsr3_resource_queue_families;\n"
+            "}\n"
+        )
+        source = replace_once(source, declaration, helpers,
+                              "resource queue-sharing helpers")
+        source = source.replace(
+            "bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;",
+            "bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;\n"
+            "        q2_fsr3_apply_buffer_queue_sharing(&bufferInfo);")
+        for indent in ("        ", "            "):
+            old_sharing = indent + "bufferInfo.sharingMode        = VK_SHARING_MODE_EXCLUSIVE;"
+            new_sharing = old_sharing + "\n" + indent + "q2_fsr3_apply_buffer_queue_sharing(&bufferInfo);"
+            source = source.replace(old_sharing, new_sharing)
+        source = source.replace(
+            "bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;\n"
+            "        q2_fsr3_apply_buffer_queue_sharing(&bufferInfo);\n"
+            "            bufferInfo.queueFamilyIndexCount = 0;\n"
+            "            bufferInfo.pQueueFamilyIndices = nullptr;",
+            "bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;\n"
+            "            bufferInfo.queueFamilyIndexCount = 0;\n"
+            "            bufferInfo.pQueueFamilyIndices = nullptr;\n"
+            "            q2_fsr3_apply_buffer_queue_sharing(&bufferInfo);",
+        )
+        source = source.replace(
+            "bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;\n"
+            "        q2_fsr3_apply_buffer_queue_sharing(&bufferInfo);\n"
+            "    bufferInfo.queueFamilyIndexCount = 0;\n"
+            "    bufferInfo.pQueueFamilyIndices = nullptr;",
+            "bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;\n"
+            "    bufferInfo.queueFamilyIndexCount = 0;\n"
+            "    bufferInfo.pQueueFamilyIndices = nullptr;\n"
+            "    q2_fsr3_apply_buffer_queue_sharing(&bufferInfo);",
+        )
+        source = replace_once(
+            source,
+            "imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;",
+            "imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;\n"
+            "        q2_fsr3_apply_image_queue_sharing(&imageInfo);",
+            "resource image queue sharing",
+        )
+        write_if_changed(source_path, source)
+
+
 def harden_vulkan_frame_interpolation_wait(root):
     """Use a hybrid wait on Linux to reduce presenter CPU use."""
 
@@ -107,6 +191,23 @@ def harden_vulkan_frame_interpolation_source(root):
         write_if_changed(path, text)
 
     source = source_path.read_text()
+    source = source.replace(
+        "        presentInfo.asyncComputeQueue.queue == imageAcquireQueue.queue ||\n",
+        "",
+    )
+    source = source.replace(
+        "        if (presentInfo.compositionMode == FGSwapchainCompositionMode::eComposeOnGameQueue)\n"
+        "        {\n"
+        "            // since we compose on gameQueue anyway we should run interpolation on it too, to avoid semaphores\n"
+        "            nextFrameGenerationConfig.allowAsyncWorkloads = false;\n"
+        "            inputInterpolationQueue                       = presentInfo.gameQueue;\n"
+        "        }\n\n",
+        "",
+    )
+    source = source.replace(
+        "vkAcquireNextImageKHR(device, realSwapchain, UINT64_MAX, acquireSemaphore, VK_NULL_HANDLE, &imageIndex)",
+        "vkAcquireNextImageKHR(device, realSwapchain, 0, acquireSemaphore, VK_NULL_HANDLE, &imageIndex)",
+    )
     source = source.replace("#pragma once\n", "", 1)
     source = source.replace(
         '#ifdef VK_USE_PLATFORM_WIN32_KHR\n'
@@ -200,6 +301,86 @@ def harden_vulkan_frame_interpolation_source(root):
         "gameSwapChain = reinterpret_cast<FfxSwapchain>(pSwapChainVK);",
     )
 
+    # Count successful real present submissions without taking the swapchain
+    # lock, which can also be held across a blocking image acquisition.
+    old_real_present = (
+        "    EnterCriticalSection(&pPresenter->swapchainCriticalSection);\n"
+        "    VkResult res = vkQueuePresentKHR(pPresenter->presentQueue.queue, &presentInfoKHR);\n"
+        "    LeaveCriticalSection(&pPresenter->swapchainCriticalSection);\n"
+        "\n"
+        "    ++(pPresenter->realPresentCount);\n"
+        "    return res;\n"
+    )
+    new_real_present = (
+        "    EnterCriticalSection(&pPresenter->swapchainCriticalSection);\n"
+        "    VkResult res = vkQueuePresentKHR(pPresenter->presentQueue.queue, &presentInfoKHR);\n"
+        "    if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR)\n"
+        "        pPresenter->realPresentCount.fetch_add(1, std::memory_order_relaxed);\n"
+        "    LeaveCriticalSection(&pPresenter->swapchainCriticalSection);\n"
+        "\n"
+        "    return res;\n"
+    )
+    old_real_present_v1 = (
+        "    EnterCriticalSection(&pPresenter->swapchainCriticalSection);\n"
+        "    VkResult res = vkQueuePresentKHR(pPresenter->presentQueue.queue, &presentInfoKHR);\n"
+        "    if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR)\n"
+        "        ++(pPresenter->realPresentCount);\n"
+        "    LeaveCriticalSection(&pPresenter->swapchainCriticalSection);\n"
+        "\n"
+        "    return res;\n"
+    )
+    if new_real_present not in source:
+        if old_real_present in source:
+            source = replace_once(source, old_real_present, new_real_present,
+                                  "successful real-present counter")
+        else:
+            source = replace_once(source, old_real_present_v1, new_real_present,
+                                  "atomic successful real-present counter")
+
+    old_getter = (
+        "uint64_t FrameInterpolationSwapChainVK::getLastPresentCount()\n"
+        "{\n"
+        "    return presentInfo.realPresentCount;\n"
+        "}\n"
+    )
+    new_getter = (
+        "uint64_t FrameInterpolationSwapChainVK::getLastPresentCount()\n"
+        "{\n"
+        "    return presentInfo.realPresentCount.load(std::memory_order_relaxed);\n"
+        "}\n"
+    )
+    if new_getter not in source:
+        old_getter_v1 = (
+            "uint64_t FrameInterpolationSwapChainVK::getLastPresentCount()\n"
+            "{\n"
+            "    EnterCriticalSection(&presentInfo.swapchainCriticalSection);\n"
+            "    const uint64_t count = presentInfo.realPresentCount;\n"
+            "    LeaveCriticalSection(&presentInfo.swapchainCriticalSection);\n"
+            "    return count;\n"
+            "}\n"
+        )
+        if old_getter in source:
+            source = replace_once(source, old_getter, new_getter,
+                                  "thread-safe real-present getter")
+        else:
+            source = replace_once(source, old_getter_v1, new_getter,
+                                  "atomic real-present getter")
+
+    header_path = root / "sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK.h"
+    header = header_path.read_text()
+    if "#include <atomic>" not in header:
+        header = replace_once(header, "#include <vulkan/vulkan.h>\n",
+                              "#include <vulkan/vulkan.h>\n\n#include <atomic>\n",
+                              "atomic counter include")
+    if "std::atomic<uint64_t> realPresentCount{0};" not in header:
+        header = replace_once(
+            header,
+            "    uint64_t realPresentCount = 0;\n",
+            "    std::atomic<uint64_t> realPresentCount{0};\n",
+            "atomic real-present counter",
+        )
+    write_if_changed(header_path, header)
+
     if "SubmissionSemaphores emptySignals;" not in source:
         source = replace_once(
             source,
@@ -282,6 +463,7 @@ def main():
         raise SystemExit("usage: q2_fsr3_sdk_hardening.py <fsr3-root>")
 
     root = Path(sys.argv[1])
+    harden_vulkan_backend_resource_sharing(root)
     harden_vulkan_frame_interpolation_wait(root)
     harden_vulkan_frame_interpolation_source(root)
     harden_breadcrumb_uint64_format(root)

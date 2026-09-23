@@ -157,6 +157,12 @@ uint64_t Q2_FSR3_GetProviderDispatchCount(const q2_fsr3_context_t *context)
     (void)context;
     return 0;
 }
+void Q2_FSR3_SetResourceQueueFamilies(uint32_t game_family,
+                                      uint32_t async_family)
+{
+    (void)game_family;
+    (void)async_family;
+}
 int Q2_FSR3_GetLastError(const q2_fsr3_context_t *context)
 {
     (void)context;
@@ -165,10 +171,17 @@ int Q2_FSR3_GetLastError(const q2_fsr3_context_t *context)
 bool Q2_FSR3_ConfigureProvider(q2_fsr3_context_t *context,
                                q2_fsr3_provider_t *provider,
                                bool enabled, bool allow_async_workloads,
-                               uint64_t frame_id)
+                               uint64_t frame_id, VkImage hudless_color,
+                               VkFormat hudless_color_format,
+                               uint32_t hudless_color_width,
+                               uint32_t hudless_color_height)
 {
     (void)context;
     (void)provider;
+    (void)hudless_color;
+    (void)hudless_color_format;
+    (void)hudless_color_width;
+    (void)hudless_color_height;
     assert(frame_id == test_fsr_frame_id);
     assert(provider_configure_calls < q_countof(provider_configure_enabled));
     provider_configure_enabled[provider_configure_calls] = enabled;
@@ -1282,6 +1295,8 @@ static void check_fsr3_provider_presentation_configuration(void)
     vk.fsr_framegen_requested = true;
     vk.fsr_framegen_prepared = true;
     vk.fsr_output_valid = true;
+    vk.fsr_output_texture.image = HANDLE(VkImage, 983);
+    vk.fsr_output_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     vk.fsr_frame_reset = false;
     vk.fsr_pause_frame = false;
     vk.fsr_pause_reuse = false;
