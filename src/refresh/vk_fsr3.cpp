@@ -12,6 +12,7 @@ the Free Software Foundation; either version 2 of the License, or
 #if USE_VULKAN
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -66,6 +67,7 @@ struct q2_fsr3_context {
     uint32_t display_height = 0;
     uint64_t next_frame_id = 0;
     uint64_t current_frame_id = 0;
+    std::atomic<uint64_t> provider_dispatch_count{0};
     q2_fsr3_capabilities_t capabilities = {};
     PFN_vkGetInstanceProcAddr get_instance_proc_addr = nullptr;
     PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;
@@ -73,6 +75,10 @@ struct q2_fsr3_context {
     bool frame_started = false;
     bool frame_generation = false;
     bool frame_generation_failed = false;
+    bool prepared_frame_valid = false;
+    bool upscaled_frame_valid = false;
+    uint64_t prepared_frame_id = 0;
+    uint64_t upscaled_frame_id = 0;
     bool profile_supported = true;
     bool force_reset = false;
     bool full_context_initialized = false;
@@ -947,12 +953,21 @@ extern "C" void Q2_FSR3_BeginFrame(q2_fsr3_context_t *context)
     context->current_frame_id = context->next_frame_id++;
     context->frame_started = true;
     context->force_reset = false;
+    context->prepared_frame_valid = false;
+    context->upscaled_frame_valid = false;
 }
 
 extern "C" uint64_t Q2_FSR3_GetCurrentFrameId(
     const q2_fsr3_context_t *context)
 {
     return context && context->frame_started ? context->current_frame_id : 0;
+}
+
+extern "C" uint64_t Q2_FSR3_GetProviderDispatchCount(
+    const q2_fsr3_context_t *context)
+{
+    return context ? context->provider_dispatch_count.load(
+                         std::memory_order_relaxed) : 0;
 }
 
 extern "C" int Q2_FSR3_GetLastError(const q2_fsr3_context_t *context)
@@ -980,6 +995,9 @@ extern "C" bool Q2_FSR3_Dispatch(
     (void)output_view;
     if (!context || !context->frame_started)
         return false;
+    /* A failed upscale must never leave the previous successful frame
+     * eligible for the provider callback. */
+    context->upscaled_frame_valid = false;
     q2_fsr3_context_scope scope(context);
     if (!command_buffer || !color || !depth || !motion ||
         !output || (!context->full_context_created &&
@@ -1083,6 +1101,8 @@ extern "C" bool Q2_FSR3_Dispatch(
     }
     if (context->last_error != FFX_OK)
         return false;
+    context->upscaled_frame_id = context->current_frame_id;
+    context->upscaled_frame_valid = true;
     return true;
 }
 
@@ -1092,7 +1112,12 @@ extern "C" bool Q2_FSR3_PrepareFrameGeneration(
     float jitter_x, float jitter_y, float frame_time_ms,
     float vertical_fov_radians, float camera_near, float camera_far)
 {
-    if (!context || !context->frame_started || !context->frame_generation ||
+    if (!context || !context->frame_started)
+        return false;
+    /* Preparation is a per-frame prerequisite. A retry starts with no
+     * eligibility and records it only after the SDK accepts the work. */
+    context->prepared_frame_valid = false;
+    if (!context->frame_generation ||
         context->frame_generation_failed ||
         !context->full_context_created || !command_buffer ||
         !depth || !motion)
@@ -1133,6 +1158,10 @@ extern "C" bool Q2_FSR3_PrepareFrameGeneration(
     context->last_error = error;
     if (error != FFX_OK)
         context->frame_generation_failed = true;
+    else {
+        context->prepared_frame_id = context->current_frame_id;
+        context->prepared_frame_valid = true;
+    }
     return error == FFX_OK;
 }
 
@@ -1141,7 +1170,13 @@ extern "C" bool Q2_FSR3_DispatchFrameGeneration(
     VkImage present, VkFormat present_format, VkImage output,
     VkFormat output_format, bool reset)
 {
-    if (!context || !context->frame_started || !context->frame_generation ||
+    if (!context || !context->frame_started)
+        return false;
+    /* A failed frame-generation dispatch also invalidates the source frame
+     * for any provider callback that may still be pending. */
+    context->upscaled_frame_valid = false;
+    context->prepared_frame_valid = false;
+    if (!context->frame_generation ||
         context->frame_generation_failed ||
         !context->full_context_created || !command_buffer ||
         !present || !output)
@@ -1204,6 +1239,17 @@ static void q2_fsr3_provider_clear_binding(void)
     q2_provider_async_queue = VK_NULL_HANDLE;
     q2_provider_present_queue = VK_NULL_HANDLE;
     q2_provider_image_acquire_queue = VK_NULL_HANDLE;
+}
+
+static bool q2_fsr3_provider_frame_ready(
+    const q2_fsr3_context_t *context, uint64_t frame_id)
+{
+    return context && context->frame_started && context->frame_generation &&
+        context->full_context_created && !context->frame_generation_failed &&
+        context->prepared_frame_valid && context->upscaled_frame_valid &&
+        context->prepared_frame_id == frame_id &&
+        context->upscaled_frame_id == frame_id &&
+        context->current_frame_id == frame_id;
 }
 
 static q2_fsr3_context_t *q2_fsr3_provider_active_context()
@@ -1549,15 +1595,21 @@ static FfxErrorCode q2_provider_frame_generation_callback(
     const FfxFrameGenerationDispatchDescription *description, void *userdata)
 {
     q2_fsr3_context_t *context = static_cast<q2_fsr3_context_t *>(userdata);
-    if (!context || !description || !context->full_context_created ||
-        context->frame_generation_failed)
+    if (!description || !q2_fsr3_provider_frame_ready(
+            context, description ? description->frameID : 0))
         return FFX_ERROR_INVALID_POINTER;
 
     q2_fsr3_context_scope scope(context);
     const FfxErrorCode error = ffxFsr3DispatchFrameGeneration(description);
     context->last_error = error;
-    if (error != FFX_OK)
+    if (error == FFX_OK)
+        context->provider_dispatch_count.fetch_add(1,
+                                                   std::memory_order_relaxed);
+    else {
         context->frame_generation_failed = true;
+        context->prepared_frame_valid = false;
+        context->upscaled_frame_valid = false;
+    }
     return error;
 }
 
@@ -1682,6 +1734,14 @@ extern "C" bool Q2_FSR3_ConfigureProvider(
     if (!context || !provider || provider->context != context ||
         !provider->swapchain || !context->full_context_created)
         return false;
+
+    /* The provider's queue-present callback can run after this call. When
+     * enabling it, bind that callback to the exact frame whose prepare and
+     * upscale both completed successfully. */
+    if (enabled && !q2_fsr3_provider_frame_ready(context, frame_id)) {
+        context->last_error = FFX_ERROR_INVALID_POINTER;
+        return false;
+    }
 
     q2_fsr3_context_scope scope(context);
     FfxFrameGenerationConfig config = {};

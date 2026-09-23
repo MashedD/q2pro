@@ -75,6 +75,8 @@ bool Q2_FSR3_GetJitter(q2_fsr3_context_t *context, float *x, float *y);
 bool Q2_FSR3_GetJitterPhase(const q2_fsr3_context_t *context,
                             uint32_t *phase, uint32_t *phase_count);
 uint64_t Q2_FSR3_GetCurrentFrameId(const q2_fsr3_context_t *context);
+/* Number of provider callbacks that recorded interpolation work successfully. */
+uint64_t Q2_FSR3_GetProviderDispatchCount(const q2_fsr3_context_t *context);
 int Q2_FSR3_GetLastError(const q2_fsr3_context_t *context);
 bool Q2_FSR3_Dispatch(q2_fsr3_context_t *context, VkCommandBuffer command_buffer,
                       VkImage color, VkImageView color_view, VkFormat color_format,

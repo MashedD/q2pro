@@ -1389,11 +1389,18 @@ static void vk_presentation_provider_shutdown(
 
 static bool vk_presentation_adapter_ensure(void)
 {
-    if (vk.presentation_adapter && !vk.fsr3_provider_active)
-        return true;
-    if (vk.presentation_adapter && vk.fsr3_provider_active) {
-        Q2_VK_PresentationAdapterDestroy(vk.presentation_adapter,
-                                         Q2_VK_PRESENTATION_SHUTDOWN_NORMAL);
+    if (vk.presentation_adapter) {
+        /* Keep the adapter object stable between acquire and present. In
+         * particular, destroying/recreating the provider adapter here clears
+         * its acquired-image latch and makes the matching present fail with
+         * VK_ERROR_INITIALIZATION_FAILED. Rebuild only when presentation
+         * ownership actually changes between native and provider modes. */
+        bool provider_adapter = Q2_VK_PresentationAdapterProviderReady(
+            vk.presentation_adapter);
+        if (provider_adapter == vk.fsr3_provider_active)
+            return true;
+        Q2_VK_PresentationAdapterDestroy(
+            vk.presentation_adapter, Q2_VK_PRESENTATION_SHUTDOWN_NORMAL);
         vk.presentation_adapter = NULL;
     }
     if (!vk.device || !vk.swapchain || !vk.AcquireNextImageKHR ||
@@ -1703,7 +1710,13 @@ static void vk_fsr_dynamic_configure(void)
     bool was_enabled = vk.fsr_dynamic.enabled;
     float current_scale = vk.fsr_dynamic.current_scale;
     vk.fsr_dynamic.enabled = r_fsr_dynamic && r_fsr_dynamic->integer &&
-        vk_fsr_user_requested() && !vk_fsr_auto_enabled();
+        vk_fsr_user_requested() && !vk_fsr_auto_enabled() &&
+        !(r_fsr_frame_generation && r_fsr_frame_generation->integer &&
+          !vk_session_frame_generation_disabled);
+    if (was_enabled && !vk.fsr_dynamic.enabled &&
+        r_fsr_frame_generation && r_fsr_frame_generation->integer &&
+        !vk_session_frame_generation_disabled)
+        Com_Printf("Vulkan FSR3 dynamic resolution paused while frame generation is requested\n");
     vk.fsr_dynamic.cpu_fallback = r_fsr_dynamic_cpu &&
         r_fsr_dynamic_cpu->integer;
     vk.fsr_dynamic.target_ms = r_fsr_dynamic_target_ms ?
@@ -1812,6 +1825,12 @@ static bool vk_fsr_requested(void)
         return false;
     if (!vk_fsr_auto_enabled())
         return true;
+    /* Automatic selection pauses while interpolation is requested. Keep the
+     * configured FSR quality active during that pause, including while the
+     * automatic benchmark is still in warmup or frame generation has fallen
+     * back for this session. */
+    if (vk_fsr_frame_generation_user_requested())
+        return true;
     return vk.fsr_auto_phase == VK_FSR_AUTO_TRIAL ||
         vk.fsr_auto_phase == VK_FSR_AUTO_ACCEPTED;
 }
@@ -1825,6 +1844,7 @@ static bool vk_fsr_frame_generation_requested(void)
 static bool vk_fsr_frame_generation_async_enabled(void)
 {
     return vk.provider_async_compute_available &&
+        vk.provider_async_compute_queue_family == vk.queues.graphics_family &&
         !vk.fsr3_provider_async_workloads_failed &&
         (!r_fsr_frame_generation_async ||
          r_fsr_frame_generation_async->integer != 0);
@@ -1866,7 +1886,10 @@ static bool vk_fsr_frame_generation_compute_only_enabled(void)
  * motion-mode override, so checking one cannot recurse into the other. */
 static bool vk_fsr_frame_generation_effective(void)
 {
-    if (vk_session_frame_generation_disabled || vk_fsr_auto_enabled() ||
+    /* An explicit frame-generation request is independent of automatic FSR
+     * quality selection. Auto mode benchmarks native versus upscaled frames;
+     * it must not silently mask a user's interpolation request. */
+    if (vk_session_frame_generation_disabled ||
         !vk_fsr_frame_generation_user_requested())
         return false;
     return vk_fsr_frame_generation_presentation_adapter_available() ||
@@ -1928,9 +1951,10 @@ static bool vk_fsr_auto_is_faster(uint64_t native, uint64_t fsr)
  * same frame. Configuration generations prevent old in-flight work from
  * contaminating a newly started trial. */
 static void vk_fsr_auto_update(unsigned record_usec, unsigned gpu_usec,
-                                uint32_t generation, bool eligible)
+                               uint32_t generation, bool eligible)
 {
     if (!vk_fsr_auto_enabled() || !vk_fsr_user_requested() || !eligible ||
+        vk_fsr_frame_generation_user_requested() ||
         generation != vk.fsr_auto_generation || vk.fsr_auto_recreate ||
         (vk.fsr_auto_phase != VK_FSR_AUTO_WARMUP &&
          vk.fsr_auto_phase != VK_FSR_AUTO_TRIAL))
@@ -4469,7 +4493,8 @@ static void vk_begin_fsr_frame_generation_telemetry(void)
     if (vk_session_frame_generation_disabled) {
         vk.fsr_framegen_disabled = true;
         vk.fsr_framegen_fallback_reason = "session_disabled";
-    } else if (vk_fsr_auto_enabled()) {
+    } else if (vk_fsr_auto_enabled() &&
+               !vk_fsr_frame_generation_user_requested()) {
         vk.fsr_framegen_disabled = true;
         vk.fsr_framegen_fallback_reason = "auto_mode";
     } else if (!vk_fsr_frame_generation_presentation_adapter_available() &&
@@ -6774,61 +6799,88 @@ static bool vk_create_device(void)
         }
 
         if (provider_available) {
-            uint32_t provider_present_family = vk.queues.present_family;
+            uint32_t provider_present_family = UINT32_MAX;
             uint32_t provider_present_index = 0;
             uint32_t provider_image_family = UINT32_MAX;
             uint32_t provider_image_index = 0;
 
-            if (vk.queues_same_family) {
-                /* Keep q2pro on queue 0 and reserve two independent queues
-                 * for the provider. The native fallback also uses queue 0. */
-                if (families[vk.queues.graphics_family].queueCount >= 3) {
-                    provider_present_family = vk.queues.graphics_family;
-                    provider_present_index = 1;
-                    provider_image_family = vk.queues.graphics_family;
-                    provider_image_index = 2;
-                    vk.present_queue_index = 0;
-                    queue_counts[vk.queues.graphics_family] = 3;
-                    provider_reserved = true;
-                }
-            } else {
-                /* Keep the engine's native present queue separate from the
-                 * provider queue. The SDK explicitly forbids sharing its
-                 * present queue with the engine, even when both queues are in
-                 * the same family. */
-                if (families[vk.queues.present_family].queueCount >= 2) {
-                    provider_present_index = 1;
-                    /* Prefer an additional graphics-family queue for image
-                     * acquisition; it does not need any queue capability. */
-                    if (families[vk.queues.graphics_family].queueCount >= 2) {
-                        provider_image_family = vk.queues.graphics_family;
-                        provider_image_index = 1;
-                    } else if (families[vk.queues.present_family].queueCount >= 3) {
-                        provider_image_family = vk.queues.present_family;
-                        provider_image_index = 2;
+            /* The provider owns presentation after activation. It is
+             * therefore valid for its present queue to be the queue that was
+             * used by the native swapchain; no native present is submitted
+             * while the provider is active. The provider itself only forbids
+             * sharing this queue with the game queue. Prefer the device's
+             * native present family, then look for another present-capable
+             * family. This avoids requiring a second queue in the common
+             * graphics/present family. */
+            for (uint32_t pass = 0; pass < 2 &&
+                                      provider_present_family == UINT32_MAX; pass++) {
+                for (uint32_t i = 0; i < family_count; i++) {
+                    if (!families[i].queueCount ||
+                        (pass == 0 && i != vk.queues.present_family) ||
+                        (pass == 1 && i == vk.queues.present_family) ||
+                        !(families[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT |
+                                                   VK_QUEUE_COMPUTE_BIT |
+                                                   VK_QUEUE_TRANSFER_BIT)))
+                        continue;
+
+                    VkBool32 present = VK_FALSE;
+                    if (vk.GetPhysicalDeviceSurfaceSupportKHR(
+                            vk.physical_device, i, vk.surface, &present) != VK_SUCCESS ||
+                        !present)
+                        continue;
+
+                    uint32_t index = 0;
+                    if (i == vk.queues.graphics_family) {
+                        /* Queue zero belongs to the game renderer. */
+                        index = 1;
+                        if (index >= families[i].queueCount)
+                            continue;
                     }
-                    if (provider_image_family == UINT32_MAX) {
-                        for (uint32_t i = 0; i < family_count; i++) {
-                            if (i == vk.queues.graphics_family ||
-                                i == vk.queues.present_family ||
-                                !families[i].queueCount)
+                    if (i == vk.queues.graphics_family &&
+                        index == vk.graphics_queue_index)
+                        continue;
+
+                    provider_present_family = i;
+                    provider_present_index = index;
+                    queue_counts[i] = max(queue_counts[i], index + 1);
+                    break;
+                }
+            }
+
+            /* Find a third, distinct queue handle for image acquisition. The
+             * provider accepts any submit-capable family here; graphics and
+             * native-present families are preferred to avoid manufacturing a
+             * queue on an otherwise unrelated family. */
+            if (provider_present_family != UINT32_MAX) {
+                const uint32_t preferred_families[] = {
+                    vk.queues.graphics_family,
+                    vk.queues.present_family,
+                };
+                for (uint32_t pass = 0; pass < 3 &&
+                                          provider_image_family == UINT32_MAX; pass++) {
+                    uint32_t begin = pass < 2 ? pass : 0;
+                    uint32_t end = pass < 2 ? pass + 1 : family_count;
+                    for (uint32_t n = begin; n < end; n++) {
+                        uint32_t i = pass < 2 ? preferred_families[n] : n;
+                        if (i >= family_count || !families[i].queueCount)
+                            continue;
+                        for (uint32_t index = 0;
+                             index < families[i].queueCount; index++) {
+                            if ((i == vk.queues.graphics_family &&
+                                 index == vk.graphics_queue_index) ||
+                                (i == provider_present_family &&
+                                 index == provider_present_index))
                                 continue;
                             provider_image_family = i;
-                            provider_image_index = 0;
+                            provider_image_index = index;
+                            queue_counts[i] = max(queue_counts[i], index + 1);
                             break;
                         }
+                        if (provider_image_family != UINT32_MAX)
+                            break;
                     }
                 }
-                if (provider_present_index &&
-                    provider_image_family != UINT32_MAX) {
-                    queue_counts[provider_present_family] = max(
-                        queue_counts[provider_present_family],
-                        provider_present_index + 1);
-                    queue_counts[provider_image_family] = max(
-                        queue_counts[provider_image_family],
-                        provider_image_index + 1);
-                    provider_reserved = true;
-                }
+                provider_reserved = provider_image_family != UINT32_MAX;
             }
 
             if (provider_reserved) {
@@ -6837,11 +6889,12 @@ static bool vk_create_device(void)
                 vk.provider_image_acquire_queue_family = provider_image_family;
                 vk.provider_image_acquire_queue_index = provider_image_index;
 
-                /* Async compute is optional. Only reserve it when the device
-                 * exposes another compute-capable queue that is not one of
-                 * the three mandatory provider roles. */
+                /* SDK shared buffers and images use exclusive sharing, with
+                 * no ownership transfers between upscale and interpolation.
+                 * An optional async queue must therefore share the game's
+                 * graphics family. */
                 for (uint32_t i = 0; i < family_count && !provider_async_available; i++) {
-                    if (!families[i].queueCount ||
+                    if (i != vk.queues.graphics_family || !families[i].queueCount ||
                         !(families[i].queueFlags & VK_QUEUE_COMPUTE_BIT))
                         continue;
                     uint32_t index = queue_counts[i];
@@ -6859,8 +6912,11 @@ static bool vk_create_device(void)
                 }
                 vk.provider_queues_reserved = true;
                 vk.provider_async_compute_available = provider_async_available;
+                if (!provider_async_available &&
+                    (!r_fsr_frame_generation_async || r_fsr_frame_generation_async->integer))
+                    Com_Printf("Vulkan FSR3 async workloads: no spare graphics-family queue; using the graphics queue\n");
             } else {
-                Com_WPrintf("Vulkan FSR3 frame generation requested, but dedicated provider queues are unavailable; using native presentation\n");
+                Com_WPrintf("Vulkan FSR3 frame generation unavailable: no three distinct submit queues (graphics/present/image-acquire); using native presentation\n");
             }
         }
     }
@@ -7930,11 +7986,6 @@ static void vk_destroy_swapchain(void)
         vk_handle_device_lost("vkDeviceWaitIdle",
                               vk.DeviceWaitIdle(vk.device));
 
-    /* Destroy q2pro's views before retiring the provider swapchain images;
-     * then stop the provider while the FSR context and device are alive. */
-    vk_release_swapchain_images_nowait();
-    vk_destroy_fsr3_provider_nowait();
-
     vk.render_pass_active = false;
     vk.active_render_pass = VK_NULL_HANDLE;
     vk.active_target_extent = (VkExtent2D) { 0, 0 };
@@ -8205,6 +8256,11 @@ static void vk_destroy_swapchain(void)
 
     vk_destroy_display_framebuffers_nowait();
 
+    /* Destroy q2pro's views before retiring the provider swapchain images;
+     * then stop the provider while the FSR context and device are alive. */
+    vk_release_swapchain_images_nowait();
+    vk_destroy_fsr3_provider_nowait();
+
     vk_destroy_internal_render_targets_nowait();
 
     if (vk.render_pass) {
@@ -8225,8 +8281,6 @@ static void vk_destroy_swapchain(void)
         vk.DestroyRenderPass(vk.device, vk.fsr_motion_render_pass, NULL);
         vk.fsr_motion_render_pass = VK_NULL_HANDLE;
     }
-
-    vk_release_swapchain_images_nowait();
 
     if (vk.swapchain) {
         if (vk.fsr3_provider_active &&
@@ -9104,7 +9158,7 @@ static void vk_internal_runtime_restore(const vk_internal_runtime_t *state)
 static bool vk_rebuild_internal_render_targets(float requested_scale)
 {
     if (!vk.device || vk.device_lost || !vk.separate_presentation ||
-        vk.frame_active || vk.render_pass_active ||
+        vk.frame_active || vk.render_pass_active || vk.fsr3_provider_active ||
         !isfinite(requested_scale) || requested_scale < 1.0f)
         return false;
 
@@ -10839,20 +10893,10 @@ static bool vk_activate_fsr3_provider(
     vk.fsr3_provider_functions = functions;
     vk.fsr3_provider_active = true;
     vk.fsr3_provider_async_workloads_failed = false;
-    bool async_requested = vk_fsr_frame_generation_async_enabled();
-    bool configured = vk_configure_fsr3_provider_frame_generation_mode(
-        true, async_requested);
-    if (!configured && async_requested) {
-        /* A provider can be usable on its graphics queue even when its
-         * optional async queue path rejects configuration. Keep frame
-         * generation alive and avoid repeating the failing async setup on
-         * every frame until the user toggles the cvar or recreates the
-         * provider. */
-        vk.fsr3_provider_async_workloads_failed = true;
-        Com_WPrintf("Vulkan FSR3 async workloads unavailable; retrying provider on the graphics queue\n");
-        configured = vk_configure_fsr3_provider_frame_generation_mode(
-            true, false);
-    }
+    /* Startup/menu presentation has no prepared scene. Configure passthrough
+     * explicitly; interpolation is enabled only for a complete scene frame. */
+    bool configured = Q2_FSR3_ConfigureProvider(
+        vk.fsr3, provider, false, false, Q2_FSR3_GetCurrentFrameId(vk.fsr3));
     if (!configured) {
         Com_WPrintf("Vulkan FSR3 provider frame-generation configuration failed; using native presentation\n");
         Q2_FSR3_DestroyProvider(vk.fsr3, provider, false);
@@ -10872,7 +10916,7 @@ static bool vk_activate_fsr3_provider(
             "frame-interpolation provider configuration failed");
         return false;
     }
-    vk.fsr3_provider_frame_generation_enabled = true;
+    vk.fsr3_provider_frame_generation_enabled = false;
 
     Com_Printf("Vulkan FSR3 frame-interpolation provider active: swapchain=%s, present=%u:%u, image-acquire=%u:%u, async-compute=%s\n",
                vk.fsr3_provider_active ? "owned" : "native",
@@ -11305,6 +11349,11 @@ static void vk_transition_image(VkCommandBuffer cmd, uint32_t image_index,
     } else if (vk.swapchain_layouts[image_index] == VK_IMAGE_LAYOUT_GENERAL) {
         src_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
         src_access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    } else if (vk.swapchain_layouts[image_index] ==
+               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        src_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        src_access = VK_ACCESS_SHADER_READ_BIT;
     } else if (vk.swapchain_layouts[image_index] == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
         src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         src_access = VK_ACCESS_TRANSFER_READ_BIT;
@@ -11416,12 +11465,14 @@ static void vk_batch_depth(vk_image_barrier_batch_t *batch,
         src_access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         src_stage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
                     VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-    } else if (vk.depth_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) {
+    } else if (vk.depth_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL ||
+               vk.depth_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         src_access = VK_ACCESS_SHADER_READ_BIT;
         src_stage = shader_stages;
     }
 
-    if (new_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+    if (new_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL ||
+        new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
         dst_stage |= shader_stages;
     VkImageSubresourceRange range = {
         .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT |
@@ -12655,13 +12706,6 @@ static bool vk_create_particle_buffer(void)
         vk_destroy_buffer(&vk.particle_vertices);
         return false;
     }
-
-    /* The replacement retires the native swapchain and exposes a new
-     * provider-owned pseudo-swapchain. Rebuild q2pro's image/view tables from
-     * the provider callbacks before creating any framebuffer that references
-     * them. */
-    if (vk.fsr3_provider_active && !vk_query_swapchain_images_and_views())
-        return false;
 
     return true;
 }
@@ -22961,6 +23005,40 @@ static void vk_log_fsr_frame_generation_failure(const char *stage)
                 (int)vk.fsr_frame_generation_layout);
 }
 
+/* Decide once, after scene recording has finished, for every presentation.
+ * A previous scene's configuration must never leak into menus, reset frames,
+ * or a frame whose preparation/upscale failed. The bridge also checks IDs. */
+static bool vk_configure_fsr3_provider_for_present(void)
+{
+    if (!vk.fsr3_provider_active)
+        return true;
+
+    bool enabled = vk_fsr_frame_generation_requested() && vk.fd_valid &&
+        !(vk.fd.rdflags & RDF_NOWORLDMODEL) && vk.fsr_framegen_prepared &&
+        vk.fsr_output_valid && !vk.fsr_frame_reset &&
+        !vk.fsr_pause_frame && !vk.fsr_pause_reuse &&
+        vk.fsr_result == VK_FSR_RESULT_FSR3;
+    if (vk_configure_fsr3_provider_frame_generation(enabled))
+        return true;
+
+    if (enabled && vk_fsr_frame_generation_async_enabled()) {
+        vk.fsr3_provider_async_workloads_failed = true;
+        Com_WPrintf("Vulkan FSR3 async workloads failed at runtime; retrying provider on the graphics queue\n");
+        if (vk_configure_fsr3_provider_frame_generation_mode(true, false)) {
+            vk_fsr_invalidate_history_reason(VK_FSR_RESET_CONFIG);
+            return true;
+        }
+    }
+
+    vk_log_fsr_frame_generation_failure("provider_configuration");
+    vk_disable_frame_generation("provider frame-generation configuration failed");
+    vk.fsr_framegen_disabled = true;
+    vk.fsr_framegen_fallback_reason = "provider_configuration_failed";
+    /* A failed disable cannot safely present stale interpolation inputs. The
+     * caller abandons this submission and recreates native presentation. */
+    return enabled && vk_configure_fsr3_provider_frame_generation(false);
+}
+
 static bool vk_dispatch_fsr(void)
 {
     vk_texture_t *input_texture = vk.fsr_scene_direct ?
@@ -23028,8 +23106,10 @@ static bool vk_dispatch_fsr(void)
                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                               VK_ACCESS_SHADER_READ_BIT,
                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    /* FFX COMPUTE_READ imports and sampled descriptors declare this layout,
+     * including for depth images. */
     vk_batch_depth(&pre_fsr_barriers,
-                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                    VK_ACCESS_SHADER_READ_BIT,
                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     if (!vk.fsr_motion_initialized) {
@@ -23051,7 +23131,6 @@ static bool vk_dispatch_fsr(void)
     vk_image_barrier_batch_submit(cmd, &pre_fsr_barriers);
 
     bool generated_frame = false;
-    bool provider_async_fallback = false;
     bool frame_reset = vk.fsr_reset;
     vk.fsr_frame_reset = frame_reset;
     if (frame_reset)
@@ -23120,6 +23199,13 @@ static bool vk_dispatch_fsr(void)
         frame_reset);
     vk.fsr_dispatch_record_usec = vk_time_usec() - dispatch_start;
     vk_write_fsr_timestamp(VK_TIMESTAMP_FSR_END);
+    /* The SDK samples depth using SHADER_READ_ONLY_OPTIMAL. The debug depth
+     * descriptor uses DEPTH_STENCIL_READ_ONLY_OPTIMAL, so restore that layout
+     * before an optional overlay samples the same image. */
+    if (vk_fsr_debug_mode() == 4)
+        vk_transition_depth(cmd, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                            VK_ACCESS_SHADER_READ_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     if (!dispatched) {
         vk_fsr_invalidate_history_reason(VK_FSR_RESET_DISPATCH_FAILURE);
         vk.fsr_output_valid = false;
@@ -23168,30 +23254,8 @@ static bool vk_dispatch_fsr(void)
         return false;
     }
 
-    if (vk.fsr3_provider_active) {
-        bool async_requested = vk_fsr_frame_generation_async_enabled();
-        bool provider_configured =
-            vk_configure_fsr3_provider_frame_generation(true);
-        if (!provider_configured && async_requested) {
-            vk.fsr3_provider_async_workloads_failed = true;
-            Com_WPrintf("Vulkan FSR3 async workloads failed at runtime; retrying provider on the graphics queue\n");
-            provider_configured =
-                vk_configure_fsr3_provider_frame_generation_mode(true, false);
-            provider_async_fallback = provider_configured;
-        }
-        if (!provider_configured) {
-            vk_configure_fsr3_provider_frame_generation(false);
-            vk_log_fsr_frame_generation_failure("provider_configuration");
-            vk_disable_frame_generation("provider frame-generation configuration failed");
-            vk.fsr_framegen_disabled = true;
-            vk.fsr_framegen_fallback_reason = "provider_configuration_failed";
-        }
-    }
-
     vk.fsr_reset = false;
     vk.fsr_reset_reason = VK_FSR_RESET_NONE;
-    if (provider_async_fallback)
-        vk_fsr_invalidate_history_reason(VK_FSR_RESET_CONFIG);
     vk.fsr_output_valid = true;
     if (frame_generation_prepared) {
         /* The SDK tracks dynamic-resource states internally. Keep an explicit
@@ -23608,12 +23672,16 @@ void VKR_BeginFrame(void)
         }
     }
 
-    if (vk.fsr_auto_recreate) {
+    if (vk.fsr_auto_recreate && !vk_fsr_frame_generation_user_requested()) {
         vk.fsr_auto_recreate = false;
         if (!vk_recreate_swapchain("FSR automatic performance selection"))
             return;
         vk.fsr_reset = true;
         vk.fsr_reset_reason = VK_FSR_RESET_CONFIG;
+    } else if (vk_fsr_frame_generation_user_requested()) {
+        /* Do not rebuild the provider swapchain for a stale automatic-quality
+         * transition while explicit interpolation is active. */
+        vk.fsr_auto_recreate = false;
     }
 
     if (vk.separate_presentation != vk_fsr_any_requested()) {
@@ -23704,7 +23772,8 @@ void VKR_BeginFrame(void)
     }
 
     if (vk.fsr_dynamic_fixed_restore_pending &&
-        !vk.fsr_dynamic.enabled && vk.separate_presentation) {
+        !vk.fsr_dynamic.enabled && vk.separate_presentation &&
+        !vk.fsr3_provider_active) {
         if (vk_rebuild_internal_render_targets(vk_fsr_quality_scale())) {
             vk.fsr_dynamic_fixed_restore_pending = false;
             vk.fsr_dynamic_last_applied = true;
@@ -23831,6 +23900,12 @@ void VKR_BeginFrame(void)
         result = vk_presentation_acquire(UINT64_MAX, image_available,
                                          VK_NULL_HANDLE, &vk.current_image);
         vk.acquire_usec = vk_time_usec() - start;
+        /* The FSR3 replacement swapchain can report VK_NOT_READY while its
+         * pacing state is being primed, even for an ostensibly blocking
+         * acquire. This is a normal retry condition, not device loss. Leave
+         * the frame inactive and let the next BeginFrame try again. */
+        if (result == VK_NOT_READY || result == VK_TIMEOUT)
+            return;
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
             vk_recreate_swapchain("image acquisition out of date");
             return;
@@ -23981,9 +24056,6 @@ void VKR_BeginFrame(void)
             vk_mark_fsr_frame_generation_pause();
             vk.frame_fsr = false;
         }
-        if (paused && vk.fsr3_provider_active &&
-            !vk_configure_fsr3_provider_frame_generation(false))
-            vk_log_fsr_frame_generation_failure("pause provider configuration");
         vk.fsr_frame_reset_reason = vk.fsr_reset ? vk.fsr_reset_reason : VK_FSR_RESET_NONE;
         vk.frame_active = true;
         return;
@@ -24240,10 +24312,23 @@ void VKR_EndFrame(void)
                              VK_TIMESTAMP_FRAME_END);
     }
 
-    vk_transition_image(cmd, vk.current_image,
-                        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                        0,
-                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    if (vk.fsr3_provider_active) {
+        /* Provider swapchain images are replacement buffers, not real
+         * presentable surface images. FidelityFX consumes each replacement
+         * buffer as shader-read data and performs the real-swapchain copy and
+         * present itself. Leaving these images in PRESENT_SRC_KHR violates
+         * that contract and can trigger RADV GPUVM permission faults. */
+        vk_transition_image(cmd, vk.current_image,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_ACCESS_SHADER_READ_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    } else {
+        vk_transition_image(cmd, vk.current_image,
+                            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                            0,
+                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    }
 
     uint64_t start = vk_time_usec();
     VkResult result = vk.EndCommandBuffer(cmd);
@@ -24257,6 +24342,36 @@ void VKR_EndFrame(void)
             (vk_fsr_benchmark && vk_fsr_benchmark->integer))
             vk_log_fsr_frame_generation_telemetry();
         vk.frame_active = false;
+        return;
+    }
+
+    if (!vk_configure_fsr3_provider_for_present()) {
+        vk_finish_fsr_frame_generation_telemetry(false, false,
+                                                "provider_configuration_failed");
+        vk.frame_active = false;
+        if (vk.presentation_adapter)
+            Q2_VK_PresentationAdapterAbortFrame(vk.presentation_adapter);
+        /* Acquire already signaled this binary semaphore. Retire that signal
+         * before recreating the provider; DeviceWaitIdle in teardown then
+         * waits for this empty submission as well. */
+        VkSemaphore acquired = vk.image_available[vk.frame_index];
+        VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        VkSubmitInfo drain = {
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &acquired,
+            .pWaitDstStageMask = &wait_stage,
+        };
+        VkResult drain_result = vk.QueueSubmit(vk.graphics_queue, 1, &drain,
+                                                VK_NULL_HANDLE);
+        if (drain_result != VK_SUCCESS) {
+            vk_handle_device_lost("vkQueueSubmit(acquire drain)", drain_result);
+            if (!vk.device_lost)
+                Com_Error(ERR_FATAL, "Vulkan could not retire an acquired image after FSR3 provider failure: %d",
+                          drain_result);
+            return;
+        }
+        vk_recreate_swapchain("provider interpolation could not be disabled");
         return;
     }
 
@@ -24361,6 +24476,8 @@ void VKR_EndFrame(void)
         .pImageIndices = &vk.current_image,
     };
 
+    uint64_t provider_dispatch_before = vk.fsr3_provider_active ?
+        Q2_FSR3_GetProviderDispatchCount(vk.fsr3) : 0;
     start = vk_time_usec();
     if (vk_presentation_adapter_ensure())
         result = Q2_VK_PresentationAdapterPresent(
@@ -24368,6 +24485,13 @@ void VKR_EndFrame(void)
     else
         result = vk.QueuePresentKHR(vk.present_queue, &present_info);
     vk.present_usec = vk_time_usec() - start;
+    if (vk.fsr3_provider_active &&
+        Q2_FSR3_GetProviderDispatchCount(vk.fsr3) > provider_dispatch_before) {
+        /* The provider callback recorded interpolation during this present.
+         * This counts GPU work submitted through the SDK, not scanout. */
+        vk.fsr_framegen_computed = true;
+        vk.fsr_framegen_computed_total++;
+    }
     bool present_success = result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR;
     bool recreate_swapchain = result == VK_ERROR_OUT_OF_DATE_KHR ||
         result == VK_SUBOPTIMAL_KHR;

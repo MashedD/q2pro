@@ -130,7 +130,7 @@ begin video
         "-0.5" -0.5 \
         "-1" -1 \
         "-1.5" -1.5
-    toggle --status "Requires Vulkan FSR3; experimental; falls back after GPU errors" \
+    toggle --status "Requires Vulkan FSR3; overrides automatic quality benchmarking; falls back after GPU errors" \
         "FSR3 frame-generation request" r_fsr_frame_generation
     toggle --status "Allow FSR3 to use the reserved asynchronous compute queue; disable for compatibility or benchmarking" \
         "FSR3 async workloads" r_fsr_frame_generation_async

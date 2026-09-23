@@ -126,6 +126,7 @@ def reflect(disassembler, spv):
     text = subprocess.run([disassembler, spv], check=True,
                           stdout=subprocess.PIPE, text=True).stdout
     names, bindings, sets, variables = {}, {}, {}, {}
+    non_writable = set()
     image_types, sampler_types, pointer_types = {}, set(), {}
     for line in text.splitlines():
         match = re.search(r'OpName (%\S+) "([^"]+)"', line)
@@ -137,6 +138,9 @@ def reflect(disassembler, spv):
         match = re.search(r'OpDecorate (%\S+) DescriptorSet (\d+)', line)
         if match:
             sets[match.group(1)] = int(match.group(2))
+        match = re.search(r'OpDecorate (%\S+) NonWritable\b', line)
+        if match:
+            non_writable.add(match.group(1))
         match = re.search(r'^\s*(%\S+) = OpTypeImage .* (\d+) \S+$', line)
         if match:
             image_types[match.group(1)] = int(match.group(2))
@@ -146,17 +150,28 @@ def reflect(disassembler, spv):
         match = re.search(r'^\s*(%\S+) = OpTypePointer \S+ (%\S+)$', line)
         if match:
             pointer_types[match.group(1)] = match.group(2)
-        match = re.search(r'^\s*(%\S+) = OpVariable (%\S+) (UniformConstant|Uniform)\b', line)
+        # Vulkan 1.2 emits storage buffers with the StorageBuffer storage
+        # class. Keep UniformConstant/Uniform for images and CBs, but do not
+        # drop StorageBuffer variables from reflection. NonWritable is the
+        # SPIR-V readonly marker and maps to an SRV buffer; writable buffers
+        # are UAVs.
+        match = re.search(r'^\s*(%\S+) = OpVariable (%\S+) '
+                          r'(UniformConstant|Uniform|StorageBuffer)\b', line)
         if match:
             variables[match.group(1)] = (match.group(2), match.group(3))
 
-    resources = {'cb': [], 'srv': [], 'uav': [], 'sampler': []}
+    resources = {
+        'cb': [], 'srv': [], 'uav': [], 'srv_buffer': [], 'uav_buffer': [],
+        'sampler': [],
+    }
     for variable, (pointer, storage) in variables.items():
         if variable not in bindings or variable not in sets:
             continue
         pointee = pointer_types.get(pointer)
         value = (bindings[variable], sets[variable], names.get(variable, ''))
-        if storage == 'Uniform':
+        if storage == 'StorageBuffer':
+            resources['srv_buffer' if variable in non_writable else 'uav_buffer'].append(value)
+        elif storage == 'Uniform':
             resources['cb'].append(value)
         elif pointee in sampler_types:
             resources['sampler'].append(value)
@@ -195,17 +210,20 @@ def emit_metadata(out, label, values):
 def emit_blob(out, label, data, resources):
     emit_array(out, label, data)
     names = {}
-    for kind in ('cb', 'srv', 'uav', 'sampler'):
+    for kind in ('cb', 'srv', 'uav', 'srv_buffer', 'uav_buffer', 'sampler'):
         names[kind] = '%s_%s' % (label, kind)
         emit_metadata(out, names[kind], resources[kind])
     out.write('static const FfxShaderBlob %s Q2_FSR3_UNUSED = {\n' % label)
     out.write('  %s_data, sizeof(%s_data),\n' % (label, label))
-    out.write('  %d, %d, %d, 0, 0, 0, 0,\n' %
-              (len(resources['cb']), len(resources['srv']), len(resources['uav'])))
-    for kind in ('cb', 'srv', 'uav'):
+    out.write('  %d, %d, %d, %d, %d, 0, 0,\n' %
+              (len(resources['cb']), len(resources['srv']), len(resources['uav']),
+               len(resources['srv_buffer']), len(resources['uav_buffer'])))
+    for kind in ('cb', 'srv', 'uav', 'srv_buffer', 'uav_buffer'):
         out.write('  %s_names, %s_bindings, %s_counts, %s_spaces,\n' %
                   tuple(names[kind] for _ in range(4)))
-    out.write('  nullptr, nullptr, nullptr, nullptr,\n' * 4)
+    # Samplers are created from the pass description, and acceleration
+    # structures are not used by the FSR3 Vulkan shaders.
+    out.write('  nullptr, nullptr, nullptr, nullptr,\n' * 2)
     out.write('};\n\n')
 
 

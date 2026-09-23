@@ -32,7 +32,7 @@ fsr3_threads = dependency('threads')
 python = find_program('python3')
 sdk_hardening = files('tools/q2_fsr3_sdk_hardening.py')
 run_command(python, sdk_hardening, fsr3_root, check: true)
-shader_generator = fsr3_root / '../packagefiles/fidelityfx-fsr3/tools/q2_fsr3_shader_gen.py'
+shader_generator = files('tools/q2_fsr3_shader_gen.py')
 glslc = find_program('glslc')
 spirv_dis = find_program('spirv-dis')
 spirv_opt = find_program('spirv-opt')

@@ -25,7 +25,7 @@ presentation-image copy path.
 | Recovery | Upscale/frame-generation failures disable generation, preserve ordinary FSR, and reset temporal history | C harness and source contracts |
 | Telemetry | Unique renderer frame IDs, separate SDK temporal IDs, jitter values/phase, reasoned reset fields, per-frame result/pause fields, renderer-completion pacing, simulation-time pacing, and FSR per-pass GPU timings parse deterministically | `tests/fsr_benchmark.py`, `tests/test_fsr_benchmark.py` |
 | Pause presentation | Reuses the retained FSR output and leaves the normal presentation-image copy path unused for pause reuse | Source contract and manual pause captures |
-| Frame generation | Swapchain pacing and runtime stability | Unsupported / not validated on the current Linux path |
+| Frame generation | Provider swapchain activation, queue topology, explicit toggle precedence, and pacing telemetry | Source contracts and a 2560x1440 mailbox RX 6500M run with 232 interpolation callbacks followed by accepted presents; display scanout cadence remains unmeasured |
 
 Compile and validate every motion vertex/fragment shader with `glslc` and
 `spirv-val`. The shared push layout is a Meson dependency of generated shader
@@ -88,8 +88,11 @@ validated; the benchmark records requested/result telemetry but does not claim
 generated-frame presentation cadence. Test CPU-only timing fallback, other GPU
 vendors, and long moving-camera demos before making broader performance claims.
 
-For manual comparisons use `r_fsr_auto 0`, the same quality/resolution and demo,
-then compare `r_fsr_motion auto`, `full`, and `fast` with `vk_perf_stats 1`.
-Return to `r_fsr_auto 1` for selected-quality-versus-native automatic selection.
+For manual upscaling comparisons use `r_fsr_auto 0`, the same quality/resolution
+and demo, then compare `r_fsr_motion auto`, `full`, and `fast` with
+`vk_perf_stats 1`. Explicit `r_fsr_frame_generation 1` now takes precedence over
+`r_fsr_auto`; automatic quality benchmarking pauses while interpolation is
+enabled. Return to `r_fsr_frame_generation 0` before measuring automatic
+selected-quality-versus-native performance.
 Archived `r_fsr_motion fast` settings remain fast; set it to `auto` explicitly
 to use the new hybrid path in an existing configuration.

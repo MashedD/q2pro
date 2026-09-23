@@ -293,7 +293,8 @@ require_contract 'vk_configure_fsr3_provider_frame_generation_mode(true, false)'
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'vk_configure_fsr3_provider_frame_generation(false)' \
     "$repo_dir/src/refresh/vk_backend.c"
-require_contract 'pause provider configuration' "$repo_dir/src/refresh/vk_backend.c"
+require_contract 'vk_configure_fsr3_provider_for_present' "$repo_dir/src/refresh/vk_backend.c"
+require_contract '!vk.fsr_pause_frame && !vk.fsr_pause_reuse' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'Reserve provider queues for the lifetime of the device' \
     "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'bool provider_available = Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED' \

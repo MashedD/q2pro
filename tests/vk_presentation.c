@@ -26,6 +26,12 @@ static q2_fsr3_preflight_result_t fsr_preflight_result = {
     .reason = "ok",
 };
 static bool fail_frame_generation_create;
+static unsigned provider_configure_calls;
+static bool provider_configure_enabled[16];
+static bool provider_configure_async[16];
+static unsigned provider_configure_fail_call;
+static bool provider_configure_fail_all;
+static uint64_t test_fsr_frame_id = 41;
 static unsigned test_image_calls, destroyed_image_calls;
 static VkRenderPass last_pass;
 static VkExtent2D last_extent;
@@ -36,6 +42,36 @@ static bool pipeline_blends;
 static uint32_t pipeline_colors;
 static VkAttachmentDescription clear_attachment;
 static VkSubpassDependency clear_dependency;
+
+static VkResult provider_test_acquire(void *userdata, uint64_t timeout,
+                                      VkSemaphore semaphore, VkFence fence,
+                                      uint32_t *image_index)
+{
+    (void)userdata; (void)timeout; (void)semaphore; (void)fence;
+    if (image_index) *image_index = 0;
+    return VK_SUCCESS;
+}
+static VkResult provider_test_present(void *userdata, VkQueue queue,
+                                      const VkPresentInfoKHR *present_info)
+{
+    (void)userdata; (void)queue; (void)present_info;
+    return VK_SUCCESS;
+}
+static void provider_test_shutdown(void *userdata,
+                                   q2_vk_presentation_shutdown_t reason)
+{
+    (void)userdata; (void)reason;
+}
+static VkResult provider_test_wait(void *userdata)
+{
+    (void)userdata;
+    return VK_SUCCESS;
+}
+static VkResult provider_test_recreate(void *userdata, VkSwapchainKHR old_swapchain)
+{
+    (void)userdata; (void)old_swapchain;
+    return VK_SUCCESS;
+}
 
 void Com_SetLastError(const char *message)
 {
@@ -111,6 +147,36 @@ q2_fsr3_preflight_result_t Q2_FSR3_Preflight(
     return fsr_preflight_result;
 }
 void Q2_FSR3_Destroy(q2_fsr3_context_t *context) { }
+uint64_t Q2_FSR3_GetCurrentFrameId(const q2_fsr3_context_t *context)
+{
+    (void)context;
+    return test_fsr_frame_id;
+}
+uint64_t Q2_FSR3_GetProviderDispatchCount(const q2_fsr3_context_t *context)
+{
+    (void)context;
+    return 0;
+}
+int Q2_FSR3_GetLastError(const q2_fsr3_context_t *context)
+{
+    (void)context;
+    return 0;
+}
+bool Q2_FSR3_ConfigureProvider(q2_fsr3_context_t *context,
+                               q2_fsr3_provider_t *provider,
+                               bool enabled, bool allow_async_workloads,
+                               uint64_t frame_id)
+{
+    (void)context;
+    (void)provider;
+    assert(frame_id == test_fsr_frame_id);
+    assert(provider_configure_calls < q_countof(provider_configure_enabled));
+    provider_configure_enabled[provider_configure_calls] = enabled;
+    provider_configure_async[provider_configure_calls] = allow_async_workloads;
+    provider_configure_calls++;
+    return !provider_configure_fail_all &&
+        provider_configure_calls != provider_configure_fail_call;
+}
 bool Q2_FSR3_WaitProvider(q2_fsr3_context_t *context,
                           q2_fsr3_provider_t *provider)
 {
@@ -771,10 +837,14 @@ static void check_fsr_frame_generation_contracts(void)
     assert(!vk_fsr_frame_generation_requested());
     assert(vk_fsr_any_requested());
 
-    /* Automatic selection owns the temporal path, so explicit frame
-     * generation must not leak into an auto-evaluation swapchain. */
+    /* An explicit frame-generation request owns the temporal path even when
+     * automatic quality selection remains enabled. */
     auto_fsr.integer = 1;
-    assert(!vk_fsr_frame_generation_requested());
+    vk.provider_queues_reserved = Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED;
+    assert(vk_fsr_frame_generation_requested());
+    vk.fsr_auto_phase = VK_FSR_AUTO_WARMUP;
+    assert(vk_fsr_requested());
+    vk.provider_queues_reserved = false;
     auto_fsr.integer = 0;
 
     /* With no adapter or compute-only opt-in, fast motion remains effective;
@@ -1072,7 +1142,7 @@ static void check_fsr_frame_generation_telemetry_contracts(void)
     vk_session_frame_generation_disabled = false;
     vk_begin_fsr_frame_generation_telemetry();
     assert(vk.fsr_framegen_requested && vk.fsr_framegen_disabled &&
-           !strcmp(vk.fsr_framegen_fallback_reason, "auto_mode"));
+           !strcmp(vk.fsr_framegen_fallback_reason, "no_framegen_swapchain"));
     vk_finish_fsr_frame_generation_telemetry(false, false, "auto_mode");
     vk_reset_fsr_frame_generation_telemetry();
     r_fsr_auto = NULL;
@@ -1153,6 +1223,138 @@ static void check_fsr_frame_generation_telemetry_contracts(void)
     puts("FSR frame-generation telemetry: passed (lifecycle, fallback, no extra present)");
 }
 
+static void check_fsr3_provider_presentation_configuration(void)
+{
+    cvar_t frame_generation = { .integer = 1 };
+    cvar_t async = { .integer = 1 };
+    r_fsr_frame_generation = &frame_generation;
+    r_fsr_frame_generation_async = &async;
+
+    memset(provider_configure_enabled, 0, sizeof(provider_configure_enabled));
+    memset(provider_configure_async, 0, sizeof(provider_configure_async));
+    provider_configure_calls = 0;
+    provider_configure_fail_call = 0;
+    provider_configure_fail_all = false;
+    vk.fsr3 = HANDLE(q2_fsr3_context_t *, 981);
+    vk.fsr3_provider = HANDLE(q2_fsr3_provider_t *, 982);
+    vk.fsr3_provider_active = true;
+    vk.fsr3_provider_frame_generation_enabled = false;
+    vk.provider_queues_reserved = true;
+    vk.provider_async_compute_available = true;
+    vk.provider_async_compute_queue_family = vk.queues.graphics_family;
+    q2_vk_presentation_ops_t provider_ops = {
+        .frame_generation_ready = true,
+        .provider_swapchain_owned = true,
+        .topology = {
+            .queue_family_facts_known = true,
+            .graphics_queue_family = 0,
+            .graphics_queue_index = 0,
+            .present_queue_family = 0,
+            .present_queue_index = 0,
+            .sync_contract = {
+                .acquire_signal = Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE,
+                .render_finished_signal = Q2_VK_PRESENTATION_SYNC_BINARY_SEMAPHORE,
+                .frame_completion = Q2_VK_PRESENTATION_SYNC_FENCE,
+                .image_reuse = Q2_VK_PRESENTATION_SYNC_FENCE,
+            },
+            .provider_queue_contract = {
+                .present_queue_reserved = true,
+                .image_acquire_queue_reserved = true,
+            },
+            .native_sync_facts_known = true,
+            .native_sync_facts = Q2_VK_PRESENTATION_SYNC_ACQUIRE_BINARY |
+                Q2_VK_PRESENTATION_SYNC_RENDER_FINISHED_BINARY |
+                Q2_VK_PRESENTATION_SYNC_FRAME_FENCE |
+                Q2_VK_PRESENTATION_SYNC_IMAGE_FENCE_ALIASES_FRAME,
+            .provider_synchronization_ready = true,
+        },
+        .acquire = provider_test_acquire,
+        .present = provider_test_present,
+        .wait_idle = provider_test_wait,
+        .recreate = provider_test_recreate,
+        .shutdown = provider_test_shutdown,
+    };
+    vk.presentation_adapter = Q2_VK_PresentationAdapterCreate(
+        Q2_VK_PRESENTATION_FRAME_INTERPOLATION, &provider_ops);
+    assert(vk.presentation_adapter);
+    vk.fd_valid = true;
+    vk.fd.rdflags = 0;
+    vk.fsr_framegen_requested = true;
+    vk.fsr_framegen_prepared = true;
+    vk.fsr_output_valid = true;
+    vk.fsr_frame_reset = false;
+    vk.fsr_pause_frame = false;
+    vk.fsr_pause_reuse = false;
+    vk.fsr_result = VK_FSR_RESULT_FSR3;
+    vk_session_frame_generation_disabled = false;
+
+    /* A ready frame enables the provider with the requested async path. */
+    assert(vk_configure_fsr3_provider_for_present());
+    assert(provider_configure_calls == 1);
+    assert(provider_configure_enabled[0] && provider_configure_async[0]);
+    assert(vk.fsr3_provider_frame_generation_enabled);
+
+    /* A menu/no-view frame must immediately disable provider generation. */
+    vk.fd_valid = false;
+    assert(vk_configure_fsr3_provider_for_present());
+    assert(provider_configure_calls == 2);
+    assert(!provider_configure_enabled[1] && !provider_configure_async[1]);
+    assert(!vk.fsr3_provider_frame_generation_enabled);
+
+    /* Reset, pause reuse, and stale FSR output each suppress enablement. */
+    vk.fd_valid = true;
+    vk.fsr3_provider_frame_generation_enabled = true;
+    vk.fsr_frame_reset = true;
+    assert(vk_configure_fsr3_provider_for_present());
+    assert(provider_configure_calls == 3 && !provider_configure_enabled[2]);
+    vk.fsr_frame_reset = false;
+    vk.fsr3_provider_frame_generation_enabled = true;
+    vk.fsr_pause_frame = true;
+    assert(vk_configure_fsr3_provider_for_present());
+    assert(provider_configure_calls == 4 && !provider_configure_enabled[3]);
+    vk.fsr_pause_frame = false;
+    vk.fsr3_provider_frame_generation_enabled = true;
+    vk.fsr_output_valid = false;
+    assert(vk_configure_fsr3_provider_for_present());
+    assert(provider_configure_calls == 5 && !provider_configure_enabled[4]);
+
+    /* Async setup can fail once and recover on the graphics queue. */
+    vk.fsr_output_valid = true;
+    provider_configure_fail_call = 6;
+    assert(vk_configure_fsr3_provider_for_present());
+    assert(provider_configure_calls == 7);
+    assert(provider_configure_enabled[5] && provider_configure_async[5]);
+    assert(provider_configure_enabled[6] && !provider_configure_async[6]);
+    assert(vk.fsr3_provider_frame_generation_enabled);
+
+    /* If even the disabling call fails, report failure so the caller can
+     * abandon the submission instead of presenting stale interpolation data. */
+    vk.fsr3_provider_async_workloads_failed = false;
+    provider_configure_fail_call = 0;
+    provider_configure_fail_all = true;
+    assert(!vk_configure_fsr3_provider_for_present());
+    assert(provider_configure_calls == 10);
+    assert(provider_configure_enabled[7] && provider_configure_async[7]);
+    assert(provider_configure_enabled[8] && !provider_configure_async[8]);
+    assert(!provider_configure_enabled[9] && !provider_configure_async[9]);
+    assert(vk_session_frame_generation_disabled);
+    assert(vk.fsr3_provider_frame_generation_enabled);
+    provider_configure_fail_all = false;
+
+    r_fsr_frame_generation = NULL;
+    r_fsr_frame_generation_async = NULL;
+    vk.fsr3 = NULL;
+    vk.fsr3_provider = NULL;
+    vk.fsr3_provider_active = false;
+    vk.provider_queues_reserved = false;
+    Q2_VK_PresentationAdapterDestroy(vk.presentation_adapter,
+                                     Q2_VK_PRESENTATION_SHUTDOWN_NORMAL);
+    vk.presentation_adapter = NULL;
+    vk.fsr_framegen_requested = false;
+    vk_session_frame_generation_disabled = false;
+    puts("FSR3 provider presentation configuration: passed (guards, async fallback, stale prevention)");
+}
+
 int main(void)
 {
     check_fsr_barriers();
@@ -1163,6 +1365,7 @@ int main(void)
     check_fsr_frame_generation_compute_only_gate_contracts();
     check_fsr_lifecycle_contracts();
     check_fsr_frame_generation_telemetry_contracts();
+    check_fsr3_provider_presentation_configuration();
     check_fsr_transaction_guards();
     check_fsr_transaction_resource_rollback();
     framebuffer_calls = 0;
