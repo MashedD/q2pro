@@ -1026,6 +1026,7 @@ typedef struct {
     VkDescriptorSet fsr_depth_descriptor;
     VkPipeline alias_pipeline;
     VkPipeline alias_bloom_pipeline;
+    VkPipeline alias_glow_bloom_pipeline;
     VkPipeline alias_alpha_pipeline;
     VkPipeline alias_depth_pipeline;
     VkPipeline alias_blend_pipeline;
@@ -8278,6 +8279,10 @@ static void vk_destroy_swapchain(void)
         vk.DestroyPipeline(vk.device, vk.alias_bloom_pipeline, NULL);
         vk.alias_bloom_pipeline = VK_NULL_HANDLE;
     }
+    if (vk.alias_glow_bloom_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_glow_bloom_pipeline, NULL);
+        vk.alias_glow_bloom_pipeline = VK_NULL_HANDLE;
+    }
 
     if (vk.alias_alpha_pipeline) {
         vk.DestroyPipeline(vk.device, vk.alias_alpha_pipeline, NULL);
@@ -10730,9 +10735,19 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
             (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT) : 0,
     } };
-    if (pipeline == &vk.alias_bloom_pipeline) {
+    if (pipeline == &vk.alias_bloom_pipeline ||
+        pipeline == &vk.alias_glow_bloom_pipeline) {
         color_blend_attachment[1] = color_blend_attachment[0];
         color_blend_attachment[0].colorWriteMask = 0;
+        if (pipeline == &vk.alias_glow_bloom_pipeline) {
+            // Model glowmaps are premultiplied when loaded. Their RGB already
+            // contains alpha coverage, so don't attenuate them by SrcAlpha a
+            // second time when accumulating the bloom attachment.
+            color_blend_attachment[1].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            color_blend_attachment[1].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            color_blend_attachment[1].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            color_blend_attachment[1].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        }
     } else if (pipeline == &vk.alias_pipeline ||
                pipeline == &vk.alias_alpha_pipeline) {
         // Opaque alias fragments replace any bloom left by geometry drawn
@@ -11321,6 +11336,8 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_alias_pipeline(&vk.alias_glow_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_bloom_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
+        !vk_create_alias_pipeline(&vk.alias_glow_bloom_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_shadow_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_TRUE, -1.0f, -2.0f, &shadow_depth_stencil) ||
@@ -15752,14 +15769,14 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
             vk_draw_alias_pass(cmd, pipeline, buffers, offsets, model, batch,
                                texture, &push);
         if (skin->texnum2 && skin->texnum2 < MAX_RIMAGES &&
-            (vk.drawing_bloom ? vk.alias_bloom_pipeline : vk.alias_glow_pipeline)) {
+            (vk.drawing_bloom ? vk.alias_glow_bloom_pipeline : vk.alias_glow_pipeline)) {
             const vk_texture_t *glow = vk_texture_for_index(skin->texnum2, false);
 
             if (glow) {
                 vk_alias_push_t glow_push = push;
 
                 glow_push.intensity = vk_glowmap_intensity();
-                vk_draw_alias_pass(cmd, vk.drawing_bloom ? vk.alias_bloom_pipeline :
+                vk_draw_alias_pass(cmd, vk.drawing_bloom ? vk.alias_glow_bloom_pipeline :
                                    vk.alias_glow_pipeline, buffers, offsets,
                                    model, batch, glow, &glow_push);
             }
@@ -21888,6 +21905,11 @@ void VKR_RenderFrame(const refdef_t *fd)
         vk.fsr_jitter_ready = false;
         return;
     }
+    // Refresh postprocess activation from the current refdef rather than the
+    // previous frame's cached view (BeginFrame runs before this refdef arrives).
+    vk.frame_bloom = vk_bloom_enabled_for_frame();
+    vk.frame_waterwarp = vk_waterwarp_enabled_for_frame();
+    vk.frame_ssr = vk_ssr_enabled_for_frame();
     if (vk.separate_presentation) {
         vk.frame_fsr = vk.fsr3 && vk_fsr_any_requested() &&
             !(fd->rdflags & RDF_NOWORLDMODEL);
@@ -21895,9 +21917,6 @@ void VKR_RenderFrame(const refdef_t *fd)
             vk.fsr_reset = true;
             vk_fsr_invalidate_history_reason(VK_FSR_RESET_CONFIG);
         }
-        vk.frame_bloom = vk_bloom_enabled_for_frame();
-        vk.frame_waterwarp = vk_waterwarp_enabled_for_frame();
-        vk.frame_ssr = vk_ssr_enabled_for_frame();
         vk_begin_scene_view();
     }
     if (vk.frame_fsr && vk.fsr_previous_fd_valid) {
@@ -23465,9 +23484,9 @@ static bool vk_dispatch_fsr(void)
 
 static void vk_finish_postprocess_scene(void)
 {
-    if (!vk.frame_bloom && !vk.frame_waterwarp && !vk.frame_ssr)
-        if (!vk.separate_presentation)
-            return;
+    if (!vk.frame_bloom && !vk.frame_waterwarp && !vk.frame_ssr &&
+        !vk.separate_presentation)
+        return;
 
     vk_write_fsr_timestamp(VK_TIMESTAMP_POSTPROCESS_BEGIN);
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
@@ -23475,7 +23494,14 @@ static void vk_finish_postprocess_scene(void)
     bool waterwarp = vk.frame_waterwarp;
     bool fsr_input_active = false;
     bool postprocess_timestamp_ended = false;
-
+    // SSR ends the scene render pass. Draw alias bloom sources while its
+    // color/depth attachments are still bound so the bloom MRT receives them.
+    if (bloom && !vk.separate_presentation && vk.render_pass_active &&
+        vk.fd_valid) {
+        vk_draw_bloom_source_entities(&vk.fd);
+        vk_draw_bloom_beams(&vk.fd);
+        vk_draw_bloom_only_entities(&vk.fd);
+    }
     vk_render_ssr();
 
     if (bloom) {
@@ -23512,11 +23538,6 @@ static void vk_finish_postprocess_scene(void)
             1.0f,
         };
 
-        if (vk.render_pass_active && vk.fd_valid) {
-            vk_draw_bloom_source_entities(&vk.fd);
-            vk_draw_bloom_beams(&vk.fd);
-            vk_draw_bloom_only_entities(&vk.fd);
-        }
         if (vk.render_pass_active) {
             vk.CmdEndRenderPass(cmd);
             vk.render_pass_active = false;
