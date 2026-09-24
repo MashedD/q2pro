@@ -14498,7 +14498,13 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 continue;
             }
 
-            bool can_group = world_batching &&
+            // Static-light bloom uses per-face push constants. A texture batch
+            // can contain both light and unlit faces, so don't inherit the
+            // first face's bloom flag for these lamps.
+            bool static_lamp = (face->face->texinfo->c.flags & SURF_LIGHT) &&
+                !image->texnum2 &&
+                !(face->face->drawflags & (SURF_TRANS_MASK | SURF_WARP | SURF_NODRAW));
+            bool can_group = world_batching && !static_lamp &&
                 batch_index_mapped && vk.world.batch_indices.buffer &&
                 vk.world.batch_index_data &&
                 image->texnum == batch->texture_index &&
