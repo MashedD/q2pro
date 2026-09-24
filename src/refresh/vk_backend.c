@@ -15775,6 +15775,12 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
             if (glow) {
                 vk_alias_push_t glow_push = push;
 
+                // Glowmaps are emissive: OpenGL adds their RGB independently
+                // of the alias model's sampled lighting, while retaining the
+                // entity alpha for translucent models.
+                glow_push.color[0] = 1.0f;
+                glow_push.color[1] = 1.0f;
+                glow_push.color[2] = 1.0f;
                 glow_push.intensity = vk_glowmap_intensity();
                 vk_draw_alias_pass(cmd, vk.drawing_bloom ? vk.alias_glow_bloom_pipeline :
                                    vk.alias_glow_pipeline, buffers, offsets,
@@ -23517,24 +23523,22 @@ static void vk_finish_postprocess_scene(void)
         };
         float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
         sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
-        // The fixed 9-tap kernel is normalized around sigma ~= 2 texels.
-        // OpenGL applies its requested sigma in the quarter-resolution
-        // target. Scale the offsets so the screen-space radius stays equal
-        // when vk_bloom_downsample changes.
-        sigma = max(sigma, 1.0f) * 2.0f /
+        // OpenGL evaluates the Gaussian at quarter resolution. Preserve its
+        // screen-space radius when the Vulkan downsample factor changes.
+        sigma = max(sigma, 0.1f) * 4.0f /
             (float)vk_bloom_downsample_value();
         int iterations = (vk_showbloom && vk_showbloom->integer >= 2) ? 0 :
             (gl_bloom ? Cvar_ClampInteger(gl_bloom, 1, 8) : 1);
         vec4_t blur_x = {
-            sigma / (float)bloom_w,
+            1.0f / (float)bloom_w,
             0.0f,
-            0.0f,
+            sigma,
             1.0f,
         };
         vec4_t blur_y = {
             0.0f,
-            sigma / (float)bloom_h,
-            0.0f,
+            1.0f / (float)bloom_h,
+            sigma,
             1.0f,
         };
 
@@ -24327,20 +24331,20 @@ void VKR_EndFrame(void)
         };
         float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
         sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
-        sigma = max(sigma, 1.0f) * 2.0f /
+        sigma = max(sigma, 0.1f) * 4.0f /
             (float)vk_bloom_downsample_value();
         int iterations = (vk_showbloom && vk_showbloom->integer >= 2) ? 0 :
             (gl_bloom ? Cvar_ClampInteger(gl_bloom, 1, 8) : 1);
         vec4_t blur_x = {
-            sigma / (float)bloom_w,
+            1.0f / (float)bloom_w,
             0.0f,
-            0.0f,
+            sigma,
             1.0f,
         };
         vec4_t blur_y = {
             0.0f,
-            sigma / (float)bloom_h,
-            0.0f,
+            1.0f / (float)bloom_h,
+            sigma,
             1.0f,
         };
 
