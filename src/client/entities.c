@@ -619,7 +619,7 @@ static bool CL_GetModelSkinTint(const centity_state_t *state, vec3_t tint)
 
         // Player tints get an extra 20% boost over item and weapon tints.
         if (!Q_stricmp(ci->model_name, "male"))
-            VectorSet(tint, 1.2f, 1.2f, 1.2f);
+            VectorSet(tint, 2.0f, 2.0f, 2.0f);
         else if (!Q_stricmp(ci->model_name, "female"))
             VectorSet(tint, 0.08f, 1.2f, 0.05f);
         else
@@ -760,13 +760,14 @@ static bool CL_GetPlayerHighlight(const centity_state_t *state, item_highlight_t
 
     ci = &cl.clientinfo[clientnum];
     if (!Q_stricmp(ci->model_name, "male")) {
+        highlight->shell = RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE;
+        VectorSet(highlight->color, 1.0f, 1.0f, 1.0f);
+    } else if (!Q_stricmp(ci->model_name, "female")) {
         highlight->shell = RF_SHELL_GREEN;
         VectorSet(highlight->color, 0.0f, 1.0f, 0.0f);
-    } else if (!Q_stricmp(ci->model_name, "female")) {
-        highlight->shell = RF_SHELL_BLUE | RF_SHELL_GREEN;
-        VectorSet(highlight->color, 0.0f, 0.75f, 1.0f);
     } else {
-        return false;
+        highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
+        VectorSet(highlight->color, 1.0f, 0.65f, 0.2f);
     }
 
     return true;
@@ -816,9 +817,32 @@ static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *
         return true;
     }
 
+    if (item_highlight && model_starts_with(model, "models/items/adrenal/")) {
+        highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
+        VectorSet(highlight->color, 1.0f, 0.68f, 0.3f);
+        return true;
+    }
+
     if (item_highlight && model_starts_with(model, "models/items/armor/")) {
-        highlight->shell = RF_SHELL_BLUE | RF_SHELL_GREEN;
-        VectorSet(highlight->color, 0.0f, 0.75f, 1.0f);
+        if (model_starts_with(model, "models/items/armor/body/")) {
+            highlight->shell = RF_SHELL_RED;
+            VectorSet(highlight->color, 1.0f, 0.1f, 0.1f);
+        } else if (model_starts_with(model, "models/items/armor/combat/")) {
+            highlight->shell = RF_SHELL_DOUBLE;
+            VectorSet(highlight->color, 1.0f, 0.75f, 0.0f);
+        } else if (model_starts_with(model, "models/items/armor/jacket/")) {
+            highlight->shell = RF_SHELL_GREEN;
+            VectorSet(highlight->color, 0.3f, 1.0f, 0.3f);
+        } else if (model_starts_with(model, "models/items/armor/screen/")) {
+            highlight->shell = RF_SHELL_BLUE;
+            VectorSet(highlight->color, 0.0f, 0.3f, 1.0f);
+        } else if (model_starts_with(model, "models/items/armor/shield/")) {
+            highlight->shell = RF_SHELL_RED | RF_SHELL_BLUE;
+            VectorSet(highlight->color, 0.75f, 0.0f, 1.0f);
+        } else {
+            highlight->shell = RF_SHELL_GREEN | RF_SHELL_BLUE;
+            VectorSet(highlight->color, 0.0f, 0.85f, 1.0f);
+        }
         return true;
     }
 
@@ -826,14 +850,16 @@ static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *
         (!Q_strcasecmp(model, "models/objects/rocket/tris.md2") ||
          !Q_strcasecmp(model, "models/objects/grenade/tris.md2") ||
          !Q_strcasecmp(model, "models/objects/grenade2/tris.md2"))) {
-        highlight->shell = RF_SHELL_RED;
-        VectorSet(highlight->color, 1.0f, 0.0f, 0.0f);
+        highlight->shell = RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE;
+        VectorSet(highlight->color, 1.0f, 1.0f, 1.0f);
         return true;
     }
 
     if ((ammo_highlight &&
          !Q_strcasecmp(model, "models/items/ammo/shells/medium/tris.md2")) ||
-        (weapon_highlight && !Q_strcasecmp(model, "models/weapons/g_shotg2/tris.md2"))) {
+        (weapon_highlight &&
+         (!Q_strcasecmp(model, "models/weapons/g_shotg/tris.md2") ||
+          !Q_strcasecmp(model, "models/weapons/g_shotg2/tris.md2")))) {
         highlight->shell = RF_SHELL_DOUBLE;
         VectorSet(highlight->color, 1.0f, 0.75f, 0.0f);
         return true;
@@ -849,7 +875,9 @@ static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *
 
     if ((ammo_highlight &&
          !Q_strcasecmp(model, "models/items/ammo/bullets/medium/tris.md2")) ||
-        (weapon_highlight && !Q_strcasecmp(model, "models/weapons/g_chain/tris.md2"))) {
+        (weapon_highlight &&
+         (!Q_strcasecmp(model, "models/weapons/g_machn/tris.md2") ||
+          !Q_strcasecmp(model, "models/weapons/g_chain/tris.md2")))) {
         highlight->shell = RF_SHELL_BLUE;
         VectorSet(highlight->color, 0.0f, 0.25f, 1.0f);
         return true;
@@ -876,43 +904,46 @@ static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *
         (weapon_highlight &&
          (!Q_strcasecmp(model, "models/weapons/g_hyperb/tris.md2") ||
           !Q_strcasecmp(model, "models/weapons/g_bfg/tris.md2")))) {
-        highlight->shell = RF_SHELL_LITE_GREEN;
-        VectorSet(highlight->color, 0.56f, 0.93f, 0.56f);
+        highlight->shell = RF_SHELL_GREEN;
+        VectorSet(highlight->color, 0.3f, 1.0f, 0.0f);
+        return true;
+    }
+
+    if (ammo_highlight && model_starts_with(model, "models/items/ammo/nuke/")) {
+        highlight->shell = RF_SHELL_GREEN;
+        VectorSet(highlight->color, 0.45f, 1.0f, 0.15f);
         return true;
     }
 
     if (ammo_highlight && model_starts_with(model, "models/items/ammo/")) {
-        highlight->shell = RF_SHELL_DOUBLE;
+        highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
         VectorSet(highlight->color, 1.0f, 0.75f, 0.0f);
         return true;
     }
 
+    if (weapon_highlight &&
+        (model_starts_with(model, "models/weapons/g_blast/") ||
+         model_starts_with(model, "models/weapons/g_disint/"))) {
+        highlight->shell = RF_SHELL_GREEN | RF_SHELL_BLUE;
+        VectorSet(highlight->color, 0.0f, 0.85f, 1.0f);
+        return true;
+    }
+
     if (weapon_highlight && model_starts_with(model, "models/weapons/g_")) {
-        highlight->shell = RF_SHELL_RED;
-        VectorSet(highlight->color, 1.0f, 0.0f, 0.0f);
+        highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
+        VectorSet(highlight->color, 1.0f, 0.65f, 0.2f);
         return true;
     }
 
-    if (item_highlight &&
-        (model_starts_with(model, "models/items/quaddama/") ||
-         model_starts_with(model, "models/items/invulner/") ||
-         model_starts_with(model, "models/items/silencer/") ||
-         model_starts_with(model, "models/items/breather/") ||
-         model_starts_with(model, "models/items/enviro/"))) {
-        highlight->shell = RF_SHELL_RED | RF_SHELL_BLUE;
-        VectorSet(highlight->color, 1.0f, 0.0f, 1.0f);
-        return true;
-    }
-
-    if (item_highlight && model_starts_with(model, "models/items/keys/")) {
-        highlight->shell = RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE;
-        VectorSet(highlight->color, 1.0f, 1.0f, 1.0f);
+    if (item_highlight && model_starts_with(model, "models/items/quaddama/")) {
+        highlight->shell = RF_SHELL_BLUE;
+        VectorSet(highlight->color, 0.61f, 0.73f, 1.0f);
         return true;
     }
 
     if (item_highlight && model_starts_with(model, "models/items/")) {
-        highlight->shell = RF_SHELL_BLUE;
-        VectorSet(highlight->color, 0.25f, 0.45f, 1.0f);
+        highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
+        VectorSet(highlight->color, 1.0f, 0.65f, 0.2f);
         return true;
     }
 
@@ -922,10 +953,12 @@ static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *
 static bool CL_GetWeaponHighlight(int weapon, item_highlight_t *highlight)
 {
     switch (weapon) {
+    case 2: // shotgun
     case 3: // super shotgun
         highlight->shell = RF_SHELL_DOUBLE;
         VectorSet(highlight->color, 1.0f, 0.75f, 0.0f);
         return true;
+    case 4: // machinegun
     case 5: // chaingun
         highlight->shell = RF_SHELL_BLUE;
         VectorSet(highlight->color, 0.0f, 0.25f, 1.0f);
@@ -938,17 +971,20 @@ static bool CL_GetWeaponHighlight(int weapon, item_highlight_t *highlight)
         highlight->shell = RF_SHELL_RED | RF_SHELL_BLUE;
         VectorSet(highlight->color, 0.75f, 0.0f, 1.0f);
         return true;
+    case 6: // grenade launcher
     case 7: // grenade launcher
         highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
         VectorSet(highlight->color, 1.0f, 0.45f, 0.0f);
         return true;
     case 9: // hyperblaster
     case 11: // BFG
-        highlight->shell = RF_SHELL_LITE_GREEN;
-        VectorSet(highlight->color, 0.56f, 0.93f, 0.56f);
+        highlight->shell = RF_SHELL_GREEN;
+        VectorSet(highlight->color, 0.3f, 1.0f, 0.0f);
         return true;
     default:
-        return false;
+        highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
+        VectorSet(highlight->color, 1.0f, 0.65f, 0.2f);
+        return true;
     }
 }
 
