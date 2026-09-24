@@ -104,7 +104,7 @@ typedef struct mface_s {
     uint16_t        lm_height;
 
     int             drawflags; // DSURF_PLANEBACK, etc
-    int             statebits;
+    uint64_t        statebits; // OpenGL GLS_* flags extend beyond bit 31
     int             firstvert;
     uint16_t        light_s, light_t;
     float           stylecache[MAX_LIGHTMAPS];
