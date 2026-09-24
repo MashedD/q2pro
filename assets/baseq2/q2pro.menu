@@ -299,20 +299,31 @@ begin effects
     values "dynamic lighting" gl_dynamic "no" "yes" "only switchable"
     values "entity cel-shading" gl_celshading no 1x 2x 3x
     toggle "entity glowing" cl_noglow ~
-    toggle "item highlighting" cl_itemhighlight
-    toggle "weapon highlighting" cl_weaponhighlight
-    toggle "ammo highlighting" cl_ammohighlight
-    toggle "tint item skins" cl_itemtint
-    toggle "tint weapon skins" cl_weapontint
-    toggle "tint ammo skins" cl_ammotint
-    toggle "tint player skins" cl_playertint
-    toggle "player highlighting" cl_playerhighlight
-    range "highlight bloom" cl_itemhighlight_glow 0 5 1
+    action "colorization setup..." pushmenu colorization
     values "ground shadows" gl_shadows no yes fade
     toggle "screen blending" gl_polyblend
     toggle "screen warping" gl_waterwarp
     toggle "grenade explosions" cl_disable_explosions ~0
     toggle "rocket explosions" cl_disable_explosions ~1
+    toggle --status "Hide blood particles only for impacts on your player" \
+        "blood particles when hit" cl_disable_self_blood ~
+    blank
+    action --align "railgun trail setup..." pushmenu railtrail
+end
+
+begin colorization
+    title "Colorization Setup"
+    toggle "tint item skins" cl_itemtint
+    toggle "tint weapon skins" cl_weapontint
+    toggle "tint ammo skins" cl_ammotint
+    toggle "tint player skins" cl_playertint
+    blank
+    toggle "item highlights" cl_itemhighlight
+    toggle "weapon highlights" cl_weaponhighlight
+    toggle "ammo highlights" cl_ammohighlight
+    toggle "player highlights" cl_playerhighlight
+    range "highlight bloom" cl_itemhighlight_glow 0 5 1
+    blank
     pairs "rocket/grenade trail color" cl_projectiletrail_color \
         default none \
         black black \
@@ -323,10 +334,6 @@ begin effects
         cyan cyan \
         magenta magenta \
         white white
-    toggle --status "Hide blood particles only for impacts on your player" \
-        "blood particles when hit" cl_disable_self_blood ~
-    blank
-    action --align "railgun trail setup..." pushmenu railtrail
 end
 
 begin crosshair

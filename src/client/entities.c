@@ -666,7 +666,7 @@ static bool CL_GetModelSkinTint(const centity_state_t *state, vec3_t tint)
         else if (model_starts_with(model, "models/items/armor/combat/"))
             VectorSet(tint, 1.0f, 0.74f, 0.0f);
         else if (model_starts_with(model, "models/items/armor/jacket/"))
-            VectorSet(tint, 0.337f, 1.0f, 0.38f);
+            VectorSet(tint, 0.45f, 0.65f, 0.08f);
         else if (model_starts_with(model, "models/items/armor/screen/"))
             VectorSet(tint, 0.0f, 0.31f, 1.0f);
         else if (model_starts_with(model, "models/items/armor/shield/"))
@@ -679,7 +679,7 @@ static bool CL_GetModelSkinTint(const centity_state_t *state, vec3_t tint)
     }
 
     if (cl_itemtint->integer && model_starts_with(model, "models/items/mega_h/")) {
-        VectorSet(tint, 0.45f, 1.0f, 0.35f);
+        VectorSet(tint, 1.0f, 0.18f, 0.65f);
         return true;
     }
 
@@ -689,17 +689,17 @@ static bool CL_GetModelSkinTint(const centity_state_t *state, vec3_t tint)
     }
 
     if (cl_itemtint->integer && model_starts_with(model, "models/items/healing/large/")) {
-        VectorSet(tint, 0.62f, 1.0f, 0.48f);
+        VectorSet(tint, 1.0f, 0.18f, 0.65f);
         return true;
     }
 
     if (cl_itemtint->integer && model_starts_with(model, "models/items/healing/medium/")) {
-        VectorSet(tint, 0.62f, 1.0f, 0.48f);
+        VectorSet(tint, 1.0f, 0.18f, 0.65f);
         return true;
     }
 
     if (cl_itemtint->integer && model_starts_with(model, "models/items/healing/stimpack/")) {
-        VectorSet(tint, 0.62f, 1.0f, 0.48f);
+        VectorSet(tint, 1.0f, 0.18f, 0.65f);
         return true;
     }
 
@@ -812,8 +812,8 @@ static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *
     if (item_highlight &&
         (model_starts_with(model, "models/items/healing/") ||
          model_starts_with(model, "models/items/mega_h/"))) {
-        highlight->shell = RF_SHELL_GREEN;
-        VectorSet(highlight->color, 0.0f, 1.0f, 0.0f);
+        highlight->shell = RF_SHELL_RED | RF_SHELL_BLUE;
+        VectorSet(highlight->color, 1.0f, 0.18f, 0.65f);
         return true;
     }
 
@@ -831,8 +831,8 @@ static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *
             highlight->shell = RF_SHELL_DOUBLE;
             VectorSet(highlight->color, 1.0f, 0.75f, 0.0f);
         } else if (model_starts_with(model, "models/items/armor/jacket/")) {
-            highlight->shell = RF_SHELL_GREEN;
-            VectorSet(highlight->color, 0.3f, 1.0f, 0.3f);
+            highlight->shell = RF_SHELL_GREEN | RF_SHELL_DOUBLE;
+            VectorSet(highlight->color, 0.45f, 0.65f, 0.08f);
         } else if (model_starts_with(model, "models/items/armor/screen/")) {
             highlight->shell = RF_SHELL_BLUE;
             VectorSet(highlight->color, 0.0f, 0.3f, 1.0f);
