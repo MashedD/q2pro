@@ -100,7 +100,6 @@ begin video
     range "modulate world" gl_modulate_world 1 5
     range "modulate entities"  gl_modulate_entities 1 5
     toggle "bloom" gl_bloom
-    toggle --status "OpenGL: compact glare on visible wall lights" "light glare" gl_glare
     range "glowmap intensity" gl_glowmap_intensity 0 1
     toggle "lava glowmaps" r_lava_glowmaps
 end
