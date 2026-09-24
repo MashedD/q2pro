@@ -302,6 +302,10 @@ begin effects
     toggle "item highlighting" cl_itemhighlight
     toggle "weapon highlighting" cl_weaponhighlight
     toggle "ammo highlighting" cl_ammohighlight
+    toggle "tint item skins" cl_itemtint
+    toggle "tint weapon skins" cl_weapontint
+    toggle "tint ammo skins" cl_ammotint
+    toggle "tint player skins" cl_playertint
     toggle "player highlighting" cl_playerhighlight
     range "highlight bloom" cl_itemhighlight_glow 0 5 1
     values "ground shadows" gl_shadows no yes fade

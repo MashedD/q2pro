@@ -235,6 +235,14 @@ static const uint32_t vk_alias_shadow_frag_spv[] =
 #include "vk_alias_shadow_frag_spv.h"
 ;
 
+static const uint32_t vk_alias_frag_spv[] =
+#include "vk_alias_frag_spv.h"
+;
+
+static const uint32_t vk_alias_alpha_frag_spv[] =
+#include "vk_alias_alpha_frag_spv.h"
+;
+
 static const uint32_t vk_motion_world_vert_spv[] =
 #include "vk_motion_world_vert_spv.h"
 ;
@@ -751,10 +759,12 @@ typedef struct {
     float fog[4];
     float intensity;
     float desaturation;
+    float _pad2[2];
+    float skin_tint[4];
 } vk_alias_push_t;
 
 typedef char vk_alias_push_size_check[
-    sizeof(vk_alias_push_t) == 136 ? 1 : -1];
+    sizeof(vk_alias_push_t) == 160 ? 1 : -1];
 
 typedef struct {
     mat4_t mvp;
@@ -10605,10 +10615,10 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
         vk_create_shader_module(vk_alias_shadow_frag_spv,
                                 sizeof(vk_alias_shadow_frag_spv)) :
         alpha_test ?
-        vk_create_shader_module(vk_world_alpha_frag_spv,
-                                sizeof(vk_world_alpha_frag_spv)) :
-        vk_create_shader_module(vk_world_frag_spv,
-                                sizeof(vk_world_frag_spv));
+        vk_create_shader_module(vk_alias_alpha_frag_spv,
+                                sizeof(vk_alias_alpha_frag_spv)) :
+        vk_create_shader_module(vk_alias_frag_spv,
+                                sizeof(vk_alias_frag_spv));
     if (!frag) {
         vk.DestroyShaderModule(vk.device, vert, NULL);
         return false;
@@ -15736,6 +15746,15 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     vk_fog_params(fd, push.fog);
     push.intensity = vk_texture_intensity();
     push.desaturation = 0.0f;
+    push._pad2[0] = push._pad2[1] = 0.0f;
+    if ((ent->flags & RF_SKINTINT) && !(ent->flags & RF_SHELL_MASK)) {
+        push.skin_tint[0] = ent->skin_tint[0] * SKINTINT_BRIGHTNESS;
+        push.skin_tint[1] = ent->skin_tint[1] * SKINTINT_BRIGHTNESS;
+        push.skin_tint[2] = ent->skin_tint[2] * SKINTINT_BRIGHTNESS;
+        push.skin_tint[3] = 1.0f;
+    } else {
+        Vector4Clear(push.skin_tint);
+    }
 
     for (int i = 0; i < model->alias_batch_count; i++) {
         const vk_alias_batch_t *batch = &model->alias_batches[i];
@@ -15781,6 +15800,10 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
                 glow_push.color[0] = 1.0f;
                 glow_push.color[1] = 1.0f;
                 glow_push.color[2] = 1.0f;
+                glow_push.skin_tint[3] =
+                    (push.skin_tint[0] > 2.0f &&
+                     push.skin_tint[1] > 2.0f &&
+                     push.skin_tint[2] > 2.0f) ? 1.0f : 0.0f;
                 glow_push.intensity = vk_glowmap_intensity();
                 vk_draw_alias_pass(cmd, vk.drawing_bloom ? vk.alias_glow_bloom_pipeline :
                                    vk.alias_glow_pipeline, buffers, offsets,

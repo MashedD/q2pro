@@ -45,6 +45,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define RF_RT_WATER_WAKE     BIT_ULL(45)
 #define RF_RT_ENERGY_COLLAPSE BIT_ULL(46)
 #define RF_RT_RAIL_IONIZATION BIT_ULL(47)
+#define RF_SKINTINT          BIT_ULL(48)
+#define SKINTINT_BRIGHTNESS  1.25f
 
 typedef enum {
     RT_TELEPORT_STANDARD,
@@ -101,6 +103,7 @@ typedef struct entity_s {
 
     float   alpha;                  // ignore if RF_TRANSLUCENT isn't set
     color_t rgba;
+    vec3_t  skin_tint;     // RGB multiplier for the alias skin when RF_SKINTINT is set
 
     uint64_t    flags;
 

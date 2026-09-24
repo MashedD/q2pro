@@ -11,6 +11,8 @@ layout(push_constant) uniform Push {
     vec4 fog;
     float intensity;
     float desaturation;
+    float _pad2[2];
+    vec4 skin_tint;
 } pc;
 
 layout(location = 0) in vec3 in_position;

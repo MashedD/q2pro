@@ -113,6 +113,7 @@ static void write_block(sizebuf_t *buf, glStateBits_t bits)
         float u_heightfog_falloff;
         vec2 pad_4;
         vec4 u_vieworg;
+        vec4 u_skin_tint;
     )
     GLSF("};\n");
 }
@@ -592,8 +593,28 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
     if (!(bits & GLS_TEXTURE_REPLACE))
         GLSL(diffuse *= v_color;)
 
+    if (bits & GLS_SKINTINT) {
+        GLSL(
+            if (u_skin_tint.a > 0.0) {
+                float luma = dot(diffuse.rgb, vec3(0.2126, 0.7152, 0.0722));
+                luma = 0.15 + 0.85 * sqrt(max(luma, 0.0));
+                diffuse.rgb = mix(diffuse.rgb,
+                                  vec3(luma) * u_skin_tint.rgb,
+                                  u_skin_tint.a);
+            }
+        )
+    }
+
     if (!(bits & GLS_LIGHTMAP_ENABLE) && (bits & GLS_GLOWMAP_ENABLE)) {
         GLSL(vec4 glowmap = texture(u_glowmap, tc);)
+        if (bits & GLS_SKINTINT) {
+            GLSL(
+                if (all(greaterThan(u_skin_tint.rgb, vec3(2.0)))) {
+                    float luma = dot(glowmap.rgb, vec3(0.2126, 0.7152, 0.0722));
+                    glowmap.rgb = vec3(luma) * u_skin_tint.rgb;
+                }
+            )
+        }
         if (bits & GLS_INTENSITY_ENABLE)
             GLSL(diffuse.rgb += glowmap.rgb * u_intensity2;)
         else
