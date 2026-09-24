@@ -161,8 +161,8 @@ vec3 static_lamp_bloom(vec3 color)
         return vec3(0.0);
 
     float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    float mask = smoothstep(0.14, 0.45, luma);
-    return color * mask * (0.75 * max(pc.intensity, 0.0));
+    float mask = smoothstep(0.02, 0.18, luma);
+    return color * mask * (3.0 * max(pc.intensity, 0.0));
 }
 
 float rt_emissive_control(float packed)

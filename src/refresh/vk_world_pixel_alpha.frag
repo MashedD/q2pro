@@ -49,13 +49,14 @@ vec3 static_lamp_bloom(vec3 color)
         return vec3(0.0);
 
     float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    float mask = smoothstep(0.14, 0.45, luma);
-    return color * mask * (0.75 * max(pc.intensity, 0.0));
+    float mask = smoothstep(0.02, 0.18, luma);
+    return color * mask * (3.0 * max(pc.intensity, 0.0));
 }
 
 void main()
 {
     out_bloom = vec4(0.0);
+    vec3 lamp_material = vec3(0.0);
     float mode = fast_path ? 0.0 : mod(v_mode, 4.0);
     vec2 uv = v_uv;
 
@@ -70,6 +71,7 @@ void main()
         if (texel.a <= 0.666) {
             discard;
         }
+        lamp_material = texel.rgb;
         if (pc.desaturation > 0.0) {
             float luma = dot(texel.rgb, vec3(0.2126, 0.7152, 0.0722));
             texel.rgb = mix(texel.rgb, vec3(luma), pc.desaturation);
@@ -94,5 +96,5 @@ void main()
         float fog = 1.0 - exp(-(d * d));
         out_color.rgb = mix(out_color.rgb, pc.fog.rgb, fog);
     }
-    out_bloom = vec4(static_lamp_bloom(out_color.rgb), out_color.a);
+    out_bloom = vec4(static_lamp_bloom(lamp_material), out_color.a);
 }
