@@ -62,6 +62,10 @@ cvar_t *gl_damageblend_frac;
 cvar_t *gl_waterwarp;
 cvar_t *gl_fog;
 cvar_t *gl_bloom;
+cvar_t *gl_glare;
+cvar_t *gl_glare_threshold;
+cvar_t *gl_glare_size;
+cvar_t *gl_glare_intensity;
 cvar_t *r_lava_glowmaps;
 cvar_t *gl_swapinterval;
 
@@ -923,6 +927,168 @@ static pp_flags_t GL_BindFramebuffer(void)
     return flags;
 }
 
+static void GL_OccludeGlare(void)
+{
+    bool set = false;
+    if (!gl_glare->integer || !glr.num_glare_sources ||
+        (glr.fd.rdflags & RDF_NOWORLDMODEL) ||
+        gl_fullbright->integer || gl_vertexlight->integer)
+        return;
+
+    for (int i = 0; i < glr.num_glare_sources; i++) {
+        glare_source_t *gs = &glr.glare_sources[i];
+        int j;
+        for (j = 0; j < 4; j++)
+            if (PlaneDiff(gs->origin, &glr.frustumPlanes[j]) < -2.5f)
+                break;
+        if (j != 4) {
+            gs->pending = gs->visible = false;
+            continue;
+        }
+
+        vec3_t to_src, to_viewer;
+        VectorSubtract(gs->origin, glr.fd.vieworg, to_src);
+        float dist = VectorNormalize(to_src);
+        VectorNegate(to_src, to_viewer);
+        if (dist < 1 || DotProduct(to_viewer, gs->normal) < 0.01f) {
+            gs->pending = gs->visible = false;
+            continue;
+        }
+        if (gs->pending || com_eventTime - gs->timestamp <= 33)
+            continue;
+
+        if (!set) {
+            GL_LoadMatrix(glr.viewmatrix);
+            GL_LoadUniforms();
+            GL_BindTexture(TMU_TEXTURE, TEXNUM_WHITE);
+            GL_BindArrays(VA_OCCLUDE);
+            GL_StateBits(GLS_DEPTHMASK_FALSE);
+            GL_ArrayBits(GLA_VERTEX);
+            qglColorMask(0, 0, 0, 0);
+            set = true;
+        }
+        float scale = 2.5f + (dist > 20 ? dist * 0.004f : 0);
+        vec3_t left, right, up, down;
+        VectorScale(glr.viewaxis[1], scale, left);
+        VectorNegate(left, right);
+        VectorScale(glr.viewaxis[2], scale, up);
+        VectorNegate(up, down);
+        VectorAdd3(gs->origin, down, left, tess.vertices);
+        VectorAdd3(gs->origin, up, left, tess.vertices + 3);
+        VectorAdd3(gs->origin, down, right, tess.vertices + 6);
+        VectorAdd3(gs->origin, up, right, tess.vertices + 9);
+        GL_LockArrays(4);
+        qglBeginQuery(gl_static.samples_passed, gs->query);
+        qglDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        qglEndQuery(gl_static.samples_passed);
+        GL_UnlockArrays();
+        gs->timestamp = com_eventTime;
+        gs->pending = true;
+        c.occlusionQueries++;
+    }
+    if (set)
+        qglColorMask(1, 1, 1, 1);
+}
+
+void GL_DrawGlare(void)
+{
+    if (!gl_glare->integer || !glr.num_glare_sources ||
+        (glr.fd.rdflags & RDF_NOWORLDMODEL) ||
+        gl_fullbright->integer || gl_vertexlight->integer)
+        return;
+
+    GL_LoadMatrix(glr.viewmatrix);
+    GL_LoadUniforms();
+    GL_BindTexture(TMU_TEXTURE, TEXNUM_PARTICLE);
+    GL_BindArrays(VA_EFFECT);
+    GL_StateBits(GLS_DEPTHTEST_DISABLE | GLS_DEPTHMASK_FALSE | GLS_BLEND_ADD);
+    GL_ArrayBits(GLA_VERTEX | GLA_TC | GLA_COLOR);
+    vec_t *dst = tess.vertices;
+    int count = 0;
+
+    for (int i = 0; i < glr.num_glare_sources; i++) {
+        glare_source_t *gs = &glr.glare_sources[i];
+        if (gs->pending && gs->timestamp != com_eventTime) {
+            GLuint result;
+            if (gl_config.caps & QGL_CAP_QUERY_RESULT_NO_WAIT) {
+                result = (GLuint)-1;
+                qglGetQueryObjectuiv(gs->query, GL_QUERY_RESULT_NO_WAIT, &result);
+                if (result != (GLuint)-1) {
+                    gs->visible = result != 0;
+                    gs->pending = false;
+                }
+            } else {
+                qglGetQueryObjectuiv(gs->query, GL_QUERY_RESULT_AVAILABLE, &result);
+                if (result) {
+                    qglGetQueryObjectuiv(gs->query, GL_QUERY_RESULT, &result);
+                    gs->visible = result != 0;
+                    gs->pending = false;
+                }
+            }
+        }
+        GL_AdvanceValue(&gs->visibility, gs->visible, gl_flarespeed->value);
+        if (!gs->visibility)
+            continue;
+
+        vec3_t to_src, to_viewer;
+        VectorSubtract(gs->origin, glr.fd.vieworg, to_src);
+        float dist = VectorLength(to_src);
+        if (dist < 1)
+            continue;
+        VectorScale(to_src, -1.0f / dist, to_viewer);
+        float angle = DotProduct(to_viewer, gs->normal);
+        if (angle < 0.01f)
+            continue;
+        float scale = Cvar_ClampValue(gl_glare_size, 0, 256) * gs->brightness;
+        if (dist > 20)
+            scale *= 1.0f + dist * 0.004f;
+        scale = min(scale, 200.0f);
+        float alpha = min(angle * gs->brightness * gs->visibility *
+                          Cvar_ClampValue(gl_glare_intensity, 0, 4), 1.0f);
+        if (alpha < 0.01f)
+            continue;
+
+        color_t color;
+        color.u8[0] = (byte)(Q_clipf(gs->color[0], 0, 1) * 255);
+        color.u8[1] = (byte)(Q_clipf(gs->color[1], 0, 1) * 255);
+        color.u8[2] = (byte)(Q_clipf(gs->color[2], 0, 1) * 255);
+        color.u8[3] = (byte)(alpha * 255);
+        vec3_t left, right, up, down, corners[4];
+        VectorScale(glr.viewaxis[1], scale, left);
+        VectorNegate(left, right);
+        VectorScale(glr.viewaxis[2], scale, up);
+        VectorNegate(up, down);
+        VectorAdd3(gs->origin, down, left, corners[0]);
+        VectorAdd3(gs->origin, up, left, corners[1]);
+        VectorAdd3(gs->origin, down, right, corners[2]);
+        VectorAdd3(gs->origin, up, right, corners[3]);
+        static const int indices[6] = { 0, 1, 2, 2, 1, 3 };
+        static const vec2_t uv[4] = { {0, 1}, {0, 0}, {1, 1}, {1, 0} };
+        for (int j = 0; j < 6; j++) {
+            int k = indices[j];
+            VectorCopy(corners[k], dst);
+            dst += 3;
+            VectorCopy(uv[k], dst);
+            dst += 2;
+            WN32(dst, color.u32);
+            dst++;
+        }
+        count += 6;
+        if (count >= TESS_MAX_VERTICES - 6) {
+            GL_LockArrays(count);
+            qglDrawArrays(GL_TRIANGLES, 0, count);
+            GL_UnlockArrays();
+            dst = tess.vertices;
+            count = 0;
+        }
+    }
+    if (count) {
+        GL_LockArrays(count);
+        qglDrawArrays(GL_TRIANGLES, 0, count);
+        GL_UnlockArrays();
+    }
+}
+
 void R_RenderFrame(const refdef_t *fd)
 {
     GL_Flush2D();
@@ -977,8 +1143,10 @@ void R_RenderFrame(const refdef_t *fd)
     GL_DrawParticles();
 
     GL_OccludeFlares();
+    GL_OccludeGlare();
 
     GL_DrawFlares();
+    GL_DrawGlare();
 
     GL_DrawEntities(glr.ents.alpha_front);
 
@@ -1152,6 +1320,13 @@ static void gl_lightmap_changed(cvar_t *self)
     lm.dirty = true; // rebuild all lightmaps next frame
 }
 
+static void gl_glare_threshold_changed(cvar_t *self)
+{
+    Cvar_ClampValue(self, 0, 1);
+    if (gl_static.world.cache)
+        GL_BuildGlareList();
+}
+
 static void gl_modulate_entities_changed(cvar_t *self)
 {
     gl_static.entity_modulate = Cvar_ClampValue(gl_modulate, 0, 1e6f);
@@ -1238,6 +1413,11 @@ static void GL_Register(void)
     gl_waterwarp = Cvar_Get("gl_waterwarp", "0", 0);
     gl_fog = Cvar_Get("gl_fog", "1", 0);
     gl_bloom = Cvar_Get("gl_bloom", "1", CVAR_ARCHIVE);
+    gl_glare = Cvar_Get("gl_glare", "1", CVAR_ARCHIVE);
+    gl_glare_threshold = Cvar_Get("gl_glare_threshold", "0.3", 0);
+    gl_glare_threshold->changed = gl_glare_threshold_changed;
+    gl_glare_size = Cvar_Get("gl_glare_size", "16", 0);
+    gl_glare_intensity = Cvar_Get("gl_glare_intensity", "0.25", 0);
     if (Cvar_Get("r_fsr", "0", CVAR_ARCHIVE)->integer)
         Com_WPrintf("r_fsr is Vulkan-only; FSR is disabled by the OpenGL renderer\n");
     Cvar_Get("r_fsr_quality", "quality", CVAR_ARCHIVE);

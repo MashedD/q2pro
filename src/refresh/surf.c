@@ -985,8 +985,17 @@ void GL_RebuildLighting(void)
     LM_RebuildSurfaces();
 }
 
+static void GL_ClearGlareList(void)
+{
+    for (int i = 0; i < glr.num_glare_sources; i++)
+        if (glr.glare_sources[i].query)
+            qglDeleteQueries(1, &glr.glare_sources[i].query);
+    glr.num_glare_sources = 0;
+}
+
 void GL_FreeWorld(void)
 {
+    GL_ClearGlareList();
     if (!gl_static.world.cache)
         return;
 
@@ -1069,6 +1078,76 @@ static void remove_fake_sky_faces(const bsp_t *bsp)
         Com_DPrintf("Removed %d fake sky faces\n", count);
 }
 
+void GL_BuildGlareList(void)
+{
+    const bsp_t *bsp = gl_static.world.cache;
+    GL_ClearGlareList();
+    if (!bsp || !qglBeginQuery)
+        return;
+
+    for (int i = 0; i < bsp->numfaces; i++) {
+        const mface_t *surf = &bsp->faces[i];
+        if ((surf->drawflags & SURF_NODRAW) || !surf->texinfo ||
+            !surf->texinfo->image || !surf->plane || !surf->firstsurfedge ||
+            surf->numsurfedges <= 0 || surf->lm_width <= 0 || surf->lm_height <= 0 ||
+            !surf->light_m || !surf->light_m->buffer)
+            continue;
+
+        bool glowmap_source = surf->texinfo->image->texnum2 != 0;
+        bool static_light_source = !glowmap_source &&
+            !(surf->drawflags & (SURF_TRANS_MASK | SURF_WARP | SURF_SKY)) &&
+            !(surf->texinfo->c.flags & (SURF_SKY | SURF_NODRAW)) &&
+            (surf->texinfo->c.flags & SURF_LIGHT);
+        if (!glowmap_source && !static_light_source)
+            continue;
+
+        vec3_t center = { 0, 0, 0 };
+        const msurfedge_t *edge = surf->firstsurfedge;
+        for (int j = 0; j < surf->numsurfedges; j++, edge++) {
+            const medge_t *e = bsp->edges + edge->edge;
+            const mvertex_t *v = bsp->vertices + e->v[edge->vert];
+            VectorAdd(center, v->point, center);
+        }
+        VectorScale(center, 1.0f / surf->numsurfedges, center);
+
+        int s = surf->lm_width / 2, t = surf->lm_height / 2;
+        int offset = ((surf->light_t + t) * lm.block_size + surf->light_s + s) * 4;
+        const byte *pixel = surf->light_m->buffer + offset;
+        float r = pixel[0] / 255.0f, g = pixel[1] / 255.0f, b = pixel[2] / 255.0f;
+        float brightness = (r + g + b) / 3.0f;
+        if (static_light_source) {
+            float peak = max(r, max(g, b));
+            float base = surf->texinfo->c.value > 0 ? surf->texinfo->c.value : 200.0f;
+            if (peak > 0.0f) {
+                r /= peak; g /= peak; b /= peak;
+            } else {
+                r = g = b = 1.0f;
+            }
+            brightness = Q_clipf(base / 200.0f, 0.0f, 1.0f);
+        }
+        if (brightness < Cvar_ClampValue(gl_glare_threshold, 0, 1))
+            continue;
+        if (glr.num_glare_sources >= MAX_GLARE_SOURCES)
+            break;
+
+        vec3_t normal;
+        VectorCopy(surf->plane->normal, normal);
+        if (surf->drawflags & DSURF_PLANEBACK)
+            VectorNegate(normal, normal);
+        glare_source_t *gs = &glr.glare_sources[glr.num_glare_sources++];
+        memset(gs, 0, sizeof(*gs));
+        VectorMA(center, 2.0f, normal, gs->origin);
+        VectorCopy(normal, gs->normal);
+        VectorSet(gs->color, r, g, b);
+        gs->brightness = brightness;
+        qglGenQueries(1, &gs->query);
+        if (!gs->query) {
+            glr.num_glare_sources--;
+            break;
+        }
+    }
+}
+
 void GL_LoadWorld(const char *name)
 {
     char buffer[MAX_QPATH];
@@ -1099,6 +1178,7 @@ void GL_LoadWorld(const char *name)
             bsp->leafs[i].visframe = 0;
 
         Com_DPrintf("%s: reused old world model\n", __func__);
+        GL_BuildGlareList();
         bsp->refcount--;
         return;
     }
@@ -1197,6 +1277,7 @@ void GL_LoadWorld(const char *name)
 
     // post process all surfaces
     upload_world_surfaces();
+    GL_BuildGlareList();
 
     glr.fd.lightstyles = NULL;
 

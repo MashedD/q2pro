@@ -628,10 +628,23 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
     }
 
     if (bits & GLS_BLOOM_GENERATE) {
-        if (bits & GLS_BLOOM_SHELL)
-            GLSL(bloom = diffuse;)
-        else
+        if (bits & GLS_BLOOM_SHELL) {
+            if (bits & GLS_LIGHTMAP_ENABLE) {
+                // Static wall lamps have no separate glowmap. Seed bloom from
+                // their material, not their lightmap (which can receive colored
+                // dynamic lights), so nearby entities cannot recolor the halo.
+                GLSL(
+                    vec3 emissive = texture(u_texture, tc).rgb;
+                    float luma = dot(emissive, vec3(0.2126, 0.7152, 0.0722));
+                    float mask = smoothstep(0.02, 0.18, luma);
+                    bloom = vec4(emissive * mask * 3.0 * u_intensity, diffuse.a);
+                )
+            } else {
+                GLSL(bloom = diffuse;)
+            }
+        } else {
             GLSL(bloom.a = diffuse.a;)
+        }
     }
 
     if (bits & (GLS_FOG_GLOBAL | GLS_FOG_HEIGHT))
