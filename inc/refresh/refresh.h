@@ -33,6 +33,40 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define RF_NOBLOOM          BIT_ULL(33)
 #define RF_NOSHELLSCALE     BIT_ULL(34)
 #define RF_BLOOM_ONLY       BIT_ULL(35)
+#define RF_BEAM_ADDITIVE    BIT_ULL(36)
+#define RF_EXPLOSION        BIT_ULL(37)
+#define RF_EFFECT_ONLY      BIT_ULL(38)
+#define RF_RT_IMPACT        BIT_ULL(39)
+#define RF_RT_SPLASH_RIPPLE BIT_ULL(40)
+#define RF_RT_TELEPORT      BIT_ULL(41)
+#define RF_RT_ITEM_RESPAWN   BIT_ULL(42)
+#define RF_RT_ELECTRIC       BIT_ULL(43)
+#define RF_RT_LANDING_DUST   BIT_ULL(44)
+#define RF_RT_WATER_WAKE     BIT_ULL(45)
+#define RF_RT_ENERGY_COLLAPSE BIT_ULL(46)
+#define RF_RT_RAIL_IONIZATION BIT_ULL(47)
+#define RF_SKINTINT          BIT_ULL(48)
+#define SKINTINT_BRIGHTNESS  1.25f
+
+typedef enum {
+    RT_TELEPORT_STANDARD,
+    RT_TELEPORT_DBALL,
+    RT_TELEPORT_BOSS,
+} rt_teleport_type_t;
+
+typedef enum {
+    RT_LANDING_SHORT,
+    RT_LANDING_NORMAL,
+    RT_LANDING_FAR,
+    RT_LANDING_SEVERITY_MASK = 3,
+    RT_LANDING_LOCAL = 4,
+} rt_landing_type_t;
+
+typedef enum {
+    RT_ENERGY_BFG_CORE,
+    RT_ENERGY_BFG_SECONDARY,
+    RT_ENERGY_TRACKER,
+} rt_energy_collapse_type_t;
 
 #define RF_SHELL_MASK       (RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE | \
                              RF_SHELL_DOUBLE | RF_SHELL_HALF_DAM | RF_SHELL_LITE_GREEN)
@@ -40,6 +74,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define DLIGHT_CUTOFF       64
 
 typedef struct entity_s {
+    uint32_t           temporal_id;    // renderer history identity, 0 = transient
+    uint32_t           temporal_generation;
     qhandle_t           model;          // opaque type outside refresh
     vec3_t              angles;
 
@@ -54,6 +90,9 @@ typedef struct entity_s {
     */
     vec3_t              oldorigin;  // also used as RF_BEAM's "to"
     unsigned            oldframe;
+    vec3_t              previous_origin;
+    vec3_t              previous_angles;
+    bool                previous_valid;
 
     /*
     ** misc
@@ -64,6 +103,7 @@ typedef struct entity_s {
 
     float   alpha;                  // ignore if RF_TRANSLUCENT isn't set
     color_t rgba;
+    vec3_t  skin_tint;     // RGB multiplier for the alias skin when RF_SKINTINT is set
 
     uint64_t    flags;
 
@@ -150,6 +190,11 @@ typedef struct {
 } refcfg_t;
 
 extern refcfg_t r_config;
+
+typedef enum {
+    REF_VIDEO_OPENGL,
+    REF_VIDEO_VULKAN,
+} ref_video_api_t;
 
 typedef struct {
     int left, right, top, bottom;
@@ -246,5 +291,6 @@ void    R_BeginFrame(void);
 void    R_EndFrame(void);
 void    R_ModeChanged(int width, int height, int flags);
 bool    R_VideoSync(void);
+ref_video_api_t R_GetVideoAPI(void);
 
 r_opengl_config_t R_GetGLConfig(void);

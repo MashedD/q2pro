@@ -158,6 +158,8 @@ static void Parse_Spin(menuFrameWork_t *menu, menuType_t type)
 static void Parse_Pairs(menuFrameWork_t *menu)
 {
     menuSpinControl_t *s;
+    menuSpinControl_t expanded = { 0 };
+    bool deferred;
     int c, i, numItems;
     char *status = NULL;
 
@@ -172,7 +174,10 @@ static void Parse_Pairs(menuFrameWork_t *menu)
     }
 
     numItems = Cmd_Argc() - (cmd_optind + 2);
-    if (numItems < 2 || (numItems & 1)) {
+    deferred = numItems > 0 &&
+        strchr(Cmd_ArgsFrom(cmd_optind + 2), '$') != NULL;
+    if ((!deferred && (numItems < 2 || (numItems & 1))) ||
+        (deferred && numItems < 1)) {
         Com_Printf("Usage: %s <name> <cvar> <desc1> <value1> [...]\n", Cmd_Argv(0));
         return;
     }
@@ -182,12 +187,39 @@ static void Parse_Pairs(menuFrameWork_t *menu)
     s->generic.name = UI_CopyString(Cmd_Argv(cmd_optind));
     s->generic.status = UI_CopyString(status);
     s->cvar = Cvar_WeakGet(Cmd_Argv(cmd_optind + 1));
+
+    cmd_optind += 2;
+    if (deferred) {
+        long_args_hack(&expanded, numItems);
+        if (expanded.numItems < 2 || (expanded.numItems & 1)) {
+            Com_Printf("Expanded pairs list must contain label/value pairs\n");
+            for (i = 0; i < expanded.numItems; i++)
+                Z_Free(expanded.itemnames[i]);
+            Z_Free(expanded.itemnames);
+            Z_Free(s->generic.name);
+            Z_Free(s->generic.status);
+            Z_Free(s);
+            return;
+        }
+
+        s->numItems = expanded.numItems / 2;
+        s->itemnames = UI_Mallocz(sizeof(char *) * (s->numItems + 1));
+        s->itemvalues = UI_Mallocz(sizeof(char *) * (s->numItems + 1));
+        for (i = 0; i < s->numItems; i++) {
+            s->itemnames[i] = expanded.itemnames[i * 2];
+            s->itemvalues[i] = expanded.itemnames[i * 2 + 1];
+        }
+        Z_Free(expanded.itemnames);
+        Menu_AddItem(menu, s);
+        return;
+    }
+
     numItems /= 2;
     s->itemnames = UI_Mallocz(sizeof(char *) * (numItems + 1));
     s->itemvalues = UI_Mallocz(sizeof(char *) * (numItems + 1));
     for (i = 0; i < numItems; i++) {
-        s->itemnames[i] = UI_CopyString(Cmd_Argv(cmd_optind + 2 + i * 2));
-        s->itemvalues[i] = UI_CopyString(Cmd_Argv(cmd_optind + 3 + i * 2));
+        s->itemnames[i] = UI_CopyString(Cmd_Argv(cmd_optind + i * 2));
+        s->itemvalues[i] = UI_CopyString(Cmd_Argv(cmd_optind + i * 2 + 1));
     }
     s->numItems = numItems;
 

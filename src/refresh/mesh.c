@@ -39,8 +39,6 @@ static GLuint           buffer;
 
 static vec3_t   shadedir;
 static bool     dotshading;
-
-static float    celscale;
 static float    shadowalpha;
 
 static drawshadow_t drawshadow;
@@ -417,16 +415,6 @@ static void setup_color(void)
         color[3] = 1;
 }
 
-static void setup_celshading(void)
-{
-    float value = Cvar_ClampValue(gl_celshading, 0, 10);
-
-    if (value == 0 || (glr.ent->flags & (RF_TRANSLUCENT | RF_SHELL_MASK | RF_TRACKER)) || !qglPolygonMode || !qglLineWidth)
-        celscale = 0;
-    else
-        celscale = 1.0f - Distance(origin, glr.fd.vieworg) / 700.0f;
-}
-
 static void uniform_mesh_color(float r, float g, float b, float a)
 {
     if (gls.currentva) {
@@ -435,28 +423,6 @@ static void uniform_mesh_color(float r, float g, float b, float a)
         Vector4Set(gls.u_block.mesh.color, r, g, b, a);
         gls.u_block_dirty = true;
     }
-}
-
-static void draw_celshading(const uint16_t *indices, int num_indices)
-{
-    if (celscale < 0.01f)
-        return;
-
-    GL_BindTexture(TMU_TEXTURE, TEXNUM_BLACK);
-    GL_StateBits(GLS_BLEND_BLEND | (meshbits & ~GLS_MESH_SHADE) | glr.fog_bits);
-    if (gls.currentva)
-        GL_ArrayBits(GLA_VERTEX);
-
-    uniform_mesh_color(0, 0, 0, color[3] * celscale);
-    GL_LoadUniforms();
-
-    qglLineWidth(gl_celshading->value * celscale);
-    qglPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-    qglCullFace(GL_FRONT);
-    qglDrawElements(GL_TRIANGLES, num_indices, GL_UNSIGNED_SHORT, indices);
-    qglCullFace(GL_BACK);
-    qglPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-    qglLineWidth(1);
 }
 
 static drawshadow_t cull_shadow(const model_t *model)
@@ -689,6 +655,9 @@ static void draw_alias_mesh(const uint16_t *indices, int num_indices,
         state |= meshbits;
     else if (dotshading)
         state |= GLS_SHADE_SMOOTH;
+    if ((glr.ent->flags & RF_SKINTINT) &&
+        !(glr.ent->flags & RF_SHELL_MASK))
+        state |= GLS_SKINTINT;
 
     if (glr.ent->flags & RF_TRANSLUCENT)
         state |= GLS_BLEND_BLEND | GLS_DEPTHMASK_FALSE;
@@ -722,8 +691,6 @@ static void draw_alias_mesh(const uint16_t *indices, int num_indices,
     GL_LockArrays(num_verts);
 
     qglDrawElements(GL_TRIANGLES, num_indices, GL_UNSIGNED_SHORT, indices);
-
-    draw_celshading(indices, num_indices);
 
     if (gl_showtris->integer & SHOWTRIS_MESH)
         GL_DrawOutlines(num_indices, GL_UNSIGNED_SHORT, indices);
@@ -970,6 +937,8 @@ void GL_DrawAliasModel(const model_t *model)
 
     VectorCopy(ent->origin, origin);
 
+    buffer = model->buffers[0];
+
     // cull the shadow
     drawshadow = cull_shadow(model);
 
@@ -987,7 +956,6 @@ void GL_DrawAliasModel(const model_t *model)
     // setup parameters common for all meshes
     if (!drawshadow)
         setup_color();
-    setup_celshading();
     setup_dotshading();
     setup_shadow();
 
@@ -998,7 +966,16 @@ void GL_DrawAliasModel(const model_t *model)
         shellscale = (ent->flags & RF_NOSHELLSCALE) ? 0 :
             (ent->flags & RF_WEAPONMODEL) ? WEAPONSHELL_SCALE : POWERSUIT_SCALE;
 
-    buffer = model->buffers[0];
+    if ((ent->flags & RF_SKINTINT) && !(ent->flags & RF_SHELL_MASK)) {
+        gls.u_block.skin_tint[0] = ent->skin_tint[0] * SKINTINT_BRIGHTNESS;
+        gls.u_block.skin_tint[1] = ent->skin_tint[1] * SKINTINT_BRIGHTNESS;
+        gls.u_block.skin_tint[2] = ent->skin_tint[2] * SKINTINT_BRIGHTNESS;
+        gls.u_block.skin_tint[3] = 1.0f;
+    } else {
+        Vector4Clear(gls.u_block.skin_tint);
+    }
+    gls.u_block_dirty = true;
+
     GL_BindBuffer(GL_ARRAY_BUFFER, model->buffers[0]);
     GL_BindBuffer(GL_ELEMENT_ARRAY_BUFFER, model->buffers[1]);
 

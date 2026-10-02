@@ -78,9 +78,19 @@ typedef struct {
     float           radius;             // from mid point
 
     int             serverframe;        // if not current, this ent isn't in the frame
+    uint32_t        temporal_generation;
 
     int             trailcount;         // for diminishing grenade trails
     vec3_t          lerp_origin;        // for trails (variable hz)
+
+    vec3_t          rt_water_wake_sample_origin;
+    vec3_t          rt_water_wake_origin;
+    vec3_t          rt_water_wake_normal;
+    vec3_t          rt_water_wake_direction;
+    int             rt_water_wake_sample_time;
+    int             rt_water_wake_seen_time;
+    float           rt_water_wake_scale;
+    bool            rt_water_wake_valid;
 
 #if USE_FPS
     int             prev_frame;
@@ -550,6 +560,10 @@ extern cvar_t   *cl_noglow;
 extern cvar_t   *cl_itemhighlight;
 extern cvar_t   *cl_weaponhighlight;
 extern cvar_t   *cl_ammohighlight;
+extern cvar_t   *cl_itemtint;
+extern cvar_t   *cl_weapontint;
+extern cvar_t   *cl_ammotint;
+extern cvar_t   *cl_playertint;
 extern cvar_t   *cl_itemhighlight_glow;
 extern cvar_t   *cl_playerhighlight;
 extern cvar_t   *cl_nobob;
@@ -577,6 +591,7 @@ extern cvar_t   *cl_showclamp;
 extern cvar_t   *cl_vwep;
 
 extern cvar_t   *cl_disable_particles;
+extern cvar_t   *cl_disable_self_blood;
 extern cvar_t   *cl_disable_explosions;
 extern cvar_t   *cl_dlight_hacks;
 extern cvar_t   *cl_smooth_explosions;
@@ -830,6 +845,12 @@ void CL_AddWeaponMuzzleFX(cl_muzzlefx_t fx, const vec3_t offset, float scale);
 void CL_AddMuzzleFX(const vec3_t origin, const vec3_t angles, cl_muzzlefx_t fx, int skin, float scale);
 
 void CL_SmokeAndFlash(const vec3_t origin);
+
+void CL_RTTeleportVortex(const vec3_t origin, rt_teleport_type_t type);
+void CL_RTItemRespawn(const vec3_t origin);
+void CL_RTLandingDust(int entnum, rt_landing_type_t type);
+void CL_RTEnergyCollapse(const vec3_t origin,
+                         rt_energy_collapse_type_t type);
 void CL_DrawBeam(const vec3_t org, const vec3_t end, qhandle_t model);
 void CL_PlayFootstepSfx(int step_id, int entnum, float volume, float attenuation);
 

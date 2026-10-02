@@ -82,9 +82,15 @@ cl_async::
 TIP: When using non-zero ‘gl_swapinterval’, ‘cl_async’ can be set to 2 to avoid
 blocking on buffer swaps, reducing input lag.
 
+With the Vulkan renderer, mode 2 also polls mailbox image readiness when
+‘gl_swapinterval’ is 0, preventing a render frame from blocking inside image
+acquisition.
+
 r_maxfps::
     Specifies maximum rendering frame rate if ‘cl_async’ is set to 1, otherwise
-    ignored.  Default value is 0, which means no particular limit.
+    ignored. Fractional frame intervals are accumulated so rates that do not
+    evenly divide 1000, such as 288, remain exact on average. Default value is
+    0, which means no particular limit.
 
 cl_maxfps::
     Specifies client physics frame rate if ‘cl_async’ 1 or 2 is used.
@@ -143,8 +149,9 @@ cl_updaterate::
     update rate available (that is, native server frame rate).
 
 cl_warn_on_fps_rounding::
-    Print a warning if value specified for ‘cl_maxfps’ or ‘r_maxfps’ is inexact
-    due to rounding. Default value is 1 (enabled).
+    Print a warning if the value specified for ‘cl_maxfps’ is inexact due to
+    rounding. Asynchronous ‘r_maxfps’ scheduling does not require rounding.
+    Default value is 1 (enabled).
 
 Network
 ~~~~~~~
@@ -239,6 +246,13 @@ cl_railcore_color::
 cl_railcore_width::
     Width of the rail core beam. Default value is 3.
 
+cl_railcore_glow::
+    Controls the soft outer layer and pale center of the alternative rail core,
+    clamped between 0 and 1. The outer layer retains `cl_railcore_color` while
+    the narrower center is tinted toward white; black remains black. Both
+    layers reuse the existing depth-tested beam and bloom rendering paths.
+    Value 0 restores the previous single-layer core. Default value is 0.65.
+
 cl_railspiral_color::
     Color of the rail spiral. Default value is "blue".
 
@@ -254,6 +268,18 @@ cl_disable_particles::
       - 8 — rocket trails
       - 16 — blood splashes
       - 32 — blaster trails
+
+cl_disable_self_blood::
+    Hides ordinary blood particles only when their impact point is inside the
+    local player's bounding box. Blood particles from hits on other players and
+    monsters remain visible. This setting does not affect damage blending,
+    gibs, or the `cl_disable_particles` bitmask. Default value is 0.
+
+cl_projectiletrail_color::
+    Overrides the particle color of flying rocket and grenade trails. The
+    setting accepts the named colors `black`, `red`, `green`, `yellow`,
+    `blue`, `cyan`, `magenta`, and `white`. Set it to `none` to preserve the
+    default trail colors. Changes apply immediately. Default value is `none`.
 
 .Bitmasks
 TIP: Bitmask cvars allow multiple features to be enabled. To enable the needed
@@ -726,12 +752,678 @@ sys_exitonerror::
     command line only.
 
 
+Vulkan Renderer
+~~~~~~~~~~~~~~~
+
+r_fsr::
+    Enables AMD FidelityFX Super Resolution 3 temporal upscaling in the
+    Vulkan renderer. The scene is rendered at a reduced resolution and
+    reconstructed to the display resolution before the 2D interface is drawn.
+    This is available on compatible Vulkan devices, including AMD cards;
+    OpenGL ignores it and reports that FSR is Vulkan-only. Default value is 0.
+
+r_fsr_quality::
+    Selects the FSR3 render scale: ‘quality’ (1.5x), ‘balanced’ (1.7x),
+    ‘performance’ (2x), or ‘ultra_performance’ (3x). Changes take effect after
+    the Vulkan swapchain is recreated. Default value is ‘quality’.
+
+r_fsr_sharpness::
+    Controls the optional FSR3 RCAS sharpening pass from 0 (disabled) to 1
+    (maximum). Zero is the fastest setting because it avoids an additional
+    sharpening pass. The default value is 0.
+
+r_fsr_auto::
+    Enables the Vulkan FSR3 automatic performance mode. When enabled, the
+    renderer compares native resolution with only the selected r_fsr_quality
+    profile. It keeps FSR when frame cost improves by at least 5%; otherwise
+    it uses native resolution without lowering the selected quality. Each
+    window discards 15 warmup frames, collects 90 eligible submissions, and
+    trims the fastest and slowest 10%. CPU recording and GPU timings belong
+    to the same submission; CPU-only estimates are identified in the log.
+    Set this to 0 to force the selected profile. Default value is 1.
+
+r_fsr_motion::
+    Selects the FSR motion-vector path. ‘auto’ reconstructs camera motion from
+    depth, overrides moving objects, and adds reactive coverage for effects.
+    ‘full’ additionally redraws static geometry as a reference path. ‘fast’
+    uses camera motion only and can ghost on moving objects and effects.
+    Frame generation overrides ‘fast’ to include dynamic motion.
+    Default value is ‘auto’.
+
+r_fsr_mip_bias::
+    FSR scene texture mip bias. ‘auto’ uses log2(render width / display width)
+    minus one to retain texture detail at reduced resolution. A numeric value
+    overrides this bias within device limits. UI textures are unaffected.
+    Default value is ‘auto’.
+
+r_fsr_frame_generation::
+    Enables the optional FSR3 optical-flow frame-generation path in the Vulkan
+    renderer. It is disabled by default, requires FSR3-compatible Vulkan
+    hardware, and is automatically skipped while the scene is paused or a
+    non-gameplay view is active. Automatic performance mode keeps frame
+    generation disabled because it adds work without increasing the real
+    render rate; set r_fsr_auto to 0 to explicitly test it. If frame
+    generation reports an error or the
+    Vulkan device is lost, it is disabled for the current session and the
+    renderer falls back to normal Vulkan rendering or FSR upscaling; the
+    archived cvar value is preserved. OpenGL ignores this cvar. Default value
+    is 0.
+
+r_fsr_composition_mask::
+    Enables the separate FSR3 transparency-and-composition mask for translucent
+    surfaces and effects. It is generated with the motion coverage pass and
+    defaults to 1. Devices without the required color attachments or
+    independent blending use the reactive-mask fallback.
+
+vk_fsr_precision::
+    Selects FSR3 shader precision: ‘auto’ enables FP16 only when Vulkan reports
+    and enables shaderFloat16, ‘fp16’ requests that capability and otherwise
+    falls back to FP32, and ‘fp32’ disables FP16. Default value is ‘auto’.
+
+vk_fsr_subgroup::
+    Requests a compute subgroup size of ‘native’, 32, or 64 when supported by
+    the device. Unsupported requests fall back to native. Changing this or
+    vk_fsr_precision recreates the Vulkan device. Default value is ‘native’.
+
+vk_fsr_profile::
+    Enables opt-in per-dispatch FSR GPU timestamp logging with SDK effect, pass,
+    permutation, and duration. It is excluded from automatic performance tests.
+    Default value is 0.
+
+vk_fsr_debug::
+    Selects an opt-in FSR overlay: ‘off’, ‘motion’, ‘reactive’, ‘composition’,
+    or ‘depth’. It is excluded from automatic performance tests. Default value
+    is ‘off’.
+
+vk_fsr_benchmark::
+    Emits timestamped per-frame samples for the external
+    ‘tests/fsr_benchmark.py’ harness. Default value is 0.
+
+fsr_retest::
+    Restarts the automatic FSR performance evaluation after a device, display,
+    or workload change. This is useful when r_fsr_auto is enabled and the
+    initial warm-up was captured under an unrepresentative workload.
+
+vk_raytracing::
+    Enables the optional Vulkan ray-query path. The renderer preserves Vulkan
+    pixel lightmaps, glow maps, and bloom while using ray queries for
+    dynamic-light shadows and ambient occlusion on opaque world surfaces.
+    Stable world AO and visibility-weighted color from ‘SURF_LIGHT’ emitters
+    are baked once when a map loads into an RGBA atlas capped at 2048x2048.
+    Existing lightmaps remain the authoritative diffuse lighting: baked RT
+    emitter data supplies localized, capped colored light pools and a matching
+    bloom source. AO and emitter visibility each receive a budget of
+    approximately four million rays. The renderer validates atlas coverage and
+    reports AO/emissive statistics after the bake. Successful bakes therefore
+    add no per-frame AO or static-light rays.
+    If the bake is unavailable, the renderer falls back to the previous
+    distance-limited single-ray AO and two-source emissive paths. Dynamic and
+    emissive shadow opacity use blocker distance, keeping contact shadows
+    distinct while softening distant blockers. The strongest dynamic light
+    uses two symmetric area samples when its contribution is visible and the
+    receiver is within 320 world units; weaker or distant lights retain a
+    single center sample. Dynamic shadows remain per-pixel
+    within 512 world units and share results in 2x2 quads beyond that distance.
+    The same visibility results drive a capped dynamic color-bounce
+    approximation, adding localized combat-light spill without extra rays or
+    render passes. AO affects baked lightmaps but preserves emissive glow. A
+    renderer restart is required. If the selected
+    device lacks Vulkan 1.2, acceleration structures, ray queries, buffer
+    device addresses, or the required descriptor features, Q2PRO reports the
+    reason and continues with the raster path. Default value is 0.
+
+vk_rt_ao::
+    Controls ray-traced ambient-occlusion strength on opaque BSP world
+    surfaces, clamped between 0 and 0.5. A contact-focused sampling cone and
+    response curve make corners, wall/floor junctions, stairs, and undersides
+    clearly deeper while limiting broad scene darkening. The default setting
+    darkens ordinary strongly occluded contacts by roughly one third, with the
+    strongest well-lit contacts capped at 45 percent; an ambient floor
+    preserves texture detail at higher settings. Glowmapped pixels remain
+    protected. The baked atlas is reused when this value changes, so changes
+    apply immediately without rebuilding the map. Value 0 disables the effect.
+    Default value is 0.24.
+
+vk_rt_emissive::
+    Controls ray-shadowed color from opaque BSP surfaces marked
+    with the Quake II ‘SURF_LIGHT’ flag. Original lightmap luminance is never
+    replaced by this data. Visible emitters add localized colored illumination
+    on top of the raster result and, when bloom is enabled, a matching bloom
+    source. Light color is derived from each surface's glow mask or
+    brightest base-texture pixels when no glow mask exists. Each face retains
+    its strongest 12 possible sources. The map-load bake chooses the strongest
+    two at each atlas texel and samples across the emitting surface to create
+    soft, stable visibility. Weak distant contributions are rejected. Added
+    luminance is capped at 45 percent of the local raster result, with a small
+    dark-surface floor and a 0.12 absolute maximum. Screen-style headroom keeps
+    bright texture detail from clipping. Static RT bloom is capped separately
+    at 0.06, preventing broad exposure changes. If baking fails, the per-frame
+    two-source implementation supplies the same light-pool and bloom inputs.
+    Influence lists remain in the world mesh so ordinary face batching stays
+    available. Changes apply immediately without rebaking. Default value is
+    0.35; 0 removes colored pools and static RT bloom while the shared atlas
+    remains available for ambient occlusion.
+
+vk_rt_reflections::
+    Controls half-resolution screen-space reflections on floors and grazing
+    walls, clamped between 0 and 1. Materials use 10 to 14 adaptive half-size
+    depth-march steps followed by a full-resolution, roughness-aware bilateral
+    resolve. Strict depth crossings reject self-reflections, while continuous
+    distance and screen-edge fades avoid hard reflection boundaries. Objects
+    outside the screen or hidden behind other geometry cannot be reflected.
+    Requires multisampling 1x. Default value is 0.35; value 0 disables it.
+
+vk_rt_reflection_glints::
+    Controls compact colored highlights around bright details in resolved
+    screen-space reflections, clamped between 0 and 1. Brightness and
+    screen-space luminance variation isolate reflected lamps, explosions, and
+    projectiles after the depth- and material-aware bilateral resolve. Smooth
+    materials respond most strongly while rough surfaces suppress the effect.
+    Added luminance is capped at 0.12. The effect adds no ray queries, texture
+    samples, passes, descriptors, or draws and requires `vk_rt_reflections`.
+    Changes apply immediately. Default value is 0.55; value 0 disables it.
+
+vk_rt_reflection_dispersion::
+    Controls red-blue spectral separation around bright details in smooth
+    resolved screen-space reflections, clamped between 0 and 1. The effect
+    derives a radial color gradient from the four samples already used by the
+    bilateral resolve. Brightness, local detail, material smoothness,
+    reflection coverage, and screen-position masks reject broad or unstable
+    color shifts. Channel deviation and luminance change are capped to avoid
+    patches or overall scene-brightness changes. It adds no texture samples,
+    ray queries, passes, descriptors, push-constant storage, or draw calls and
+    requires `vk_rt_reflections`. Changes apply immediately. Default value is
+    0.6; value 0 restores the previous reflection resolve.
+
+vk_rt_emissive_halo::
+    Controls stable colored edge halos on opaque static BSP `SURF_LIGHT`
+    textures while Vulkan ray tracing is active, clamped between 0 and 1. The
+    effect derives boundaries from bright base-texture details and screen-space
+    derivatives, using a glowmap as an optional refinement when one exists. It
+    preserves bright cores and rejects weak internal noise. Its
+    local contribution is capped at 0.045 luminance; a separate contribution
+    capped at 0.035 feeds the existing bloom path when enabled. It adds no
+    texture samples, ray queries, passes, descriptors, or draws and remains
+    independent of `vk_rt_emissive`. Changes apply immediately. Default value
+    is 0.65; value 0 disables both local and bloom contributions.
+
+vk_rt_emissive_flicker::
+    Controls irregular texture-seeded variation of opaque `SURF_LIGHT` lamp
+    cores, edge halos, and glowmap bloom while Vulkan ray tracing is active,
+    clamped between 0 and 1. Two smooth waves provide ordinary variation and
+    a slower waveform adds occasional shallow dips; lamps never switch fully
+    off. Faces sharing a lamp texture remain synchronized, while liquids,
+    translucent surfaces, sky, baked emissive illumination, and dynamic
+    lights remain unchanged. The factor is calculated on the CPU and reuses
+    existing RT controls, adding no shader trigonometry, texture samples, ray
+    queries, passes, descriptors, or draws. Changes apply immediately.
+    Default value is 0.55; value 0 restores stable emission.
+
+vk_rt_emissive_motes::
+    Controls restrained additive energy motes around opaque `SURF_LIGHT`
+    emitters while Vulkan ray tracing is active, clamped between 0 and 1. Up
+    to eight nearby visible surface lights supply color and orientation for
+    deterministic paths that orbit across each emitter and drift smoothly
+    outward. Values below 0.35 emit one mote per source, values from 0.35 emit
+    two, and values from 0.75 emit three, capped globally at 24 motes (48
+    triangles). Motes fade between 320 and 512 units and near the camera;
+    solid, liquid, underwater, and non-visible locations are excluded. The
+    effect reuses the existing particle buffer and additive pipeline, adding
+    at most one draw and no ray queries, texture samples, render passes,
+    descriptors, or per-frame allocations. It remains independent of ambient
+    dust, bloom, and `vk_rt_emissive`. Changes apply immediately. Default
+    value is 0.45; value 0 disables the effect.
+
+vk_rt_specular::
+    Controls material-aware highlights from dynamic lights and nearby emissive
+    `SURF_LIGHT` surfaces, clamped between 0 and 1. The effect reuses existing
+    candidate lists and smooth source falloff and adds no ray queries. It does
+    not add an environment term, so surfaces without a suitable light remain
+    unchanged even at value 1. Reflection strength and roughness come from
+    `materials/rt_reflections.mat`; a 10-to-96 roughness-shaped,
+    energy-normalized primary lobe and a derived clearcoat lobe give smooth
+    materials focused glints and rough materials broader visible highlights.
+    A fifth-power Fresnel response strengthens grazing highlights, while a
+    small base-texture luminance modulation preserves visible material detail
+    without extra texture samples. Smooth, reflective materials also tint
+    their direct highlights toward the base-texture color, producing a mild
+    metallic sheen while rough surfaces remain nearly neutral. Filtered
+    base-texture luminance also supplies a derivative-based micro-bump normal
+    for direct material lighting. Its slope is capped, fades on rough or weakly
+    reflective surfaces, and requires no normal map or extra texture sample.
+    Nearby emissive candidates are
+    shared across geometry-connected coplanar surface islands, including BSP
+    T-junctions, so highlights remain continuous across polygon boundaries.
+    Changes apply
+    immediately. Default value is 0.45; value 0 disables the highlights
+    without disabling screen-space reflections.
+
+vk_rt_liquids::
+    Controls enhanced liquid shading while Vulkan ray tracing is active,
+    clamped between 0 and 1. Water, slime, and lava receive two-frequency
+    animated ripples, a view-dependent colored Fresnel sheen, and highlights
+    from the existing dynamic-light visibility calculations. The effect adds
+    no texture samples, render passes, or ray queries. Bright highlights feed
+    bloom when ‘gl_bloom’ is enabled; lava also supplies a restrained
+    texture-shaped bloom contribution when ‘r_lava_glowmaps’ is enabled.
+    Existing liquid translucency, fog, and underwater warp are preserved.
+    Changes apply immediately. Default value is 0.65; value 0 restores the
+    previous liquid shading.
+
+vk_rt_environment::
+    Controls a material-aware cool blue-gray environment sheen on opaque BSP
+    world surfaces while Vulkan ray tracing is active, clamped between 0 and
+    1. Reflectivity and roughness come from the existing reflection material
+    system. A broad Fresnel response keeps the effect visible away from
+    extreme grazing angles, while smooth upward-facing surfaces receive the
+    strongest response and walls and rough surfaces remain softer. The
+    contribution uses stabilized aperture openness, preserves bright texture
+    detail, is capped at 0.08 luminance, and does not feed bloom. It adds no
+    ray queries, texture samples, render passes, descriptors, or draw calls.
+    Changes apply immediately. Default value is 0.65; value 0 disables it.
+
+vk_rt_atmosphere::
+    Controls neutral blue-gray distance haze while Vulkan ray tracing is
+    active, clamped between 0 and 1. It reuses the existing exponential fog
+    calculations for world surfaces, models, sprites, particles, and sky, so
+    it adds no ray queries, texture samples, render passes, descriptors, or
+    draw calls. Existing custom or map-authored distance and sky fog provide
+    the base color and density; atmospheric haze is combined with them instead
+    of replacing them. Authored height fog remains unchanged and can coexist
+    with the distance haze. The atmospheric contribution is suppressed
+    underwater and when no world model is rendered. Changes apply immediately.
+    Default value is 0.45; value 0 removes only the atmospheric contribution.
+
+vk_rt_underwater_absorption::
+    Controls blue-green distance attenuation while the camera is underwater
+    in ordinary water with Vulkan ray tracing active, clamped between 0 and 1.
+    The contribution is combined with map-authored distance fog instead of
+    replacing it and applies consistently to world surfaces, models, weapon
+    models, sprites, and particles. Lava, slime, height fog, sky visibility,
+    and above-water rendering remain unchanged. It reuses the existing
+    exponential fog path and adds no ray queries, texture samples, render
+    passes, descriptors, or draw calls. `gl_fog` remains the master switch.
+    Changes apply immediately. Default value is 0.65; value 0 removes only the
+    underwater absorption contribution.
+
+vk_rt_dust::
+    Controls depth-tested ambient dust motes while Vulkan ray tracing is
+    active, clamped between 0 and 1. Motes are anchored to deterministic
+    world-space cells, drift slowly, and fade near the edge of their bounded
+    400-unit range. Solid, liquid, underwater, and non-visible areas are
+    excluded. At full strength the effect draws at most 48 motes (96
+    triangles) in one additional alpha-blended particle draw and performs no
+    ray queries or per-frame allocations. Gameplay particles retain their
+    original capacity and blend mode. Changes apply immediately. Default
+    value is 0.35; value 0 disables the effect.
+
+vk_rt_dust_lighting::
+    Controls colored dynamic lighting on ambient dust while Vulkan ray tracing
+    is active, clamped between 0 and 1. At most three visible live or cached
+    afterglow lights are selected once per frame, then evaluated across the
+    existing maximum of 48 motes. Smooth distance falloff tints and moderately
+    brightens nearby dust without changing its density, size, movement, or
+    standard-alpha draw. Light selection rejects solid, liquid, out-of-range,
+    and non-visible BSP locations. The effect adds no particles, draws,
+    triangles, descriptors, texture samples, render passes, ray queries, or
+    per-frame allocations. Changes apply immediately and require `vk_rt_dust`.
+    Default value is 0.65; value 0 restores neutral dust.
+
+vk_rt_light_scattering::
+    Controls colored light scattering inside active distance fog while Vulkan
+    ray tracing is active, clamped between 0 and 1. Strong explosions,
+    projectiles, muzzle flashes, and cached afterglow sources reuse the three
+    existing shadow-tested dynamic-light candidates. The pixel-lightmap RT
+    path also reuses available static emissive illumination. View alignment
+    concentrates the broad glow toward visible light sources. Local and bloom
+    contributions are capped independently, and the effect is suppressed
+    underwater or without active fog. It adds no ray queries, texture samples,
+    render passes, descriptors, or draw calls. Changes apply immediately.
+    Default value is 0.5; value 0 disables the effect.
+
+vk_rt_fog_turbulence::
+    Controls slow world-space density movement in active Vulkan RT distance
+    fog, clamped between 0 and 1. Two broad procedural waves move in different
+    directions and remain continuous across BSP face boundaries. At value 1,
+    local fog density varies by at most 35 percent; sky fog, models, and HUD
+    elements remain stable. Fog light scattering and bloom attenuation reuse
+    the animated fog amount. The effect is suppressed underwater or without
+    active fog and adds no texture samples, particles, render passes,
+    descriptors, or draw calls. Changes apply immediately. Default value is
+    0.4; value 0 restores uniform fog density.
+
+vk_rt_skylight::
+    Controls a cool blue-gray ambient fill on open static BSP world surfaces
+    while Vulkan ray tracing is active, clamped between 0 and 1. Baked ambient
+    visibility identifies apertures and open areas; upward-facing surfaces
+    receive the strongest fill and walls receive a softer amount. The result
+    is luminance-capped, preserves bright texture detail, does not feed bloom,
+    and adds no ray queries, samples, passes, descriptors, or draw calls.
+    Changes apply immediately. Default value is 0.6; value 0 disables it.
+
+vk_rt_caustics::
+    Controls animated underwater caustic lighting on nearby BSP surfaces while
+    Vulkan ray tracing is active, clamped between 0 and 1. Only water receives
+    the cool-blue pattern; slime and lava are deliberately excluded. Floors
+    receive the strongest pattern while walls retain a softer contribution;
+    the effect fades between 512 and 1152 world units from the camera. It is
+    procedural and adds no ray queries, texture samples, render passes,
+    descriptors, or draw calls. Bright crests provide a restrained bloom
+    contribution when ‘gl_bloom’ is enabled. Changes apply immediately.
+    Default value is 0.65; value 0 disables the effect.
+
+vk_rt_lava_embers::
+    Controls warm additive embers rising from visible lava surfaces while
+    Vulkan ray tracing is active, clamped between 0 and 1. Deterministic
+    anchors are distributed across upward-facing lava polygons when the map
+    loads. Embers drift upward, fade smoothly over their lifetime and between
+    512 and 768 world units, and are rejected in solid or liquid space. At
+    full strength the effect draws at most 48 embers (96 triangles) through
+    the existing auxiliary particle batch, adding no ray queries, shaders,
+    textures, descriptors, render passes, or per-frame allocations. Bright
+    cores use the existing bloom output when ‘gl_bloom’ is enabled. The effect
+    remains independent of lava glowmaps, liquid shading, caustics, and
+    reflection materials. Changes apply immediately. Default value is 0.65;
+    value 0 disables the effect.
+
+vk_rt_sunlight::
+    Controls warm directional light on exposed static BSP world surfaces while
+    Vulkan ray tracing is active, clamped between 0 and 1. The fixed elevated
+    direction is normalized from `(0.45, 0.35, 0.82)`. Existing stabilized
+    aperture openness limits the effect in enclosed areas, with baked
+    visibility restricted to mild modulation so coarse AO cannot create dark
+    islands. The contribution preserves texture detail, is capped at 0.12
+    luminance, and does not feed bloom. It adds no ray queries, texture
+    samples, passes, descriptors, or draws. Changes apply immediately. Default
+    value is 0.65; value 0 disables the effect.
+
+vk_rt_shadow_fringe::
+    Controls colored penumbra fringes from the strongest nearby dynamic light,
+    clamped between 0 and 1. The effect uses disagreement between the two
+    existing area-light visibility samples, so fully lit, fully blocked, and
+    single-ray regions remain unchanged. Fringe color follows the light, is
+    capped at 0.06 luminance, and does not contribute to bloom, specular, or
+    color bounce. It adds no additional ray queries or visibility samples and
+    no passes, descriptors, or draws. Runtime transport quantizes specular and
+    bounce controls to 7 bits
+    and caustic and fringe controls to 5 bits, which remains finer than their
+    menu increments. Changes apply immediately. Default value is 0.6.
+
+vk_rt_bounce::
+    Controls a performance-friendly approximation of colored indirect light
+    from explosions, projectiles, muzzle flashes, and other dynamic lights,
+    clamped between 0 and 1. It reuses the existing dynamic-light candidates
+    and ray-shadow visibility to add localized color spill across nearby BSP
+    world surfaces. Occluded lights do not leak through walls. The contribution
+    preserves texture detail, has separate luminance and bloom limits, and adds
+    no ray queries, render passes, draws, descriptors, or texture samples.
+    Changes apply immediately. Default value is 0.65; value 0 disables the
+    indirect contribution while retaining ordinary dynamic lighting.
+
+vk_rt_afterglow::
+    Controls how long bright transient dynamic lights remain after their live
+    source disappears, in seconds, clamped between 0 and 1. Sources with at
+    least 160 intensity are retained in an eight-entry renderer cache and fade
+    quadratically. Live and fading sources compete for the same three
+    per-surface light slots, so the effect does not increase shader loops or
+    ray queries. The fading source retains the existing diffuse, shadow,
+    bounce, specular, fringe, and bloom response. History is cleared on map or
+    renderer changes, time reversal, and RT or dynamic-light disablement.
+    Changes apply immediately. Default value is 0.35 seconds; value 0 disables
+    the effect.
+
+vk_rt_light_ripples::
+    Controls animated colored illumination rings from strong live dynamic
+    lights on opaque BSP world surfaces, clamped between 0 and 1. Explosions,
+    projectiles, and muzzle flashes with at least 160 intensity produce rings
+    that follow existing distance falloff and ray-traced visibility, so walls
+    block them. Cached afterglow sources are excluded. Local luminance is
+    capped at 0.07 and remains visible without bloom; a separate contribution
+    capped at 0.02 feeds bloom when enabled. The effect reuses the existing
+    three dynamic-light slots and adds no rays, samples, passes, descriptors,
+    or draws. Runtime transport uses 6-bit specular and bounce controls plus
+    4-bit caustic, fringe, and ripple controls. Changes apply immediately.
+    Default value is 0.6; value 0 disables the effect.
+
+vk_rt_shockwaves::
+    Controls expanding colored energy rings around polygon explosions while
+    Vulkan ray tracing is active, clamped between 0 and 1. Rocket, grenade,
+    BFG, and custom-model explosions are tagged by the client rather than
+    inferred from dynamic-light intensity. During the opening animation
+    frames, one camera-facing ring expands from 16 to roughly 112 world units
+    and fades smoothly. Its color follows the colocated explosion light, with
+    warm orange used as a fallback. Rings are depth tested, restricted to the
+    current BSP visibility and liquid medium, and capped to the nearest eight
+    explosions. A procedural ring texture and the existing additive particle
+    pipeline limit the effect to 16 triangles and at most one additional draw,
+    with no ray queries, new shaders, render passes, or per-frame allocations.
+    Bright rings use the existing bloom output when ‘gl_bloom’ is enabled but
+    remain visible without bloom. Changes apply immediately. Default value is
+    0.7; value 0 disables the effect.
+
+vk_rt_impact_marks::
+    Controls brief surface-aligned hot cores and expanding energy rings at
+    weapon impacts while Vulkan ray tracing is active, clamped between 0 and
+    1. Conventional gun and shotgun impacts use restrained amber marks;
+    blaster, hyperblaster, flechette, screen, shield, and laser-spark impacts
+    retain their event color. Marks use temporary effect-only client entities,
+    so the underlying OpenGL and Vulkan raster impact visuals remain
+    unchanged. They are depth tested, offset along the supplied surface normal
+    to avoid z-fighting, restricted to the current BSP visibility and liquid
+    medium, and rejected from the back side. The nearest 16 marks are rendered
+    with a procedural texture through one additive batch, capped at 32
+    triangles and one draw with no ray queries, fullscreen passes, or
+    per-frame allocations. Bright cores use existing bloom when enabled but
+    remain visible without it. Changes apply immediately. Default value is
+    0.75; value 0 disables the effect.
+
+vk_rt_splash_ripples::
+    Controls two staggered expanding rings on liquid surfaces struck by
+    weapon splash events while Vulkan ray tracing is active, clamped between
+    0 and 1. Blue water uses pale cyan, brown water a muted warm neutral,
+    slime acid green, and lava orange-gold. Spark, blood, electric, and
+    unknown splash categories remain unchanged. Ripple size responds modestly
+    to the event's splash count. Rings remain visible for roughly 0.9 seconds,
+    face the viewer from either side of the liquid boundary, and are restricted
+    to the current BSP visibility, area, distance, and liquid medium. The
+    nearest 12 events reuse the procedural shockwave texture and shared
+    additive ring batch, capped at 48 triangles with no new texture, shader,
+    ray query, render pass, draw, or per-frame allocation. This effect is
+    independent of liquid caustics and does not enable slime or lava caustics.
+    Changes apply immediately. Default value is 0.75; value 0 disables the
+    effect.
+
+vk_rt_water_wakes::
+    Controls paired V-shaped surface wakes behind moving players while Vulkan
+    ray tracing is active, clamped between 0 and 1. The local player and other
+    players produce three progressively wider pairs of pale-blue elliptical
+    crests only while moving at the air/water boundary; dry ground, deep water,
+    slime, lava, stationary players, and teleport-sized movement do not create
+    wakes. Surface traces are cached for 100 milliseconds and expire after 150
+    milliseconds. The renderer validates both sides of the liquid boundary and
+    restricts wakes to the current BSP visibility, area, distance, and viewing
+    medium. The nearest six wakes reuse the procedural shockwave texture and
+    shared additive batch, capped at 72 triangles with no new texture, shader,
+    ray query, render pass, persistent effect allocation, or extra draw when
+    the shockwave batch is already active. Changes apply immediately. Default
+    value is 0.75; value 0 disables the effect.
+
+vk_rt_teleport_vortex::
+    Controls layered energy vortices at discrete teleport events while Vulkan
+    ray tracing is active, clamped between 0 and 1. Player and scripted
+    teleports use cyan-blue energy, disc-ball goals violet-magenta, and boss
+    teleports a larger orange-violet variant. Each vortex combines two
+    oppositely rotating tilted rings, four smaller rings rising through a
+    vertical column, and four orbiting camera-facing nodes. Existing teleport
+    particles and sounds remain unchanged, while continuous teleporter-pad
+    particles do not create vortices. The effect fades near the camera and at
+    distance, follows BSP visibility, area, and liquid-medium restrictions,
+    and is capped to the nearest four active events. It reuses the procedural
+    shockwave texture and shared additive ring batch, adding at most 80
+    triangles with no new texture, shader, render pass, ray query, draw, or
+    per-frame allocation. Bright elements use existing bloom when enabled.
+    Changes apply immediately. Default value is 0.8; value 0 disables the
+    effect.
+
+vk_rt_item_respawn::
+    Controls an emerald-mint materialization effect when map items respawn
+    while Vulkan ray tracing is active, clamped between 0 and 1. Each event
+    combines an expanding base ring, a scanning ring that rises through the
+    item, and a delayed contracting upper ring. Existing respawn particles
+    and sounds remain unchanged. Rings are depth tested, restricted to the
+    current BSP visibility, area, distance, and liquid medium, and fade near
+    the camera. The nearest eight active events reuse the procedural
+    shockwave texture and shared additive ring batch, adding at most 48
+    triangles with no new texture, shader, render pass, ray query, draw, or
+    per-frame allocation. Bright rings use existing bloom when enabled but
+    remain visible without it. Changes apply immediately. Default value is
+    0.8; value 0 disables the effect.
+
+vk_rt_electric_filaments::
+    Controls short branching filaments at electrical impact events while
+    Vulkan ray tracing is active, clamped between 0 and 1. Electric sparks use
+    blue-white energy, shield sparks blue-violet, screen sparks orange-red,
+    and heat-beam sparks a slightly larger orange-white variant. Each impact
+    produces three stable surface-crawling branches with two tapered segments;
+    their brightness pulses and fades over roughly 0.4 seconds. Existing
+    particles, sounds, impact marks, and continuous lightning beams remain
+    unchanged. Filaments are depth tested and restricted by surface facing,
+    BSP visibility, area, distance, and liquid medium. The nearest eight
+    events reuse the beam texture, additive pipeline, particle vertex buffer,
+    fog, and bloom output, adding at most 96 triangles and one draw while
+    active with no new texture, shader, descriptor, render pass, ray query, or
+    per-frame allocation. Changes apply immediately. Default value is 0.75;
+    value 0 disables the effect.
+
+vk_rt_landing_dust::
+    Controls brief surface-aware dust puffs when players land while Vulkan ray
+    tracing is active, clamped between 0 and 1. Short, normal, and hard landing
+    events emit four, six, or eight deterministic motes respectively. Motes
+    spread outward from a single client-side floor trace, rise slightly, expand,
+    and fade over roughly 0.6 seconds; local-player puffs are restrained near
+    the camera. Existing landing sounds and particles remain unchanged. Dust is
+    rejected on unsupported or steep surfaces and in water, slime, and lava,
+    while BSP visibility, area, and distance restrictions prevent it appearing
+    through the world. The nearest six active events reuse the particle texture,
+    mapped particle buffer, and depth-tested sprite batch, adding at most 96
+    triangles and one draw while active with no new shader, texture, descriptor,
+    render pass, ray query, dynamic light, or per-frame allocation. Changes apply
+    immediately. Default value is 0.7; value 0 disables the effect.
+
+vk_rt_energy_collapse::
+    Controls inward-collapse effects at BFG and tracker detonations while
+    Vulkan ray tracing is active, clamped between 0 and 1. Main BFG impacts use
+    a large green-mint collapse, BFG damage events use restrained half-size
+    green collapses, and tracker explosions use a medium violet-magenta
+    variant. Three mutually perpendicular rings contract around four spiraling
+    nodes before a compact final core pulse. The main BFG effect lasts roughly
+    0.8 seconds; secondary and tracker effects last roughly 0.6 seconds.
+    Existing explosion models, particles, lights, sounds, damage, and outward
+    shockwaves remain unchanged. Effects are restricted by BSP visibility,
+    area, distance, near-camera fading, and liquid medium. The nearest five
+    active events reuse the procedural shockwave texture, additive pipeline,
+    mapped particle buffer, fog, and shared shockwave batch, adding at most 80
+    triangles and one draw while active with no new shader, texture, descriptor,
+    render pass, ray query, or per-frame allocation. Changes apply immediately.
+    Default value is 0.8; value 0 disables the effect.
+
+vk_rt_rail_impact::
+    Controls compact ionization effects where railgun shots land while Vulkan
+    ray tracing is active, clamped between 0 and 1. A short client-side trace
+    recovers the impact normal; trace misses fall back to the reversed shot
+    direction. Each impact combines one small surface-aligned
+    pulse with three short filaments and inherits the configured rail core and
+    spiral colors. Effects last roughly 0.3 seconds and are restricted by BSP
+    visibility, area, distance, facing, near-camera fading, and the viewing
+    liquid medium. The nearest six impacts reuse the impact and beam textures,
+    additive pipelines, mapped particle buffer, fog, and shared batches, adding
+    at most 48 triangles and two draws when both batches are otherwise empty.
+    No new shader, texture, descriptor, render pass, ray query, protocol field,
+    or per-frame allocation is required. Changes apply immediately. Default
+    value is 0.65; value 0 disables the effect.
+
+vk_rt_light_coronas::
+    Controls compact colored halos around strong live combat lights while
+    Vulkan ray tracing is active, clamped between 0 and 1. At most six nearby
+    visible lights with at least 160 intensity receive a soft outer corona and
+    a smaller pale core. Coronas are depth tested, respect the current PVS and
+    liquid medium, fade near the camera and between 768 and 1024 units, and do
+    not include cached afterglow sources. They reuse the existing radial
+    particle texture, fog, bloom output, vertex buffer, and additive auxiliary
+    batch. The effect adds at most 12 quads (24 triangles), no new draw when
+    that additive batch is already present and otherwise at most one draw. It
+    adds no shaders, textures, descriptors, ray queries, render passes,
+    allocations, or history tracking. Changes apply immediately. Default
+    value is 0.6; value 0 disables the effect.
+
+materials/rt_reflections.mat::
+    Optional exact-name material overrides used by the Vulkan SSR and specular
+    paths. Entries use a Q2RTX-style block with independent `reflect` and
+    `roughness` values clamped between 0 and 1:
+
+    textures/base_floor:
+        reflect 0.85
+        roughness 0.35
+
+    The existing `textures/<name>.mat` footstep files and Q2RTX
+    `materials/baseq2.mat` are not parsed for SSR. Unlisted opaque textures use
+    the renderer's conservative fallback material; warp and translucent
+    surfaces remain excluded.
+
+vk_rt_debug::
+    Visualizes the static ray-tracing atlas on BSP world surfaces. Value 1
+    shows atlas coverage, 2 shows decoded ambient occlusion, and 3 shows
+    amplified visibility-weighted emitter radiance. Value 4 shows the SSR
+    strength, 5 shows the reconstructed surface mask (green is reflective),
+    6 shows ray hits in blue and misses in brown, and 7 shows only the final
+    resolved reflection contribution. Value 8 disables SSR and shows only
+    amplified specular: dynamic-light highlights are cyan and baked-emitter
+    highlights are amber. Value 9 shows the final capped dynamic color-bounce
+    contribution amplified eight times; black means that no bounce reaches the
+    surface. Value 10 shows underwater caustics amplified eight times and is
+    black outside water, including in slime and lava. Value 11 shows the final
+    colored dynamic-shadow fringe amplified eight times. Value 12 shows the
+    final aperture-skylight contribution amplified eight times. Value 13 shows
+    the final environment-sheen contribution amplified eight times. Value 14
+    shows only fading-source direct radiance amplified eight times. Value 15
+    shows the final warm sunlight contribution amplified eight times. Value 16
+    shows the local emissive-edge halo amplified eight times and is black on
+    non-emissive surfaces. Value 17 shows the final dynamic-light ripple
+    contribution amplified eight times. Value 18 keeps SSR active and shows
+    only the final reflected-light glint contribution amplified eight times.
+    Value 19 shows the emissive-lamp flicker mask at its current intensity and
+    is black on ineligible surfaces. Value 20 keeps SSR active and shows the
+    absolute reflection-dispersion contribution amplified twelve times.
+    Value 0 restores
+    normal rendering. This
+    diagnostic is applied immediately, does not rebake the map, and adds no
+    work while disabled. Default value is 0.
+
+Ray tracing preserves glowmap bloom and contributes bright dynamic and baked
+RT lighting to bloom when ‘gl_bloom’ is enabled. For a restrained
+performance-friendly effect, use ‘gl_bloom 1’ with ‘vk_bloom_downsample 4’.
+Bloom is enabled by default and adds no work while ‘gl_bloom’ is 0.
+
+Only opaque static BSP world geometry currently participates in ray queries;
+other geometry continues to use the normal raster path. The acceleration
+structure reuses the raster world's vertex buffer and keeps only a separate
+opaque-triangle index buffer.
+
+
 OpenGL Renderer
 ~~~~~~~~~~~~~~~
 
 gl_gamma_scale_pics::
     Apply software gamma scaling not only to textures and skins, but to HUD
     pictures also. Default value is 0 (don't apply to pics).
+
+gl_intensity_2D::
+    Scale the RGB intensity of 2D rendering in the OpenGL and Vulkan renderers,
+    including the HUD, menu, console, and 2D fills. Values above 1 make these
+    elements brighter; alpha is unchanged. The effective range is 0 to 5.
+    This setting takes effect immediately and works independently of software
+    gamma and gamma-ramp support. The legacy OpenGL path requires ARB fragment
+    program support. Default value is 1.
 
 gl_noscrap::
     By default, OpenGL renderer combines small HUD pictures into the single
@@ -789,31 +1481,16 @@ gl_fog::
 
 gl_bloom::
     Enable re-release bloom effect. Only effective when using GLSL backend.
-    Default value is 0 (disabled). Higher values specify number of blurring
-    filter iterations (typical value is 1).
+    The setting is archived. Default value is 1 (enabled). Higher values
+    specify number of blurring filter iterations (typical value is 1).
 
 gl_bloom_sigma::
     Specifies strength parameter of gaussian blur filter used for the bloom
     effect. Default value is 4.
 
-NOTE: Bloom only works with glowmaps. Enabling it with non-remastered content
-(or glowmaps disabled) is a waste of resources.
-
-gl_glare::
-    Enables lens glare sprites on bright glowmapped world surfaces. Visibility
-    is checked against the rendered scene and fades smoothly using
-    ‘gl_flarespeed’. Default value is 0.
-
-gl_glare_threshold::
-    Minimum lightmap brightness required for a glowmapped surface to emit glare.
-    Higher values reduce the number of glare sources. Default value is 0.3.
-
-gl_glare_size::
-    Base size of surface glare sprites. Glare size also scales with source
-    brightness and distance from the viewer. Default value is 24.
-
-gl_glare_intensity::
-    Intensity factor for surface glare sprites. Default value is 0.5.
+NOTE: Bloom requires glowmaps or another renderer-generated bloom source, such
+as RT lighting, specular highlights, enhanced liquids, beams, or particles.
+Enabling it when a scene has no contributing source is a waste of resources.
 
 gl_flarespeed::
     Specifies flare fading effect speed. Default value is 8. Set this to 0

@@ -64,6 +64,13 @@ meson configure builddir
 Q2PRO specific options are listed in `Project options` section. They are
 defined in `meson_options.txt` file.
 
+Vulkan ray-query support is detected automatically when Vulkan headers expose
+the required extensions. It can be required or disabled explicitly with
+`-Dvulkan-raytracing=enabled` or `-Dvulkan-raytracing=disabled`. Enabling the
+build option does not require ray-query capable hardware at runtime; the Vulkan
+renderer falls back to its raster path when the device lacks the necessary
+extensions and features.
+
 E.g. to install to different prefix:
 
 ```bash
@@ -249,9 +256,12 @@ paru -S \
     mingw-w64-pkg-config \
     mingw-w64-libpng \
     mingw-w64-libjpeg-turbo \
-    mingw-w64-openal \
     mingw-w64-zstd
 ```
+
+The Windows build scripts compile the pinned OpenAL Soft source with the
+selected MinGW toolchain and link it statically. CMake is required for this
+step. No OpenAL DLL is needed for the resulting executables.
 
 ### Compilation
 
@@ -279,14 +289,6 @@ baseq2/players/
 baseq2/pak0.pak
 baseq2/pak1.pak
 baseq2/pak2.pak
-```
-
-and add [OpenAL Soft](https://github.com/kcat/openal-soft) for
-Windows builds:
-
-```
-OpenAL32.dll
-OpenAL64.dll // rename from OpenAL32.dll 64-bit version
 ```
 
 Additionally Copy file `assets/baseq2/q2pro.menu` to `baseq2` folder.

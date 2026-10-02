@@ -45,11 +45,26 @@ static inline bool entity_is_optimized(const centity_state_t *state)
         && cl.frame.ps.pmove.pm_type < PM_DEAD;
 }
 
+static inline void entity_reset_water_wake(centity_t *ent,
+                                           const vec_t *origin)
+{
+    VectorCopy(origin, ent->rt_water_wake_sample_origin);
+    VectorCopy(origin, ent->rt_water_wake_origin);
+    VectorClear(ent->rt_water_wake_normal);
+    VectorClear(ent->rt_water_wake_direction);
+    ent->rt_water_wake_sample_time = cl.time;
+    ent->rt_water_wake_seen_time = 0;
+    ent->rt_water_wake_scale = 0.0f;
+    ent->rt_water_wake_valid = false;
+}
+
 static inline void
 entity_update_new(centity_t *ent, const centity_state_t *state, const vec_t *origin)
 {
+    ent->temporal_generation++;
     ent->trailcount = 1024;     // for diminishing rocket / grenade trails
     ent->flashlightfrac = 1.0f;
+    entity_reset_water_wake(ent, origin);
 
     // duplicate the current state so lerping doesn't hurt anything
     ent->prev = *state;
@@ -98,8 +113,10 @@ entity_update_old(centity_t *ent, const centity_state_t *state, const vec_t *ori
         || fabsf(origin[2] - ent->current.origin[2]) > 512
         || cl_nolerp->integer == 1) {
         // some data changes will force no lerping
+        ent->temporal_generation++;
         ent->trailcount = 1024;     // for diminishing rocket / grenade trails
         ent->flashlightfrac = 1.0f;
+        entity_reset_water_wake(ent, origin);
 
         // duplicate the current state so lerping doesn't hurt anything
         ent->prev = *state;
@@ -219,10 +236,12 @@ static void parse_entity_event(int number)
     case EV_ITEM_RESPAWN:
         S_StartSound(NULL, number, CHAN_WEAPON, S_RegisterSound("items/respawn1.wav"), 1, ATTN_IDLE, 0);
         CL_ItemRespawnParticles(cent->current.origin);
+        CL_RTItemRespawn(cent->current.origin);
         break;
     case EV_PLAYER_TELEPORT:
         S_StartSound(NULL, number, CHAN_WEAPON, S_RegisterSound("misc/tele1.wav"), 1, ATTN_IDLE, 0);
         CL_TeleportParticles(cent->current.origin);
+        CL_RTTeleportVortex(cent->current.origin, RT_TELEPORT_STANDARD);
         break;
     case EV_FOOTSTEP:
         if (cl_footsteps->integer)
@@ -238,12 +257,15 @@ static void parse_entity_event(int number)
         break;
     case EV_FALLSHORT:
         S_StartSound(NULL, number, CHAN_AUTO, S_RegisterSound("player/land1.wav"), 1, ATTN_NORM, 0);
+        CL_RTLandingDust(number, RT_LANDING_SHORT);
         break;
     case EV_FALL:
         S_StartSound(NULL, number, CHAN_AUTO, S_RegisterSound("*fall2.wav"), 1, ATTN_NORM, 0);
+        CL_RTLandingDust(number, RT_LANDING_NORMAL);
         break;
     case EV_FALLFAR:
         S_StartSound(NULL, number, CHAN_AUTO, S_RegisterSound("*fall1.wav"), 1, ATTN_NORM, 0);
+        CL_RTLandingDust(number, RT_LANDING_FAR);
         break;
     }
 }
@@ -501,6 +523,219 @@ static bool model_starts_with(const char *model, const char *prefix)
     return !Q_strncasecmp(model, prefix, strlen(prefix));
 }
 
+static bool CL_GetWeaponModelTint(const char *model, vec3_t tint)
+{
+    if (!cl_weapontint->integer)
+        return false;
+
+    if (model_starts_with(model, "models/weapons/g_shotg/") ||
+        model_starts_with(model, "models/weapons/g_shotg2/") ||
+        model_starts_with(model, "models/weapons/v_shotg/") ||
+        model_starts_with(model, "models/weapons/v_shotg2/"))
+        VectorSet(tint, 1.0f, 0.75f, 0.0f);
+    else if (model_starts_with(model, "models/weapons/g_machn/") ||
+             model_starts_with(model, "models/weapons/g_chain/") ||
+             model_starts_with(model, "models/weapons/v_machn/") ||
+             model_starts_with(model, "models/weapons/v_chain/"))
+        VectorSet(tint, 0.0f, 0.25f, 1.0f);
+    else if (model_starts_with(model, "models/weapons/g_launch/") ||
+             model_starts_with(model, "models/weapons/v_launch/") ||
+             model_starts_with(model, "models/weapons/v_handgr/") ||
+             model_starts_with(model, "models/weapons/g_flareg/") ||
+             model_starts_with(model, "models/weapons/v_flareg/"))
+        VectorSet(tint, 1.0f, 0.55f, 0.1f);
+    else if (model_starts_with(model, "models/weapons/g_rocket/") ||
+             model_starts_with(model, "models/weapons/v_rocket/"))
+        VectorSet(tint, 1.0f, 0.1f, 0.1f);
+    else if (model_starts_with(model, "models/weapons/g_hyperb/") ||
+             model_starts_with(model, "models/weapons/v_hyperb/"))
+        VectorSet(tint, 0.3f, 1.0f, 0.0f);
+    else if (model_starts_with(model, "models/weapons/g_rail/") ||
+             model_starts_with(model, "models/weapons/v_rail/"))
+        VectorSet(tint, 0.75f, 0.0f, 1.0f);
+    else if (model_starts_with(model, "models/weapons/g_bfg/") ||
+             model_starts_with(model, "models/weapons/v_bfg/"))
+        VectorSet(tint, 0.3f, 1.0f, 0.0f);
+    else if (model_starts_with(model, "models/weapons/g_blast/") ||
+             model_starts_with(model, "models/weapons/v_blast/") ||
+             model_starts_with(model, "models/weapons/g_disint/") ||
+             model_starts_with(model, "models/weapons/v_disint/"))
+        VectorSet(tint, 0.0f, 0.85f, 1.0f);
+    else if (model_starts_with(model, "models/weapons/g_") ||
+             model_starts_with(model, "models/weapons/v_"))
+        VectorSet(tint, 1.0f, 0.65f, 0.2f);
+    else
+        return false;
+
+    return true;
+}
+
+static bool CL_GetWeaponIndexTint(int weapon, vec3_t tint)
+{
+    if (!cl_weapontint->integer)
+        return false;
+
+    switch (weapon) {
+    case 2: // shotgun
+    case 3: // super shotgun
+        VectorSet(tint, 1.0f, 0.75f, 0.0f);
+        break;
+    case 4: // machinegun
+    case 5: // chaingun
+        VectorSet(tint, 0.0f, 0.25f, 1.0f);
+        break;
+    case 7: // grenade launcher
+        VectorSet(tint, 1.0f, 0.55f, 0.1f);
+        break;
+    case 8: // rocket launcher
+        VectorSet(tint, 1.0f, 0.1f, 0.1f);
+        break;
+    case 9: // hyperblaster
+    case 11: // BFG
+        VectorSet(tint, 0.3f, 1.0f, 0.0f);
+        break;
+    case 10: // railgun
+        VectorSet(tint, 0.75f, 0.0f, 1.0f);
+        break;
+    default:
+        VectorSet(tint, 1.0f, 0.65f, 0.2f);
+        break;
+    }
+
+    return true;
+}
+
+static bool CL_GetModelSkinTint(const centity_state_t *state, vec3_t tint)
+{
+    const char *model;
+
+    if (state->modelindex == MODELINDEX_PLAYER && cl_playertint->integer) {
+        int clientnum = state->skinnum & 0xff;
+        const clientinfo_t *ci;
+
+        if (clientnum >= MAX_CLIENTS)
+            return false;
+        ci = &cl.clientinfo[clientnum];
+
+        // Player tints get an extra 20% boost over item and weapon tints.
+        if (!Q_stricmp(ci->model_name, "male"))
+            VectorSet(tint, 2.0f, 2.0f, 2.0f);
+        else if (!Q_stricmp(ci->model_name, "female"))
+            VectorSet(tint, 0.08f, 1.2f, 0.05f);
+        else
+            VectorSet(tint, 1.2f, 0.78f, 0.24f);
+        return true;
+    }
+
+    if (!state->modelindex)
+        return false;
+
+    model = cl.configstrings[cl.csr.models + state->modelindex];
+
+    // cl_itemtint covers all pickups; cl_ammotint can tint ammo on its own.
+    if ((cl_ammotint->integer || cl_itemtint->integer) &&
+        model_starts_with(model, "models/items/ammo/")) {
+        if (model_starts_with(model, "models/items/ammo/shells/"))
+            VectorSet(tint, 1.0f, 0.75f, 0.0f);
+        else if (model_starts_with(model, "models/items/ammo/bullets/"))
+            VectorSet(tint, 0.0f, 0.244f, 1.0f);
+        else if (model_starts_with(model, "models/items/ammo/cells/"))
+            VectorSet(tint, 0.3f, 1.0f, 0.0f);
+        else if (model_starts_with(model, "models/items/ammo/rockets/"))
+            VectorSet(tint, 1.0f, 0.085f, 0.085f);
+        else if (model_starts_with(model, "models/items/ammo/slugs/"))
+            VectorSet(tint, 0.748f, 0.0f, 1.0f);
+        else if (model_starts_with(model, "models/items/ammo/grenades/") ||
+                 model_starts_with(model, "models/items/ammo/mines/"))
+            VectorSet(tint, 1.0f, 0.446f, 0.0f);
+        else if (model_starts_with(model, "models/items/ammo/nuke/"))
+            VectorSet(tint, 0.45f, 1.0f, 0.15f);
+        else
+            VectorSet(tint, 1.0f, 0.55f, 0.1f);
+        return true;
+    }
+
+    if (CL_GetWeaponModelTint(model, tint))
+        return true;
+
+    if (cl_itemtint->integer && model_starts_with(model, "models/items/armor/")) {
+        if (model_starts_with(model, "models/items/armor/shard/"))
+            VectorSet(tint, 0.0f, 0.86f, 1.0f);
+        else if (model_starts_with(model, "models/items/armor/body/"))
+            VectorSet(tint, 1.0f, 0.10f, 0.10f);
+        else if (model_starts_with(model, "models/items/armor/combat/"))
+            VectorSet(tint, 1.0f, 0.74f, 0.0f);
+        else if (model_starts_with(model, "models/items/armor/jacket/"))
+            VectorSet(tint, 0.45f, 0.65f, 0.08f);
+        else if (model_starts_with(model, "models/items/armor/screen/"))
+            VectorSet(tint, 0.0f, 0.31f, 1.0f);
+        else if (model_starts_with(model, "models/items/armor/shield/"))
+            VectorSet(tint, 0.743f, 0.0f, 1.0f);
+        else if (model_starts_with(model, "models/items/armor/effect/"))
+            VectorSet(tint, 0.861f, 1.0f, 1.0f);
+        else
+            VectorSet(tint, 1.0f, 0.55f, 0.1f);
+        return true;
+    }
+
+    if (cl_itemtint->integer && model_starts_with(model, "models/items/mega_h/")) {
+        VectorSet(tint, 1.0f, 0.18f, 0.65f);
+        return true;
+    }
+
+    if (cl_itemtint->integer && model_starts_with(model, "models/items/adrenal/")) {
+        VectorSet(tint, 1.0f, 0.68f, 0.3f);
+        return true;
+    }
+
+    if (cl_itemtint->integer && model_starts_with(model, "models/items/healing/large/")) {
+        VectorSet(tint, 1.0f, 0.18f, 0.65f);
+        return true;
+    }
+
+    if (cl_itemtint->integer && model_starts_with(model, "models/items/healing/medium/")) {
+        VectorSet(tint, 1.0f, 0.18f, 0.65f);
+        return true;
+    }
+
+    if (cl_itemtint->integer && model_starts_with(model, "models/items/healing/stimpack/")) {
+        VectorSet(tint, 1.0f, 0.18f, 0.65f);
+        return true;
+    }
+
+    if (cl_itemtint->integer && model_starts_with(model, "models/items/quaddama/")) {
+        VectorSet(tint, 0.612f, 0.729f, 1.0f);
+        return true;
+    }
+
+    if (cl_itemtint->integer && model_starts_with(model, "models/items/invulner/")) {
+        VectorSet(tint, 1.0f, 0.563f, 0.222f);
+        return true;
+    }
+
+    if (cl_itemtint->integer && model_starts_with(model, "models/objects/rocket/")) {
+        VectorSet(tint, 8.0f, 8.0f, 8.0f);
+        return true;
+    }
+
+    if (cl_itemtint->integer &&
+        (model_starts_with(model, "models/objects/grenade/") ||
+         model_starts_with(model, "models/objects/grenade2/"))) {
+        VectorSet(tint, 8.0f, 8.0f, 8.0f);
+        return true;
+    }
+
+    // Cover pickups not present in the skin pack too (keys, bandolier,
+    // breather, silencer, Rogue items, and mod-specific models).
+    if (cl_itemtint->integer && model_starts_with(model, "models/items/") &&
+        !model_starts_with(model, "models/items/ammo/")) {
+        VectorSet(tint, 1.0f, 0.65f, 0.2f);
+        return true;
+    }
+
+    return false;
+}
+
 static float CL_ItemHighlightBloom(void)
 {
     return Cvar_ClampValue(cl_itemhighlight_glow, 0, 5);
@@ -525,13 +760,14 @@ static bool CL_GetPlayerHighlight(const centity_state_t *state, item_highlight_t
 
     ci = &cl.clientinfo[clientnum];
     if (!Q_stricmp(ci->model_name, "male")) {
+        highlight->shell = RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE;
+        VectorSet(highlight->color, 1.0f, 1.0f, 1.0f);
+    } else if (!Q_stricmp(ci->model_name, "female")) {
         highlight->shell = RF_SHELL_GREEN;
         VectorSet(highlight->color, 0.0f, 1.0f, 0.0f);
-    } else if (!Q_stricmp(ci->model_name, "female")) {
-        highlight->shell = RF_SHELL_BLUE | RF_SHELL_GREEN;
-        VectorSet(highlight->color, 0.0f, 0.75f, 1.0f);
     } else {
-        return false;
+        highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
+        VectorSet(highlight->color, 1.0f, 0.65f, 0.2f);
     }
 
     return true;
@@ -576,14 +812,37 @@ static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *
     if (item_highlight &&
         (model_starts_with(model, "models/items/healing/") ||
          model_starts_with(model, "models/items/mega_h/"))) {
-        highlight->shell = RF_SHELL_GREEN;
-        VectorSet(highlight->color, 0.0f, 1.0f, 0.0f);
+        highlight->shell = RF_SHELL_RED | RF_SHELL_BLUE;
+        VectorSet(highlight->color, 1.0f, 0.18f, 0.65f);
+        return true;
+    }
+
+    if (item_highlight && model_starts_with(model, "models/items/adrenal/")) {
+        highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
+        VectorSet(highlight->color, 1.0f, 0.68f, 0.3f);
         return true;
     }
 
     if (item_highlight && model_starts_with(model, "models/items/armor/")) {
-        highlight->shell = RF_SHELL_BLUE | RF_SHELL_GREEN;
-        VectorSet(highlight->color, 0.0f, 0.75f, 1.0f);
+        if (model_starts_with(model, "models/items/armor/body/")) {
+            highlight->shell = RF_SHELL_RED;
+            VectorSet(highlight->color, 1.0f, 0.1f, 0.1f);
+        } else if (model_starts_with(model, "models/items/armor/combat/")) {
+            highlight->shell = RF_SHELL_DOUBLE;
+            VectorSet(highlight->color, 1.0f, 0.75f, 0.0f);
+        } else if (model_starts_with(model, "models/items/armor/jacket/")) {
+            highlight->shell = RF_SHELL_GREEN | RF_SHELL_DOUBLE;
+            VectorSet(highlight->color, 0.45f, 0.65f, 0.08f);
+        } else if (model_starts_with(model, "models/items/armor/screen/")) {
+            highlight->shell = RF_SHELL_BLUE;
+            VectorSet(highlight->color, 0.0f, 0.3f, 1.0f);
+        } else if (model_starts_with(model, "models/items/armor/shield/")) {
+            highlight->shell = RF_SHELL_RED | RF_SHELL_BLUE;
+            VectorSet(highlight->color, 0.75f, 0.0f, 1.0f);
+        } else {
+            highlight->shell = RF_SHELL_GREEN | RF_SHELL_BLUE;
+            VectorSet(highlight->color, 0.0f, 0.85f, 1.0f);
+        }
         return true;
     }
 
@@ -591,14 +850,16 @@ static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *
         (!Q_strcasecmp(model, "models/objects/rocket/tris.md2") ||
          !Q_strcasecmp(model, "models/objects/grenade/tris.md2") ||
          !Q_strcasecmp(model, "models/objects/grenade2/tris.md2"))) {
-        highlight->shell = RF_SHELL_RED;
-        VectorSet(highlight->color, 1.0f, 0.0f, 0.0f);
+        highlight->shell = RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE;
+        VectorSet(highlight->color, 1.0f, 1.0f, 1.0f);
         return true;
     }
 
     if ((ammo_highlight &&
          !Q_strcasecmp(model, "models/items/ammo/shells/medium/tris.md2")) ||
-        (weapon_highlight && !Q_strcasecmp(model, "models/weapons/g_shotg2/tris.md2"))) {
+        (weapon_highlight &&
+         (!Q_strcasecmp(model, "models/weapons/g_shotg/tris.md2") ||
+          !Q_strcasecmp(model, "models/weapons/g_shotg2/tris.md2")))) {
         highlight->shell = RF_SHELL_DOUBLE;
         VectorSet(highlight->color, 1.0f, 0.75f, 0.0f);
         return true;
@@ -614,7 +875,9 @@ static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *
 
     if ((ammo_highlight &&
          !Q_strcasecmp(model, "models/items/ammo/bullets/medium/tris.md2")) ||
-        (weapon_highlight && !Q_strcasecmp(model, "models/weapons/g_chain/tris.md2"))) {
+        (weapon_highlight &&
+         (!Q_strcasecmp(model, "models/weapons/g_machn/tris.md2") ||
+          !Q_strcasecmp(model, "models/weapons/g_chain/tris.md2")))) {
         highlight->shell = RF_SHELL_BLUE;
         VectorSet(highlight->color, 0.0f, 0.25f, 1.0f);
         return true;
@@ -641,43 +904,46 @@ static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *
         (weapon_highlight &&
          (!Q_strcasecmp(model, "models/weapons/g_hyperb/tris.md2") ||
           !Q_strcasecmp(model, "models/weapons/g_bfg/tris.md2")))) {
-        highlight->shell = RF_SHELL_LITE_GREEN;
-        VectorSet(highlight->color, 0.56f, 0.93f, 0.56f);
+        highlight->shell = RF_SHELL_GREEN;
+        VectorSet(highlight->color, 0.3f, 1.0f, 0.0f);
+        return true;
+    }
+
+    if (ammo_highlight && model_starts_with(model, "models/items/ammo/nuke/")) {
+        highlight->shell = RF_SHELL_GREEN;
+        VectorSet(highlight->color, 0.45f, 1.0f, 0.15f);
         return true;
     }
 
     if (ammo_highlight && model_starts_with(model, "models/items/ammo/")) {
-        highlight->shell = RF_SHELL_DOUBLE;
+        highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
         VectorSet(highlight->color, 1.0f, 0.75f, 0.0f);
         return true;
     }
 
+    if (weapon_highlight &&
+        (model_starts_with(model, "models/weapons/g_blast/") ||
+         model_starts_with(model, "models/weapons/g_disint/"))) {
+        highlight->shell = RF_SHELL_GREEN | RF_SHELL_BLUE;
+        VectorSet(highlight->color, 0.0f, 0.85f, 1.0f);
+        return true;
+    }
+
     if (weapon_highlight && model_starts_with(model, "models/weapons/g_")) {
-        highlight->shell = RF_SHELL_RED;
-        VectorSet(highlight->color, 1.0f, 0.0f, 0.0f);
+        highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
+        VectorSet(highlight->color, 1.0f, 0.65f, 0.2f);
         return true;
     }
 
-    if (item_highlight &&
-        (model_starts_with(model, "models/items/quaddama/") ||
-         model_starts_with(model, "models/items/invulner/") ||
-         model_starts_with(model, "models/items/silencer/") ||
-         model_starts_with(model, "models/items/breather/") ||
-         model_starts_with(model, "models/items/enviro/"))) {
-        highlight->shell = RF_SHELL_RED | RF_SHELL_BLUE;
-        VectorSet(highlight->color, 1.0f, 0.0f, 1.0f);
-        return true;
-    }
-
-    if (item_highlight && model_starts_with(model, "models/items/keys/")) {
-        highlight->shell = RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE;
-        VectorSet(highlight->color, 1.0f, 1.0f, 1.0f);
+    if (item_highlight && model_starts_with(model, "models/items/quaddama/")) {
+        highlight->shell = RF_SHELL_BLUE;
+        VectorSet(highlight->color, 0.61f, 0.73f, 1.0f);
         return true;
     }
 
     if (item_highlight && model_starts_with(model, "models/items/")) {
-        highlight->shell = RF_SHELL_BLUE;
-        VectorSet(highlight->color, 0.25f, 0.45f, 1.0f);
+        highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
+        VectorSet(highlight->color, 1.0f, 0.65f, 0.2f);
         return true;
     }
 
@@ -687,10 +953,12 @@ static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *
 static bool CL_GetWeaponHighlight(int weapon, item_highlight_t *highlight)
 {
     switch (weapon) {
+    case 2: // shotgun
     case 3: // super shotgun
         highlight->shell = RF_SHELL_DOUBLE;
         VectorSet(highlight->color, 1.0f, 0.75f, 0.0f);
         return true;
+    case 4: // machinegun
     case 5: // chaingun
         highlight->shell = RF_SHELL_BLUE;
         VectorSet(highlight->color, 0.0f, 0.25f, 1.0f);
@@ -703,18 +971,125 @@ static bool CL_GetWeaponHighlight(int weapon, item_highlight_t *highlight)
         highlight->shell = RF_SHELL_RED | RF_SHELL_BLUE;
         VectorSet(highlight->color, 0.75f, 0.0f, 1.0f);
         return true;
+    case 6: // grenade launcher
     case 7: // grenade launcher
         highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
         VectorSet(highlight->color, 1.0f, 0.45f, 0.0f);
         return true;
     case 9: // hyperblaster
     case 11: // BFG
-        highlight->shell = RF_SHELL_LITE_GREEN;
-        VectorSet(highlight->color, 0.56f, 0.93f, 0.56f);
+        highlight->shell = RF_SHELL_GREEN;
+        VectorSet(highlight->color, 0.3f, 1.0f, 0.0f);
         return true;
     default:
-        return false;
+        highlight->shell = RF_SHELL_RED | RF_SHELL_DOUBLE;
+        VectorSet(highlight->color, 1.0f, 0.65f, 0.2f);
+        return true;
     }
+}
+
+#define RT_WATER_WAKE_SAMPLE_MSEC 100
+#define RT_WATER_WAKE_HOLD_MSEC   150
+
+static bool CL_RTWaterWakesEnabled(void)
+{
+    static cvar_t *water_wakes;
+    static cvar_t *raytracing;
+    static cvar_t *renderer;
+
+    if (!water_wakes)
+        water_wakes = Cvar_FindVar("vk_rt_water_wakes");
+    if (!raytracing)
+        raytracing = Cvar_FindVar("vk_raytracing");
+    if (!renderer)
+        renderer = Cvar_FindVar("vid_ref");
+
+    return water_wakes && water_wakes->value > 0.0f &&
+           raytracing && raytracing->integer && renderer &&
+           !strcmp(renderer->string, "vk");
+}
+
+static void CL_AddRTWaterWake(centity_t *cent, const vec3_t origin,
+                              int entity_number)
+{
+    if (!cl.bsp || !CL_RTWaterWakesEnabled()) {
+        entity_reset_water_wake(cent, origin);
+        return;
+    }
+
+    int elapsed = cl.time - cent->rt_water_wake_sample_time;
+    if (elapsed < 0) {
+        entity_reset_water_wake(cent, origin);
+        return;
+    }
+
+    if (elapsed >= RT_WATER_WAKE_SAMPLE_MSEC) {
+        vec3_t movement;
+        VectorSubtract(origin, cent->rt_water_wake_sample_origin, movement);
+        movement[2] = 0.0f;
+        float distance = VectorLength(movement);
+
+        VectorCopy(origin, cent->rt_water_wake_sample_origin);
+        cent->rt_water_wake_sample_time = cl.time;
+
+        if (distance > 96.0f) {
+            cent->rt_water_wake_valid = false;
+        } else if (distance >= 4.0f) {
+            vec3_t start, end;
+            trace_t trace;
+            VectorCopy(origin, start);
+            VectorCopy(origin, end);
+            start[2] += max(cent->maxs[2], 32.0f) + 12.0f;
+            end[2] += min(cent->mins[2], -24.0f) - 12.0f;
+
+            CL_Trace(&trace, start, end, vec3_origin, vec3_origin,
+                     CONTENTS_WATER);
+            if (!trace.startsolid && !trace.allsolid &&
+                trace.fraction > 0.0f && trace.fraction < 1.0f &&
+                trace.plane.normal[2] >= 0.7f) {
+                vec3_t above, below;
+                VectorMA(trace.endpos, 3.0f, trace.plane.normal, above);
+                VectorMA(trace.endpos, -3.0f, trace.plane.normal, below);
+                int above_contents = CM_PointContents(above, cl.bsp->nodes,
+                                                       cl.csr.extended);
+                int below_contents = CM_PointContents(below, cl.bsp->nodes,
+                                                       cl.csr.extended);
+
+                if (!(above_contents & MASK_WATER) &&
+                    (below_contents & CONTENTS_WATER)) {
+                    VectorMA(trace.endpos, 0.75f, trace.plane.normal,
+                             cent->rt_water_wake_origin);
+                    VectorCopy(trace.plane.normal,
+                               cent->rt_water_wake_normal);
+                    VectorNormalize(movement);
+                    VectorCopy(movement, cent->rt_water_wake_direction);
+                    cent->rt_water_wake_scale =
+                        Q_clipf(distance / 12.0f, 0.8f, 1.25f);
+                    cent->rt_water_wake_seen_time = cl.time;
+                    cent->rt_water_wake_valid = true;
+                } else {
+                    cent->rt_water_wake_valid = false;
+                }
+            } else {
+                cent->rt_water_wake_valid = false;
+            }
+        }
+    }
+
+    if (!cent->rt_water_wake_valid ||
+        cl.time - cent->rt_water_wake_seen_time > RT_WATER_WAKE_HOLD_MSEC)
+        return;
+
+    entity_t wake = { 0 };
+    VectorCopy(cent->rt_water_wake_origin, wake.origin);
+    VectorCopy(cent->rt_water_wake_direction, wake.oldorigin);
+    VectorCopy(cent->rt_water_wake_normal, wake.angles);
+    wake.frame = entity_number;
+    wake.rgba.u32 = MakeColor(112, 196, 238, 255);
+    wake.flags = RF_EFFECT_ONLY | RF_RT_WATER_WAKE | RF_TRANSLUCENT;
+    wake.alpha = 1.0f;
+    wake.scale = cent->rt_water_wake_scale;
+    V_AddEntity(&wake);
 }
 
 /*
@@ -739,8 +1114,10 @@ static void CL_AddPacketEntities(void)
     uint64_t                custom_flags;
     item_highlight_t        item_highlight;
     item_highlight_t        player_highlight;
+    vec3_t                  skin_tint;
     bool                    has_item_highlight;
     bool                    has_player_highlight;
+    bool                    has_skin_tint;
     uint64_t                player_powerup_highlight_shell;
 
     // bonus items rotate at a fixed rate
@@ -758,6 +1135,8 @@ static void CL_AddPacketEntities(void)
         s1 = &cl.entityStates[i];
 
         cent = &cl_entities[s1->number];
+        ent.temporal_id = s1->number * 8;
+        ent.temporal_generation = cent->temporal_generation;
 
         has_trail = false;
 
@@ -765,6 +1144,8 @@ static void CL_AddPacketEntities(void)
         renderfx = s1->renderfx;
         has_item_highlight = CL_GetItemHighlight(s1, &item_highlight);
         has_player_highlight = CL_GetPlayerHighlight(s1, &player_highlight);
+        has_skin_tint = CL_GetModelSkinTint(s1, skin_tint);
+        VectorSet(ent.skin_tint, 1.0f, 1.0f, 1.0f);
         player_powerup_highlight_shell = CL_GetPlayerPowerupHighlightShell(s1->effects);
 
         // set frame
@@ -835,16 +1216,19 @@ static void CL_AddPacketEntities(void)
                        cl.lerpfrac, ent.origin);
             LerpVector(cent->prev.old_origin, cent->current.old_origin,
                        cl.lerpfrac, ent.oldorigin);
+            VectorCopy(cent->prev.origin, ent.previous_origin);
         } else {
             if (s1->number == cl.frame.clientNum + 1) {
                 // use predicted origin
                 VectorCopy(cl.playerEntityOrigin, ent.origin);
                 VectorCopy(cl.playerEntityOrigin, ent.oldorigin);
+                VectorCopy(cl.playerEntityOrigin, ent.previous_origin);
             } else {
                 // interpolate origin
                 LerpVector(cent->prev.origin, cent->current.origin,
                            cl.lerpfrac, ent.origin);
                 VectorCopy(ent.origin, ent.oldorigin);
+                VectorCopy(cent->prev.origin, ent.previous_origin);
             }
 #if USE_FPS
             // run alias model animation
@@ -867,10 +1251,15 @@ static void CL_AddPacketEntities(void)
 #endif
         }
 
+        if (s1->modelindex == MODELINDEX_PLAYER && !(renderfx & RF_BEAM))
+            CL_AddRTWaterWake(cent, ent.origin, s1->number);
+
         if (effects & EF_BOB && !cl_nobob->integer) {
             ent.origin[2] += autobob;
             ent.oldorigin[2] += autobob;
+            ent.previous_origin[2] += autobob;
         }
+        ent.previous_valid = true;
 
         if (!cl_gibs->integer) {
             if (effects & EF_GIB && !(cl.csr.extended && effects & EF_ROCKET))
@@ -1007,6 +1396,9 @@ static void CL_AddPacketEntities(void)
             if (s1->modelindex == MODELINDEX_PLAYER && cl_rollhack->integer)
                 ent.angles[ROLL] = -ent.angles[ROLL];
         }
+        VectorCopy(cent->prev.angles, ent.previous_angles);
+        if (s1->number == cl.frame.clientNum + 1)
+            VectorCopy(ent.angles, ent.previous_angles);
 
         if (s1->morefx & EFX_FLASHLIGHT) {
             vec3_t forward, start, end;
@@ -1097,6 +1489,12 @@ static void CL_AddPacketEntities(void)
             custom_flags |= RF_TRACKER;
         }
 
+        if (has_skin_tint) {
+            VectorCopy(skin_tint, ent.skin_tint);
+            ent.flags |= RF_SKINTINT;
+            custom_flags |= RF_SKINTINT;
+        }
+
         ent.scale = s1->scale;
 
         // add to refresh list
@@ -1152,13 +1550,17 @@ static void CL_AddPacketEntities(void)
 
         ent.skin = 0;       // never use a custom skin on others
         ent.skinnum = 0;
-        ent.flags = custom_flags;
+        ent.flags = custom_flags & ~RF_SKINTINT;
+        VectorSet(ent.skin_tint, 1.0f, 1.0f, 1.0f);
         ent.alpha = custom_alpha;
 
         // duplicate for linked models
         if (s1->modelindex2) {
+            ent.temporal_id = s1->number * 8 + 1;
             item_highlight_t weapon_highlight;
+            vec3_t weapon_tint;
             bool has_weapon_highlight = false;
+            bool has_weapon_tint = false;
 
             if (s1->modelindex2 == MODELINDEX_PLAYER) {
                 // custom weapon
@@ -1170,6 +1572,7 @@ static void CL_AddPacketEntities(void)
                     CL_GetWeaponHighlight(i, &weapon_highlight) : false;
                 if (i < 0 || i > cl.numWeaponModels - 1)
                     i = 0;
+                has_weapon_tint = CL_GetWeaponIndexTint(i, weapon_tint);
                 ent.model = ci->weaponmodel[i];
                 if (!ent.model) {
                     if (i != 0)
@@ -1177,8 +1580,17 @@ static void CL_AddPacketEntities(void)
                     if (!ent.model)
                         ent.model = cl.baseclientinfo.weaponmodel[0];
                 }
-            } else
+            } else {
                 ent.model = cl.model_draw[s1->modelindex2];
+                has_weapon_tint = CL_GetWeaponModelTint(
+                    cl.configstrings[cl.csr.models + s1->modelindex2],
+                    weapon_tint);
+            }
+
+            if (has_weapon_tint) {
+                VectorCopy(weapon_tint, ent.skin_tint);
+                ent.flags |= RF_SKINTINT;
+            }
 
             // PMM - check for the defender sphere shell .. make it translucent
             if (!Q_strcasecmp(cl.configstrings[cl.csr.models + s1->modelindex2], "models/items/shell/tris.md2")) {
@@ -1208,16 +1620,19 @@ static void CL_AddPacketEntities(void)
         }
 
         if (s1->modelindex3) {
+            ent.temporal_id = s1->number * 8 + 2;
             ent.model = cl.model_draw[s1->modelindex3];
             V_AddEntity(&ent);
         }
 
         if (s1->modelindex4) {
+            ent.temporal_id = s1->number * 8 + 3;
             ent.model = cl.model_draw[s1->modelindex4];
             V_AddEntity(&ent);
         }
 
         if (effects & EF_POWERSCREEN) {
+            ent.temporal_id = s1->number * 8 + 4;
             ent.model = cl_mod_powerscreen;
             ent.oldframe = 0;
             ent.frame = 0;
@@ -1397,6 +1812,8 @@ static void CL_AddViewWeapon(void)
     const centity_t *ent;
     const player_state_t *ps, *ops;
     entity_t    gun;        // view model
+    vec3_t      weapon_tint;
+    bool        has_weapon_tint = false;
     int         i, flags;
 
     // allow the gun to be completely removed
@@ -1431,6 +1848,12 @@ static void CL_AddViewWeapon(void)
         return;
     }
 
+    if (!gun_model) {
+        int modelindex = ps->gunindex & GUNINDEX_MASK;
+        has_weapon_tint = CL_GetWeaponModelTint(
+            cl.configstrings[cl.csr.models + modelindex], weapon_tint);
+    }
+
     // set up gun position
     for (i = 0; i < 3; i++) {
         gun.origin[i] = cl.refdef.vieworg[i] + ops->gunoffset[i] +
@@ -1459,6 +1882,10 @@ static void CL_AddViewWeapon(void)
     }
 
     gun.flags = RF_MINLIGHT | RF_DEPTHHACK | RF_WEAPONMODEL;
+    if (has_weapon_tint) {
+        VectorCopy(weapon_tint, gun.skin_tint);
+        gun.flags |= RF_SKINTINT;
+    }
     gun.alpha = Cvar_ClampValue(cl_gunalpha, 0.1f, 1.0f);
 
     ent = get_player_entity();
@@ -1470,6 +1897,7 @@ static void CL_AddViewWeapon(void)
     if (gun.alpha != 1.0f)
         gun.flags |= RF_TRANSLUCENT;
 
+    gun.temporal_id = MAX_EDICTS * 8;
     V_AddEntity(&gun);
 
     // add shell effect from player entity

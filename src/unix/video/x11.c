@@ -56,6 +56,9 @@ static struct {
     bool        evdev;
     char        *clipboard_data;
     int         dpi_scale;
+    XErrorHandler old_error_handler;
+    XIOErrorHandler old_io_error_handler;
+    bool        error_handlers_installed;
 
     struct {
         Atom    delete;
@@ -140,6 +143,11 @@ static void shutdown(void)
             XFreeCursor(x11.dpy, x11.empty_cursor);
 
         XCloseDisplay(x11.dpy);
+    }
+
+    if (x11.error_handlers_installed) {
+        XSetErrorHandler(x11.old_error_handler);
+        XSetIOErrorHandler(x11.old_io_error_handler);
     }
 
     Z_Free(x11.clipboard_data);
@@ -278,8 +286,9 @@ static bool init(void)
         return false;
     }
 
-    XSetIOErrorHandler(io_error_handler);
-    XSetErrorHandler(error_handler);
+    x11.old_io_error_handler = XSetIOErrorHandler(io_error_handler);
+    x11.old_error_handler = XSetErrorHandler(error_handler);
+    x11.error_handlers_installed = true;
 
     x11.screen = DefaultScreen(x11.dpy);
     x11.root = RootWindow(x11.dpy, x11.screen);

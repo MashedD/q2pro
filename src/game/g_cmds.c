@@ -141,6 +141,20 @@ Cmd_Give_f
 Give items to a client
 ==================
 */
+static void GiveItem(edict_t *ent, const gitem_t *it)
+{
+    edict_t *it_ent = G_Spawn();
+
+    it_ent->classname = it->classname;
+    SpawnItem(it_ent, it);
+    if (!it_ent->inuse || !it_ent->item)
+        return;
+
+    Touch_Item(it_ent, ent, NULL, NULL);
+    if (it_ent->inuse)
+        G_FreeEdict(it_ent);
+}
+
 static void Cmd_Give_f(edict_t *ent)
 {
     char        *name;
@@ -148,7 +162,6 @@ static void Cmd_Give_f(edict_t *ent)
     int         index;
     int         i;
     bool        give_all;
-    edict_t     *it_ent;
 
     if ((deathmatch->value || coop->value) && !sv_cheats->value) {
         gi.cprintf(ent, PRINT_HIGH, "You must run the server with '+set cheats 1' to enable this command.\n");
@@ -216,12 +229,7 @@ static void Cmd_Give_f(edict_t *ent)
 
     if (give_all || Q_stricmp(name, "Power Shield") == 0) {
         it = FindItem("Power Shield");
-        it_ent = G_Spawn();
-        it_ent->classname = it->classname;
-        SpawnItem(it_ent, it);
-        Touch_Item(it_ent, ent, NULL, NULL);
-        if (it_ent->inuse)
-            G_FreeEdict(it_ent);
+        GiveItem(ent, it);
 
         if (!give_all)
             return;
@@ -262,12 +270,7 @@ static void Cmd_Give_f(edict_t *ent)
         else
             ent->client->pers.inventory[index] += it->quantity;
     } else {
-        it_ent = G_Spawn();
-        it_ent->classname = it->classname;
-        SpawnItem(it_ent, it);
-        Touch_Item(it_ent, ent, NULL, NULL);
-        if (it_ent->inuse)
-            G_FreeEdict(it_ent);
+        GiveItem(ent, it);
     }
 }
 

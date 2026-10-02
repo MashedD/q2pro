@@ -32,6 +32,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "format/pcx.h"
 #include "format/wal.h"
 #include "images.h"
+#include "gl_backend.h"
 
 #if USE_PNG
 #define PNG_SKIP_SETJMP_CHECK
@@ -1481,6 +1482,7 @@ static cvar_t   *r_texture_overrides;
 #endif
 
 static cvar_t   *r_glowmaps;
+static const image_upload_t *r_image_upload;
 
 static const cmd_option_t o_imagelist[] = {
     { "8", "pal", "list paletted images" },
@@ -1816,6 +1818,23 @@ static void print_error(const char *name, imageflags_t flags, int err)
     Com_LPrintf(level, "Couldn't load %s: %s\n", Com_MakePrintable(name), msg);
 }
 
+void IMG_SetUploadBackend(const image_upload_t *backend)
+{
+    r_image_upload = backend;
+}
+
+void IMG_Load(image_t *image, byte *pic)
+{
+    if (r_image_upload && r_image_upload->load)
+        r_image_upload->load(image, pic);
+}
+
+void IMG_Unload(image_t *image)
+{
+    if (r_image_upload && r_image_upload->unload)
+        r_image_upload->unload(image);
+}
+
 static int load_image_data(image_t *image, imageformat_t fmt, bool need_dimensions, byte **pic)
 {
     int ret;
@@ -1852,6 +1871,29 @@ static int load_image_data(image_t *image, imageformat_t fmt, bool need_dimensio
 #endif
 
     return ret;
+}
+
+byte *IMG_LoadPixels(const char *name, int *width, int *height)
+{
+    image_t image = { .type = IT_WALL };
+    byte *pic = NULL;
+    size_t len = FS_NormalizePathBuffer(image.name, name, sizeof(image.name));
+    image.baselen = COM_FileExtension(image.name) - image.name;
+    if (!len || image.baselen < 1 || image.name[image.baselen] != '.')
+        return NULL;
+
+    imageformat_t fmt;
+    for (fmt = 0; fmt < IM_MAX; fmt++)
+        if (!Q_stricmp(image.name + image.baselen + 1, img_loaders[fmt].ext))
+            break;
+    if (fmt == IM_MAX || load_image_data(&image, fmt, false, &pic) < 0)
+        return NULL;
+
+    if (width)
+        *width = image.upload_width;
+    if (height)
+        *height = image.upload_height;
+    return pic;
 }
 
 static void check_for_glow_map(image_t *image)
@@ -1991,7 +2033,8 @@ static image_t *find_or_load_image(const char *name, size_t len,
     List_Append(&r_imageHash[hash], &image->entry);
 
     // check for glow maps
-    if (r_glowmaps->integer && (type == IT_SKIN || type == IT_WALL))
+    if (r_image_upload && r_image_upload->glowmaps &&
+        r_glowmaps->integer && (type == IT_SKIN || type == IT_WALL))
         check_for_glow_map(image);
 
     if (type == IT_SKY && flags & IF_CLASSIC_SKY) {
@@ -2069,7 +2112,7 @@ image_t *IMG_ForHandle(qhandle_t h)
 R_RegisterImage
 ===============
 */
-qhandle_t R_RegisterImage(const char *name, imagetype_t type, imageflags_t flags)
+qhandle_t IMG_RegisterImage(const char *name, imagetype_t type, imageflags_t flags)
 {
     image_t     *image;
     char        fullname[MAX_QPATH];
@@ -2113,7 +2156,7 @@ qhandle_t R_RegisterImage(const char *name, imagetype_t type, imageflags_t flags
 R_GetPicSize
 =============
 */
-bool R_GetPicSize(int *w, int *h, qhandle_t pic)
+bool IMG_GetPicSize(int *w, int *h, qhandle_t pic)
 {
     const image_t *image = IMG_ForHandle(pic);
 
@@ -2123,6 +2166,16 @@ bool R_GetPicSize(int *w, int *h, qhandle_t pic)
         *h = image->height;
 
     return image->flags & IF_TRANSPARENT;
+}
+
+qhandle_t GLR_RegisterImage(const char *name, imagetype_t type, imageflags_t flags)
+{
+    return IMG_RegisterImage(name, type, flags);
+}
+
+bool GLR_GetPicSize(int *w, int *h, qhandle_t pic)
+{
+    return IMG_GetPicSize(w, h, pic);
 }
 
 /*
@@ -2281,4 +2334,5 @@ void IMG_Shutdown(void)
     Cmd_Deregister(img_cmd);
     memset(r_images, 0, R_NUM_AUTO_IMG * sizeof(r_images[0]));   // clear R_NOTEXTURE
     r_numImages = 0;
+    r_image_upload = NULL;
 }

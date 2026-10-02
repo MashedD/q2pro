@@ -336,7 +336,8 @@ typedef struct {
         ex_flash,
         ex_mflash,
         ex_poly,
-        ex_light
+        ex_light,
+        ex_rt_effect
     } type;
 
     entity_t    ent;
@@ -518,6 +519,7 @@ static void CL_AddExplosions(void)
         switch (ex->type) {
         case ex_misc:
         case ex_light:
+        case ex_rt_effect:
             if (f >= ex->frames - 1) {
                 ex->type = ex_free;
                 break;
@@ -532,6 +534,7 @@ static void CL_AddExplosions(void)
             ent->alpha = 1.0f;
             break;
         case ex_poly:
+            ent->flags |= RF_EXPLOSION;
             if (f >= ex->frames - 1) {
                 ex->type = ex_free;
                 break;
@@ -569,7 +572,8 @@ static void CL_AddExplosions(void)
                        ex->lightcolor[0], ex->lightcolor[1], ex->lightcolor[2]);
 
         if (ex->type != ex_light) {
-            VectorCopy(ent->origin, ent->oldorigin);
+            if (ex->type != ex_rt_effect)
+                VectorCopy(ent->origin, ent->oldorigin);
 
             if (f < 0)
                 f = 0;
@@ -599,6 +603,7 @@ typedef struct {
     color_t     rgba;
     int         width;
     int         lifetime, starttime;
+    bool        additive;
 } laser_t;
 
 static laser_t  cl_lasers[MAX_LASERS];
@@ -648,6 +653,8 @@ static void CL_AddLasers(void)
 
         ent.skinnum = l->color;
         ent.flags = RF_TRANSLUCENT | RF_BEAM;
+        if (l->additive)
+            ent.flags |= RF_BEAM_ADDITIVE;
         VectorCopy(l->start, ent.origin);
         VectorCopy(l->end, ent.oldorigin);
         ent.frame = l->width;
@@ -1130,6 +1137,7 @@ static cvar_t *cl_railtrail_type;
 static cvar_t *cl_railtrail_time;
 static cvar_t *cl_railcore_color;
 static cvar_t *cl_railcore_width;
+static cvar_t *cl_railcore_glow;
 static cvar_t *cl_railspiral_color;
 static cvar_t *cl_railspiral_radius;
 
@@ -1153,7 +1161,32 @@ static void cl_railspiral_color_changed(cvar_t *self)
 
 static void CL_RailCore(void)
 {
-    laser_t *l;
+    float glow = cl_railcore_glow ?
+        Cvar_ClampValue(cl_railcore_glow, 0.0f, 1.0f) : 0.65f;
+    int width = cl_railcore_width ?
+        Cvar_ClampInteger(cl_railcore_width, 1, 6) : 2;
+    color_t inner = railcore_color;
+    int peak = max(inner.u8[0], max(inner.u8[1], inner.u8[2]));
+    if (peak > 0 && glow > 0.0f) {
+        float white_mix = 0.55f * glow;
+        for (int i = 0; i < 3; i++)
+            inner.u8[i] = Q_rint(inner.u8[i] * (1.0f - white_mix) +
+                                255.0f * white_mix);
+    }
+
+    laser_t *l = CL_AllocLaser();
+    if (!l)
+        return;
+
+    VectorCopy(te.pos1, l->start);
+    VectorCopy(te.pos2, l->end);
+    l->color = -1;
+    l->lifetime = cl_railtrail_time->integer;
+    l->width = width;
+    l->rgba = inner;
+
+    if (glow <= 0.0f)
+        return;
 
     l = CL_AllocLaser();
     if (!l)
@@ -1163,8 +1196,10 @@ static void CL_RailCore(void)
     VectorCopy(te.pos2, l->end);
     l->color = -1;
     l->lifetime = cl_railtrail_time->integer;
-    l->width = cl_railcore_width->integer;
+    l->width = width + max(1, (int)ceilf(3.0f * glow));
     l->rgba = railcore_color;
+    l->rgba.u8[3] = Q_rint(l->rgba.u8[3] * 0.38f * glow);
+    l->additive = true;
 }
 
 static void CL_RailSpiral(void)
@@ -1227,17 +1262,229 @@ static void CL_RailTrail(void)
     }
 }
 
-static void dirtoangles(vec3_t angles)
+static void dirtoangles(const vec3_t dir, vec3_t angles)
 {
-    angles[0] = RAD2DEG(acosf(te.dir[2]));
-    if (te.dir[0])
-        angles[1] = RAD2DEG(atan2f(te.dir[1], te.dir[0]));
-    else if (te.dir[1] > 0)
+    angles[0] = RAD2DEG(acosf(Q_clipf(dir[2], -1.0f, 1.0f)));
+    if (dir[0])
+        angles[1] = RAD2DEG(atan2f(dir[1], dir[0]));
+    else if (dir[1] > 0)
         angles[1] = 90;
-    else if (te.dir[1] < 0)
+    else if (dir[1] < 0)
         angles[1] = 270;
     else
         angles[1] = 0;
+}
+
+static explosion_t *CL_RTEffect(const vec3_t origin, const vec3_t normal,
+                                uint64_t effect_flag, uint32_t rgba,
+                                float scale, int frames)
+{
+    explosion_t *ex = CL_AllocExplosion();
+    vec3_t direction;
+
+    VectorCopy(origin, ex->ent.origin);
+    VectorCopy(normal, direction);
+    if (VectorNormalize(direction) <= 0.0f)
+        VectorSet(direction, 0.0f, 0.0f, 1.0f);
+    VectorCopy(direction, ex->ent.oldorigin);
+    ex->type = ex_rt_effect;
+    ex->ent.flags = RF_EFFECT_ONLY | effect_flag | RF_TRANSLUCENT;
+    ex->ent.rgba.u32 = rgba;
+    ex->ent.skinnum = -1;
+    ex->ent.scale = scale;
+    ex->ent.alpha = 1.0f;
+    ex->start = cl.servertime - CL_FRAMETIME;
+    ex->frames = frames;
+    return ex;
+}
+
+static void CL_RTRailIonization(void)
+{
+    vec3_t direction, origin, normal, trace_start, trace_end;
+    VectorSubtract(te.pos2, te.pos1, direction);
+    if (VectorNormalize(direction) <= 1.0f)
+        return;
+
+    VectorCopy(te.pos2, origin);
+    VectorNegate(direction, normal);
+    if (cl.bsp) {
+        trace_t trace;
+        VectorMA(te.pos2, -8.0f, direction, trace_start);
+        VectorMA(te.pos2, 2.0f, direction, trace_end);
+        CL_Trace(&trace, trace_start, trace_end, vec3_origin, vec3_origin,
+                 MASK_SOLID);
+        if (!trace.allsolid && !trace.startsolid && trace.fraction < 1.0f &&
+            VectorLength(trace.plane.normal) > 0.1f) {
+            VectorMA(trace.endpos, 0.75f, trace.plane.normal, origin);
+            VectorCopy(trace.plane.normal, normal);
+        }
+    }
+
+    explosion_t *ex = CL_RTEffect(origin, normal,
+                                  RF_RT_RAIL_IONIZATION,
+                                  railcore_color.u32,
+                                  railspiral_color.u8[3] / 255.0f, 4);
+    ex->ent.angles[0] = railspiral_color.u8[0] / 255.0f;
+    ex->ent.angles[1] = railspiral_color.u8[1] / 255.0f;
+    ex->ent.angles[2] = railspiral_color.u8[2] / 255.0f;
+}
+
+static explosion_t *CL_RTImpact(const vec3_t origin, const vec3_t normal,
+                                uint32_t rgba, float scale)
+{
+    return CL_RTEffect(origin, normal, RF_RT_IMPACT, rgba, scale, 5);
+}
+
+static void CL_RTElectricFilaments(const vec3_t origin, const vec3_t normal,
+                                   uint32_t rgba, float scale)
+{
+    explosion_t *ex = CL_RTEffect(origin, normal, RF_RT_ELECTRIC, rgba,
+                                  scale, 5);
+    ex->ent.angles[0] = 4.0f;
+    ex->ent.angles[1] = Q_rand() & 255;
+}
+
+static void CL_RTSplashRipple(const vec3_t origin, const vec3_t normal,
+                              int splash, int count)
+{
+    uint32_t rgba;
+
+    switch (splash) {
+    case SPLASH_BLUE_WATER:
+        rgba = MakeColor(112, 196, 238, 255);
+        break;
+    case SPLASH_BROWN_WATER:
+        rgba = MakeColor(194, 156, 106, 255);
+        break;
+    case SPLASH_SLIME:
+        rgba = MakeColor(104, 226, 76, 255);
+        break;
+    case SPLASH_LAVA:
+        rgba = MakeColor(255, 112, 28, 255);
+        break;
+    default:
+        return;
+    }
+
+    float scale = 0.80f + Q_clipf(count / 16.0f, 0.0f, 1.0f) * 0.40f;
+    explosion_t *ex = CL_RTEffect(origin, normal, RF_RT_SPLASH_RIPPLE,
+                                  rgba, scale, 10);
+    ex->ent.skinnum = splash;
+}
+
+void CL_RTTeleportVortex(const vec3_t origin, rt_teleport_type_t type)
+{
+    static const vec3_t up = { 0.0f, 0.0f, 1.0f };
+    uint32_t rgba;
+    float scale;
+    int frames;
+
+    switch (type) {
+    case RT_TELEPORT_STANDARD:
+        rgba = MakeColor(78, 188, 255, 255);
+        scale = 1.0f;
+        frames = 12;
+        break;
+    case RT_TELEPORT_DBALL:
+        rgba = MakeColor(190, 78, 255, 255);
+        scale = 1.15f;
+        frames = 13;
+        break;
+    case RT_TELEPORT_BOSS:
+        rgba = MakeColor(255, 112, 92, 255);
+        scale = 1.8f;
+        frames = 16;
+        break;
+    default:
+        return;
+    }
+
+    explosion_t *ex = CL_RTEffect(origin, up, RF_RT_TELEPORT, rgba,
+                                  scale, frames);
+    ex->ent.skinnum = type;
+    ex->ent.angles[0] = frames - 1;
+}
+
+void CL_RTItemRespawn(const vec3_t origin)
+{
+    static const vec3_t up = { 0.0f, 0.0f, 1.0f };
+    explosion_t *ex = CL_RTEffect(origin, up, RF_RT_ITEM_RESPAWN,
+                                  MakeColor(88, 255, 132, 255), 1.0f, 11);
+    ex->ent.angles[0] = 10.0f;
+}
+
+void CL_RTLandingDust(int entnum, rt_landing_type_t type)
+{
+    if ((unsigned)entnum >= MAX_EDICTS || !cl.bsp)
+        return;
+
+    const centity_t *cent = &cl_entities[entnum];
+    const vec3_t trace_mins = { cent->mins[0], cent->mins[1], 0.0f };
+    const vec3_t trace_maxs = { cent->maxs[0], cent->maxs[1], 0.0f };
+    vec3_t start, end;
+
+    VectorCopy(cent->current.origin, start);
+    start[2] += 1.0f;
+    VectorCopy(start, end);
+    end[2] -= 9.0f;
+    if (cent->current.solid && cent->current.solid != PACKED_BSP)
+        end[2] += cent->mins[2];
+    else
+        end[2] -= 66.0f;
+
+    trace_t trace;
+    CL_Trace(&trace, start, end, trace_mins, trace_maxs, MASK_SOLID);
+    if (trace.allsolid || trace.startsolid || trace.fraction == 1.0f ||
+        trace.plane.normal[2] < 0.45f)
+        return;
+
+    vec3_t origin;
+    VectorMA(trace.endpos, 1.5f, trace.plane.normal, origin);
+    float scale = type == RT_LANDING_FAR ? 1.3f :
+                  type == RT_LANDING_NORMAL ? 1.0f : 0.7f;
+    explosion_t *ex = CL_RTEffect(origin, trace.plane.normal,
+                                  RF_RT_LANDING_DUST,
+                                  MakeColor(154, 144, 126, 255), scale, 7);
+    ex->ent.skinnum = type & RT_LANDING_SEVERITY_MASK;
+    if (entnum == cl.frame.clientNum + 1)
+        ex->ent.skinnum |= RT_LANDING_LOCAL;
+    ex->ent.angles[0] = 6.0f;
+    ex->ent.angles[1] = Q_rand() & 255;
+}
+
+void CL_RTEnergyCollapse(const vec3_t origin,
+                         rt_energy_collapse_type_t type)
+{
+    static const vec3_t up = { 0.0f, 0.0f, 1.0f };
+    uint32_t rgba;
+    float scale;
+    int frames;
+
+    switch (type) {
+    case RT_ENERGY_BFG_CORE:
+        rgba = MakeColor(76, 255, 104, 255);
+        scale = 1.5f;
+        frames = 9;
+        break;
+    case RT_ENERGY_BFG_SECONDARY:
+        rgba = MakeColor(104, 230, 116, 255);
+        scale = 0.75f;
+        frames = 7;
+        break;
+    case RT_ENERGY_TRACKER:
+        rgba = MakeColor(192, 82, 255, 255);
+        scale = 1.0f;
+        frames = 7;
+        break;
+    default:
+        return;
+    }
+
+    explosion_t *ex = CL_RTEffect(origin, up, RF_RT_ENERGY_COLLAPSE,
+                                  rgba, scale, frames);
+    ex->ent.skinnum = type;
+    ex->ent.angles[0] = frames - 1;
+    ex->ent.angles[1] = Q_rand() & 255;
 }
 
 /*
@@ -1247,6 +1494,31 @@ CL_ParseTEnt
 */
 static const byte splash_color[] = {0x00, 0xe0, 0xb0, 0x50, 0xd0, 0xe0, 0xe8};
 
+static bool CL_IsSelfBloodImpact(const vec3_t origin)
+{
+    const centity_t *ent;
+    vec3_t player_origin;
+    int entnum, i;
+
+    if (!VALIDATE_CLIENTNUM(&cl.csr, cl.frame.clientNum))
+        return false;
+
+    entnum = cl.frame.clientNum + 1;
+    ent = &cl_entities[entnum];
+    if (!ent->current.solid || ent->current.solid == PACKED_BSP)
+        return false;
+
+    VectorScale(cl.frame.ps.pmove.origin, 0.125f, player_origin);
+    for (i = 0; i < 3; i++) {
+        // Network positions are quantized to 1/8th of a unit.
+        if (origin[i] < player_origin[i] + ent->mins[i] - 0.125f ||
+            origin[i] > player_origin[i] + ent->maxs[i] + 0.125f)
+            return false;
+    }
+
+    return true;
+}
+
 void CL_ParseTEnt(void)
 {
     explosion_t *ex;
@@ -1254,7 +1526,8 @@ void CL_ParseTEnt(void)
 
     switch (te.type) {
     case TE_BLOOD:          // bullet hitting flesh
-        if (!(cl_disable_particles->integer & NOPART_BLOOD))
+        if (!(cl_disable_particles->integer & NOPART_BLOOD) &&
+            !(cl_disable_self_blood->integer && CL_IsSelfBloodImpact(te.pos1)))
             CL_ParticleEffect(te.pos1, te.dir, 0xe8, 60);
         break;
 
@@ -1265,6 +1538,9 @@ void CL_ParseTEnt(void)
             CL_ParticleEffect(te.pos1, te.dir, 0, 40);
         else
             CL_ParticleEffect(te.pos1, te.dir, 0xe0, 6);
+
+        CL_RTImpact(te.pos1, te.dir, MakeColor(255, 154, 48, 255),
+                    te.type == TE_SPARKS ? 0.75f : 0.9f);
 
         if (te.type != TE_SPARKS) {
             CL_SmokeAndFlash(te.pos1);
@@ -1286,6 +1562,16 @@ void CL_ParseTEnt(void)
             CL_ParticleEffect(te.pos1, te.dir, 0xd0, 40);
         else
             CL_ParticleEffect(te.pos1, te.dir, 0xb0, 40);
+        CL_RTImpact(te.pos1, te.dir,
+                    te.type == TE_SCREEN_SPARKS ?
+                        MakeColor(255, 90, 62, 255) :
+                        MakeColor(90, 130, 255, 255),
+                    1.0f);
+        CL_RTElectricFilaments(te.pos1, te.dir,
+                    te.type == TE_SCREEN_SPARKS ?
+                        MakeColor(255, 104, 64, 255) :
+                        MakeColor(104, 132, 255, 255),
+                    1.0f);
         //FIXME : replace or remove this sound
         S_StartSound(te.pos1, 0, 257, cl_sfx_lashit, 1, ATTN_NORM, 0);
         break;
@@ -1293,6 +1579,7 @@ void CL_ParseTEnt(void)
     case TE_SHOTGUN:            // bullet hitting wall
         CL_ParticleEffect(te.pos1, te.dir, 0, 20);
         CL_SmokeAndFlash(te.pos1);
+        CL_RTImpact(te.pos1, te.dir, MakeColor(255, 148, 42, 255), 0.85f);
         break;
 
     case TE_SPLASH:         // bullet hitting water
@@ -1308,6 +1595,8 @@ void CL_ParseTEnt(void)
             CL_ParticleEffect(te.pos1, te.dir, r, te.count);
         }
 
+        CL_RTSplashRipple(te.pos1, te.dir, te.color, te.count);
+
         if (te.color == SPLASH_SPARKS) {
             r = Q_rand() & 3;
             if (r == 0)
@@ -1321,14 +1610,18 @@ void CL_ParseTEnt(void)
 
     case TE_LASER_SPARKS:
         CL_ParticleEffect2(te.pos1, te.dir, te.color, te.count);
+        ex = CL_RTImpact(te.pos1, te.dir, U32_WHITE, 0.9f);
+        ex->ent.skinnum = te.color & 0xff;
         break;
 
     case TE_BLUEHYPERBLASTER:   // broken version
         CL_BlasterParticles(te.pos1, te.pos2);
+        CL_RTImpact(te.pos1, te.pos2, MakeColor(72, 132, 255, 255), 1.0f);
         break;
 
     case TE_BLUEHYPERBLASTER_2: // fixed version
         CL_BlasterParticles(te.pos1, te.dir);
+        CL_RTImpact(te.pos1, te.dir, MakeColor(72, 132, 255, 255), 1.0f);
         break;
 
     case TE_BLASTER:            // blaster hitting wall
@@ -1336,7 +1629,7 @@ void CL_ParseTEnt(void)
     case TE_FLECHETTE:          // flechette
         ex = CL_AllocExplosion();
         VectorCopy(te.pos1, ex->ent.origin);
-        dirtoangles(ex->ent.angles);
+        dirtoangles(te.dir, ex->ent.angles);
         ex->type = ex_misc;
         ex->ent.flags = RF_FULLBRIGHT | RF_TRANSLUCENT;
         switch (te.type) {
@@ -1344,16 +1637,19 @@ void CL_ParseTEnt(void)
             CL_BlasterParticles(te.pos1, te.dir);
             ex->lightcolor[0] = 1;
             ex->lightcolor[1] = 1;
+            CL_RTImpact(te.pos1, te.dir, MakeColor(255, 210, 64, 255), 1.1f);
             break;
         case TE_BLASTER2:
             CL_BlasterParticles2(te.pos1, te.dir, 0xd0);
             ex->ent.skinnum = 1;
             ex->lightcolor[1] = 1;
+            CL_RTImpact(te.pos1, te.dir, MakeColor(76, 255, 92, 255), 1.1f);
             break;
         case TE_FLECHETTE:
             CL_BlasterParticles2(te.pos1, te.dir, 0x6f);  // 75
             ex->ent.skinnum = 2;
             VectorSet(ex->lightcolor, 0.19f, 0.41f, 0.75f);
+            CL_RTImpact(te.pos1, te.dir, MakeColor(72, 142, 255, 255), 1.1f);
             break;
         }
         ex->start = cl.servertime - CL_FRAMETIME;
@@ -1366,6 +1662,7 @@ void CL_ParseTEnt(void)
     case TE_RAILTRAIL:          // railgun effect
     case TE_RAILTRAIL2:
         CL_RailTrail();
+        CL_RTRailIonization();
         S_StartSound(te.pos2, 0, 0, cl_sfx_railg, 1, ATTN_NORM, 0);
         break;
 
@@ -1442,10 +1739,12 @@ void CL_ParseTEnt(void)
 
     case TE_BFG_EXPLOSION:
         CL_BFGExplosion(te.pos1);
+        CL_RTEnergyCollapse(te.pos1, RT_ENERGY_BFG_SECONDARY);
         break;
 
     case TE_BFG_BIGEXPLOSION:
         CL_BFGExplosionParticles(te.pos1);
+        CL_RTEnergyCollapse(te.pos1, RT_ENERGY_BFG_CORE);
         break;
 
     case TE_BFG_LASER:
@@ -1455,6 +1754,7 @@ void CL_ParseTEnt(void)
     case TE_BFG_ZAP:
         CL_ParseLaser(0xd0d1d2d3);
         CL_BFGExplosion(te.pos2);
+        CL_RTEnergyCollapse(te.pos2, RT_ENERGY_BFG_SECONDARY);
         break;
 
     case TE_BUBBLETRAIL:
@@ -1470,6 +1770,7 @@ void CL_ParseTEnt(void)
 
     case TE_BOSSTPORT:          // boss teleporting to station
         CL_BigTeleportParticles(te.pos1);
+        CL_RTTeleportVortex(te.pos1, RT_TELEPORT_BOSS);
         S_StartSound(te.pos1, 0, 0, S_RegisterSound("misc/bigtele.wav"), 1, ATTN_NONE, 0);
         break;
 
@@ -1536,6 +1837,8 @@ void CL_ParseTEnt(void)
 
     case TE_HEATBEAM_SPARKS:
         CL_ParticleSteamEffect(te.pos1, te.dir, 0x8, 50, 60);
+        CL_RTElectricFilaments(te.pos1, te.dir,
+                              MakeColor(255, 172, 84, 255), 1.15f);
         S_StartSound(te.pos1,  0, 0, cl_sfx_lashit, 1, ATTN_NORM, 0);
         break;
 
@@ -1564,6 +1867,8 @@ void CL_ParseTEnt(void)
 
     case TE_ELECTRIC_SPARKS:
         CL_ParticleEffect(te.pos1, te.dir, 0x75, 40);
+        CL_RTElectricFilaments(te.pos1, te.dir,
+                              MakeColor(104, 176, 255, 255), 1.05f);
         //FIXME : replace or remove this sound
         S_StartSound(te.pos1, 0, 0, cl_sfx_lashit, 1, ATTN_NORM, 0);
         break;
@@ -1571,12 +1876,18 @@ void CL_ParseTEnt(void)
     case TE_TRACKER_EXPLOSION:
         CL_ColorFlash(te.pos1, 0, 150, -1, -1, -1);
         CL_ColorExplosionParticles(te.pos1, 0, 1);
+        CL_RTEnergyCollapse(te.pos1, RT_ENERGY_TRACKER);
         S_StartSound(te.pos1, 0, 0, cl_sfx_disrexp, 1, ATTN_NORM, 0);
         break;
 
     case TE_TELEPORT_EFFECT:
+        CL_TeleportParticles(te.pos1);
+        CL_RTTeleportVortex(te.pos1, RT_TELEPORT_STANDARD);
+        break;
+
     case TE_DBALL_GOAL:
         CL_TeleportParticles(te.pos1);
+        CL_RTTeleportVortex(te.pos1, RT_TELEPORT_DBALL);
         break;
 
     case TE_WIDOWBEAMOUT:
@@ -1596,7 +1907,7 @@ void CL_ParseTEnt(void)
 
         ex = CL_AllocExplosion();
         VectorCopy(te.pos1, ex->ent.origin);
-        dirtoangles(ex->ent.angles);
+        dirtoangles(te.dir, ex->ent.angles);
         ex->type = ex_misc;
         ex->ent.model = cl_mod_explode;
         ex->ent.flags = RF_FULLBRIGHT | RF_TRANSLUCENT;
@@ -1676,6 +1987,7 @@ void CL_InitTEnts(void)
     cl_railcore_color->generator = Com_Color_g;
     cl_railcore_color_changed(cl_railcore_color);
     cl_railcore_width = Cvar_Get("cl_railcore_width", "2", 0);
+    cl_railcore_glow = Cvar_Get("cl_railcore_glow", "0.65", 0);
     cl_railspiral_color = Cvar_Get("cl_railspiral_color", "blue", 0);
     cl_railspiral_color->changed = cl_railspiral_color_changed;
     cl_railspiral_color->generator = Com_Color_g;

@@ -718,12 +718,12 @@ void Touch_Item(edict_t *ent, edict_t *other, cplane_t *plane, csurface_t *surf)
 {
     bool    taken;
 
+    if (!ent->inuse || !ent->item || !ent->item->pickup)
+        return;
     if (!other->client)
         return;
     if (other->health < 1)
         return;     // dead people can't pickup
-    if (!ent->item->pickup)
-        return;     // not a grabbable item?
 
     taken = ent->item->pickup(ent, other);
 

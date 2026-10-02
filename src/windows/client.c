@@ -996,6 +996,68 @@ void Win_Init(void)
     }
 }
 
+#if USE_VULKAN
+bool Win_GetVkInstanceExtensions(uint32_t *count, const char **names,
+                                 uint32_t max_names)
+{
+    static const char *const extensions[] = {
+        VK_KHR_SURFACE_EXTENSION_NAME,
+        VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+    };
+
+    if (!names) {
+        *count = q_countof(extensions);
+        return true;
+    }
+
+    if (max_names < q_countof(extensions))
+        return false;
+
+    memcpy(names, extensions, sizeof(extensions));
+    *count = q_countof(extensions);
+    return true;
+}
+
+bool Win_CreateVkSurface(VkInstance instance, VkSurfaceKHR *surface)
+{
+    HMODULE loader = LoadLibraryA("vulkan-1.dll");
+    if (!loader) {
+        Com_EPrintf("Couldn't load vulkan-1.dll: %s\n",
+                    Sys_ErrorString(GetLastError()));
+        return false;
+    }
+
+    PFN_vkGetInstanceProcAddr get_instance_proc_addr =
+        (PFN_vkGetInstanceProcAddr)GetProcAddress(loader, "vkGetInstanceProcAddr");
+    PFN_vkCreateWin32SurfaceKHR create_surface = NULL;
+    if (get_instance_proc_addr) {
+        create_surface = (PFN_vkCreateWin32SurfaceKHR)
+            get_instance_proc_addr(instance, "vkCreateWin32SurfaceKHR");
+    }
+
+    if (!create_surface) {
+        Com_EPrintf("Vulkan loader is missing vkCreateWin32SurfaceKHR\n");
+        FreeLibrary(loader);
+        return false;
+    }
+
+    VkWin32SurfaceCreateInfoKHR create_info = {
+        .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+        .hinstance = hGlobalInstance,
+        .hwnd = win.wnd,
+    };
+    VkResult result = create_surface(instance, &create_info, NULL, surface);
+    FreeLibrary(loader);
+
+    if (result != VK_SUCCESS) {
+        Com_EPrintf("vkCreateWin32SurfaceKHR failed: Vulkan error %d\n", result);
+        return false;
+    }
+
+    return true;
+}
+#endif
+
 /*
 ============
 Win_Shutdown

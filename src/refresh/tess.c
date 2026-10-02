@@ -33,7 +33,8 @@ void GL_Flush2D(void)
     if (!tess.numverts)
         return;
 
-    bits = GLS_DEPTHTEST_DISABLE | GLS_DEPTHMASK_FALSE | GLS_CULL_DISABLE | tess.flags;
+    bits = GLS_DEPTHTEST_DISABLE | GLS_DEPTHMASK_FALSE | GLS_CULL_DISABLE |
+        GLS_INTENSITY_2D | tess.flags;
     if (bits & GLS_BLEND_BLEND)
         bits &= ~GLS_ALPHATEST_ENABLE;
 
@@ -131,12 +132,13 @@ void GL_DrawParticles(void)
     } while (total);
 }
 
-static void GL_FlushBeamSegments(void)
+static void GL_FlushBeamSegments(bool additive)
 {
     if (!tess.numindices)
         return;
 
-    glStateBits_t state = GLS_BLEND_BLEND | GLS_DEPTHMASK_FALSE | glr.fog_bits;
+    glStateBits_t state = (additive ? GLS_BLEND_ADD : GLS_BLEND_BLEND) |
+        GLS_DEPTHMASK_FALSE | glr.fog_bits;
     glArrayBits_t array = GLA_VERTEX | GLA_COLOR;
     GLuint texnum = TEXNUM_BEAM;
 
@@ -158,7 +160,8 @@ static void GL_FlushBeamSegments(void)
 
 #define BEAM_POINTS   12
 
-static void GL_DrawPolyBeam(const vec3_t *segments, int num_segments, color_t color, float width)
+static void GL_DrawPolyBeam(const vec3_t *segments, int num_segments,
+                            color_t color, float width, bool additive)
 {
     int i, j, k, firstvert;
     vec3_t points[BEAM_POINTS];
@@ -175,7 +178,7 @@ static void GL_DrawPolyBeam(const vec3_t *segments, int num_segments, color_t co
 
     if (q_unlikely(tess.numverts + BEAM_POINTS * (num_segments + 1) > TESS_MAX_VERTICES ||
                    tess.numindices + BEAM_POINTS * 6 * num_segments > TESS_MAX_INDICES))
-        GL_FlushBeamSegments();
+        GL_FlushBeamSegments(additive);
 
     dst_vert = tess.vertices + tess.numverts * 4;
 
@@ -211,7 +214,8 @@ static void GL_DrawPolyBeam(const vec3_t *segments, int num_segments, color_t co
     tess.numindices += BEAM_POINTS * 6 * num_segments;
 }
 
-static void GL_DrawSimpleBeam(const vec3_t start, const vec3_t end, color_t color, float width)
+static void GL_DrawSimpleBeam(const vec3_t start, const vec3_t end,
+                              color_t color, float width, bool additive)
 {
     vec3_t d1, d2, d3;
     vec_t *dst_vert;
@@ -226,7 +230,7 @@ static void GL_DrawSimpleBeam(const vec3_t start, const vec3_t end, color_t colo
 
     if (q_unlikely(tess.numverts + 4 > TESS_MAX_VERTICES ||
                    tess.numindices + 6 > TESS_MAX_INDICES))
-        GL_FlushBeamSegments();
+        GL_FlushBeamSegments(additive);
 
     dst_vert = tess.vertices + tess.numverts * 6;
     VectorAdd(start, d3, dst_vert);
@@ -260,7 +264,8 @@ static void GL_DrawSimpleBeam(const vec3_t start, const vec3_t end, color_t colo
 #define MAX_LIGHTNING_SEGMENTS      7
 #define MIN_SEGMENT_LENGTH          16
 
-static void GL_DrawLightningBeam(const vec3_t start, const vec3_t end, color_t color, float width)
+static void GL_DrawLightningBeam(const vec3_t start, const vec3_t end,
+                                 color_t color, float width, bool additive)
 {
     vec3_t dir, segments[MAX_LIGHTNING_SEGMENTS + 1];
     vec3_t right, up;
@@ -298,10 +303,11 @@ static void GL_DrawLightningBeam(const vec3_t start, const vec3_t end, color_t c
     VectorCopy(end, segments[i]);
 
     if (gl_beamstyle->integer) {
-        GL_DrawPolyBeam(segments, num_segments, color, width);
+        GL_DrawPolyBeam(segments, num_segments, color, width, additive);
     } else {
         for (i = 0; i < num_segments; i++)
-            GL_DrawSimpleBeam(segments[i], segments[i + 1], color, width);
+            GL_DrawSimpleBeam(segments[i], segments[i + 1], color, width,
+                              additive);
     }
 }
 
@@ -311,6 +317,7 @@ void GL_DrawBeams(void)
     color_t color;
     float width, scale;
     const entity_t *ent;
+    bool batch_additive = false;
 
     if (!glr.ents.beams)
         return;
@@ -326,6 +333,11 @@ void GL_DrawBeams(void)
     }
 
     for (ent = glr.ents.beams; ent; ent = ent->next) {
+        bool additive = ent->flags & RF_BEAM_ADDITIVE;
+        if (tess.numindices && additive != batch_additive)
+            GL_FlushBeamSegments(batch_additive);
+        batch_additive = additive;
+
         VectorCopy(ent->origin, segs[0]);
         VectorCopy(ent->oldorigin, segs[1]);
 
@@ -338,14 +350,14 @@ void GL_DrawBeams(void)
         width = abs((int16_t)ent->frame) * scale;
 
         if (ent->flags & RF_GLOW)
-            GL_DrawLightningBeam(segs[0], segs[1], color, width);
+            GL_DrawLightningBeam(segs[0], segs[1], color, width, additive);
         else if (gl_beamstyle->integer)
-            GL_DrawPolyBeam(segs, 1, color, width);
+            GL_DrawPolyBeam(segs, 1, color, width, additive);
         else
-            GL_DrawSimpleBeam(segs[0], segs[1], color, width);
+            GL_DrawSimpleBeam(segs[0], segs[1], color, width, additive);
     }
 
-    GL_FlushBeamSegments();
+    GL_FlushBeamSegments(batch_additive);
 }
 
 static void GL_FlushFlares(void)

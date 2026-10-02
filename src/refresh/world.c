@@ -324,30 +324,20 @@ static void GL_MarkLeaves(void)
 {
     const bsp_t *bsp = gl_static.world.cache;
     const mleaf_t *leaf;
-    visrow_t vis1, vis2;
-    int i, cluster1, cluster2;
-    vec3_t tmp;
+    visrow_t vis1;
+    int i, cluster1;
 
     if (gl_lockpvs->integer)
         return;
 
     leaf = BSP_PointLeaf(bsp->nodes, glr.fd.vieworg);
-    cluster1 = cluster2 = leaf->cluster;
-    VectorCopy(glr.fd.vieworg, tmp);
-    if (!leaf->contents[0])
-        tmp[2] -= 16;
-    else
-        tmp[2] += 16;
-    leaf = BSP_PointLeaf(bsp->nodes, tmp);
-    if (!(leaf->contents[0] & CONTENTS_SOLID))
-        cluster2 = leaf->cluster;
+    cluster1 = leaf->cluster;
 
-    if (cluster1 == glr.viewcluster1 && cluster2 == glr.viewcluster2)
+    if (cluster1 == glr.viewcluster1 && cluster1 == glr.viewcluster2)
         return;
 
     glr.visframe++;
-    glr.viewcluster1 = cluster1;
-    glr.viewcluster2 = cluster2;
+    glr.viewcluster1 = glr.viewcluster2 = cluster1;
 
     if (!bsp->vis || gl_novis->integer || cluster1 == -1) {
         // mark everything visible
@@ -362,12 +352,6 @@ static void GL_MarkLeaves(void)
     }
 
     BSP_ClusterVis(bsp, &vis1, cluster1, DVIS_PVS);
-    if (cluster1 != cluster2) {
-        BSP_ClusterVis(bsp, &vis2, cluster2, DVIS_PVS);
-        int longs = VIS_FAST_LONGS(bsp->visrowsize);
-        for (i = 0; i < longs; i++)
-            vis1.l[i] |= vis2.l[i];
-    }
 
     glr.nodes_visible = 0;
     for (i = 0, leaf = bsp->leafs; i < bsp->numleafs; i++, leaf++) {

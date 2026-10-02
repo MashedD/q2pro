@@ -38,7 +38,6 @@ unsigned r_registration_sequence;
 cvar_t *gl_partscale;
 cvar_t *gl_partstyle;
 cvar_t *gl_beamstyle;
-cvar_t *gl_celshading;
 cvar_t *gl_dotshading;
 cvar_t *gl_shadows;
 cvar_t *gl_modulate;
@@ -51,6 +50,7 @@ cvar_t *gl_dlight_falloff;
 cvar_t *gl_modulate_entities;
 cvar_t *gl_doublelight_entities;
 cvar_t *gl_glowmap_intensity;
+cvar_t *gl_intensity_2D;
 cvar_t *gl_flarespeed;
 cvar_t *gl_fontshadow;
 cvar_t *gl_shaders;
@@ -63,10 +63,6 @@ cvar_t *gl_damageblend_frac;
 cvar_t *gl_waterwarp;
 cvar_t *gl_fog;
 cvar_t *gl_bloom;
-cvar_t *gl_glare;
-cvar_t *gl_glare_threshold;
-cvar_t *gl_glare_size;
-cvar_t *gl_glare_intensity;
 cvar_t *r_lava_glowmaps;
 cvar_t *gl_swapinterval;
 
@@ -522,6 +518,130 @@ static void GL_OccludeFlares(void)
         qglColorMask(1, 1, 1, 1);
 }
 
+#define LIQUID_PLANE_EPSILON    0.125f
+#define LIQUID_FRACTION_EPSILON 0.00001f
+
+static bool R_LiquidBoundaryTranslucent(const mleaf_t *leaf, int medium,
+                                        const vec3_t liquid_origin,
+                                        const vec3_t other_origin)
+{
+    const mbrushside_t *outer_side = NULL;
+    float outer_fraction = -1.0f;
+    bool outer_translucent = false;
+
+    if (!leaf || !medium)
+        return false;
+
+    for (int i = 0; i < leaf->numleafbrushes; i++) {
+        const mbrush_t *brush = leaf->firstleafbrush[i];
+        const mbrushside_t *exit_side = NULL;
+        float exit_fraction = 2.0f;
+        bool inside = true;
+
+        if (!brush || !(brush->contents & medium))
+            continue;
+
+        for (int j = 0; j < brush->numsides; j++) {
+            const mbrushside_t *side = brush->firstbrushside + j;
+            float d1 = PlaneDiff(liquid_origin, side->plane);
+            float d2 = PlaneDiff(other_origin, side->plane);
+
+            if (d1 > LIQUID_PLANE_EPSILON) {
+                inside = false;
+                break;
+            }
+            if (d2 <= LIQUID_PLANE_EPSILON)
+                continue;
+
+            float fraction = d1 / (d1 - d2);
+            if (fraction < exit_fraction) {
+                exit_fraction = fraction;
+                exit_side = side;
+            }
+        }
+
+        if (!inside || !exit_side)
+            continue;
+
+        bool translucent = exit_side->texinfo &&
+            (exit_side->texinfo->c.flags & SURF_TRANS_MASK);
+        if (!outer_side ||
+            exit_fraction > outer_fraction + LIQUID_FRACTION_EPSILON) {
+            outer_side = exit_side;
+            outer_fraction = exit_fraction;
+            outer_translucent = translucent;
+        } else if (fabsf(exit_fraction - outer_fraction) <=
+                   LIQUID_FRACTION_EPSILON) {
+            // Coincident boundaries are visible only when all authored sides
+            // at the outer edge are translucent.
+            outer_translucent = outer_translucent && translucent;
+        }
+    }
+
+    // If BSP brush metadata cannot identify the crossed boundary, avoid
+    // leaking entities through an effectively opaque liquid surface.
+    return outer_side && outer_translucent;
+}
+
+static bool R_PointVisibleAcrossLiquids(const bsp_t *bsp,
+                                        const vec3_t view_origin,
+                                        const vec3_t point)
+{
+    const mleaf_t *view_leaf, *point_leaf;
+    int view_medium, point_medium;
+
+    if (!bsp || !bsp->nodes)
+        return true;
+
+    view_leaf = BSP_PointLeaf(bsp->nodes, view_origin);
+    point_leaf = BSP_PointLeaf(bsp->nodes, point);
+    view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
+    point_medium = point_leaf ? point_leaf->contents[0] & MASK_WATER : 0;
+
+    if (view_medium == point_medium)
+        return true;
+
+    if (view_medium &&
+        !R_LiquidBoundaryTranslucent(view_leaf, view_medium,
+                                     view_origin, point))
+        return false;
+    if (point_medium &&
+        !R_LiquidBoundaryTranslucent(point_leaf, point_medium,
+                                     point, view_origin))
+        return false;
+
+    return true;
+}
+
+void R_SyncUnderwaterFlag(const bsp_t *bsp, refdef_t *fd)
+{
+    const mleaf_t *leaf;
+
+    if (!fd || !bsp || !bsp->nodes)
+        return;
+
+    leaf = BSP_PointLeaf(bsp->nodes, fd->vieworg);
+    if (leaf && (leaf->contents[0] & MASK_WATER))
+        fd->rdflags |= RDF_UNDERWATER;
+    else
+        fd->rdflags &= ~RDF_UNDERWATER;
+}
+
+bool R_EntityVisibleAcrossLiquids(const bsp_t *bsp, const refdef_t *fd,
+                                  const entity_t *ent)
+{
+    if (!fd || !ent ||
+        (ent->flags & (RF_WEAPONMODEL | RF_DEPTHHACK)) ||
+        (ent->model & BIT(31)))
+        return true;
+
+    if (R_PointVisibleAcrossLiquids(bsp, fd->vieworg, ent->origin))
+        return true;
+
+    return (ent->flags & RF_BEAM) &&
+        R_PointVisibleAcrossLiquids(bsp, fd->vieworg, ent->oldorigin);
+}
+
 static void GL_ClassifyEntities(void)
 {
     entity_t *ent;
@@ -533,6 +653,12 @@ static void GL_ClassifyEntities(void)
         return;
 
     for (i = 0, ent = glr.fd.entities; i < glr.fd.num_entities; i++, ent++) {
+        if (ent->flags & RF_EFFECT_ONLY)
+            continue;
+
+        if (!R_EntityVisibleAcrossLiquids(gl_static.world.cache, &glr.fd, ent))
+            continue;
+
         if (ent->flags & RF_BEAM) {
             if (ent->frame) {
                 ent->next = glr.ents.beams;
@@ -798,222 +924,6 @@ static pp_flags_t GL_BindFramebuffer(void)
     return flags;
 }
 
-static void make_glare_quad(const vec3_t origin, float scale)
-{
-    vec3_t up, down, left, right;
-
-    VectorScale(glr.viewaxis[1],  scale, left);
-    VectorScale(glr.viewaxis[1], -scale, right);
-    VectorScale(glr.viewaxis[2], -scale, down);
-    VectorScale(glr.viewaxis[2],  scale, up);
-
-    VectorAdd3(origin, down, left,  tess.vertices + 0);
-    VectorAdd3(origin, up,   left,  tess.vertices + 3);
-    VectorAdd3(origin, down, right, tess.vertices + 6);
-    VectorAdd3(origin, up,   right, tess.vertices + 9);
-}
-
-static void GL_OccludeGlare(void)
-{
-    vec3_t to_src, to_viewer;
-    bool set = false;
-    int i;
-
-    if (!gl_glare->integer || !glr.num_glare_sources ||
-        (glr.fd.rdflags & RDF_NOWORLDMODEL) ||
-        gl_fullbright->integer || gl_vertexlight->integer)
-        return;
-
-    for (i = 0; i < glr.num_glare_sources; i++) {
-        glare_source_t *gs = &glr.glare_sources[i];
-        int j;
-
-        for (j = 0; j < 4; j++)
-            if (PlaneDiff(gs->origin, &glr.frustumPlanes[j]) < -2.5f)
-                break;
-        if (j != 4) {
-            gs->pending = gs->visible = false;
-            continue;
-        }
-
-        VectorSubtract(gs->origin, glr.fd.vieworg, to_src);
-        float dist = VectorNormalize(to_src);
-        if (dist < 1) {
-            gs->pending = gs->visible = false;
-            continue;
-        }
-
-        VectorNegate(to_src, to_viewer);
-        if (DotProduct(to_viewer, gs->normal) < 0.01f) {
-            gs->pending = gs->visible = false;
-            continue;
-        }
-
-        if (gs->pending || com_eventTime - gs->timestamp <= 33)
-            continue;
-
-        if (!set) {
-            GL_LoadMatrix(glr.viewmatrix);
-            GL_LoadUniforms();
-            GL_BindTexture(TMU_TEXTURE, TEXNUM_WHITE);
-            GL_BindArrays(VA_OCCLUDE);
-            GL_StateBits(GLS_DEPTHMASK_FALSE);
-            GL_ArrayBits(GLA_VERTEX);
-            qglColorMask(0, 0, 0, 0);
-            set = true;
-        }
-
-        float scale = 2.5f;
-        if (dist > 20)
-            scale += dist * 0.004f;
-        make_glare_quad(gs->origin, scale);
-
-        GL_LockArrays(4);
-        qglBeginQuery(gl_static.samples_passed, gs->query);
-        qglDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-        qglEndQuery(gl_static.samples_passed);
-        GL_UnlockArrays();
-
-        gs->timestamp = com_eventTime;
-        gs->pending = true;
-        c.occlusionQueries++;
-    }
-
-    if (set)
-        qglColorMask(1, 1, 1, 1);
-}
-
-void GL_DrawGlare(void)
-{
-    int i;
-
-    if (!gl_glare->integer || !glr.num_glare_sources ||
-        (glr.fd.rdflags & RDF_NOWORLDMODEL) ||
-        gl_fullbright->integer || gl_vertexlight->integer)
-        return;
-
-    GL_LoadMatrix(glr.viewmatrix);
-    GL_LoadUniforms();
-    GL_BindTexture(TMU_TEXTURE, TEXNUM_PARTICLE);
-    GL_BindArrays(VA_EFFECT);
-    GL_StateBits(GLS_DEPTHTEST_DISABLE | GLS_DEPTHMASK_FALSE | GLS_BLEND_ADD);
-    GL_ArrayBits(GLA_VERTEX | GLA_TC | GLA_COLOR);
-
-    vec_t *dst = tess.vertices;
-    int count = 0;
-
-    for (i = 0; i < glr.num_glare_sources; i++) {
-        glare_source_t *gs = &glr.glare_sources[i];
-        vec3_t to_src;
-
-        if (gs->pending && gs->timestamp != com_eventTime) {
-            GLuint result;
-
-            if (gl_config.caps & QGL_CAP_QUERY_RESULT_NO_WAIT) {
-                result = (GLuint)-1;
-                qglGetQueryObjectuiv(gs->query, GL_QUERY_RESULT_NO_WAIT, &result);
-                if (result != (GLuint)-1) {
-                    gs->visible = result != 0;
-                    gs->pending = false;
-                }
-            } else {
-                qglGetQueryObjectuiv(gs->query, GL_QUERY_RESULT_AVAILABLE, &result);
-                if (result) {
-                    qglGetQueryObjectuiv(gs->query, GL_QUERY_RESULT, &result);
-                    gs->visible = result != 0;
-                    gs->pending = false;
-                }
-            }
-        }
-
-        GL_AdvanceValue(&gs->visibility, gs->visible, gl_flarespeed->value);
-        if (!gs->visibility)
-            continue;
-
-        VectorSubtract(gs->origin, glr.fd.vieworg, to_src);
-        float dist = VectorLength(to_src);
-        if (dist < 1)
-            continue;
-
-        vec3_t view_dir;
-        VectorCopy(to_src, view_dir);
-        VectorNormalize(view_dir);
-        vec3_t to_viewer;
-        VectorNegate(view_dir, to_viewer);
-        float view_angle = DotProduct(to_viewer, gs->normal);
-        if (view_angle < 0.01f)
-            continue;
-
-        float scale = Cvar_ClampValue(gl_glare_size, 0, 256) * gs->brightness;
-        if (dist > 20)
-            scale *= (1.0f + dist * 0.004f);
-        scale = min(scale, 200.0f);
-
-        float alpha = view_angle * gs->brightness *
-            Cvar_ClampValue(gl_glare_intensity, 0, 4) * gs->visibility;
-        alpha = min(alpha, 1.0f);
-        if (alpha < 0.01f)
-            continue;
-
-        color_t color;
-        color.u8[0] = (byte)min(gs->lightcolor[0] * 255.0f, 255.0f);
-        color.u8[1] = (byte)min(gs->lightcolor[1] * 255.0f, 255.0f);
-        color.u8[2] = (byte)min(gs->lightcolor[2] * 255.0f, 255.0f);
-        color.u8[3] = (byte)(alpha * 255.0f);
-
-        vec3_t up, down, left, right, v0, v1, v2, v3;
-        VectorScale(glr.viewaxis[1], scale, left);
-        VectorScale(glr.viewaxis[1], -scale, right);
-        VectorScale(glr.viewaxis[2], -scale, down);
-        VectorScale(glr.viewaxis[2], scale, up);
-
-        VectorAdd3(gs->origin, down, left, v0);
-        VectorAdd3(gs->origin, up, left, v1);
-        VectorAdd3(gs->origin, down, right, v2);
-        VectorAdd3(gs->origin, up, right, v3);
-
-        VectorCopy(v0, dst); dst += 3;
-        dst[0] = 0; dst[1] = 1; dst += 2;
-        WN32(dst, color.u32); dst += 1;
-
-        VectorCopy(v1, dst); dst += 3;
-        dst[0] = 0; dst[1] = 0; dst += 2;
-        WN32(dst, color.u32); dst += 1;
-
-        VectorCopy(v2, dst); dst += 3;
-        dst[0] = 1; dst[1] = 1; dst += 2;
-        WN32(dst, color.u32); dst += 1;
-
-        VectorCopy(v2, dst); dst += 3;
-        dst[0] = 1; dst[1] = 1; dst += 2;
-        WN32(dst, color.u32); dst += 1;
-
-        VectorCopy(v1, dst); dst += 3;
-        dst[0] = 0; dst[1] = 0; dst += 2;
-        WN32(dst, color.u32); dst += 1;
-
-        VectorCopy(v3, dst); dst += 3;
-        dst[0] = 1; dst[1] = 0; dst += 2;
-        WN32(dst, color.u32); dst += 1;
-
-        count += 6;
-
-        if (count >= TESS_MAX_VERTICES - 6) {
-            GL_LockArrays(count);
-            qglDrawArrays(GL_TRIANGLES, 0, count);
-            GL_UnlockArrays();
-            dst = tess.vertices;
-            count = 0;
-        }
-    }
-
-    if (count) {
-        GL_LockArrays(count);
-        qglDrawArrays(GL_TRIANGLES, 0, count);
-        GL_UnlockArrays();
-    }
-}
-
 void R_RenderFrame(const refdef_t *fd)
 {
     GL_Flush2D();
@@ -1023,6 +933,7 @@ void R_RenderFrame(const refdef_t *fd)
     glr.drawframe++;
 
     glr.fd = *fd;
+    R_SyncUnderwaterFlag(gl_static.world.cache, &glr.fd);
 
     if (gl_dynamic->integer != 1 || gl_vertexlight->integer)
         glr.fd.num_dlights = 0;
@@ -1068,11 +979,7 @@ void R_RenderFrame(const refdef_t *fd)
 
     GL_OccludeFlares();
 
-    GL_OccludeGlare();
-
     GL_DrawFlares();
-
-    GL_DrawGlare();
 
     GL_DrawEntities(glr.ents.alpha_front);
 
@@ -1270,23 +1177,6 @@ static void gl_novis_changed(cvar_t *self)
     glr.viewcluster1 = glr.viewcluster2 = -2;
 }
 
-static void gl_glare_threshold_changed(cvar_t *self)
-{
-    Cvar_ClampValue(self, 0, 1);
-    if (gl_static.world.cache)
-        GL_BuildGlareList();
-}
-
-static void gl_glare_changed(cvar_t *self)
-{
-    (void)self;
-    for (int i = 0; i < glr.num_glare_sources; i++) {
-        glare_source_t *gs = &glr.glare_sources[i];
-        gs->visibility = 0;
-        gs->pending = gs->visible = false;
-    }
-}
-
 static void gl_swapinterval_changed(cvar_t *self)
 {
     if (vid && vid->swap_interval)
@@ -1318,7 +1208,6 @@ static void GL_Register(void)
     gl_partscale = Cvar_Get("gl_partscale", "2", 0);
     gl_partstyle = Cvar_Get("gl_partstyle", "0", 0);
     gl_beamstyle = Cvar_Get("gl_beamstyle", "0", 0);
-    gl_celshading = Cvar_Get("gl_celshading", "0", 0);
     gl_dotshading = Cvar_Get("gl_dotshading", "1", 0);
     gl_shadows = Cvar_Get("gl_shadows", "0", CVAR_ARCHIVE);
     gl_modulate = Cvar_Get("gl_modulate", "1", CVAR_ARCHIVE);
@@ -1338,6 +1227,7 @@ static void GL_Register(void)
     gl_modulate_entities->changed = gl_modulate_entities_changed;
     gl_doublelight_entities = Cvar_Get("gl_doublelight_entities", "1", 0);
     gl_glowmap_intensity = Cvar_Get("gl_glowmap_intensity", "0.75", 0);
+    gl_intensity_2D = Cvar_Get("gl_intensity_2D", "1", CVAR_ARCHIVE);
     gl_flarespeed = Cvar_Get("gl_flarespeed", "8", 0);
     gl_fontshadow = Cvar_Get("gl_fontshadow", "0", 0);
     gl_shaders = Cvar_Get("gl_shaders", "1", CVAR_FILES);
@@ -1349,13 +1239,10 @@ static void GL_Register(void)
     gl_damageblend_frac = Cvar_Get("gl_damageblend_frac", "0.2", 0);
     gl_waterwarp = Cvar_Get("gl_waterwarp", "0", 0);
     gl_fog = Cvar_Get("gl_fog", "1", 0);
-    gl_bloom = Cvar_Get("gl_bloom", "0", 0);
-    gl_glare = Cvar_Get("gl_glare", "0", CVAR_ARCHIVE);
-    gl_glare->changed = gl_glare_changed;
-    gl_glare_threshold = Cvar_Get("gl_glare_threshold", "0.3", 0);
-    gl_glare_threshold->changed = gl_glare_threshold_changed;
-    gl_glare_size = Cvar_Get("gl_glare_size", "24", 0);
-    gl_glare_intensity = Cvar_Get("gl_glare_intensity", "0.5", 0);
+    gl_bloom = Cvar_Get("gl_bloom", "1", CVAR_ARCHIVE);
+    if (Cvar_Get("r_fsr", "0", CVAR_ARCHIVE)->integer)
+        Com_WPrintf("r_fsr is Vulkan-only; FSR is disabled by the OpenGL renderer\n");
+    Cvar_Get("r_fsr_quality", "quality", CVAR_ARCHIVE);
     r_lava_glowmaps = Cvar_Get("r_lava_glowmaps", "1", 0);
     gl_swapinterval = Cvar_Get("gl_swapinterval", "1", CVAR_ARCHIVE);
     gl_swapinterval->changed = gl_swapinterval_changed;
@@ -1727,7 +1614,6 @@ void R_BeginRegistration(const char *name)
     gl_static.registering = true;
     r_registration_sequence++;
 
-    GL_ClearGlareList();
     memset(&glr, 0, sizeof(glr));
     glr.viewcluster1 = glr.viewcluster2 = -2;
 

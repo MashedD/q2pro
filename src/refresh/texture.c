@@ -19,6 +19,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "gl.h"
 #include "common/prompt.h"
+#include "vk_backend.h"
 
 static int gl_filter_min;
 static int gl_filter_max;
@@ -822,10 +823,10 @@ static bool GL_UploadCubemap(image_t *image, byte *pic)
 
 /*
 ================
-IMG_Load
+GLR_UploadImage
 ================
 */
-void IMG_Load(image_t *image, byte *pic)
+static void GLR_UploadImage(image_t *image, byte *pic)
 {
     byte    *src, *dst;
     int     i, s, t, maxlevel;
@@ -889,7 +890,7 @@ void IMG_Load(image_t *image, byte *pic)
     }
 }
 
-void IMG_Unload(image_t *image)
+static void GLR_UnloadImage(image_t *image)
 {
     if (image->texnum && !(image->flags & IF_SCRAP)) {
         GLuint tex[2] = { image->texnum, image->texnum2 };
@@ -907,9 +908,20 @@ void IMG_Unload(image_t *image)
     }
 }
 
+static const image_upload_t gl_image_upload = {
+    .load = GLR_UploadImage,
+    .unload = GLR_UnloadImage,
+    .glowmaps = true,
+};
+
 // for screenshots
 int IMG_ReadPixels(screenshot_t *s)
 {
+#if USE_VULKAN
+    if (R_GetVideoAPI() == REF_VIDEO_VULKAN)
+        return VKR_ReadPixels(s);
+#endif
+
     int format = gl_config.ver_es ? GL_RGBA : GL_RGB;
     int align = 4, bpp = format == GL_RGBA ? 4 : 3;
 
@@ -1303,6 +1315,7 @@ void GL_InitImages(void)
     gl_anisotropy_changed(gl_anisotropy);
 
     IMG_Init();
+    IMG_SetUploadBackend(&gl_image_upload);
 
     IMG_GetPalette();
 

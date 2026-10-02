@@ -766,7 +766,8 @@ static void SCR_Draw_f(void)
         Com_Printf("Name               X    Y\n"
                    "--------------- ---- ----\n");
         FOR_EACH_DRAWOBJ(obj) {
-            s = obj->macro ? obj->macro->name : obj->cvar->name;
+            s = obj->macro ? obj->macro->name :
+                obj->cvar ? obj->cvar->name : "<invalid>";
             Com_Printf("%-15s %4d %4d\n", s, obj->x, obj->y);
         }
         return;
@@ -840,7 +841,10 @@ static void SCR_Draw_g(genctx_t *ctx)
     Prompt_AddMatch(ctx, "all");
 
     FOR_EACH_DRAWOBJ(obj) {
-        s = obj->macro ? obj->macro->name : obj->cvar->name;
+        s = obj->macro ? obj->macro->name :
+            obj->cvar ? obj->cvar->name : NULL;
+        if (!s)
+            continue;
         Prompt_AddMatch(ctx, s);
     }
 }
@@ -854,10 +858,9 @@ static void SCR_UnDraw_c(genctx_t *ctx, int argnum)
 
 static void SCR_UnDraw_f(void)
 {
-    char *s;
+    char s[MAX_QPATH];
     drawobj_t *obj, *next;
-    cmd_macro_t *macro;
-    cvar_t *cvar;
+    const char *obj_name;
 
     if (Cmd_Argc() != 2) {
         Com_Printf("Usage: %s <name>\n", Cmd_Argv(0));
@@ -869,7 +872,7 @@ static void SCR_UnDraw_f(void)
         return;
     }
 
-    s = Cmd_Argv(1);
+    Cmd_ArgvBuffer(1, s, sizeof(s));
     if (!strcmp(s, "all")) {
         FOR_EACH_DRAWOBJ_SAFE(obj, next) {
             Z_Free(obj);
@@ -879,14 +882,10 @@ static void SCR_UnDraw_f(void)
         return;
     }
 
-    cvar = NULL;
-    macro = Cmd_FindMacro(s);
-    if (!macro) {
-        cvar = Cvar_WeakGet(s);
-    }
-
     FOR_EACH_DRAWOBJ_SAFE(obj, next) {
-        if (obj->macro == macro && obj->cvar == cvar) {
+        obj_name = obj->macro ? obj->macro->name :
+            obj->cvar ? obj->cvar->name : NULL;
+        if (obj_name && !strcmp(obj_name, s)) {
             List_Remove(&obj->entry);
             Z_Free(obj);
             return;
@@ -917,8 +916,10 @@ static void SCR_DrawObjects(void)
         if (obj->macro) {
             obj->macro->function(buffer, sizeof(buffer));
             SCR_DrawString(x, y, obj->flags, buffer);
-        } else {
+        } else if (obj->cvar) {
             SCR_DrawString(x, y, obj->flags, obj->cvar->string);
+        } else {
+            continue;
         }
         if (!(obj->flags & UI_IGNORECOLOR)) {
             R_ClearColor();

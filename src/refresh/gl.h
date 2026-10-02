@@ -42,6 +42,40 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define R_Malloc(size)  Z_TagMalloc(size, TAG_RENDERER)
 #define R_Mallocz(size) Z_TagMallocz(size, TAG_RENDERER)
 
+#define R_Init              GLR_Init
+#define R_Shutdown          GLR_Shutdown
+#define R_BeginRegistration GLR_BeginRegistration
+#define R_RegisterModel     GLR_RegisterModel
+#define R_RegisterImage     GLR_RegisterImage
+#define R_SetSky            GLR_SetSky
+#define R_EndRegistration   GLR_EndRegistration
+#define R_RenderFrame       GLR_RenderFrame
+#define R_LightPoint        GLR_LightPoint
+#define R_ClearColor        GLR_ClearColor
+#define R_SetAlpha          GLR_SetAlpha
+#define R_SetColor          GLR_SetColor
+#define R_SetClipRect       GLR_SetClipRect
+#define R_ClampScale        GLR_ClampScale
+#define R_SetScale          GLR_SetScale
+#define R_DrawChar          GLR_DrawChar
+#define R_DrawString        GLR_DrawString
+#define R_GetPicSize        GLR_GetPicSize
+#define R_DrawPic           GLR_DrawPic
+#define R_DrawStretchPic    GLR_DrawStretchPic
+#define R_DrawKeepAspectPic GLR_DrawKeepAspectPic
+#define R_DrawStretchRaw    GLR_DrawStretchRaw
+#define R_UpdateRawPic      GLR_UpdateRawPic
+#define R_TileClear         GLR_TileClear
+#define R_DrawFill8         GLR_DrawFill8
+#define R_DrawFill32        GLR_DrawFill32
+#define R_BeginFrame        GLR_BeginFrame
+#define R_EndFrame          GLR_EndFrame
+#define R_ModeChanged       GLR_ModeChanged
+#define R_VideoSync         GLR_VideoSync
+#define R_GetGLConfig       GLR_GetGLConfig
+
+#include "gl_backend.h"
+
 #if USE_GLES
 #define QGL_INDEX_TYPE  GL_UNSIGNED_SHORT
 typedef GLushort glIndex_t;
@@ -130,20 +164,6 @@ typedef struct {
     hash_map_t      *programs;
 } glStatic_t;
 
-#define MAX_GLARE_SOURCES 512
-
-typedef struct {
-    vec3_t origin;
-    vec3_t normal;
-    vec3_t lightcolor;
-    float brightness;
-    float visibility;
-    GLuint query;
-    unsigned timestamp;
-    bool pending;
-    bool visible;
-} glare_source_t;
-
 typedef struct {
     refdef_t        fd;
     vec3_t          viewaxis[3];
@@ -170,8 +190,6 @@ typedef struct {
         entity_t    *alpha_back;
         entity_t    *alpha_front;
     } ents;
-    int             num_glare_sources;
-    glare_source_t  glare_sources[MAX_GLARE_SOURCES];
     glStateBits_t   fog_bits, fog_bits_sky;
     int             framebuffer_width;
     int             framebuffer_height;
@@ -234,6 +252,11 @@ typedef struct {
     int lightTexels;
     int trisDrawn;
     int batchesDrawn;
+    int worldBatches;
+    int entityBatches;
+    int particleBatches;
+    int bloomBatches;
+    int otherBatches;
     int nodesCulled;
     int facesCulled;
     int boxesCulled;
@@ -241,6 +264,10 @@ typedef struct {
     int rotatedBoxesCulled;
     int shadowsCulled;
     int batchesDrawn2D;
+    int charsDrawn2D;
+    int picsDrawn2D;
+    int rectsDrawn2D;
+    int pipelineBinds;
     int uniformUploads;
     int vertexArrayBinds;
     int occlusionQueries;
@@ -252,7 +279,6 @@ extern statCounters_t c;
 extern cvar_t *gl_partscale;
 extern cvar_t *gl_partstyle;
 extern cvar_t *gl_beamstyle;
-extern cvar_t *gl_celshading;
 extern cvar_t *gl_dotshading;
 extern cvar_t *gl_shadows;
 extern cvar_t *gl_modulate;
@@ -265,6 +291,7 @@ extern cvar_t *gl_dlight_falloff;
 extern cvar_t *gl_modulate_entities;
 extern cvar_t *gl_doublelight_entities;
 extern cvar_t *gl_glowmap_intensity;
+extern cvar_t *gl_intensity_2D;
 extern cvar_t *gl_flarespeed;
 extern cvar_t *gl_fontshadow;
 extern cvar_t *gl_shaders;
@@ -276,10 +303,6 @@ extern cvar_t *gl_md5_distance;
 extern cvar_t *gl_damageblend_frac;
 extern cvar_t *gl_waterwarp;
 extern cvar_t *gl_bloom;
-extern cvar_t *gl_glare;
-extern cvar_t *gl_glare_threshold;
-extern cvar_t *gl_glare_size;
-extern cvar_t *gl_glare_intensity;
 extern cvar_t *r_lava_glowmaps;
 
 // development variables
@@ -455,6 +478,11 @@ typedef struct {
     image_t **skins;
 } md5_model_t;
 
+md5_model_t *MOD_LoadMD5Replacement(const char *name, int numframes,
+                                    int numskins,
+                                    const maliasskinname_t *skinnames,
+                                    memhunk_t *hunk);
+
 #endif
 
 typedef struct {
@@ -576,6 +604,8 @@ void GL_LoadWorld(const char *name);
 #define GLS_BLOOM_OUTPUT        BIT_ULL(30)
 #define GLS_BLOOM_SHELL         BIT_ULL(31)
 #define GLS_BLOOM_ONLY          BIT_ULL(34)
+#define GLS_SKINTINT             BIT_ULL(35)
+#define GLS_INTENSITY_2D         BIT_ULL(36)
 
 #define GLS_BLUR_GAUSS          BIT_ULL(32)
 #define GLS_BLUR_BOX            BIT_ULL(33)
@@ -591,9 +621,11 @@ void GL_LoadWorld(const char *name);
 #define GLS_SHADER_MASK         (GLS_ALPHATEST_ENABLE | GLS_TEXTURE_REPLACE | GLS_SCROLL_ENABLE | \
                                  GLS_LIGHTMAP_ENABLE | GLS_WARP_ENABLE | GLS_INTENSITY_ENABLE | \
                                  GLS_GLOWMAP_ENABLE | GLS_SKY_MASK | GLS_DEFAULT_FLARE | GLS_MESH_MASK | \
-                                 GLS_FOG_MASK | GLS_BLOOM_MASK | GLS_BLUR_MASK)
+                                 GLS_FOG_MASK | GLS_BLOOM_MASK | GLS_BLUR_MASK | GLS_SKINTINT | \
+                                 GLS_INTENSITY_2D)
 #define GLS_UNIFORM_MASK        (GLS_WARP_ENABLE | GLS_LIGHTMAP_ENABLE | GLS_INTENSITY_ENABLE | \
-                                 GLS_SKY_MASK | GLS_FOG_MASK | GLS_BLUR_MASK)
+                                 GLS_SKY_MASK | GLS_FOG_MASK | GLS_BLUR_MASK | GLS_SKINTINT | \
+                                 GLS_INTENSITY_2D)
 #define GLS_SCROLL_MASK         (GLS_SCROLL_ENABLE | GLS_SCROLL_X | GLS_SCROLL_Y | GLS_SCROLL_FLIP | GLS_SCROLL_SLOW)
 
 typedef enum {
@@ -701,6 +733,7 @@ typedef struct {
     GLfloat     heightfog_falloff;
     vec2_t      pad_4;
     vec4_t      vieworg;
+    vec4_t      skin_tint;
 } glUniformBlock_t;
 
 typedef struct {
@@ -941,9 +974,6 @@ void GL_Flush2D(void);
 void GL_DrawParticles(void);
 void GL_DrawBeams(void);
 void GL_DrawFlares(void);
-void GL_BuildGlareList(void);
-void GL_ClearGlareList(void);
-void GL_DrawGlare(void);
 
 void GL_BindArrays(glVertexArray_t va);
 void GL_LockArrays(GLsizei count);
@@ -968,6 +998,9 @@ void GL_DrawBspModel(mmodel_t *model);
 void GL_DrawWorld(void);
 void GL_SampleLightPoint(vec3_t color);
 void GL_LightPoint(const vec3_t origin, vec3_t color);
+void R_SyncUnderwaterFlag(const bsp_t *bsp, refdef_t *fd);
+bool R_EntityVisibleAcrossLiquids(const bsp_t *bsp, const refdef_t *fd,
+                                  const entity_t *ent);
 
 /*
  * gl_sky.c

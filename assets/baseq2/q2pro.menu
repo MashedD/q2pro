@@ -67,10 +67,18 @@ color disabled #7f7f7f
 begin video
     //title "Video Setup"
     banner m_banner_video
+    pairs "renderer" vid_ref "OpenGL" gl "Vulkan" vk
+    pairs "Vulkan device" vk_device $$vk_devicelist
+    action --align --status "Requires the Vulkan renderer" \
+        "Vulkan ray tracing..." pushmenu raytracing
+    action --align --status "Requires the Vulkan renderer" \
+        "Vulkan FSR3..." pushmenu fsr3
     values "video mode" vid_fullscreen windowed $$vid_modelist
     values "fov scaling" cl_adjustfov vert- hor+
     field --numeric --width 4 "field of view" fov
     toggle "vertical sync" gl_swapinterval
+    pairs "Vulkan present mode" vk_present_mode \
+        automatic 0 FIFO 1 mailbox 2 immediate 3
     pairs "anti-aliasing" gl_multisamples no 0 "2x MSAA" 2 "4x MSAA" 4 "8x MSAA" 8
     range "texture gamma" vid_gamma 1.3 0.3
     toggle "hardware gamma" vid_hwgamma
@@ -83,6 +91,7 @@ begin video
     pairs "anisotropic filter" gl_anisotropy no 1 2x 2 4x 4 8x 8 16x 16
     range "texture saturation" gl_saturation 0 1
     pairs "texture intensity" intensity 1x 1 2x 2 3x 3
+    range "2D intensity" gl_intensity_2D 1 5 0.1
     range "lightmap saturation" gl_coloredlightmaps 0 1
     range "lightmap brightness" gl_brightness 0 0.3
     values "rendering backend" gl_shaders legacy shaders
@@ -94,10 +103,152 @@ begin video
     toggle "bloom" gl_bloom
     range "glowmap intensity" gl_glowmap_intensity 0 1
     toggle "lava glowmaps" r_lava_glowmaps
-    toggle "surface glare" gl_glare
-    range "glare intensity" gl_glare_intensity 0 2
-    range "glare size" gl_glare_size 8 96
-    range "glare threshold" gl_glare_threshold 0 1
+end
+
+begin fsr3
+    title "Vulkan FSR3 Setup"
+    toggle --status "Requires Vulkan; changing this refreshes the renderer" \
+        "FSR3 upscaling" r_fsr
+    pairs --status "Requires Vulkan; changing this refreshes the renderer" \
+        "quality profile" r_fsr_quality \
+        quality quality \
+        balanced balanced \
+        performance performance \
+        "ultra performance" ultra_performance
+    range --status "Requires Vulkan; changing this refreshes the renderer" \
+        "sharpening" r_fsr_sharpness 0 1
+    toggle --status "Keeps the selected profile only if it is at least 5% faster than native" \
+        "automatic performance" r_fsr_auto
+    toggle --status "Adjusts internal resolution toward the target GPU frame time" \
+        "dynamic resolution" r_fsr_dynamic
+    range --status "Target GPU frame time for dynamic-resolution recommendations" \
+        "dynamic target (ms)" r_fsr_dynamic_target_ms 8 33
+    toggle --status "Use CPU recording time only when GPU timestamps are unavailable" \
+        "dynamic CPU fallback" r_fsr_dynamic_cpu
+    pairs --status "Auto: camera + objects; full: reference; fast: camera only" \
+        "motion mode" r_fsr_motion \
+        auto auto \
+        full full \
+        fast fast
+    pairs --status "Scene texture detail at reduced resolution; UI unaffected" \
+        "mip bias" r_fsr_mip_bias \
+        auto auto \
+        neutral 0 \
+        "-0.5" -0.5 \
+        "-1" -1 \
+        "-1.5" -1.5
+    blank
+    toggle --status "Opt-in; can reduce latency only when the GPU has sufficient headroom" \
+        "frame generation" r_fsr_frame_generation
+    toggle --status "Use the reserved asynchronous compute queue; disable for compatibility tests" \
+        "async workloads" r_fsr_frame_generation_async
+    toggle --status "Compatibility/debug mode; computes interpolation without presenting generated frames" \
+        "compute-only frame generation" r_fsr_frame_generation_compute_only
+    toggle --status "Add the composition mask for transparent effects" \
+        "reactive/composition mask" r_fsr_composition_mask
+    blank
+    pairs --status "FP16 is selected only when supported by Vulkan" \
+        "precision" vk_fsr_precision \
+        auto auto \
+        fp32 fp32 \
+        fp16 fp16
+    pairs --status "Optional fixed subgroup size; native is recommended" \
+        "subgroup" vk_fsr_subgroup \
+        native native \
+        32 32 \
+        64 64
+    toggle --status "Record per-dispatch GPU timestamps; excluded from automatic performance tests" \
+        "GPU profile" vk_fsr_profile
+    pairs --status "Optional diagnostic overlay" \
+        "debug overlay" vk_fsr_debug \
+        off off \
+        motion motion \
+        reactive reactive \
+        composition composition \
+        depth depth
+    toggle --status "Emit per-frame samples for FSR benchmark tooling" \
+        "benchmark telemetry" vk_fsr_benchmark
+end
+
+begin raytracing
+    title "Ray Tracing Setup"
+    toggle --status "Enable Vulkan ray tracing; changing this refreshes the renderer" \
+        "ray tracing" vk_raytracing
+    range --status "Contact shadowing in corners and at surface junctions" \
+        "ambient occlusion" vk_rt_ao 0 0.5 0.01
+    range --status "Cool ambient fill on open world surfaces" \
+        "aperture skylight" vk_rt_skylight 0 1 0.05
+    range --status "Warm directional light on exposed world surfaces" \
+        "sunlit apertures" vk_rt_sunlight 0 1 0.05
+    range --status "Colored lighting from emissive world surfaces" \
+        "emissive lighting" vk_rt_emissive 0 2 0.05
+    range --status "Colored edge glow on emissive world textures" \
+        "emissive edge halos" vk_rt_emissive_halo 0 1 0.05
+    range --status "Irregular variation in emissive lamp cores and halos" \
+        "emissive flicker" vk_rt_emissive_flicker 0 1 0.05
+    range --status "Additive energy motes around emissive world surfaces" \
+        "emissive motes" vk_rt_emissive_motes 0 1 0.05
+    range --status "Screen-space reflections on configured materials" \
+        "reflections" vk_rt_reflections 0 1 0.05
+    range --status "Compact colored highlights around bright reflections" \
+        "reflection glints" vk_rt_reflection_glints 0 1 0.05
+    range --status "Red-blue spectral separation around bright reflections" \
+        "reflection dispersion" vk_rt_reflection_dispersion 0 1 0.05
+    range --status "Material highlights from dynamic and emissive lights" \
+        "specular highlights" vk_rt_specular 0 1 0.05
+    range --status "Ambient sheen on reflective world materials" \
+        "environment sheen" vk_rt_environment 0 1 0.05
+    range --status "Blue-gray distance haze on maps without authored fog" \
+        "atmospheric haze" vk_rt_atmosphere 0 1 0.05
+    range --status "Blue-green distance attenuation while underwater" \
+        "underwater absorption" vk_rt_underwater_absorption 0 1 0.05
+    range --status "Colored combat-light scattering inside distance fog" \
+        "fog light scattering" vk_rt_light_scattering 0 1 0.05
+    range --status "Slow world-space motion in active distance fog" \
+        "fog turbulence" vk_rt_fog_turbulence 0 1 0.05
+    range --status "World-space ambient dust motes in ray-traced scenes" \
+        "ambient dust" vk_rt_dust 0 1 0.05
+    range --status "Colored dynamic lighting on ambient dust motes" \
+        "ambient dust lighting" vk_rt_dust_lighting 0 1 0.05
+    range --status "Ripples, sheen, highlights, and glow on liquids" \
+        "liquid effects" vk_rt_liquids 0 1 0.05
+    range --status "Animated lighting on nearby surfaces while underwater" \
+        "underwater caustics" vk_rt_caustics 0 1 0.05
+    range --status "Warm additive embers rising from visible lava" \
+        "lava embers" vk_rt_lava_embers 0 1 0.05
+    range --status "Colored penumbrae from nearby dynamic lights" \
+        "shadow fringes" vk_rt_shadow_fringe 0 1 0.05
+    range --status "Localized color spill from explosions and projectiles" \
+        "dynamic color bounce" vk_rt_bounce 0 1 0.05
+    range --status "Animated shadow-aware rings from strong dynamic lights" \
+        "dynamic light ripples" vk_rt_light_ripples 0 1 0.05
+    range --status "Expanding rings from explosions and other impact events" \
+        "combat shockwaves" vk_rt_shockwaves 0 1 0.05
+    range --status "Persistent darkened marks at weapon impact sites" \
+        "impact marks" vk_rt_impact_marks 0 1 0.05
+    range --status "Expanding ripples at weapon splash events" \
+        "splash ripples" vk_rt_splash_ripples 0 1 0.05
+    range --status "V-shaped surface wakes behind moving players" \
+        "water wakes" vk_rt_water_wakes 0 1 0.05
+    range --status "Layered energy vortices at teleport events" \
+        "teleport vortices" vk_rt_teleport_vortex 0 1 0.05
+    range --status "Emerald energy rings when map items respawn" \
+        "item respawn effects" vk_rt_item_respawn 0 1 0.05
+    range --status "Branching filaments at electrical impact events" \
+        "electric filaments" vk_rt_electric_filaments 0 1 0.05
+    range --status "Brief surface-aware dust puffs when players land" \
+        "landing dust" vk_rt_landing_dust 0 1 0.05
+    range --status "Inward energy collapses at BFG and tracker detonations" \
+        "energy collapse" vk_rt_energy_collapse 0 1 0.05
+    range --status "Compact ionization pulse where railgun shots land" \
+        "rail impact" vk_rt_rail_impact 0 1 0.05
+    range --status "Compact colored halos around strong combat lights" \
+        "light coronas" vk_rt_light_coronas 0 1 0.05
+    range --status "Fade time for bright transient ray-traced lights" \
+        "dynamic light afterglow" vk_rt_afterglow 0 1 0.05
+    blank
+    toggle --status "Allow bright ray-traced effects to contribute bloom" \
+        "bloom" gl_bloom
 end
 
 begin options
@@ -136,6 +287,7 @@ begin railtrail
         "default" "core only" "core and spiral"
     range "rail trail duration" cl_railtrail_time 0.1 3.0 0.1
     range "core width" cl_railcore_width 1 6 1
+    range "core glow" cl_railcore_glow 0 1 0.05
     range "spiral radius" cl_railspiral_radius 1 6 1
     strings "core color" cl_railcore_color \
         black red green yellow blue cyan magenta white
@@ -148,18 +300,41 @@ begin effects
     values "dynamic lighting" gl_dynamic "no" "yes" "only switchable"
     values "entity cel-shading" gl_celshading no 1x 2x 3x
     toggle "entity glowing" cl_noglow ~
-    toggle "item highlighting" cl_itemhighlight
-    toggle "weapon highlighting" cl_weaponhighlight
-    toggle "ammo highlighting" cl_ammohighlight
-    toggle "player highlighting" cl_playerhighlight
-    range "highlight bloom" cl_itemhighlight_glow 0 5 1
+    action "colorization setup..." pushmenu colorization
     values "ground shadows" gl_shadows no yes fade
     toggle "screen blending" gl_polyblend
     toggle "screen warping" gl_waterwarp
     toggle "grenade explosions" cl_disable_explosions ~0
     toggle "rocket explosions" cl_disable_explosions ~1
+    toggle --status "Hide blood particles only for impacts on your player" \
+        "blood particles when hit" cl_disable_self_blood ~
     blank
     action --align "railgun trail setup..." pushmenu railtrail
+end
+
+begin colorization
+    title "Colorization Setup"
+    toggle "tint item skins" cl_itemtint
+    toggle "tint weapon skins" cl_weapontint
+    toggle "tint ammo skins" cl_ammotint
+    toggle "tint player skins" cl_playertint
+    blank
+    toggle "item highlights" cl_itemhighlight
+    toggle "weapon highlights" cl_weaponhighlight
+    toggle "ammo highlights" cl_ammohighlight
+    toggle "player highlights" cl_playerhighlight
+    range "highlight bloom" cl_itemhighlight_glow 0 5 1
+    blank
+    pairs "rocket/grenade trail color" cl_projectiletrail_color \
+        default none \
+        black black \
+        red red \
+        green green \
+        yellow yellow \
+        blue blue \
+        cyan cyan \
+        magenta magenta \
+        white white
 end
 
 begin crosshair

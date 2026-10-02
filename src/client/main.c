@@ -45,6 +45,10 @@ cvar_t  *cl_noglow;
 cvar_t  *cl_itemhighlight;
 cvar_t  *cl_weaponhighlight;
 cvar_t  *cl_ammohighlight;
+cvar_t  *cl_itemtint;
+cvar_t  *cl_weapontint;
+cvar_t  *cl_ammotint;
+cvar_t  *cl_playertint;
 cvar_t  *cl_itemhighlight_glow;
 cvar_t  *cl_playerhighlight;
 cvar_t  *cl_nobob;
@@ -61,6 +65,7 @@ cvar_t  *cl_thirdperson_angle;
 cvar_t  *cl_thirdperson_range;
 
 cvar_t  *cl_disable_particles;
+cvar_t  *cl_disable_self_blood;
 cvar_t  *cl_disable_explosions;
 cvar_t  *cl_dlight_hacks;
 cvar_t  *cl_smooth_explosions;
@@ -691,9 +696,12 @@ void CL_ClearState(void)
 
 #if USE_REF
     // unprotect our custom modulate cvars
-    gl_modulate_world->flags &= ~CVAR_CHEAT;
-    gl_modulate_entities->flags &= ~CVAR_CHEAT;
-    gl_brightness->flags &= ~CVAR_CHEAT;
+    if (gl_modulate_world)
+        gl_modulate_world->flags &= ~CVAR_CHEAT;
+    if (gl_modulate_entities)
+        gl_modulate_entities->flags &= ~CVAR_CHEAT;
+    if (gl_brightness)
+        gl_brightness->flags &= ~CVAR_CHEAT;
 #endif
 }
 
@@ -1683,9 +1691,12 @@ void CL_Begin(void)
 #if USE_REF
     if (!Q_stricmp(cl.gamedir, "gloom")) {
         // cheat protect our custom modulate cvars
-        gl_modulate_world->flags |= CVAR_CHEAT;
-        gl_modulate_entities->flags |= CVAR_CHEAT;
-        gl_brightness->flags |= CVAR_CHEAT;
+        if (gl_modulate_world)
+            gl_modulate_world->flags |= CVAR_CHEAT;
+        if (gl_modulate_entities)
+            gl_modulate_entities->flags |= CVAR_CHEAT;
+        if (gl_brightness)
+            gl_brightness->flags |= CVAR_CHEAT;
     }
 #endif
 
@@ -2769,6 +2780,10 @@ static void CL_InitLocal(void)
     cl_itemhighlight = Cvar_Get("cl_itemhighlight", "0", 0);
     cl_weaponhighlight = Cvar_Get("cl_weaponhighlight", "0", 0);
     cl_ammohighlight = Cvar_Get("cl_ammohighlight", "0", 0);
+    cl_itemtint = Cvar_Get("cl_itemtint", "0", 0);
+    cl_weapontint = Cvar_Get("cl_weapontint", "0", 0);
+    cl_ammotint = Cvar_Get("cl_ammotint", "0", 0);
+    cl_playertint = Cvar_Get("cl_playertint", "0", 0);
     cl_itemhighlight_glow = Cvar_Get("cl_itemhighlight_glow", "0", 0);
     cl_playerhighlight = Cvar_Get("cl_playerhighlight", "0", 0);
     cl_nobob = Cvar_Get("cl_nobob", "0", 0);
@@ -2797,6 +2812,7 @@ static void CL_InitLocal(void)
     cl_thirdperson_range = Cvar_Get("cl_thirdperson_range", "60", 0);
 
     cl_disable_particles = Cvar_Get("cl_disable_particles", "0", 0);
+    cl_disable_self_blood = Cvar_Get("cl_disable_self_blood", "0", CVAR_ARCHIVE);
     cl_disable_explosions = Cvar_Get("cl_disable_explosions", "0", 0);
     cl_dlight_hacks = Cvar_Get("cl_dlight_hacks", "0", 0);
     cl_smooth_explosions = Cvar_Get("cl_smooth_explosions", "1", 0);
@@ -3145,6 +3161,8 @@ static const char *const sync_names[] = {
 
 static int ref_msec, phys_msec, main_msec;
 static int ref_extra, phys_extra, main_extra;
+static int ref_rate;
+static unsigned ref_accum;
 static sync_mode_t sync_mode;
 
 #define MIN_PHYS_HZ 10
@@ -3198,6 +3216,17 @@ static int fps_to_clamped_msec(cvar_t *cvar, int min, int max)
     return msec;
 }
 
+static int fps_to_clamped_rate(cvar_t *cvar, int min, int max)
+{
+    int rate = cvar->integer ? Cvar_ClampInteger(cvar, min, max) : max;
+
+    // Unlike physics ticks, asynchronous rendering uses a fractional
+    // accumulator and does not need to round the requested rate to a whole
+    // number of milliseconds.
+    cvar->modified = false;
+    return rate;
+}
+
 /*
 ==================
 CL_UpdateFrameTimes
@@ -3213,6 +3242,8 @@ void CL_UpdateFrameTimes(void)
 
     phys_msec = ref_msec = main_msec = 0;
     ref_extra = phys_extra = main_extra = 0;
+    ref_rate = 0;
+    ref_accum = 0;
     cls.frametime = 0.0f;
 
     if (com_timedemo->integer) {
@@ -3232,7 +3263,7 @@ void CL_UpdateFrameTimes(void)
         if (cl_async->integer > 1 && r_config.flags & QVF_VIDEOSYNC) {
             sync_mode = ASYNC_VIDEO;
         } else {
-            ref_msec = fps_to_clamped_msec(r_maxfps, MIN_REF_HZ, MAX_REF_HZ);
+            ref_rate = fps_to_clamped_rate(r_maxfps, MIN_REF_HZ, MAX_REF_HZ);
             sync_mode = ASYNC_FULL;
         }
     } else {
@@ -3241,8 +3272,8 @@ void CL_UpdateFrameTimes(void)
         sync_mode = SYNC_MAXFPS;
     }
 
-    Com_DDPrintf("%s: mode=%s main_msec=%d ref_msec=%d, phys_msec=%d\n",
-                 __func__, sync_names[sync_mode], main_msec, ref_msec, phys_msec);
+    Com_DDPrintf("%s: mode=%s main_msec=%d ref_rate=%d, phys_msec=%d\n",
+                 __func__, sync_names[sync_mode], main_msec, ref_rate, phys_msec);
 }
 
 /*
@@ -3294,11 +3325,15 @@ unsigned CL_Frame(unsigned msec)
         if (sync_mode == ASYNC_VIDEO) {
             ref_frame = R_VideoSync();
         } else {
-            ref_extra += main_extra;
-            if (ref_extra < ref_msec) {
+            // Accumulate thousandths of a frame. This represents arbitrary
+            // rates exactly on average using the existing millisecond main
+            // clock, for example alternating 3/4 ms at 288 fps instead of
+            // silently rounding the interval to 3 ms (333 fps).
+            ref_accum += main_extra * ref_rate;
+            if (ref_accum < 1000) {
                 ref_frame = false;
-            } else if (ref_extra > ref_msec * 4) {
-                ref_extra = ref_msec;
+            } else if (ref_accum > 4000) {
+                ref_accum = 1000;
             }
         }
         break;
@@ -3386,7 +3421,10 @@ unsigned CL_Frame(unsigned msec)
 
         cls.frametime = 0.0f;
 
-        ref_extra -= ref_msec;
+        if (sync_mode == ASYNC_FULL)
+            ref_accum -= 1000;
+        else
+            ref_extra -= ref_msec;
         R_FRAMES++;
 
         // update audio after the 3D view was drawn

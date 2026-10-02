@@ -34,6 +34,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "system/system.h"
 #include "../res/q2pro.xbm"
 #include <SDL.h>
+#if USE_VULKAN
+#include <SDL_vulkan.h>
+#endif
 
 static struct {
     SDL_Window      *window;
@@ -104,6 +107,26 @@ static void swap_interval(int val)
         Com_EPrintf("Couldn't set swap interval %d: %s\n", val, SDL_GetError());
 }
 
+#if USE_VULKAN
+static bool use_vulkan_desktop_geometry(vrect_t *rc)
+{
+    SDL_DisplayMode mode;
+
+    if (R_GetVideoAPI() != REF_VIDEO_VULKAN || vid_fullscreen->integer ||
+        !vid_geometry || strcmp(vid_geometry->string, VID_GEOMETRY))
+        return false;
+
+    if (SDL_GetCurrentDisplayMode(0, &mode) < 0 || mode.w < 320 || mode.h < 240)
+        return false;
+
+    rc->x = SDL_WINDOWPOS_UNDEFINED;
+    rc->y = SDL_WINDOWPOS_UNDEFINED;
+    rc->width = mode.w;
+    rc->height = mode.h;
+    return true;
+}
+#endif
+
 /*
 ===============================================================================
 
@@ -116,7 +139,14 @@ static void mode_changed(void)
 {
     SDL_GetWindowSize(sdl.window, &sdl.win_width, &sdl.win_height);
 
-    SDL_GL_GetDrawableSize(sdl.window, &sdl.width, &sdl.height);
+#if USE_VULKAN
+    if (R_GetVideoAPI() == REF_VIDEO_VULKAN) {
+        SDL_Vulkan_GetDrawableSize(sdl.window, &sdl.width, &sdl.height);
+    } else
+#endif
+    {
+        SDL_GL_GetDrawableSize(sdl.window, &sdl.width, &sdl.height);
+    }
 
     Uint32 flags = SDL_GetWindowFlags(sdl.window);
     if (flags & SDL_WINDOW_FULLSCREEN)
@@ -124,6 +154,8 @@ static void mode_changed(void)
     else
         sdl.flags &= ~QVF_FULLSCREEN;
 
+    Com_Printf("SDL window: %dx%d, drawable: %dx%d\n",
+               sdl.win_width, sdl.win_height, sdl.width, sdl.height);
     R_ModeChanged(sdl.width, sdl.height, sdl.flags);
     SCR_ModeChanged();
 }
@@ -149,7 +181,11 @@ static void set_mode(void)
             flags = SDL_WINDOW_FULLSCREEN_DESKTOP;
         }
     } else {
-        if (VID_GetGeometry(&rc)) {
+        if (
+#if USE_VULKAN
+            use_vulkan_desktop_geometry(&rc) ||
+#endif
+            VID_GetGeometry(&rc)) {
             SDL_SetWindowSize(sdl.window, rc.width, rc.height);
             SDL_SetWindowPosition(sdl.window, rc.x, rc.y);
         }
@@ -255,12 +291,25 @@ static void shutdown(void)
 
 static bool create_window_and_context(const vrect_t *rc)
 {
-    sdl.window = SDL_CreateWindow(PRODUCT, rc->x, rc->y, rc->width, rc->height,
-                                  SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
+    Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+
+#if USE_VULKAN
+    if (R_GetVideoAPI() == REF_VIDEO_VULKAN)
+        flags |= SDL_WINDOW_VULKAN;
+    else
+#endif
+        flags |= SDL_WINDOW_OPENGL;
+
+    sdl.window = SDL_CreateWindow(PRODUCT, rc->x, rc->y, rc->width, rc->height, flags);
     if (!sdl.window) {
         Com_EPrintf("Couldn't create SDL window: %s\n", SDL_GetError());
         return false;
     }
+
+#if USE_VULKAN
+    if (R_GetVideoAPI() == REF_VIDEO_VULKAN)
+        return true;
+#endif
 
     sdl.context = SDL_GL_CreateContext(sdl.window);
     if (!sdl.context) {
@@ -282,7 +331,10 @@ static bool init(void)
         return false;
     }
 
-    set_gl_attributes();
+#if USE_VULKAN
+    if (R_GetVideoAPI() != REF_VIDEO_VULKAN)
+#endif
+        set_gl_attributes();
 
     SDL_SetEventFilter(my_event_filter, NULL);
 
@@ -291,7 +343,17 @@ static bool init(void)
         rc.y = SDL_WINDOWPOS_UNDEFINED;
     }
 
+#if USE_VULKAN
+    use_vulkan_desktop_geometry(&rc);
+#endif
+
     if (!create_window_and_context(&rc)) {
+#if USE_VULKAN
+        if (R_GetVideoAPI() == REF_VIDEO_VULKAN) {
+            shutdown();
+            return false;
+        }
+#endif
         Com_Printf("Falling back to failsafe config\n");
         SDL_GL_ResetAttributes();
         if (!create_window_and_context(&rc)) {
@@ -336,6 +398,46 @@ static bool init(void)
 
     return true;
 }
+
+#if USE_VULKAN
+static bool get_vk_instance_extensions(uint32_t *count, const char **names,
+                                       uint32_t max_names)
+{
+    unsigned sdl_count = 0;
+
+    if (!SDL_Vulkan_GetInstanceExtensions(sdl.window, &sdl_count, NULL)) {
+        Com_EPrintf("Couldn't get SDL Vulkan instance extension count: %s\n", SDL_GetError());
+        return false;
+    }
+
+    if (!names) {
+        *count = sdl_count;
+        return true;
+    }
+
+    if (sdl_count > max_names) {
+        Com_EPrintf("SDL reported too many Vulkan instance extensions: %u\n", sdl_count);
+        return false;
+    }
+
+    if (!SDL_Vulkan_GetInstanceExtensions(sdl.window, &sdl_count, names)) {
+        Com_EPrintf("Couldn't get SDL Vulkan instance extensions: %s\n", SDL_GetError());
+        return false;
+    }
+
+    *count = sdl_count;
+    return true;
+}
+
+static bool create_vk_surface(VkInstance instance, VkSurfaceKHR *surface)
+{
+    if (SDL_Vulkan_CreateSurface(sdl.window, instance, surface))
+        return true;
+
+    Com_EPrintf("Couldn't create SDL Vulkan surface: %s\n", SDL_GetError());
+    return false;
+}
+#endif
 
 /*
 ==========================================================================
@@ -580,6 +682,11 @@ const vid_driver_t vid_sdl = {
     .get_proc_addr = get_proc_addr,
     .swap_buffers = swap_buffers,
     .swap_interval = swap_interval,
+
+#if USE_VULKAN
+    .get_vk_instance_extensions = get_vk_instance_extensions,
+    .create_vk_surface = create_vk_surface,
+#endif
 
     .get_clipboard_data = get_clipboard_data,
     .set_clipboard_data = set_clipboard_data,

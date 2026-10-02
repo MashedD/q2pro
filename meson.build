@@ -1,4 +1,4 @@
-project('q2pro', 'c',
+project('q2pro', 'c', 'cpp',
   license: 'GPL-2.0-or-later',
   version: run_command(find_program('python3'), 'version.py', check: true).stdout().strip(),
   meson_version: '>= 0.59.0',
@@ -79,6 +79,7 @@ ui_src = [
 ]
 
 refresh_src = [
+  'src/refresh/backend.c',
   'src/refresh/draw.c',
   'src/refresh/hq2x.c',
   'src/refresh/images.c',
@@ -353,6 +354,152 @@ client_deps = [png, curl, sdl2]
 server_deps = []
 game_deps = [zlib]
 
+vulkan = dependency('vulkan', required: false)
+if not vulkan.found() and host_machine.system() == 'windows'
+  # The Windows backend loads vulkan-1.dll dynamically, so cross builds only
+  # need the platform-independent Vulkan headers.  Linux distributions
+  # commonly install those in /usr/include without providing a MinGW pkg-config
+  # file.  Search that directory after the MinGW compiler's native headers so
+  # standard C and Windows headers still come from the cross toolchain.
+  vulkan_header_args = ['-idirafter', '/usr/include']
+  if cc.has_header('vulkan/vulkan.h', args: vulkan_header_args)
+    vulkan = declare_dependency(compile_args: vulkan_header_args)
+  endif
+endif
+if get_option('vulkan').enabled() and not vulkan.found()
+  error('Vulkan support was enabled, but Vulkan headers were not found')
+endif
+if vulkan.found()
+  glslc = find_program('glslc', required: get_option('vulkan'))
+  vulkan_rt_headers = cc.has_header_symbol(
+    'vulkan/vulkan.h',
+    'VK_KHR_RAY_QUERY_EXTENSION_NAME',
+    dependencies: vulkan,
+  )
+  if get_option('vulkan-raytracing').enabled() and not vulkan_rt_headers
+    error('Vulkan ray tracing was enabled, but the Vulkan headers are too old')
+  endif
+  config.set10('USE_VULKAN_RAYTRACING',
+    vulkan_rt_headers and not get_option('vulkan-raytracing').disabled())
+  vk_shader_headers = []
+  foreach shader : ['vk_rect.vert', 'vk_rect.frag', 'vk_vignette.vert',
+                    'vk_tex.vert', 'vk_tex.frag',
+                    'vk_waterwarp.frag',
+                    'vk_bloom_downscale.frag', 'vk_bloom_blur.frag',
+                    'vk_ssr.vert', 'vk_ssr.frag', 'vk_ssr_resolve.frag',
+                    'vk_scene.frag',
+                    'vk_color3d.vert', 'vk_color3d.frag',
+                    'vk_world.vert', 'vk_world.frag', 'vk_world_alpha.frag',
+                    'vk_world_lit.vert', 'vk_world_lit.frag',
+                    'vk_world_lit_alpha.frag',
+                    'vk_world_pixel.vert', 'vk_world_pixel.frag',
+                    'vk_world_pixel_alpha.frag',
+                    'vk_world_pixel_glow.frag',
+                    'vk_world_pixel_glow_alpha.frag',
+                    'vk_world_glow.frag',
+                    'vk_alias.vert', 'vk_alias_shadow.vert',
+                    'vk_alias_shadow.frag', 'vk_alias.frag',
+                    'vk_alias_alpha.frag',
+                    'vk_motion_world.vert', 'vk_motion_alias.vert',
+                    'vk_motion_color.vert', 'vk_motion.frag',
+                    'vk_motion_no_composition.frag',
+                    'vk_motion_camera.vert', 'vk_motion_camera.frag',
+                    'vk_motion_camera_no_composition.frag', 'vk_fsr_debug.frag']
+    vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
+      input: 'src/refresh' / shader,
+      output: shader.underscorify() + '_spv.h',
+      depend_files: files('src/refresh/vk_motion_push.glsl'),
+      command: [glslc, '-mfmt=c', '@INPUT@', '-o', '@OUTPUT@'],
+    )
+  endforeach
+  if config.get('USE_VULKAN_RAYTRACING', 0) != 0
+    foreach shader : ['vk_rt_ao_bake.vert', 'vk_rt_ao_bake.frag']
+      vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
+        input: 'src/refresh' / shader,
+        output: shader.underscorify() + '_spv.h',
+        command: [glslc, '--target-env=vulkan1.2', '-mfmt=c',
+                  '@INPUT@', '-o', '@OUTPUT@'],
+      )
+    endforeach
+    shader = 'vk_world_pixel_rt.vert'
+    vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
+      input: 'src/refresh' / shader,
+      output: shader.underscorify() + '_spv.h',
+      command: [glslc, '--target-env=vulkan1.2', '-mfmt=c',
+                '@INPUT@', '-o', '@OUTPUT@'],
+    )
+    shader = 'vk_world_lit_rt.frag'
+    vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
+      input: 'src/refresh' / shader,
+      output: shader.underscorify() + '_spv.h',
+      command: [glslc, '--target-env=vulkan1.2', '-mfmt=c',
+                '@INPUT@', '-o', '@OUTPUT@'],
+    )
+    foreach rt_shader : [
+      ['vk_world_pixel_rt_frag_spv.h', 'src/refresh/vk_world_pixel_rt.frag', []],
+      ['vk_world_pixel_rt_alpha_frag_spv.h', 'src/refresh/vk_world_pixel_rt.frag',
+       ['-DRT_ALPHA_TEST=1']],
+      ['vk_world_pixel_rt_glow_frag_spv.h', 'src/refresh/vk_world_pixel_rt.frag',
+       ['-DRT_GLOWMAP=1']],
+      ['vk_world_pixel_rt_glow_alpha_frag_spv.h',
+       'src/refresh/vk_world_pixel_rt.frag',
+       ['-DRT_GLOWMAP=1', '-DRT_ALPHA_TEST=1']],
+      ['vk_world_pixel_rt_quad_frag_spv.h', 'src/refresh/vk_world_pixel_rt.frag',
+       ['-DRT_QUAD_SHARING=1']],
+      ['vk_world_pixel_rt_quad_glow_frag_spv.h',
+       'src/refresh/vk_world_pixel_rt.frag',
+       ['-DRT_QUAD_SHARING=1', '-DRT_GLOWMAP=1']],
+    ]
+      vk_shader_headers += custom_target(rt_shader[0].underscorify(),
+        input: rt_shader[1],
+        output: rt_shader[0],
+        command: [glslc, '--target-env=vulkan1.2', '-mfmt=c'] +
+                 rt_shader[2] + ['@INPUT@', '-o', '@OUTPUT@'],
+      )
+    endforeach
+  endif
+  fsr3 = subproject('fidelityfx-fsr3')
+  common_deps += fsr3.get_variable('fsr3_dep')
+  fsr3_provider_platform = host_machine.system()
+  fsr3_provider_compiler = meson.get_compiler('cpp').get_id()
+  if host_machine.system() == 'windows'
+    fsr3_provider_reason = '@0@/@1@: real FidelityFX frame-interpolation swapchain provider is compiled for Windows'.format(host_machine.cpu_family(), fsr3_provider_compiler)
+  elif host_machine.system() == 'linux'
+    fsr3_provider_reason = 'linux/@0@: real FidelityFX frame-interpolation swapchain provider is compiled with the q2pro POSIX synchronization layer'.format(fsr3_provider_compiler)
+  else
+    fsr3_provider_reason = '@0@/@1@: real FidelityFX frame-interpolation swapchain provider is not compiled for this q2pro integration; the no-op Vulkan stub remains selected'.format(host_machine.system(), fsr3_provider_compiler)
+  endif
+  config.set10('Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED',
+               fsr3.get_variable('fsr3_frame_interpolation_provider_compiled', false))
+  config.set_quoted('Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_PLATFORM',
+                    fsr3_provider_platform)
+  config.set_quoted('Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_REASON',
+                    fsr3_provider_reason)
+  add_project_arguments('-DFFX_GCC', '-include',
+                        meson.project_source_root() / 'src/refresh/vk_fsr3_compat.h',
+                        language: 'cpp')
+  if fsr3_provider_compiler in ['gcc', 'clang']
+    add_project_arguments(
+      '-Wno-class-memaccess',
+      '-Wno-pointer-arith',
+      '-Wno-sign-compare',
+      '-Wno-strict-aliasing',
+      '-Wno-unknown-pragmas',
+      '-Wno-unused-but-set-variable',
+      '-Wno-unused-function',
+      '-Wno-unused-variable',
+      '-Wno-write-strings',
+      language: 'cpp',
+    )
+  endif
+  refresh_src += fsr3.get_variable('fsr3_sources')
+  refresh_src += 'src/refresh/vk_fsr3.cpp'
+  common_deps += vulkan.partial_dependency(compile_args: true, includes: true)
+  refresh_src += ['src/refresh/vk_backend.c',
+                  'src/refresh/vk_presentation_adapter.c', vk_shader_headers]
+  config.set10('USE_VULKAN', true)
+endif
+
 jpeg = dependency('libjpeg',
   required:        get_option('libjpeg'),
   default_options: fallback_opt + [ 'jpeg-turbo=disabled', 'tests=disabled' ]
@@ -392,7 +539,9 @@ else
 endif
 if openal.found()
   client_src += [ 'src/client/sound/al.c', 'src/client/sound/qal.c' ]
-  client_deps += openal.partial_dependency(compile_args: true, includes: true)
+  if not (win32 and get_option('qal-hard-linked'))
+    client_deps += openal.partial_dependency(compile_args: true, includes: true)
+  endif
   config.set10('USE_OPENAL', true)
   if web
     config.set('QAL_HARD_LINKED', true)
@@ -403,9 +552,18 @@ if get_option('qal-hard-linked')
   config.set('QAL_HARD_LINKED', true)
 
   if win32
+    qal_static_prefix = get_option('qal-static-prefix')
+    if qal_static_prefix == ''
+      error('qal-hard-linked on Windows requires qal-static-prefix; use build-win32.sh or build-win64.sh')
+    endif
+
     client_deps += declare_dependency(
-      compile_args: ['-DAL_LIBTYPE_STATIC'],
+      compile_args: [
+        '-DAL_LIBTYPE_STATIC',
+        '-I' + join_paths(qal_static_prefix, 'include'),
+      ],
       link_args: [
+        '-L' + join_paths(qal_static_prefix, 'lib'),
         '-l:libOpenAL32.a',
         '-lstdc++',
         '-lavrt',
@@ -689,6 +847,26 @@ endif
 
 configure_file(output: 'config.h', configuration: config)
 
+if not win32 and not web and config.get('USE_VULKAN', 0) != 0
+  fsr_contract_shell = find_program('sh', required: false)
+  if fsr_contract_shell.found()
+    test('vulkan-fsr3-contracts', fsr_contract_shell,
+      args: [meson.current_source_dir() / 'tests/vk_presentation.sh',
+             meson.current_build_dir()],
+      timeout: 120,
+    )
+  endif
+endif
+
+fsr_benchmark_parser_python = find_program('python3', 'python', required: false)
+if fsr_benchmark_parser_python.found()
+  test('fsr-benchmark-parser', fsr_benchmark_parser_python,
+    args: [meson.current_source_dir() / 'tests/test_fsr_benchmark.py'],
+    env: ['PYTHONDONTWRITEBYTECODE=1'],
+    timeout: 120,
+  )
+endif
+
 if system_wide
   summary({'datadir': datadir, 'libdir': libdir, 'homedir': homedir}, section: 'Directories')
 endif
@@ -719,6 +897,8 @@ summary({
   'tests'              : config.get('USE_TESTS', 0) != 0,
   'tga'                : config.get('USE_TGA', 0) != 0,
   'variable-fps'       : config.get('USE_FPS', 0) != 0,
+  'vulkan'             : config.get('USE_VULKAN', 0) != 0,
+  'vulkan ray tracing' : config.get('USE_VULKAN_RAYTRACING', 0) != 0,
   'wayland'            : config.get('USE_WAYLAND', 0) != 0,
   'windows-crash-dumps': config.get('USE_DBGHELP', 0) != 0,
   'windows-egl'        : config.get('USE_WIN32EGL', 0) != 0,

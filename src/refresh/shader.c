@@ -113,6 +113,7 @@ static void write_block(sizebuf_t *buf, glStateBits_t bits)
         float u_heightfog_falloff;
         vec2 pad_4;
         vec4 u_vieworg;
+        vec4 u_skin_tint;
     )
     GLSF("};\n");
 }
@@ -583,6 +584,9 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
     if (bits & GLS_INTENSITY_ENABLE)
         GLSL(diffuse.rgb *= u_intensity;)
 
+    if (bits & GLS_INTENSITY_2D)
+        GLSL(diffuse.rgb *= u_intensity;)
+
     if (bits & GLS_DEFAULT_FLARE)
         GLSL(
              diffuse.rgb *= (diffuse.r + diffuse.g + diffuse.b) / 3.0;
@@ -592,8 +596,28 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
     if (!(bits & GLS_TEXTURE_REPLACE))
         GLSL(diffuse *= v_color;)
 
+    if (bits & GLS_SKINTINT) {
+        GLSL(
+            if (u_skin_tint.a > 0.0) {
+                float luma = dot(diffuse.rgb, vec3(0.2126, 0.7152, 0.0722));
+                luma = 0.15 + 0.85 * sqrt(max(luma, 0.0));
+                diffuse.rgb = mix(diffuse.rgb,
+                                  vec3(luma) * u_skin_tint.rgb,
+                                  u_skin_tint.a);
+            }
+        )
+    }
+
     if (!(bits & GLS_LIGHTMAP_ENABLE) && (bits & GLS_GLOWMAP_ENABLE)) {
         GLSL(vec4 glowmap = texture(u_glowmap, tc);)
+        if (bits & GLS_SKINTINT) {
+            GLSL(
+                if (all(greaterThan(u_skin_tint.rgb, vec3(2.0)))) {
+                    float luma = dot(glowmap.rgb, vec3(0.2126, 0.7152, 0.0722));
+                    glowmap.rgb = vec3(luma) * u_skin_tint.rgb;
+                }
+            )
+        }
         if (bits & GLS_INTENSITY_ENABLE)
             GLSL(diffuse.rgb += glowmap.rgb * u_intensity2;)
         else
@@ -607,10 +631,23 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
     }
 
     if (bits & GLS_BLOOM_GENERATE) {
-        if (bits & GLS_BLOOM_SHELL)
-            GLSL(bloom = diffuse;)
-        else
+        if (bits & GLS_BLOOM_SHELL) {
+            if (bits & GLS_LIGHTMAP_ENABLE) {
+                // Static wall lamps have no separate glowmap. Seed bloom from
+                // their material, not their lightmap (which can receive colored
+                // dynamic lights), so nearby entities cannot recolor the halo.
+                GLSL(
+                    vec3 emissive = texture(u_texture, tc).rgb;
+                    float luma = dot(emissive, vec3(0.2126, 0.7152, 0.0722));
+                    float mask = smoothstep(0.02, 0.18, luma);
+                    bloom = vec4(emissive * mask * 3.0 * u_intensity, diffuse.a);
+                )
+            } else {
+                GLSL(bloom = diffuse;)
+            }
+        } else {
             GLSL(bloom.a = diffuse.a;)
+        }
     }
 
     if (bits & (GLS_FOG_GLOBAL | GLS_FOG_HEIGHT))
@@ -930,7 +967,7 @@ static void shader_setup_2d(void)
     gls.u_block.time = glr.fd.time;
     gls.u_block.modulate = 1.0f;
     gls.u_block.add = 0.0f;
-    gls.u_block.intensity = 1.0f;
+    gls.u_block.intensity = Cvar_ClampValue(gl_intensity_2D, 0.0f, 5.0f);
     gls.u_block.intensity2 = 1.0f;
 
     gls.u_block.w_amp[0] = 0.0025f;
