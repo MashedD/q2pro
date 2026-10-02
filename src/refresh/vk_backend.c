@@ -1546,6 +1546,7 @@ static cvar_t *vk_saturation;
 static cvar_t *vk_invert;
 static cvar_t *vk_gamma;
 static cvar_t *vk_gamma_scale_pics;
+static cvar_t *vk_intensity_2D;
 static cvar_t *vk_upscale_pcx;
 #if USE_MD5
 static cvar_t *vk_md5_load;
@@ -11841,6 +11842,11 @@ static void vk_set_3d_viewport(const refdef_t *fd)
         vk.CmdSetLineWidth(cmd, 1.0f);
 }
 
+static float vk_2d_intensity(void)
+{
+    return Cvar_ClampValue(vk_intensity_2D, 0.0f, 5.0f);
+}
+
 static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
 {
     if (!vk.render_pass_active || !vk.rect_pipeline || w <= 0 || h <= 0)
@@ -11869,12 +11875,13 @@ static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
         return;
 
     VkClearColorValue clear = vk_color_to_clear(color);
+    float intensity = vk_2d_intensity();
     vk_rect_push_t push = {
         .rect = { x, y, w, h },
         .color = {
-            clear.float32[0],
-            clear.float32[1],
-            clear.float32[2],
+            clear.float32[0] * intensity,
+            clear.float32[1] * intensity,
+            clear.float32[2] * intensity,
             clear.float32[3],
         },
         .screen = {
@@ -11901,10 +11908,11 @@ static void vk_blend_rect(int x, int y, int w, int h, const vec4_t color)
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     int screen_w = vk_2d_width();
     int screen_h = vk_2d_height();
+    float intensity = vk_2d_intensity();
     float rgba[4] = {
-        Q_clipf(color[0], 0.0f, 1.0f),
-        Q_clipf(color[1], 0.0f, 1.0f),
-        Q_clipf(color[2], 0.0f, 1.0f),
+        Q_clipf(color[0], 0.0f, 1.0f) * intensity,
+        Q_clipf(color[1], 0.0f, 1.0f) * intensity,
+        Q_clipf(color[2], 0.0f, 1.0f) * intensity,
         Q_clipf(color[3], 0.0f, 1.0f),
     };
 
@@ -11945,9 +11953,9 @@ static void vk_blend_vignette(int x, int y, int w, int h, const vec4_t color,
     vk_draw_push_t push = {
         .rect = { x, y, w, h },
         .color = {
-            Q_clipf(color[0], 0.0f, 1.0f),
-            Q_clipf(color[1], 0.0f, 1.0f),
-            Q_clipf(color[2], 0.0f, 1.0f),
+            Q_clipf(color[0], 0.0f, 1.0f) * vk_2d_intensity(),
+            Q_clipf(color[1], 0.0f, 1.0f) * vk_2d_intensity(),
+            Q_clipf(color[2], 0.0f, 1.0f) * vk_2d_intensity(),
             Q_clipf(color[3], 0.0f, 1.0f),
         },
         .screen = { vk_2d_width(), vk_2d_height() },
@@ -12053,9 +12061,9 @@ static void vk_draw_texture_resource(int x, int y, int w, int h,
     vk_draw_push_t push = {
         .rect = { x, y, w, h },
         .color = {
-            color.u8[0] / 255.0f,
-            color.u8[1] / 255.0f,
-            color.u8[2] / 255.0f,
+            color.u8[0] / 255.0f * vk_2d_intensity(),
+            color.u8[1] / 255.0f * vk_2d_intensity(),
+            color.u8[2] / 255.0f * vk_2d_intensity(),
             color.u8[3] / 255.0f,
         },
         .screen = {
@@ -21308,6 +21316,7 @@ bool VKR_Init(bool total)
     vk_saturation = Cvar_Get("gl_saturation", "1", CVAR_FILES);
     vk_invert = Cvar_Get("gl_invert", "0", CVAR_FILES);
     vk_gamma_scale_pics = Cvar_Get("gl_gamma_scale_pics", "0", CVAR_FILES);
+    vk_intensity_2D = Cvar_Get("gl_intensity_2D", "1", CVAR_ARCHIVE);
     vk_upscale_pcx = Cvar_Get("gl_upscale_pcx", "0", CVAR_FILES);
 #if USE_MD5
     vk_md5_load = Cvar_Get("gl_md5_load", "1", CVAR_FILES);

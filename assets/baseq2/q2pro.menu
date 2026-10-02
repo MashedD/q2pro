@@ -91,6 +91,7 @@ begin video
     pairs "anisotropic filter" gl_anisotropy no 1 2x 2 4x 4 8x 8 16x 16
     range "texture saturation" gl_saturation 0 1
     pairs "texture intensity" intensity 1x 1 2x 2 3x 3
+    range "2D intensity" gl_intensity_2D 1 5 0.1
     range "lightmap saturation" gl_coloredlightmaps 0 1
     range "lightmap brightness" gl_brightness 0 0.3
     values "rendering backend" gl_shaders legacy shaders

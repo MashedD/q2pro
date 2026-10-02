@@ -1417,6 +1417,14 @@ gl_gamma_scale_pics::
     Apply software gamma scaling not only to textures and skins, but to HUD
     pictures also. Default value is 0 (don't apply to pics).
 
+gl_intensity_2D::
+    Scale the RGB intensity of 2D rendering in the OpenGL and Vulkan renderers,
+    including the HUD, menu, console, and 2D fills. Values above 1 make these
+    elements brighter; alpha is unchanged. The effective range is 0 to 5.
+    This setting takes effect immediately and works independently of software
+    gamma and gamma-ramp support. The legacy OpenGL path requires ARB fragment
+    program support. Default value is 1.
+
 gl_noscrap::
     By default, OpenGL renderer combines small HUD pictures into the single
     texture called scrap. This usually speeds up rendering a bit, and allows

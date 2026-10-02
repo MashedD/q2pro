@@ -19,6 +19,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "gl.h"
 #include "arbfp.h"
 
+static GLuint legacy_intensity_2d_program;
+
 static void legacy_state_bits(glStateBits_t bits)
 {
     glStateBits_t diff = bits ^ gls.state_bits;
@@ -61,12 +63,22 @@ static void legacy_state_bits(glStateBits_t bits)
             qglDisable(GL_TEXTURE_2D);
     }
 
-    if ((diff & GLS_WARP_ENABLE) && gl_static.warp_program) {
-        if (bits & GLS_WARP_ENABLE) {
-            vec4_t param = { glr.fd.time, glr.fd.time };
+    if ((diff & GLS_WARP_ENABLE) && gl_static.warp_program &&
+        (bits & GLS_WARP_ENABLE)) {
+        vec4_t param = { glr.fd.time, glr.fd.time };
+        qglProgramLocalParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, 0, param);
+    }
+
+    if (diff & (GLS_WARP_ENABLE | GLS_INTENSITY_2D)) {
+        GLuint program = 0;
+        if ((bits & GLS_INTENSITY_2D) && legacy_intensity_2d_program)
+            program = legacy_intensity_2d_program;
+        else if ((bits & GLS_WARP_ENABLE) && gl_static.warp_program)
+            program = gl_static.warp_program;
+
+        if (program) {
             qglEnable(GL_FRAGMENT_PROGRAM_ARB);
-            qglBindProgramARB(GL_FRAGMENT_PROGRAM_ARB, gl_static.warp_program);
-            qglProgramLocalParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, 0, param);
+            qglBindProgramARB(GL_FRAGMENT_PROGRAM_ARB, program);
         } else {
             qglBindProgramARB(GL_FRAGMENT_PROGRAM_ARB, 0);
             qglDisable(GL_FRAGMENT_PROGRAM_ARB);
@@ -221,6 +233,42 @@ static void legacy_init(void)
 
     qglBindProgramARB(GL_FRAGMENT_PROGRAM_ARB, 0);
     gl_static.warp_program = prog;
+
+    static const char intensity_program[] =
+        "!!ARBfp1.0\n"
+        "TEMP texel, scaled;\n"
+        "TEX texel, fragment.texcoord[0], texture[0], 2D;\n"
+        "MUL scaled, texel, fragment.color;\n"
+        "MUL result.color.rgb, scaled, program.local[0].xxxx;\n"
+        "MOV result.color.a, scaled.a;\n"
+        "END\n";
+
+    GL_ClearErrors();
+    qglGenProgramsARB(1, &legacy_intensity_2d_program);
+    qglBindProgramARB(GL_FRAGMENT_PROGRAM_ARB, legacy_intensity_2d_program);
+    qglProgramStringARB(GL_FRAGMENT_PROGRAM_ARB, GL_PROGRAM_FORMAT_ASCII_ARB,
+                        sizeof(intensity_program) - 1, intensity_program);
+    if (GL_ShowErrors("Failed to initialize 2D intensity program")) {
+        qglBindProgramARB(GL_FRAGMENT_PROGRAM_ARB, 0);
+        qglDeleteProgramsARB(1, &legacy_intensity_2d_program);
+        legacy_intensity_2d_program = 0;
+    } else {
+        qglBindProgramARB(GL_FRAGMENT_PROGRAM_ARB, 0);
+    }
+}
+
+static void legacy_setup_2d(void)
+{
+    if (legacy_intensity_2d_program) {
+        GLuint program = gls.state_bits & GLS_WARP_ENABLE ?
+            gl_static.warp_program : 0;
+        float intensity = Cvar_ClampValue(gl_intensity_2D, 0.0f, 5.0f);
+        vec4_t param = { intensity, intensity, intensity, intensity };
+
+        qglBindProgramARB(GL_FRAGMENT_PROGRAM_ARB, legacy_intensity_2d_program);
+        qglProgramLocalParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, 0, param);
+        qglBindProgramARB(GL_FRAGMENT_PROGRAM_ARB, program);
+    }
 }
 
 static void legacy_shutdown(void)
@@ -231,6 +279,10 @@ static void legacy_shutdown(void)
         qglDeleteProgramsARB(1, &gl_static.warp_program);
         gl_static.warp_program = 0;
     }
+    if (legacy_intensity_2d_program) {
+        qglDeleteProgramsARB(1, &legacy_intensity_2d_program);
+        legacy_intensity_2d_program = 0;
+    }
 }
 
 const glbackend_t backend_legacy = {
@@ -239,6 +291,7 @@ const glbackend_t backend_legacy = {
     .init = legacy_init,
     .shutdown = legacy_shutdown,
     .clear_state = legacy_clear_state,
+    .setup_2d = legacy_setup_2d,
 
     .load_matrix = legacy_load_matrix,
 

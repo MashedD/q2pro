@@ -50,6 +50,7 @@ cvar_t *gl_dlight_falloff;
 cvar_t *gl_modulate_entities;
 cvar_t *gl_doublelight_entities;
 cvar_t *gl_glowmap_intensity;
+cvar_t *gl_intensity_2D;
 cvar_t *gl_flarespeed;
 cvar_t *gl_fontshadow;
 cvar_t *gl_shaders;
@@ -1226,6 +1227,7 @@ static void GL_Register(void)
     gl_modulate_entities->changed = gl_modulate_entities_changed;
     gl_doublelight_entities = Cvar_Get("gl_doublelight_entities", "1", 0);
     gl_glowmap_intensity = Cvar_Get("gl_glowmap_intensity", "0.75", 0);
+    gl_intensity_2D = Cvar_Get("gl_intensity_2D", "1", CVAR_ARCHIVE);
     gl_flarespeed = Cvar_Get("gl_flarespeed", "8", 0);
     gl_fontshadow = Cvar_Get("gl_fontshadow", "0", 0);
     gl_shaders = Cvar_Get("gl_shaders", "1", CVAR_FILES);

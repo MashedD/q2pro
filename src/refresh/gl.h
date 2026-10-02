@@ -291,6 +291,7 @@ extern cvar_t *gl_dlight_falloff;
 extern cvar_t *gl_modulate_entities;
 extern cvar_t *gl_doublelight_entities;
 extern cvar_t *gl_glowmap_intensity;
+extern cvar_t *gl_intensity_2D;
 extern cvar_t *gl_flarespeed;
 extern cvar_t *gl_fontshadow;
 extern cvar_t *gl_shaders;
@@ -604,6 +605,7 @@ void GL_LoadWorld(const char *name);
 #define GLS_BLOOM_SHELL         BIT_ULL(31)
 #define GLS_BLOOM_ONLY          BIT_ULL(34)
 #define GLS_SKINTINT             BIT_ULL(35)
+#define GLS_INTENSITY_2D         BIT_ULL(36)
 
 #define GLS_BLUR_GAUSS          BIT_ULL(32)
 #define GLS_BLUR_BOX            BIT_ULL(33)
@@ -619,9 +621,11 @@ void GL_LoadWorld(const char *name);
 #define GLS_SHADER_MASK         (GLS_ALPHATEST_ENABLE | GLS_TEXTURE_REPLACE | GLS_SCROLL_ENABLE | \
                                  GLS_LIGHTMAP_ENABLE | GLS_WARP_ENABLE | GLS_INTENSITY_ENABLE | \
                                  GLS_GLOWMAP_ENABLE | GLS_SKY_MASK | GLS_DEFAULT_FLARE | GLS_MESH_MASK | \
-                                 GLS_FOG_MASK | GLS_BLOOM_MASK | GLS_BLUR_MASK | GLS_SKINTINT)
+                                 GLS_FOG_MASK | GLS_BLOOM_MASK | GLS_BLUR_MASK | GLS_SKINTINT | \
+                                 GLS_INTENSITY_2D)
 #define GLS_UNIFORM_MASK        (GLS_WARP_ENABLE | GLS_LIGHTMAP_ENABLE | GLS_INTENSITY_ENABLE | \
-                                 GLS_SKY_MASK | GLS_FOG_MASK | GLS_BLUR_MASK | GLS_SKINTINT)
+                                 GLS_SKY_MASK | GLS_FOG_MASK | GLS_BLUR_MASK | GLS_SKINTINT | \
+                                 GLS_INTENSITY_2D)
 #define GLS_SCROLL_MASK         (GLS_SCROLL_ENABLE | GLS_SCROLL_X | GLS_SCROLL_Y | GLS_SCROLL_FLIP | GLS_SCROLL_SLOW)
 
 typedef enum {

@@ -33,7 +33,8 @@ void GL_Flush2D(void)
     if (!tess.numverts)
         return;
 
-    bits = GLS_DEPTHTEST_DISABLE | GLS_DEPTHMASK_FALSE | GLS_CULL_DISABLE | tess.flags;
+    bits = GLS_DEPTHTEST_DISABLE | GLS_DEPTHMASK_FALSE | GLS_CULL_DISABLE |
+        GLS_INTENSITY_2D | tess.flags;
     if (bits & GLS_BLEND_BLEND)
         bits &= ~GLS_ALPHATEST_ENABLE;
 

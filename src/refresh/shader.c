@@ -584,6 +584,9 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
     if (bits & GLS_INTENSITY_ENABLE)
         GLSL(diffuse.rgb *= u_intensity;)
 
+    if (bits & GLS_INTENSITY_2D)
+        GLSL(diffuse.rgb *= u_intensity;)
+
     if (bits & GLS_DEFAULT_FLARE)
         GLSL(
              diffuse.rgb *= (diffuse.r + diffuse.g + diffuse.b) / 3.0;
@@ -964,7 +967,7 @@ static void shader_setup_2d(void)
     gls.u_block.time = glr.fd.time;
     gls.u_block.modulate = 1.0f;
     gls.u_block.add = 0.0f;
-    gls.u_block.intensity = 1.0f;
+    gls.u_block.intensity = Cvar_ClampValue(gl_intensity_2D, 0.0f, 5.0f);
     gls.u_block.intensity2 = 1.0f;
 
     gls.u_block.w_amp[0] = 0.0025f;
