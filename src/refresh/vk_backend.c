@@ -12806,6 +12806,7 @@ static bool vk_create_particle_buffer(void)
                           &vk.particle_vertices.buffer,
                           &vk.particle_vertices.memory))
         return false;
+    vk.particle_vertices.size = size;
 
     VkResult result = vk.MapMemory(vk.device, vk.particle_vertices.memory,
                                    0, size, 0,
@@ -12895,28 +12896,38 @@ static bool vk_create_null_model(void)
 #if USE_DEBUG
 static bool vk_create_debug_line_buffer(void)
 {
+    VkDeviceSize size = sizeof(vk_vertex_t) * VK_MAX_DEBUG_LINE_VERTICES;
+
     vk_destroy_buffer(&vk.debug_lines);
-    return vk_create_buffer(sizeof(vk_vertex_t) * VK_MAX_DEBUG_LINE_VERTICES,
-                            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                            &vk.debug_lines.buffer, &vk.debug_lines.memory);
+    if (!vk_create_buffer(size,
+                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          &vk.debug_lines.buffer, &vk.debug_lines.memory))
+        return false;
+
+    vk.debug_lines.size = size;
+    return true;
 }
 
 static bool vk_create_debug_text_buffers(void)
 {
+    VkDeviceSize vertices_size = sizeof(vk_vertex_t) * VK_MAX_DEBUG_TEXT_VERTICES;
+    VkDeviceSize indices_size = sizeof(uint32_t) * VK_MAX_DEBUG_TEXT_INDICES;
+
     vk_destroy_buffer(&vk.debug_text_vertices);
     vk_destroy_buffer(&vk.debug_text_indices);
 
-    if (!vk_create_buffer(sizeof(vk_vertex_t) * VK_MAX_DEBUG_TEXT_VERTICES,
+    if (!vk_create_buffer(vertices_size,
                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                           &vk.debug_text_vertices.buffer,
                           &vk.debug_text_vertices.memory))
         return false;
+    vk.debug_text_vertices.size = vertices_size;
 
-    if (!vk_create_buffer(sizeof(uint32_t) * VK_MAX_DEBUG_TEXT_INDICES,
+    if (!vk_create_buffer(indices_size,
                           VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -12925,6 +12936,7 @@ static bool vk_create_debug_text_buffers(void)
         vk_destroy_buffer(&vk.debug_text_vertices);
         return false;
     }
+    vk.debug_text_indices.size = indices_size;
 
     return true;
 }
@@ -20582,21 +20594,24 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
             max(vk.swapchain_image_count, 1);
         vk_unmap_world_batch_indices();
         vk_destroy_buffer(&vk.world.batch_indices);
-        if (!vk_create_buffer(batch_index_size,
-                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                              &vk.world.batch_indices.buffer,
-                              &vk.world.batch_indices.memory)) {
-            Com_WPrintf("Couldn't create Vulkan world batch index buffer\n");
-        } else {
-            VkResult result = vk.MapMemory(vk.device,
-                                           vk.world.batch_indices.memory,
-                                           0, batch_index_size, 0,
-                                           &vk.world.batch_index_mapped);
-            if (result != VK_SUCCESS) {
-                vk.world.batch_index_mapped = NULL;
-                Com_WPrintf("Couldn't map Vulkan world batch index buffer\n");
+        if (batch_index_size) {
+            if (!vk_create_buffer(batch_index_size,
+                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                  &vk.world.batch_indices.buffer,
+                                  &vk.world.batch_indices.memory)) {
+                Com_WPrintf("Couldn't create Vulkan world batch index buffer\n");
+            } else {
+                vk.world.batch_indices.size = batch_index_size;
+                VkResult result = vk.MapMemory(vk.device,
+                                               vk.world.batch_indices.memory,
+                                               0, batch_index_size, 0,
+                                               &vk.world.batch_index_mapped);
+                if (result != VK_SUCCESS) {
+                    vk.world.batch_index_mapped = NULL;
+                    Com_WPrintf("Couldn't map Vulkan world batch index buffer\n");
+                }
             }
         }
         if (vk.world.batch_index_capacity < idx) {
@@ -22433,6 +22448,7 @@ int VKR_ReadPixels(screenshot_t *s)
                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                           &readback.buffer, &readback.memory))
         return Q_ERR_FAILURE;
+    readback.size = src_size;
 
     if (vk.device_lost)
         goto out;
