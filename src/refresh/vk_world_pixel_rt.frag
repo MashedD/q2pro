@@ -36,8 +36,13 @@ layout(std430, set = 3, binding = 1) readonly buffer SurfaceLights {
     uint light_indices[];
 };
 layout(set = 3, binding = 2) uniform sampler2D rt_static_sampler;
-layout(std430, set = 3, binding = 3) readonly buffer RTTriangleRadiance {
-    vec4 triangle_radiance[];
+layout(set = 3, binding = 4) uniform sampler2D rt_material_sampler;
+struct RTTriangle {
+    vec4 uv_layer[3];
+    vec4 lighting[3];
+};
+layout(std430, set = 3, binding = 3) readonly buffer RTTriangleMaterials {
+    RTTriangle triangles[];
 };
 
 layout(location = 0) in vec4 v_color;
@@ -63,8 +68,22 @@ vec3 trace_reflected_world(vec3 origin, vec3 direction, float max_distance,
         return vec3(0.0);
 
     uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(query, true);
+    vec2 bary = rayQueryGetIntersectionBarycentricsEXT(query, true);
     hit_distance = rayQueryGetIntersectionTEXT(query, true);
-    return max(triangle_radiance[primitive].rgb, vec3(0.0));
+    RTTriangle triangle = triangles[primitive];
+    float b0 = 1.0 - bary.x - bary.y;
+    vec2 uv = triangle.uv_layer[0].xy * b0 +
+        triangle.uv_layer[1].xy * bary.x +
+        triangle.uv_layer[2].xy * bary.y;
+    vec3 lighting = triangle.lighting[0].rgb * b0 +
+        triangle.lighting[1].rgb * bary.x +
+        triangle.lighting[2].rgb * bary.y;
+    int slot = int(floor(triangle.uv_layer[0].z + 0.5));
+    vec2 tile = vec2(slot % 32, slot / 32) * 64.0;
+    vec2 atlas_size = vec2(textureSize(rt_material_sampler, 0));
+    vec2 atlas_uv = (tile + vec2(1.5) + fract(uv) * 61.0) / atlas_size;
+    return max(texture(rt_material_sampler, atlas_uv).rgb * lighting,
+               vec3(0.0));
 }
 
 float trace_hit_distance(vec3 origin, vec3 direction, float max_distance)

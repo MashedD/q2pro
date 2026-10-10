@@ -16,9 +16,14 @@ layout(push_constant) uniform Push {
 
 layout(set = 0, binding = 0) uniform sampler2D tex_sampler;
 layout(set = 1, binding = 0) uniform accelerationStructureEXT scene;
-layout(std430, set = 1, binding = 3) readonly buffer RTTriangleRadiance {
-    vec4 triangle_radiance[];
+struct RTTriangle {
+    vec4 uv_layer[3];
+    vec4 lighting[3];
 };
+layout(std430, set = 1, binding = 3) readonly buffer RTTriangleMaterials {
+    RTTriangle triangles[];
+};
+layout(set = 1, binding = 4) uniform sampler2D rt_material_sampler;
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_uv;
@@ -41,8 +46,22 @@ vec3 trace_reflected_world(vec3 origin, vec3 direction, float max_distance,
         return vec3(0.0);
 
     uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(query, true);
+    vec2 bary = rayQueryGetIntersectionBarycentricsEXT(query, true);
     hit_distance = rayQueryGetIntersectionTEXT(query, true);
-    return max(triangle_radiance[primitive].rgb, vec3(0.0));
+    RTTriangle triangle = triangles[primitive];
+    float b0 = 1.0 - bary.x - bary.y;
+    vec2 uv = triangle.uv_layer[0].xy * b0 +
+        triangle.uv_layer[1].xy * bary.x +
+        triangle.uv_layer[2].xy * bary.y;
+    vec3 lighting = triangle.lighting[0].rgb * b0 +
+        triangle.lighting[1].rgb * bary.x +
+        triangle.lighting[2].rgb * bary.y;
+    int slot = int(floor(triangle.uv_layer[0].z + 0.5));
+    vec2 tile = vec2(slot % 32, slot / 32) * 64.0;
+    vec2 atlas_size = vec2(textureSize(rt_material_sampler, 0));
+    vec2 atlas_uv = (tile + vec2(1.5) + fract(uv) * 61.0) / atlas_size;
+    return max(texture(rt_material_sampler, atlas_uv).rgb * lighting,
+               vec3(0.0));
 }
 
 float trace_hit_distance(vec3 origin, vec3 direction, float distance)
@@ -636,10 +655,8 @@ void main()
             }
             out_color.rgb += environment_add;
 
-            // Trace a real reflection ray against the world BLAS. The current
-            // hit-material table supplies a stable per-triangle albedo proxy;
-            // distance/roughness/Fresnel keep this broad, restrained and
-            // avoid bright speckles on the low-detail BSP geometry.
+            // Trace a reflection ray against the world BLAS, then shade its
+            // hit using interpolated UV/light data and the RT material atlas.
             if (material_reflect > 0.001 && specular_control > 0.001) {
                 vec3 view_dir = normalize(pc.dlight.xyz - v_position);
                 vec3 reflection_dir = reflect(-view_dir, shading_normal);
