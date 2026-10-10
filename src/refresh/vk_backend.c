@@ -20698,9 +20698,11 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                 (face->face->drawflags & SURF_TRANS_MASK))
                 continue;
             const image_t *image = face->face->texinfo->image;
-            uint32_t texture_index = image ? image->texnum : 0;
+            uint32_t texture_index = image ? image->texnum : MAX_RIMAGES;
             uint32_t texture_slot = texture_index < MAX_RIMAGES ?
                 texture_slots[texture_index] : UINT32_MAX;
+            if (texture_slot == UINT32_MAX)
+                continue;
             for (uint32_t j = 0; j + 2 < face->index_count; j += 3) {
                 const uint32_t *triangle_indices =
                     indices + face->first_index + j;
