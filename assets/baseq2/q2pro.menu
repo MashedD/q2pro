@@ -188,13 +188,13 @@ begin raytracing
         "emissive flicker" vk_rt_emissive_flicker 0 1 0.05
     range --status "Additive energy motes around emissive world surfaces" \
         "emissive motes" vk_rt_emissive_motes 0 1 0.05
-    range --status "Screen-space reflections on configured materials" \
+    range --status "Ray-traced world reflections; screen-space pass adds visible detail" \
         "reflections" vk_rt_reflections 0 1 0.05
     range --status "Compact colored highlights around bright reflections" \
         "reflection glints" vk_rt_reflection_glints 0 1 0.05
     range --status "Red-blue spectral separation around bright reflections" \
         "reflection dispersion" vk_rt_reflection_dispersion 0 1 0.05
-    range --status "Material highlights from dynamic and emissive lights" \
+    range --status "Ray-reflection energy and material highlights from lights" \
         "specular highlights" vk_rt_specular 0 1 0.05
     range --status "Ambient sheen on reflective world materials" \
         "environment sheen" vk_rt_environment 0 1 0.05

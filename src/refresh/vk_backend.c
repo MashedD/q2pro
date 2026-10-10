@@ -577,6 +577,10 @@ typedef struct {
 } vk_gpu_surface_light_t;
 
 typedef struct {
+    float radiance[4];
+} vk_gpu_rt_triangle_t;
+
+typedef struct {
     uint32_t light_count;
     uint32_t index_count;
     uint32_t reserved[2];
@@ -630,6 +634,7 @@ typedef struct {
     bool surface_lights_ready;
 #if USE_VULKAN_RAYTRACING
     vk_buffer_t rt_indices;
+    vk_buffer_t rt_triangle_buffer;
     uint32_t rt_index_count;
     vk_acceleration_structure_t rt_blas;
     vk_texture_t rt_ao_texture;
@@ -2820,6 +2825,7 @@ static void vk_free_world(void)
     vk_destroy_buffer(&vk.rt_instance_buffer);
     vk_destroy_acceleration_structure(&vk.world.rt_blas);
     vk_destroy_buffer(&vk.world.rt_indices);
+    vk_destroy_buffer(&vk.world.rt_triangle_buffer);
     vk.world.rt_index_count = 0;
     if (vk.world.rt_ao_framebuffer) {
         vk.DestroyFramebuffer(vk.device, vk.world.rt_ao_framebuffer, NULL);
@@ -7461,6 +7467,12 @@ static bool vk_create_frame_resources(void)
                 .descriptorCount = 1,
                 .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
             },
+            {
+                .binding = 3,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            },
         };
         VkDescriptorSetLayoutCreateInfo rt_layout_info = {
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -7494,7 +7506,7 @@ static bool vk_create_frame_resources(void)
         };
         pool_sizes[pool_size_count++] = (VkDescriptorPoolSize) {
             .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 1,
+            .descriptorCount = 2,
         };
         pool_sizes[0].descriptorCount++;
     }
@@ -11393,6 +11405,7 @@ static bool vk_create_swapchain(int width, int height)
                                            VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE);
         if (rt_ok) {
             vk.raytracing_pixel_ready = true;
+            Com_Printf("Vulkan RT reflections: world-hit radiance from triangle texture samples\n");
             Com_Printf("Vulkan RT fragment sharing: %s\n",
                        vk.raytracing_quad_sharing ?
                        "adaptive 2x2 (static >384, dynamic >512)" :
@@ -14105,23 +14118,26 @@ static float vk_world_pack_material(float reflect, float roughness,
 
 static float vk_world_pack_rt_controls(float specular, float bounce,
                                        float caustics, float shadow_fringe,
-                                       float light_ripples)
+                                       float light_ripples,
+                                       float reflections)
 {
-    // A float represents every 24-bit integer exactly. Six-bit general
-    // controls and four-bit effect controls retain useful menu precision
-    // while leaving the 256-byte world push constants unchanged.
+    // Keep the packed control word within the 24-bit integer precision of a
+    // float while reserving a dedicated slider for ray-traced reflections.
     unsigned specular_q = (unsigned)(min(max(specular, 0.0f), 1.0f) *
-                                     63.0f + 0.5f);
+                                     31.0f + 0.5f);
     unsigned bounce_q = (unsigned)(min(max(bounce, 0.0f), 1.0f) *
-                                   63.0f + 0.5f);
+                                   31.0f + 0.5f);
     unsigned caustics_q = (unsigned)(min(max(caustics, 0.0f), 1.0f) *
-                                     15.0f + 0.5f);
+                                     7.0f + 0.5f);
     unsigned fringe_q = (unsigned)(min(max(shadow_fringe, 0.0f), 1.0f) *
-                                   15.0f + 0.5f);
+                                   7.0f + 0.5f);
     unsigned ripple_q = (unsigned)(min(max(light_ripples, 0.0f), 1.0f) *
-                                   15.0f + 0.5f);
-    return (float)(specular_q | (bounce_q << 6) | (caustics_q << 12) |
-                   (fringe_q << 16) | (ripple_q << 20));
+                                   7.0f + 0.5f);
+    unsigned reflections_q = (unsigned)(min(max(reflections, 0.0f), 1.0f) *
+                                        31.0f + 0.5f);
+    return (float)(specular_q | (bounce_q << 5) | (caustics_q << 10) |
+                   (fringe_q << 13) | (ripple_q << 16) |
+                   (reflections_q << 19));
 }
 
 static float vk_world_pack_atmosphere_controls(float emissive,
@@ -14235,8 +14251,11 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         Cvar_ClampValue(vk_rt_emissive_halo, 0.0f, 1.0f) : 0.0f;
     float emissive_flicker = emissive_face && vk.fd_valid ?
         vk_world_emissive_flicker_factor(face, vk.fd.time) : 0.0f;
+    float reflection_strength = vk_rt_reflections ?
+        Cvar_ClampValue(vk_rt_reflections, 0.0f, 1.0f) : 0.0f;
     params[3] = vk_world_pack_rt_controls(specular, bounce, caustics,
-                                          shadow_fringe, light_ripples);
+                                          shadow_fringe, light_ripples,
+                                          reflection_strength);
     int requested_debug = vk_rt_debug ? vk_rt_debug->integer : 0;
 #if USE_VULKAN_RAYTRACING
     float material_reflect, material_roughness;
@@ -20274,6 +20293,34 @@ static bool vk_upload_surface_face_data(const vk_world_face_t *faces,
 }
 #endif
 
+#if USE_VULKAN_RAYTRACING
+static bool vk_upload_rt_triangle_buffer(const vk_gpu_rt_triangle_t *triangles,
+                                         uint32_t triangle_count)
+{
+    if (!triangle_count)
+        return true;
+    if (!vk_upload_buffer(&vk.world.rt_triangle_buffer, triangles,
+                          (size_t)triangle_count * sizeof(*triangles),
+                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT))
+        return false;
+
+    VkDescriptorBufferInfo buffer_info = {
+        .buffer = vk.world.rt_triangle_buffer.buffer,
+        .range = VK_WHOLE_SIZE,
+    };
+    VkWriteDescriptorSet write = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = vk.rt_descriptor_set,
+        .dstBinding = 3,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pBufferInfo = &buffer_info,
+    };
+    vk.UpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
+    return true;
+}
+#endif
+
 static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
 {
     if (!bsp || !bsp->faces) {
@@ -20502,7 +20549,15 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
         vk.world.lava_ember_anchor_count = 0;
     if (ok && vk.raytracing_active) {
         uint32_t *rt_indices = Z_Malloc(sizeof(*rt_indices) * idx);
+        vk_gpu_rt_triangle_t *rt_triangles =
+            Z_Mallocz(sizeof(*rt_triangles) * (idx / 3));
         uint32_t rt_index_count = 0;
+        uint32_t rt_triangle_count = 0;
+        byte **texture_pixels =
+            Z_Mallocz(sizeof(*texture_pixels) * MAX_RIMAGES);
+        int *texture_widths = Z_Mallocz(sizeof(*texture_widths) * MAX_RIMAGES);
+        int *texture_heights = Z_Mallocz(sizeof(*texture_heights) * MAX_RIMAGES);
+        byte *texture_average_valid = Z_Mallocz(MAX_RIMAGES);
         for (uint32_t i = 0; i < draw_face_count; i++) {
             const vk_world_face_t *face = &draw_faces[i];
             // BSP model 0 deliberately has no face range in Q2PRO.  Inline
@@ -20511,6 +20566,55 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
             if (vk_world_face_is_inline(bsp, face->face) ||
                 (face->face->drawflags & SURF_TRANS_MASK))
                 continue;
+            const image_t *image = face->face->texinfo->image;
+            uint32_t texture_index = image ? image->texnum : 0;
+            if (texture_index >= MAX_RIMAGES)
+                texture_index = 0;
+            if (!texture_average_valid[texture_index]) {
+                texture_pixels[texture_index] = IMG_LoadPixels(
+                    image->name, &texture_widths[texture_index],
+                    &texture_heights[texture_index]);
+                texture_average_valid[texture_index] = 1;
+            }
+            for (uint32_t j = 0; j + 2 < face->index_count; j += 3) {
+                const uint32_t *triangle_indices =
+                    indices + face->first_index + j;
+                vk_gpu_rt_triangle_t *triangle =
+                    &rt_triangles[rt_triangle_count++];
+                float u = (vertices[triangle_indices[0]].uv[0] +
+                           vertices[triangle_indices[1]].uv[0] +
+                           vertices[triangle_indices[2]].uv[0]) / 3.0f;
+                float t = (vertices[triangle_indices[0]].uv[1] +
+                           vertices[triangle_indices[1]].uv[1] +
+                           vertices[triangle_indices[2]].uv[1]) / 3.0f;
+                float sampled_color[3] = { 1.0f, 1.0f, 1.0f };
+                if (texture_pixels[texture_index] &&
+                    texture_widths[texture_index] > 0 &&
+                    texture_heights[texture_index] > 0) {
+                    int width = texture_widths[texture_index];
+                    int height = texture_heights[texture_index];
+                    int x = (int)((u - floorf(u)) * width);
+                    int y = (int)((t - floorf(t)) * height);
+                    x = Q_clip(x, 0, width - 1);
+                    y = Q_clip(y, 0, height - 1);
+                    const byte *pixel = texture_pixels[texture_index] +
+                        ((size_t)y * width + x) * 4;
+                    for (int channel = 0; channel < 3; channel++)
+                        sampled_color[channel] = pixel[channel] / 255.0f;
+                } else {
+                    float fallback[4];
+                    vk_surface_color(face->face, fallback);
+                    VectorCopy(fallback, sampled_color);
+                }
+                for (int channel = 0; channel < 3; channel++) {
+                    float light = 0.0f;
+                    for (int corner = 0; corner < 3; corner++)
+                        light += vertices[triangle_indices[corner]].color[channel] /
+                                 3.0f;
+                    triangle->radiance[channel] = sampled_color[channel] * light;
+                }
+                triangle->radiance[3] = 1.0f;
+            }
             memcpy(rt_indices + rt_index_count, indices + face->first_index,
                    sizeof(*rt_indices) * face->index_count);
             rt_index_count += face->index_count;
@@ -20518,6 +20622,7 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
         vk_destroy_acceleration_structure(&vk.rt_tlas);
         vk_destroy_acceleration_structure(&vk.world.rt_blas);
         vk_destroy_buffer(&vk.world.rt_indices);
+        vk_destroy_buffer(&vk.world.rt_triangle_buffer);
         vk.world.rt_index_count = 0;
         bool rt_ok = false;
         if (!rt_index_count) {
@@ -20536,6 +20641,9 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
             vk_rt_prefix_error("world BLAS build");
         } else if (!vk_build_world_tlas()) {
             vk_rt_prefix_error("world TLAS build");
+        } else if (!vk_upload_rt_triangle_buffer(rt_triangles,
+                                                  rt_triangle_count)) {
+            vk_rt_prefix_error("world RT triangle material upload");
         } else {
             vk.world.rt_index_count = rt_index_count;
             rt_ok = true;
@@ -20550,6 +20658,15 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                             Com_GetLastError());
             }
         }
+        for (uint32_t i = 0; i < MAX_RIMAGES; i++) {
+            if (texture_pixels[i])
+                IMG_FreePixels(texture_pixels[i]);
+        }
+        Z_Free(texture_average_valid);
+        Z_Free(texture_heights);
+        Z_Free(texture_widths);
+        Z_Free(texture_pixels);
+        Z_Free(rt_triangles);
         Z_Free(rt_indices);
         if (!rt_ok) {
             Com_WPrintf("Couldn't build Vulkan world ray-tracing geometry: %s; disabling ray tracing\n",

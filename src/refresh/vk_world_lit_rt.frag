@@ -16,6 +16,9 @@ layout(push_constant) uniform Push {
 
 layout(set = 0, binding = 0) uniform sampler2D tex_sampler;
 layout(set = 1, binding = 0) uniform accelerationStructureEXT scene;
+layout(std430, set = 1, binding = 3) readonly buffer RTTriangleRadiance {
+    vec4 triangle_radiance[];
+};
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_uv;
@@ -23,6 +26,24 @@ layout(location = 2) flat in float v_mode;
 layout(location = 3) in vec3 v_position;
 layout(location = 0) out vec4 out_color;
 layout(location = 1) out vec4 out_bloom;
+
+vec3 trace_reflected_world(vec3 origin, vec3 direction, float max_distance,
+                           out float hit_distance)
+{
+    hit_distance = -1.0;
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, scene,
+        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+        0xff, origin, 0.15, direction, max(max_distance, 0.2));
+    while (rayQueryProceedEXT(query)) { }
+    if (rayQueryGetIntersectionTypeEXT(query, true) ==
+        gl_RayQueryCommittedIntersectionNoneEXT)
+        return vec3(0.0);
+
+    uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(query, true);
+    hit_distance = rayQueryGetIntersectionTEXT(query, true);
+    return max(triangle_radiance[primitive].rgb, vec3(0.0));
+}
 
 float trace_hit_distance(vec3 origin, vec3 direction, float distance)
 {
@@ -165,16 +186,22 @@ float fog_turbulence_scale(float packed, vec3 position, float time)
 vec4 rt_controls(float packed)
 {
     uint bits = uint(clamp(floor(packed + 0.5), 0.0, 16777215.0));
-    return vec4(float(bits & 63u) / 63.0,
-                float((bits >> 6) & 63u) / 63.0,
-                float((bits >> 12) & 15u) / 15.0,
-                float((bits >> 16) & 15u) / 15.0);
+    return vec4(float(bits & 31u) / 31.0,
+                float((bits >> 5) & 31u) / 31.0,
+                float((bits >> 10) & 7u) / 7.0,
+                float((bits >> 13) & 7u) / 7.0);
 }
 
 float rt_light_ripple_control(float packed)
 {
     uint bits = uint(clamp(floor(packed + 0.5), 0.0, 16777215.0));
-    return float((bits >> 20) & 15u) / 15.0;
+    return float((bits >> 16) & 7u) / 7.0;
+}
+
+float rt_reflection_control(float packed)
+{
+    uint bits = uint(clamp(floor(packed + 0.5), 0.0, 16777215.0));
+    return float((bits >> 19) & 31u) / 31.0;
 }
 
 vec3 underwater_caustics(vec3 position, vec3 normal, vec4 controls)
@@ -608,6 +635,38 @@ void main()
                 return;
             }
             out_color.rgb += environment_add;
+
+            // Trace a real reflection ray against the world BLAS. The current
+            // hit-material table supplies a stable per-triangle albedo proxy;
+            // distance/roughness/Fresnel keep this broad, restrained and
+            // avoid bright speckles on the low-detail BSP geometry.
+            if (material_reflect > 0.001 && specular_control > 0.001) {
+                vec3 view_dir = normalize(pc.dlight.xyz - v_position);
+                vec3 reflection_dir = reflect(-view_dir, shading_normal);
+                float hit_distance;
+                vec3 hit_radiance = trace_reflected_world(
+                    v_position + normal * dynamic_ray_bias(v_position),
+                    reflection_dir, 1536.0, hit_distance);
+                if (hit_distance > 0.0) {
+                    float edge = 1.0 - max(dot(shading_normal, view_dir), 0.0);
+                    float fresnel = 0.16 + 0.84 * pow(edge, 5.0);
+                    float distance_fade = 1.0 - smoothstep(512.0, 1536.0,
+                                                            hit_distance);
+                    float roughness_fade = mix(1.0, 0.22,
+                                               material_roughness);
+                    vec3 reflection = hit_radiance * material_reflect *
+                        specular_control * rt_reflection_control(
+                            pc.rt_params.w) * fresnel * distance_fade *
+                        roughness_fade * 1.20;
+                    float reflection_luma = dot(reflection, luma_weights);
+                    reflection *= min(1.0, 0.10 /
+                        max(reflection_luma, 0.000001));
+                    reflection *= max(vec3(1.0) - clamp(out_color.rgb,
+                        0.0, 1.0), vec3(0.0));
+                    out_color.rgb += reflection;
+                }
+            }
+
             vec3 sun_direction = normalize(vec3(0.45, 0.35, 0.82));
             float sun_facing = smoothstep(0.08, 0.72,
                                           dot(normal, sun_direction));
