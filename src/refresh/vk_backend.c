@@ -20375,20 +20375,40 @@ static bool vk_build_rt_material_atlas(const bsp_t *bsp,
         uint32_t tile_x = (i % VK_RT_MATERIAL_COLUMNS) * VK_RT_MATERIAL_TILE;
         uint32_t tile_y = (i / VK_RT_MATERIAL_COLUMNS) * VK_RT_MATERIAL_TILE;
         for (uint32_t y = 0; y < VK_RT_MATERIAL_TILE; y++) {
-            uint32_t sample_y = y <= 1 ? 0 :
-                (y >= VK_RT_MATERIAL_TILE - 2 ? source_height - 1 :
-                 (uint32_t)((uint64_t)(y - 1) * source_height /
-                            (VK_RT_MATERIAL_TILE - 2)));
+            uint32_t target_y = y == 0 ? 0 :
+                (y >= VK_RT_MATERIAL_TILE - 1 ? VK_RT_MATERIAL_TILE - 3 :
+                 y - 1);
+            uint32_t sample_y0 = (uint64_t)target_y * source_height /
+                (VK_RT_MATERIAL_TILE - 2);
+            uint32_t sample_y1 = ((uint64_t)(target_y + 1) * source_height +
+                VK_RT_MATERIAL_TILE - 3) / (VK_RT_MATERIAL_TILE - 2);
+            sample_y1 = max(sample_y1, sample_y0 + 1);
+            sample_y1 = min(sample_y1, (uint32_t)source_height);
             for (uint32_t x = 0; x < VK_RT_MATERIAL_TILE; x++) {
-                uint32_t sample_x = x <= 1 ? 0 :
-                    (x >= VK_RT_MATERIAL_TILE - 2 ? source_width - 1 :
-                     (uint32_t)((uint64_t)(x - 1) * source_width /
-                                (VK_RT_MATERIAL_TILE - 2)));
-                const byte *src = source +
-                    ((size_t)sample_y * source_width + sample_x) * 4;
+                uint32_t target_x = x == 0 ? 0 :
+                    (x >= VK_RT_MATERIAL_TILE - 1 ? VK_RT_MATERIAL_TILE - 3 :
+                     x - 1);
+                uint32_t sample_x0 = (uint64_t)target_x * source_width /
+                    (VK_RT_MATERIAL_TILE - 2);
+                uint32_t sample_x1 = ((uint64_t)(target_x + 1) * source_width +
+                    VK_RT_MATERIAL_TILE - 3) / (VK_RT_MATERIAL_TILE - 2);
+                sample_x1 = max(sample_x1, sample_x0 + 1);
+                sample_x1 = min(sample_x1, (uint32_t)source_width);
+                uint32_t sums[4] = { 0 };
+                uint32_t sample_count = 0;
+                for (uint32_t sy = sample_y0; sy < sample_y1; sy++) {
+                    for (uint32_t sx = sample_x0; sx < sample_x1; sx++) {
+                        const byte *src = source +
+                            ((size_t)sy * source_width + sx) * 4;
+                        for (int channel = 0; channel < 4; channel++)
+                            sums[channel] += src[channel];
+                        sample_count++;
+                    }
+                }
                 byte *dst = atlas +
                     ((size_t)(tile_y + y) * width + tile_x + x) * 4;
-                memcpy(dst, src, 4);
+                for (int channel = 0; channel < 4; channel++)
+                    dst[channel] = sums[channel] / sample_count;
             }
         }
         IMG_FreePixels(source);
