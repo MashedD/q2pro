@@ -762,7 +762,7 @@ void main()
     int rt_debug = pc.rt_params.x < 0.0 ?
         int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
         (pc.rt_params.y < -7.5 ?
-            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 19.0)) : 0);
+            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 21.0)) : 0);
     if (rt_debug >= 1 && rt_debug <= 3) {
         if (rt_debug == 1)
             out_color = vec4(vec3(static_coverage), 1.0);
@@ -992,17 +992,26 @@ void main()
         }
         raster_rgb += environment_add;
 
-        if (material_reflect > 0.001 &&
-            rt_controls(pc.rt_params.w).x > 0.001) {
+        if (rt_debug == 21 || (material_reflect > 0.001 &&
+            rt_controls(pc.rt_params.w).x > 0.001)) {
             vec3 view_dir = normalize(pc.dlight.xyz - v_position);
             vec3 reflection_dir = reflect(-view_dir, shading_normal);
             float hit_distance;
             vec3 hit_radiance = trace_reflected_world(
                 v_position + normal * dynamic_ray_bias(v_position),
                 reflection_dir, 1536.0, hit_distance);
+            if (rt_debug == 21) {
+                vec3 debug_color = hit_distance > 0.0 ?
+                    vec3(0.0, 0.12, 0.20) +
+                    clamp(hit_radiance * 4.0, 0.0, 1.0) :
+                    vec3(1.0, 0.0, 0.0);
+                out_color = vec4(debug_color, 1.0);
+                out_bloom = vec4(0.0);
+                return;
+            }
             if (hit_distance > 0.0) {
                 float edge = 1.0 - max(dot(shading_normal, view_dir), 0.0);
-                float fresnel = 0.16 + 0.84 * pow(edge, 5.0);
+                float fresnel = 0.20 + 0.80 * pow(edge, 5.0);
                 float distance_fade = 1.0 - smoothstep(512.0, 1536.0,
                                                         hit_distance);
                 float roughness_fade = mix(1.0, 0.22,
@@ -1010,12 +1019,10 @@ void main()
                 vec3 reflection = hit_radiance * material_reflect *
                     rt_controls(pc.rt_params.w).x *
                     rt_reflection_control(pc.rt_params.w) * fresnel *
-                    distance_fade * roughness_fade * 1.20;
+                    distance_fade * roughness_fade * 10.0;
                 float reflection_luma = dot(reflection, luma_weights);
                 reflection *= min(1.0, 0.10 /
                     max(reflection_luma, 0.000001));
-                reflection *= max(vec3(1.0) - clamp(raster_rgb, 0.0, 1.0),
-                                  vec3(0.0));
                 raster_rgb += reflection;
             }
         }

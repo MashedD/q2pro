@@ -14289,7 +14289,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
                                                           emissive_flicker);
             params[1] = vk_rt_ao ?
                 Cvar_ClampValue(vk_rt_ao, 0.0f, 0.5f) : 0.0f;
-            if (requested_debug >= 8 && requested_debug <= 19)
+            if (requested_debug >= 8 && requested_debug <= 21)
                 params[1] = -(float)requested_debug;
             params[2] = packed_material;
         }
@@ -14300,7 +14300,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
             vk_world_pack_atmosphere_controls(1.0f, scattering,
                                               turbulence,
                                               emissive_flicker);
-        if (requested_debug >= 8 && requested_debug <= 19)
+        if (requested_debug >= 8 && requested_debug <= 21)
             params[1] = -(float)requested_debug;
         params[2] = packed_material;
     }
