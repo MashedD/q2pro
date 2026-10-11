@@ -592,6 +592,23 @@ typedef struct {
     float lighting[3][4];
 } vk_gpu_rt_triangle_t;
 
+#define VK_RT_MAX_FRAME_SCENES 16
+// Each image owns mutable RT resources until its rendering fence completes.
+typedef struct {
+    vk_mesh_t mesh;
+    vk_acceleration_structure_t blas;
+    vk_acceleration_structure_t tlas;
+    vk_buffer_t instances;
+    vk_buffer_t triangles;
+    uint64_t hash;
+    VkDescriptorSet descriptor;
+    bool descriptor_initialized;
+    VkCommandBuffer pending_cmd;
+    VkFence update_fence;
+    vk_buffer_t temporary[8];
+    uint32_t temporary_count;
+} vk_rt_frame_scene_t;
+
 typedef struct {
     uint32_t light_count;
     uint32_t index_count;
@@ -1002,6 +1019,10 @@ typedef struct {
     vk_buffer_t rt_instance_buffer;
     VkCommandBuffer rt_update_cmd;
     VkCommandBuffer rt_update_pending_cmd;
+    VkFence rt_update_fence;
+    vk_rt_frame_scene_t *rt_frame_scenes;
+    uint32_t rt_frame_scene_count;
+    VkDescriptorSet rt_frame_descriptor_set;
     vk_buffer_t rt_update_temporary[8];
     uint32_t rt_update_temporary_count;
 #endif
@@ -2767,7 +2788,12 @@ static bool vk_defer_rt_update_buffer(vk_buffer_t *buffer)
 static bool vk_retire_rt_update(bool queue_idle)
 {
     if (vk.rt_update_pending_cmd) {
-        if (!queue_idle && !vk.device_lost) {
+        if (!vk.device_lost && vk.rt_update_fence) {
+            VkResult result = vk.WaitForFences(vk.device, 1, &vk.rt_update_fence,
+                                               VK_TRUE, UINT64_MAX);
+            if (result != VK_SUCCESS)
+                return vk_fail_result("vkWaitForFences(RT update retirement)", result);
+        } else if (!queue_idle && !vk.device_lost) {
             VkResult result = vk.QueueWaitIdle(vk.graphics_queue);
             if (result != VK_SUCCESS)
                 return vk_fail_result("vkQueueWaitIdle(RT update retirement)", result);
@@ -2789,13 +2815,15 @@ static bool vk_finish_rt_update(bool submit)
     bool ok = true;
     if (cmd && submit) {
         VkResult result = vk.EndCommandBuffer(cmd);
+        if (result == VK_SUCCESS && vk.rt_update_fence)
+            result = vk.ResetFences(vk.device, 1, &vk.rt_update_fence);
         if (result == VK_SUCCESS) {
             VkSubmitInfo info = {
                 .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                 .commandBufferCount = 1,
                 .pCommandBuffers = &cmd,
             };
-            result = vk.QueueSubmit(vk.graphics_queue, 1, &info, VK_NULL_HANDLE);
+            result = vk.QueueSubmit(vk.graphics_queue, 1, &info, vk.rt_update_fence);
         }
         if (result == VK_SUCCESS) {
             // The graphics frame follows this submission on the same queue.
@@ -2923,6 +2951,70 @@ static void vk_destroy_mesh(vk_mesh_t *mesh)
     mesh->index_count = 0;
 }
 
+#if USE_VULKAN_RAYTRACING
+static void vk_capture_rt_scene(vk_rt_frame_scene_t *scene)
+{
+    scene->mesh = vk.world.rt_dynamic_mesh;
+    scene->blas = vk.world.rt_dynamic_blas;
+    scene->tlas = vk.rt_tlas;
+    scene->instances = vk.rt_instance_buffer;
+    scene->triangles = vk.world.rt_dynamic_triangle_buffer;
+    scene->hash = vk.world.rt_dynamic_hash;
+    scene->descriptor = vk.rt_descriptor_set;
+    scene->pending_cmd = vk.rt_update_pending_cmd;
+    scene->update_fence = vk.rt_update_fence;
+    memcpy(scene->temporary, vk.rt_update_temporary, sizeof(scene->temporary));
+    scene->temporary_count = vk.rt_update_temporary_count;
+}
+
+static void vk_restore_rt_scene(const vk_rt_frame_scene_t *scene)
+{
+    vk.world.rt_dynamic_mesh = scene->mesh;
+    vk.world.rt_dynamic_blas = scene->blas;
+    vk.rt_tlas = scene->tlas;
+    vk.rt_instance_buffer = scene->instances;
+    vk.world.rt_dynamic_triangle_buffer = scene->triangles;
+    vk.world.rt_dynamic_hash = scene->hash;
+    vk.rt_descriptor_set = scene->descriptor;
+    vk.rt_update_pending_cmd = scene->pending_cmd;
+    vk.rt_update_fence = scene->update_fence;
+    memcpy(vk.rt_update_temporary, scene->temporary, sizeof(scene->temporary));
+    vk.rt_update_temporary_count = scene->temporary_count;
+}
+
+static bool vk_free_rt_frame_scenes(bool queue_idle)
+{
+    if (!vk.rt_frame_scenes)
+        return true;
+    if (!queue_idle && !vk.device_lost) {
+        VkResult result = vk.QueueWaitIdle(vk.graphics_queue);
+        if (result != VK_SUCCESS)
+            return vk_fail_result("vkQueueWaitIdle(RT frame teardown)", result);
+    }
+    for (uint32_t i = 0; i < vk.rt_frame_scene_count; i++) {
+        vk_rt_frame_scene_t *scene = &vk.rt_frame_scenes[i];
+        if (scene->pending_cmd)
+            vk.FreeCommandBuffers(vk.device, vk.command_pool, 1, &scene->pending_cmd);
+        for (uint32_t j = 0; j < scene->temporary_count; j++)
+            vk_destroy_buffer(&scene->temporary[j]);
+        vk_destroy_acceleration_structure(&scene->tlas);
+        vk_destroy_acceleration_structure(&scene->blas);
+        vk_destroy_mesh(&scene->mesh);
+        vk_destroy_buffer(&scene->instances);
+        vk_destroy_buffer(&scene->triangles);
+        if (scene->update_fence)
+            vk.DestroyFence(vk.device, scene->update_fence, NULL);
+        if (scene->descriptor && vk.descriptor_pool)
+            vk.FreeDescriptorSets(vk.device, vk.descriptor_pool, 1, &scene->descriptor);
+    }
+    Z_Free(vk.rt_frame_scenes);
+    vk.rt_frame_scenes = NULL;
+    vk.rt_frame_scene_count = 0;
+    vk.rt_frame_descriptor_set = VK_NULL_HANDLE;
+    return true;
+}
+#endif
+
 static const vk_texture_t *vk_texture_for_index(unsigned index, bool allow_nobind)
 {
     if (allow_nobind && vk_nobind && vk_nobind->integer &&
@@ -2946,7 +3038,7 @@ static const vk_texture_t *vk_texture_for_index(unsigned index, bool allow_nobin
 static void vk_free_world(void)
 {
 #if USE_VULKAN_RAYTRACING
-    if (!vk_retire_rt_update(false))
+    if (!vk_free_rt_frame_scenes(false) || !vk_retire_rt_update(false))
         return;
     vk_destroy_acceleration_structure(&vk.rt_tlas);
     vk_destroy_buffer(&vk.rt_instance_buffer);
@@ -7760,13 +7852,13 @@ static bool vk_create_frame_resources(void)
     if (vk.raytracing_active) {
         pool_sizes[pool_size_count++] = (VkDescriptorPoolSize) {
             .type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
-            .descriptorCount = 1,
+            .descriptorCount = VK_RT_MAX_FRAME_SCENES + 1,
         };
         pool_sizes[pool_size_count++] = (VkDescriptorPoolSize) {
             .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 3,
+            .descriptorCount = 3 * (VK_RT_MAX_FRAME_SCENES + 1),
         };
-        pool_sizes[0].descriptorCount += 2; // Static lighting and material atlas.
+        pool_sizes[0].descriptorCount += 2 * (VK_RT_MAX_FRAME_SCENES + 1);
     }
 #endif
     VkDescriptorPoolCreateInfo pool_info_desc = {
@@ -8323,6 +8415,7 @@ static void vk_destroy_swapchain(void)
                               vk.DeviceWaitIdle(vk.device));
 
 #if USE_VULKAN_RAYTRACING
+    vk_free_rt_frame_scenes(true);
     vk_retire_rt_update(true);
 #endif
     vk.render_pass_active = false;
@@ -14675,12 +14768,14 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                        (pixel_world ? vk.pixel_world_pipeline : pipeline));
 #if USE_VULKAN_RAYTRACING
     if (vk.raytracing_active && vk.rt_descriptor_set) {
+        VkDescriptorSet rt_set = vk.rt_frame_descriptor_set ?
+            vk.rt_frame_descriptor_set : vk.rt_descriptor_set;
         if (ray_pixel)
-            vk_bind_pixel_world_descriptor(cmd, 3, vk.rt_descriptor_set);
+            vk_bind_pixel_world_descriptor(cmd, 3, rt_set);
         else if (!pixel_world)
             vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                      vk.rect_pipeline_layout, 1, 1,
-                                     &vk.rt_descriptor_set, 0, NULL);
+                                     &rt_set, 0, NULL);
     }
 #endif
     if (pixel_world)
@@ -22491,9 +22586,32 @@ static vk_model_t *vk_rt_entity_geometry(const entity_t *ent,
     return model;
 }
 
-// Shared scene resources require retiring previous graphics work before writes.
-// Batched uploads/refits submit without a completion wait; temporary resources
-// survive until the next safe retirement point.
+// Atlas changes are rare and shared across frames. Retire graphics work before
+// replacing it; ordinary model motion does not change the atlas.
+static bool vk_refresh_rt_model_atlas(void)
+{
+    for (int i = 0; i < r_numImages; i++) {
+        const image_t *image = &r_images[i];
+        if (image->type != IT_SKIN || !image->name[0] ||
+            image->texnum >= MAX_RIMAGES ||
+            vk.world.rt_texture_slots[image->texnum] != UINT32_MAX)
+            continue;
+        VkResult result = vk.QueueWaitIdle(vk.graphics_queue);
+        if (result != VK_SUCCESS)
+            return vk_fail_result("vkQueueWaitIdle(RT skin atlas)", result);
+        uint32_t *slots = NULL, count = 0;
+        if (!vk_build_rt_material_atlas(vk.world.cache, vk.world.faces,
+                                        vk.world.face_count, &slots, &count))
+            return false;
+        Z_Free(vk.world.rt_texture_slots);
+        vk.world.rt_texture_slots = slots;
+        break;
+    }
+    return true;
+}
+
+// Called only after acquiring this image and waiting for its rendering fence.
+// Mutable resources belong exclusively to the selected frame scene.
 static bool vk_update_rt_models(const refdef_t *fd)
 {
     if (!vk.raytracing_active || !vk.world.rt_triangles ||
@@ -22518,29 +22636,6 @@ static bool vk_update_rt_models(const refdef_t *fd)
     }
     if (!index_count && !vk.world.rt_dynamic_blas.handle)
         return true;
-
-    // Newly registered/custom skins require rebuilding the shared atlas.
-    bool missing_skin = false;
-    for (int i = 0; i < r_numImages; i++) {
-        const image_t *image = &r_images[i];
-        if (image->type == IT_SKIN && image->name[0] &&
-            image->texnum < MAX_RIMAGES &&
-            vk.world.rt_texture_slots[image->texnum] == UINT32_MAX) {
-            missing_skin = true;
-            break;
-        }
-    }
-    if (missing_skin) {
-        VkResult result = vk.QueueWaitIdle(vk.graphics_queue);
-        if (result != VK_SUCCESS)
-            return vk_fail_result("vkQueueWaitIdle(RT skin atlas)", result);
-        uint32_t *slots = NULL, count = 0;
-        if (!vk_build_rt_material_atlas(vk.world.cache, vk.world.faces,
-                                        vk.world.face_count, &slots, &count))
-            return false;
-        Z_Free(vk.world.rt_texture_slots);
-        vk.world.rt_texture_slots = slots;
-    }
 
     vk_gpu_rt_triangle_t *triangles = index_count ? Z_Mallocz(
         (size_t)(index_count / 3) * sizeof(*triangles)) : NULL;
@@ -22619,13 +22714,6 @@ static bool vk_update_rt_models(const refdef_t *fd)
         Z_Free(triangles);
         return true;
     }
-    VkResult result = vk.QueueWaitIdle(vk.graphics_queue);
-    if (result != VK_SUCCESS) {
-        Z_Free(vertices);
-        Z_Free(indices);
-        Z_Free(triangles);
-        return vk_fail_result("vkQueueWaitIdle(RT models)", result);
-    }
     if (!vk_retire_rt_update(true) ||
         !vk_begin_immediate(&vk.rt_update_cmd)) {
         Z_Free(vertices);
@@ -22671,9 +22759,83 @@ static bool vk_update_rt_models(const refdef_t *fd)
     }
     if (!vk.world.rt_dynamic_hash && cursor)
         Com_Printf("Vulkan RT models: %u animated/skinned triangles; "
-                   "batched uploads/refits, deferred build completion\n", cursor / 3);
+                   "frame-buffered uploads/refits\n", cursor / 3);
     vk.world.rt_dynamic_hash = scene_hash;
     return true;
+}
+
+static bool vk_update_rt_models_for_frame(const refdef_t *fd)
+{
+    vk.rt_frame_descriptor_set = vk.rt_descriptor_set;
+    if (!vk.raytracing_active || !vk.world.rt_texture_slots ||
+        !vk.world.rt_triangles || !vk.world.rt_index_count)
+        return true;
+    if (!vk_refresh_rt_model_atlas())
+        return false;
+    if (!vk.rt_frame_scenes) {
+        if (!vk.swapchain_image_count ||
+            vk.swapchain_image_count > VK_RT_MAX_FRAME_SCENES) {
+            Com_SetLastError("Unsupported RT frame-scene count");
+            return false;
+        }
+        vk.rt_frame_scene_count = vk.swapchain_image_count;
+        vk.rt_frame_scenes = Z_Mallocz(sizeof(*vk.rt_frame_scenes) *
+                                       vk.rt_frame_scene_count);
+    }
+    if (vk.current_image >= vk.rt_frame_scene_count)
+        return false;
+    vk_rt_frame_scene_t *scene = &vk.rt_frame_scenes[vk.current_image];
+    bool initialized = scene->descriptor_initialized;
+    if (!scene->descriptor) {
+        VkDescriptorSetAllocateInfo allocation = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = vk.descriptor_pool,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &vk.rt_set_layout,
+        };
+        VkResult result = vk.AllocateDescriptorSets(vk.device, &allocation,
+                                                    &scene->descriptor);
+        if (result != VK_SUCCESS)
+            return vk_fail_result("vkAllocateDescriptorSets(RT frame)", result);
+    }
+    if (!scene->update_fence) {
+        VkFenceCreateInfo info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        VkResult result = vk.CreateFence(vk.device, &info, NULL, &scene->update_fence);
+        if (result != VK_SUCCESS)
+            return vk_fail_result("vkCreateFence(RT frame)", result);
+    }
+
+    vk_rt_frame_scene_t original;
+    vk_capture_rt_scene(&original);
+    vk_restore_rt_scene(scene);
+    // The normal image fence covers rendering. This extra fence also covers
+    // a submitted RT build if the corresponding graphics frame was aborted.
+    bool ok = vk_retire_rt_update(true);
+    if (ok) {
+        VkCopyDescriptorSet copies[6];
+        uint32_t copy_count = 0;
+        for (uint32_t binding = 0; binding < 6; binding++) {
+            // Retain this image's TLAS and dynamic triangles after creation.
+            if (initialized && (binding == 0 || binding == 5))
+                continue;
+            copies[copy_count++] = (VkCopyDescriptorSet) {
+                .sType = VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET,
+                .srcSet = original.descriptor,
+                .srcBinding = binding,
+                .dstSet = scene->descriptor,
+                .dstBinding = binding,
+                .descriptorCount = 1,
+            };
+        }
+        vk.UpdateDescriptorSets(vk.device, 0, NULL, copy_count, copies);
+        scene->descriptor_initialized = true;
+        ok = vk_update_rt_models(fd);
+    }
+    vk_capture_rt_scene(scene);
+    vk_restore_rt_scene(&original);
+    if (ok)
+        vk.rt_frame_descriptor_set = scene->descriptor;
+    return ok;
 }
 #endif
 
@@ -22822,7 +22984,7 @@ void VKR_RenderFrame(const refdef_t *fd)
     }
 
 #if USE_VULKAN_RAYTRACING
-    if (drawworld && !vk_update_rt_models(fd)) {
+    if (drawworld && !vk_update_rt_models_for_frame(fd)) {
         Com_WPrintf("Couldn't update RT model resources: %s\n", Com_GetLastError());
         vk.raytracing_active = false;
     }

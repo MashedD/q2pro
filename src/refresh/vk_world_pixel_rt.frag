@@ -64,7 +64,7 @@ vec3 trace_reflected_hit(vec3 origin, vec3 direction, float max_distance,
     rayQueryEXT query;
     rayQueryInitializeEXT(query, scene,
         gl_RayFlagsOpaqueEXT,
-        0xff, origin, 0.15, direction, max(max_distance, 0.2));
+        0x03, origin, 0.15, direction, max(max_distance, 0.2));
     while (rayQueryProceedEXT(query)) { }
     if (rayQueryGetIntersectionTypeEXT(query, true) ==
         gl_RayQueryCommittedIntersectionNoneEXT)
@@ -124,11 +124,9 @@ vec3 trace_reflected_world(vec3 origin, vec3 direction, float max_distance,
     vec3 tangent = normalize(cross(direction, axis));
     vec3 bitangent = cross(direction, tangent);
     float radius = roughness * roughness * 0.12;
-    const vec2 offsets[8] = vec2[8](
-        vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0),
-        vec2(0.7071, 0.7071), vec2(-0.7071, 0.7071),
-        vec2(0.7071, -0.7071), vec2(-0.7071, -0.7071));
-    for (int i = 0; i < 8; i++) {
+    const vec2 offsets[4] = vec2[4](
+        vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0));
+    for (int i = 0; i < 4; i++) {
         vec3 sample_direction = normalize(direction + radius *
             (tangent * offsets[i].x + bitangent * offsets[i].y));
         float sample_distance;
@@ -139,7 +137,7 @@ vec3 trace_reflected_world(vec3 origin, vec3 direction, float max_distance,
                 min(hit_distance, sample_distance) : sample_distance;
     }
     // Misses contribute black rather than boosting the remaining samples.
-    return radiance / 9.0;
+    return radiance / 5.0;
 }
 
 float trace_hit_distance(vec3 origin, vec3 direction, float max_distance)
@@ -147,7 +145,7 @@ float trace_hit_distance(vec3 origin, vec3 direction, float max_distance)
     rayQueryEXT query;
     rayQueryInitializeEXT(query, scene,
         gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
-        0xff, origin, 0.05, direction, max(max_distance - 0.1, 0.05));
+        0x01, origin, 0.05, direction, max(max_distance - 0.1, 0.05));
     while (rayQueryProceedEXT(query)) { }
     if (rayQueryGetIntersectionTypeEXT(query, true) ==
         gl_RayQueryCommittedIntersectionNoneEXT)
@@ -168,7 +166,7 @@ float trace_dynamic_hit_distance(vec3 origin, vec3 direction,
     rayQueryEXT query;
     rayQueryInitializeEXT(query, scene,
         gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
-        0xff, origin, 0.10, direction, max(max_distance - 0.20, 0.101));
+        0x01, origin, 0.10, direction, max(max_distance - 0.20, 0.101));
     while (rayQueryProceedEXT(query)) { }
     if (rayQueryGetIntersectionTypeEXT(query, true) ==
         gl_RayQueryCommittedIntersectionNoneEXT)
