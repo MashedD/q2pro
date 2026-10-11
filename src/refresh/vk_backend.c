@@ -167,6 +167,15 @@ static const uint32_t vk_rt_ao_bake_vert_spv[] =
 static const uint32_t vk_rt_ao_bake_frag_spv[] =
 #include "vk_rt_ao_bake_frag_spv.h"
 ;
+static const uint32_t vk_rt_reflection_composite_frag_spv[] =
+#include "vk_rt_reflection_composite_frag_spv.h"
+;
+static const uint32_t vk_rt_reflection_trace_frag_spv[] =
+#include "vk_rt_reflection_trace_frag_spv.h"
+;
+static const uint32_t vk_rt_reflection_filter_frag_spv[] =
+#include "vk_rt_reflection_filter_frag_spv.h"
+;
 static const uint32_t vk_world_lit_rt_frag_spv[] =
 #include "vk_world_lit_rt_frag_spv.h"
 ;
@@ -724,6 +733,17 @@ typedef struct {
 } vk_ssr_push_t;
 
 typedef struct {
+    vk_ssr_push_t base;
+    float camera[4];
+    float view_to_world[3][4];
+    float viewport[4];
+} vk_rt_reflection_push_t;
+
+typedef char vk_rt_reflection_push_layout_check[
+    sizeof(vk_rt_reflection_push_t) == 128 &&
+    offsetof(vk_rt_reflection_push_t, viewport) == 112 ? 1 : -1];
+
+typedef struct {
     mat4_t mvp;
     float color[4];
 } vk_color3d_push_t;
@@ -1059,6 +1079,12 @@ typedef struct {
     VkPipeline bloom_add_pipeline;
     VkPipeline ssr_pipeline;
     VkPipeline ssr_resolve_pipeline;
+#if USE_VULKAN_RAYTRACING
+    VkPipelineLayout rt_reflection_pipeline_layout;
+    VkPipeline rt_reflection_pipeline;
+    VkPipeline rt_reflection_filter_pipeline;
+    VkPipeline rt_reflection_composite_pipeline;
+#endif
     VkPipeline color3d_pipeline;
     VkPipeline line3d_pipeline;
     VkPipeline debug_line_pipeline;
@@ -1680,6 +1706,9 @@ static cvar_t *vk_rt_emissive_flicker;
 static cvar_t *vk_rt_reflections;
 static cvar_t *vk_rt_ssr;
 static cvar_t *vk_rt_models;
+static cvar_t *vk_rt_reflection_samples;
+static cvar_t *vk_rt_reflection_filter;
+static bool vk_rt_reflection_post_ready(void);
 static cvar_t *vk_rt_reflection_glints;
 static cvar_t *vk_rt_reflection_dispersion;
 static cvar_t *vk_rt_specular;
@@ -4434,7 +4463,8 @@ static bool vk_build_world_tlas(void)
         .instanceCustomIndex = 0,
         .mask = 0xff,
         .instanceShaderBindingTableRecordOffset = 0,
-        .flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR,
+        // World RT indices are oriented to the BSP outward normal.
+        .flags = 0,
         .accelerationStructureReference = blas_address,
     } };
     uint32_t instance_count = 1;
@@ -4448,6 +4478,7 @@ static bool vk_build_world_tlas(void)
         }
         instances[1] = instances[0];
         instances[1].instanceCustomIndex = 1; // Dynamic hit-data buffer.
+        instances[1].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         // Dynamic models participate in reflections, not the static bake.
         instances[1].mask = 0x02;
         instances[1].accelerationStructureReference = dynamic_address;
@@ -8535,6 +8566,24 @@ static void vk_destroy_swapchain(void)
         vk.DestroyPipeline(vk.device, vk.bloom_add_pipeline, NULL);
         vk.bloom_add_pipeline = VK_NULL_HANDLE;
     }
+#if USE_VULKAN_RAYTRACING
+    if (vk.rt_reflection_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.rt_reflection_pipeline, NULL);
+        vk.rt_reflection_pipeline = VK_NULL_HANDLE;
+    }
+    if (vk.rt_reflection_filter_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.rt_reflection_filter_pipeline, NULL);
+        vk.rt_reflection_filter_pipeline = VK_NULL_HANDLE;
+    }
+    if (vk.rt_reflection_composite_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.rt_reflection_composite_pipeline, NULL);
+        vk.rt_reflection_composite_pipeline = VK_NULL_HANDLE;
+    }
+    if (vk.rt_reflection_pipeline_layout) {
+        vk.DestroyPipelineLayout(vk.device, vk.rt_reflection_pipeline_layout, NULL);
+        vk.rt_reflection_pipeline_layout = VK_NULL_HANDLE;
+    }
+#endif
     if (vk.ssr_pipeline) {
         vk.DestroyPipeline(vk.device, vk.ssr_pipeline, NULL);
         vk.ssr_pipeline = VK_NULL_HANDLE;
@@ -10435,6 +10484,67 @@ static bool vk_create_ssr_pipeline(void)
                                          &info, NULL,
                                          &vk.ssr_resolve_pipeline);
     vk.DestroyShaderModule(vk.device, frag, NULL);
+#if USE_VULKAN_RAYTRACING
+    if (result == VK_SUCCESS && vk.raytracing_active &&
+        sizeof(vk_rt_reflection_push_t) <=
+            vk.physical_device_properties.limits.maxPushConstantsSize) {
+        VkDescriptorSetLayout layouts[] = {
+            vk.ssr_set_layout, vk.rt_set_layout, vk.texture_set_layout,
+        };
+        VkPushConstantRange range = {
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .size = sizeof(vk_rt_reflection_push_t),
+        };
+        VkPipelineLayoutCreateInfo layout_info = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = q_countof(layouts), .pSetLayouts = layouts,
+            .pushConstantRangeCount = 1, .pPushConstantRanges = &range,
+        };
+        VkResult rt_result = vk.CreatePipelineLayout(vk.device, &layout_info,
+            NULL, &vk.rt_reflection_pipeline_layout);
+        if (rt_result == VK_SUCCESS) {
+            info.layout = vk.rt_reflection_pipeline_layout;
+            frag = vk_create_shader_module(vk_rt_reflection_trace_frag_spv,
+                                          sizeof(vk_rt_reflection_trace_frag_spv));
+            if (frag) {
+                stages[1].module = frag;
+                viewport.width = max(vk.swapchain_extent.width / 2, 1);
+                viewport.height = max(vk.swapchain_extent.height / 2, 1);
+                scissor.extent.width = max(vk.swapchain_extent.width / 2, 1);
+                scissor.extent.height = max(vk.swapchain_extent.height / 2, 1);
+                rt_result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE,
+                    1, &info, NULL, &vk.rt_reflection_pipeline);
+                vk.DestroyShaderModule(vk.device, frag, NULL);
+            } else {
+                rt_result = VK_ERROR_INITIALIZATION_FAILED;
+            }
+            if (rt_result == VK_SUCCESS) {
+                frag = vk_create_shader_module(vk_rt_reflection_filter_frag_spv,
+                    sizeof(vk_rt_reflection_filter_frag_spv));
+                if (frag) {
+                    stages[1].module = frag;
+                    viewport.width = vk.swapchain_extent.width;
+                    viewport.height = vk.swapchain_extent.height;
+                    scissor.extent = vk.swapchain_extent;
+                    rt_result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE,
+                        1, &info, NULL, &vk.rt_reflection_filter_pipeline);
+                    vk.DestroyShaderModule(vk.device, frag, NULL);
+                } else {
+                    rt_result = VK_ERROR_INITIALIZATION_FAILED;
+                }
+            }
+        }
+        if (rt_result == VK_SUCCESS &&
+            !vk_create_texture_pipeline_ex(&vk.rt_reflection_composite_pipeline,
+                vk_rt_reflection_composite_frag_spv,
+                sizeof(vk_rt_reflection_composite_frag_spv), VK_TEXTURE_ADDITIVE,
+                vk.swapchain_extent, vk.separate_presentation, true))
+            rt_result = VK_ERROR_INITIALIZATION_FAILED;
+        if (rt_result != VK_SUCCESS)
+            Com_WPrintf("RT reflection post-pass unavailable (%d); using fragment fallback\n",
+                        rt_result);
+    }
+#endif
     vk.DestroyShaderModule(vk.device, vert, NULL);
     return result == VK_SUCCESS;
 }
@@ -10870,17 +10980,27 @@ static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test
             .pName = "main",
         },
     };
-    VkBool32 fast_value = fast_path ? VK_TRUE : VK_FALSE;
-    VkSpecializationMapEntry fast_entry = {
-        .constantID = 0,
-        .offset = 0,
-        .size = sizeof(fast_value),
+    struct {
+        VkBool32 fast;
+        uint32_t reflection_samples;
+        VkBool32 deferred_reflections;
+    } specialization = {
+        .fast = fast_path ? VK_TRUE : VK_FALSE,
+        .reflection_samples = vk_rt_reflection_samples ?
+            (uint32_t)Cvar_ClampInteger(vk_rt_reflection_samples, 1, 64) : 16,
+        .deferred_reflections = ray_query && vk_rt_reflection_post_ready(),
+    };
+    VkSpecializationMapEntry fast_entries[] = {
+        { .constantID = 0, .offset = 0, .size = sizeof(VkBool32) },
+        { .constantID = 1, .offset = sizeof(VkBool32), .size = sizeof(uint32_t) },
+        { .constantID = 2, .offset = sizeof(VkBool32) + sizeof(uint32_t),
+          .size = sizeof(VkBool32) },
     };
     VkSpecializationInfo fast_info = {
-        .mapEntryCount = 1,
-        .pMapEntries = &fast_entry,
-        .dataSize = sizeof(fast_value),
-        .pData = &fast_value,
+        .mapEntryCount = q_countof(fast_entries),
+        .pMapEntries = fast_entries,
+        .dataSize = sizeof(specialization),
+        .pData = &specialization,
     };
     stages[1].pSpecializationInfo = &fast_info;
     VkVertexInputBindingDescription bindings[] = {
@@ -11817,7 +11937,13 @@ static bool vk_create_swapchain(int width, int height)
                                            VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE);
         if (rt_ok) {
             vk.raytracing_pixel_ready = true;
-            Com_Printf("Vulkan RT reflections: UV-textured world-hit shading\n");
+            Com_Printf("Vulkan RT reflections: UV-textured world-hit shading; "
+                       "rough filter %d samples (%s)\n",
+                       vk_rt_reflection_samples->integer,
+                       vk.raytracing_quad_sharing ? "continuous 2x2 sharing" :
+                       "per-pixel");
+            if (vk_rt_reflection_post_ready())
+                Com_Printf("Vulkan RT reflections: half-resolution hardware rays + edge-aware filter\n");
             Com_Printf("Vulkan RT fragment sharing: %s\n",
                        vk.raytracing_quad_sharing ?
                        "adaptive 2x2 (static >384, dynamic >512)" :
@@ -12551,10 +12677,26 @@ static bool vk_waterwarp_enabled_for_frame(void)
         vk.scene_texture.descriptor_set;
 }
 
+static bool vk_rt_reflection_post_ready(void)
+{
+#if USE_VULKAN_RAYTRACING
+    return vk.rt_reflection_pipeline && vk.rt_reflection_filter_pipeline &&
+        vk.rt_reflection_composite_pipeline &&
+        vk.rt_reflection_pipeline_layout && vk.ssr_ready && vk.mrt_bloom &&
+        vk.raytracing_active &&
+        vk_rt_reflection_filter && vk_rt_reflection_filter->integer &&
+        vk_pixel_lightmap_mode() >= 2;
+#else
+    return false;
+#endif
+}
+
 static bool vk_ssr_enabled_for_frame(void)
 {
 #if USE_VULKAN_RAYTRACING
-    return (!vk_rt_ssr || vk_rt_ssr->integer) &&
+    return ((vk_rt_reflection_post_ready() &&
+             (!vk_rt_debug || vk_rt_debug->integer == 0)) ||
+            ((!vk_rt_ssr || vk_rt_ssr->integer) && !vk_rt_reflection_post_ready())) &&
         vk.ssr_ready && vk.raytracing_active && vk_raytracing &&
         vk_raytracing->integer && vk_rt_reflections &&
         vk_rt_reflections->value > 0.001f && vk.fd_valid &&
@@ -21175,8 +21317,20 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                 texture_slots[texture_index] : UINT32_MAX;
             // Texture availability must never remove opaque occluders.
             for (uint32_t j = 0; j + 2 < face->index_count; j += 3) {
-                const uint32_t *triangle_indices =
-                    indices + face->first_index + j;
+                uint32_t triangle_indices[3];
+                memcpy(triangle_indices, indices + face->first_index + j,
+                       sizeof(triangle_indices));
+                vec3_t edge1, edge2, winding;
+                VectorSubtract(vertices[triangle_indices[1]].position,
+                               vertices[triangle_indices[0]].position, edge1);
+                VectorSubtract(vertices[triangle_indices[2]].position,
+                               vertices[triangle_indices[0]].position, edge2);
+                CrossProduct(edge1, edge2, winding);
+                if (DotProduct(winding, vertices[triangle_indices[0]].normal) < 0.0f) {
+                    uint32_t swap = triangle_indices[1];
+                    triangle_indices[1] = triangle_indices[2];
+                    triangle_indices[2] = swap;
+                }
                 vk_gpu_rt_triangle_t *triangle =
                     &rt_triangles[rt_triangle_count++];
                 for (int corner = 0; corner < 3; corner++) {
@@ -21193,13 +21347,11 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                     VectorCopy(vertex->color, triangle->lighting[corner]);
                     triangle->lighting[corner][3] = lmuv_data ?
                         lmuv_data[vertex_index * 2 + 1] : -1.0f;
+                    rt_indices[rt_index_count++] = triangle_indices[corner];
                 }
                 VectorCopy(vertices[triangle_indices[0]].normal, triangle->normal);
                 triangle->normal[3] = 1.0f;
             }
-            memcpy(rt_indices + rt_index_count, indices + face->first_index,
-                   sizeof(*rt_indices) * face->index_count);
-            rt_index_count += face->index_count;
         }
         vk_destroy_acceleration_structure(&vk.rt_tlas);
         vk_destroy_acceleration_structure(&vk.world.rt_blas);
@@ -22126,6 +22278,10 @@ bool VKR_Init(bool total)
     vk_rt_reflections = Cvar_Get("vk_rt_reflections", "0.35", CVAR_ARCHIVE);
     vk_rt_ssr = Cvar_Get("vk_rt_ssr", "0", CVAR_ARCHIVE);
     vk_rt_models = Cvar_Get("vk_rt_models", "1", CVAR_ARCHIVE);
+    vk_rt_reflection_filter = Cvar_Get("vk_rt_reflection_filter", "1",
+                                     CVAR_ARCHIVE | CVAR_REFRESH);
+    vk_rt_reflection_samples = Cvar_Get("vk_rt_reflection_samples", "16",
+                                      CVAR_ARCHIVE | CVAR_REFRESH);
     vk_rt_reflection_glints = Cvar_Get("vk_rt_reflection_glints", "0.55",
                                        CVAR_ARCHIVE);
     vk_rt_reflection_dispersion = Cvar_Get("vk_rt_reflection_dispersion",
@@ -23704,12 +23860,40 @@ static void vk_render_ssr(void)
                 Cvar_ClampValue(vk_rt_reflection_glints, 0.0f, 1.0f) : 0.55f,
         },
     };
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.ssr_pipeline);
-    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                             vk.ssr_pipeline_layout, 0, 1,
-                             &vk.ssr_descriptor_set, 0, NULL);
-    vk.CmdPushConstants(cmd, vk.ssr_pipeline_layout,
-                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+#if USE_VULKAN_RAYTRACING
+    bool hardware_reflections = vk_rt_reflection_post_ready();
+    vk_rt_reflection_push_t rt_push = { .base = push };
+    VkDescriptorSet rt_sets[3] = {
+        vk.ssr_descriptor_set, vk.rt_frame_descriptor_set,
+        vk.world.pixel_lightmap_texture.descriptor_set,
+    };
+    if (hardware_reflections) {
+        rt_push.base.control[1] = vk_rt_specular ?
+            Cvar_ClampValue(vk_rt_specular, 0.0f, 1.0f) : 1.0f;
+        VectorCopy(vk.fd.vieworg, rt_push.camera);
+        for (int axis = 0; axis < 3; axis++)
+            for (int component = 0; component < 3; component++)
+                rt_push.view_to_world[axis][component] = view[axis + component * 4];
+        rt_push.viewport[0] = (float)vk.fd.x / vk.swapchain_extent.width;
+        rt_push.viewport[1] = (float)vk.fd.y / vk.swapchain_extent.height;
+        rt_push.viewport[2] = (float)vk.fd.width / vk.swapchain_extent.width;
+        rt_push.viewport[3] = (float)vk.fd.height / vk.swapchain_extent.height;
+        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           vk.rt_reflection_pipeline);
+        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            vk.rt_reflection_pipeline_layout, 0, q_countof(rt_sets), rt_sets, 0, NULL);
+        vk.CmdPushConstants(cmd, vk.rt_reflection_pipeline_layout,
+            VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(rt_push), &rt_push);
+    } else
+#endif
+    {
+        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.ssr_pipeline);
+        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 vk.ssr_pipeline_layout, 0, 1,
+                                 &vk.ssr_descriptor_set, 0, NULL);
+        vk.CmdPushConstants(cmd, vk.ssr_pipeline_layout,
+                            VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+    }
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     vk.CmdEndRenderPass(cmd);
@@ -23729,18 +23913,34 @@ static void vk_render_ssr(void)
     vk_begin_render_pass_sized(vk.bloom_render_pass,
                                vk.ssr_resolve_framebuffer,
                                black, width, height);
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                       vk.ssr_resolve_pipeline);
-    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                             vk.ssr_pipeline_layout, 0, 1,
-                             &vk.ssr_resolve_descriptor_set, 0, NULL);
+#if USE_VULKAN_RAYTRACING
+    if (hardware_reflections) {
+        rt_sets[0] = vk.ssr_resolve_descriptor_set;
+        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           vk.rt_reflection_filter_pipeline);
+        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            vk.rt_reflection_pipeline_layout, 0, q_countof(rt_sets), rt_sets, 0, NULL);
+        vk.CmdPushConstants(cmd, vk.rt_reflection_pipeline_layout,
+            VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(rt_push), &rt_push);
+    } else
+#endif
+    {
+        vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           vk.ssr_resolve_pipeline);
+        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 vk.ssr_pipeline_layout, 0, 1,
+                                 &vk.ssr_resolve_descriptor_set, 0, NULL);
+    }
     // The march shader needs inverse scene dimensions in control.zw, while
     // the resolve derives its texel size from the input texture. Reuse the
     // now-free control.z slot without expanding the push-constant layout.
     push.control[2] = vk_rt_reflection_dispersion ?
         Cvar_ClampValue(vk_rt_reflection_dispersion, 0.0f, 1.0f) : 0.6f;
-    vk.CmdPushConstants(cmd, vk.ssr_pipeline_layout,
-                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+#if USE_VULKAN_RAYTRACING
+    if (!hardware_reflections)
+#endif
+        vk.CmdPushConstants(cmd, vk.ssr_pipeline_layout,
+                            VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
     vk.CmdDraw(cmd, 6, 1, 0, 0);
     c.trisDrawn += 2;
     vk.CmdEndRenderPass(cmd);
@@ -23758,8 +23958,12 @@ static void vk_composite_ssr(void)
     if (!vk.frame_ssr)
         return;
     const vec4_t white = { 1, 1, 1, 1 };
-    vk_draw_refdef_texture(vk.texture_pipeline,
-                          &vk.ssr_resolve_texture, white);
+    VkPipeline pipeline = vk.texture_pipeline;
+#if USE_VULKAN_RAYTRACING
+    if (vk_rt_reflection_post_ready())
+        pipeline = vk.rt_reflection_composite_pipeline;
+#endif
+    vk_draw_refdef_texture(pipeline, &vk.ssr_resolve_texture, white);
 }
 
 static void vk_fsr_motion_parameters(vk_fsr_motion_push_t *push, const refdef_t *fd)

@@ -64,23 +64,11 @@ vec3 trace_reflected_hit(vec3 origin, vec3 direction, float max_distance,
     hit_distance = -1.0;
     rayQueryEXT query;
     rayQueryInitializeEXT(query, scene,
-        gl_RayFlagsNoOpaqueEXT,
+        gl_RayFlagsOpaqueEXT | gl_RayFlagsCullBackFacingTrianglesEXT,
         0x03, origin, 0.15, direction, max(max_distance, 0.2));
-    while (rayQueryProceedEXT(query)) {
-        if (rayQueryGetIntersectionTypeEXT(query, false) !=
-            gl_RayQueryCandidateIntersectionTriangleEXT)
-            continue;
-        uint candidate = rayQueryGetIntersectionPrimitiveIndexEXT(query, false);
-        bool model = rayQueryGetIntersectionInstanceCustomIndexEXT(query, false) == 1u;
-        if (model) {
-            if (candidate < uint(dynamic_triangles.length()))
-                rayQueryConfirmIntersectionEXT(query);
-        } else if (candidate < uint(triangles.length()) &&
-                   dot(triangles[candidate].normal.xyz, direction) < -0.00001) {
-            // BSP surface backs are not valid reflection-visible surfaces.
-            rayQueryConfirmIntersectionEXT(query);
-        }
-    }
+    // World winding follows outward BSP normals; model instances remain
+    // two-sided. Opaque hardware traversal avoids per-candidate SSBO reads.
+    while (rayQueryProceedEXT(query)) { }
     if (rayQueryGetIntersectionTypeEXT(query, true) ==
         gl_RayQueryCommittedIntersectionNoneEXT)
         return vec3(0.0);
@@ -126,15 +114,89 @@ vec3 trace_reflected_hit(vec3 origin, vec3 direction, float max_distance,
     return albedo * max(lighting, vec3(0.20));
 }
 
-// Diagnostic central-ray path: sparse cone taps produced displaced silhouettes.
-// Proper rough filtering must integrate silhouettes rather than overlay copies.
+layout(constant_id = 1) const uint reflection_samples = 16u;
+layout(constant_id = 2) const bool deferred_reflections = false;
+
+// Dense deterministic disk quadrature, not five displaced mirror images.
+// Roughness widens the lobe; misses retain their weight (black environment).
 vec3 trace_reflected_world(vec3 origin, vec3 direction, vec3 surface_normal,
                            float max_distance, out float hit_distance)
 {
     hit_distance = -1.0;
-    if (dot(direction, surface_normal) <= 0.0001)
+    float elevation = dot(direction, surface_normal);
+    if (elevation <= 0.0001)
         return vec3(0.0);
-    return trace_reflected_hit(origin, direction, max_distance, hit_distance);
+    float roughness = mod(floor(max(pc.rt_params.z, 0.0)), 16.0) / 15.0;
+    uint count = clamp(reflection_samples, 1u, 64u);
+    // Keep the hit-class diagnostic and smooth materials on the central ray.
+    if (pc.rt_params.y < -22.5 || roughness < 0.15 || count == 1u)
+        return trace_reflected_hit(origin, direction, max_distance, hit_distance);
+
+    vec3 axis = abs(direction.z) < 0.9 ? vec3(0.0, 0.0, 1.0) :
+                                             vec3(0.0, 1.0, 0.0);
+    vec3 tangent = normalize(cross(direction, axis));
+    vec3 bitangent = cross(direction, tangent);
+    float radius = min(roughness * roughness * 0.60, elevation * 0.65);
+    uint first = 0u;
+    uint stride = 1u;
+#ifdef RT_QUAD_SHARING
+    // Integrate one complete lobe across a continuous 2x2 receiver quad.
+    // Do not share across primitive edges, floor steps or normal changes.
+    vec3 reference_origin = subgroupQuadBroadcast(origin, 0);
+    vec3 reference_normal = subgroupQuadBroadcast(surface_normal, 0);
+    vec3 reference_direction = subgroupQuadBroadcast(direction, 0);
+    float reference_roughness = subgroupQuadBroadcast(roughness, 0);
+    bool share = count >= 8u;
+    for (uint lane = 0u; lane < 4u; lane++) {
+        share = share && !subgroupQuadBroadcast(gl_HelperInvocation, lane) &&
+            distance(subgroupQuadBroadcast(origin, lane), reference_origin) < 8.0 &&
+            dot(subgroupQuadBroadcast(surface_normal, lane), reference_normal) > 0.999 &&
+            dot(subgroupQuadBroadcast(direction, lane), reference_direction) > 0.999 &&
+            abs(subgroupQuadBroadcast(roughness, lane) - reference_roughness) < 0.001;
+    }
+    if (share) {
+        first = gl_SubgroupInvocationID & 3u;
+        stride = 4u;
+    }
+#endif
+    vec3 radiance = vec3(0.0);
+    float distance_sum = 0.0;
+    float hit_weight = 0.0;
+    float total_weight = 0.0;
+    for (uint i = first; i < count; i += stride) {
+        float u = (float(i) + 0.5) / float(count);
+        float angle = float(i) * 2.39996323; // Golden-angle disk, no pixel noise.
+        vec2 offset = sqrt(u) * vec2(cos(angle), sin(angle));
+        vec3 sample_direction = normalize(direction + radius *
+            (tangent * offset.x + bitangent * offset.y));
+        float weight = exp(-3.0 * u);
+        float sample_distance;
+        radiance += weight * trace_reflected_hit(origin, sample_direction,
+                                                 max_distance, sample_distance);
+        total_weight += weight;
+        if (sample_distance > 0.0) {
+            distance_sum += weight * sample_distance;
+            hit_weight += weight;
+        }
+    }
+#ifdef RT_QUAD_SHARING
+    if (share) {
+        vec3 local_radiance = radiance;
+        vec3 local_stats = vec3(distance_sum, hit_weight, total_weight);
+        radiance = vec3(0.0);
+        vec3 stats = vec3(0.0);
+        for (uint lane = 0u; lane < 4u; lane++) {
+            radiance += subgroupQuadBroadcast(local_radiance, lane);
+            stats += subgroupQuadBroadcast(local_stats, lane);
+        }
+        distance_sum = stats.x;
+        hit_weight = stats.y;
+        total_weight = stats.z;
+    }
+#endif
+    if (hit_weight > 0.0)
+        hit_distance = distance_sum / hit_weight;
+    return radiance / max(total_weight, 0.00001);
 }
 
 float reflection_fresnel(vec3 normal, vec3 view_dir, float roughness)
@@ -1100,7 +1162,8 @@ void main()
         }
         raster_rgb += environment_add;
 
-        if (reflection_surface_weight > 0.001 && material_reflect > 0.001 &&
+        if (!deferred_reflections && reflection_surface_weight > 0.001 &&
+            material_reflect > 0.001 &&
             rt_controls(pc.rt_params.w).x > 0.001 &&
             rt_reflection_control(pc.rt_params.w) > 0.001) {
             vec3 view_dir = normalize(pc.dlight.xyz - v_position);

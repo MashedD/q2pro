@@ -413,11 +413,14 @@ if vulkan.found()
     )
   endforeach
   if config.get('USE_VULKAN_RAYTRACING', 0) != 0
-    foreach shader : ['vk_rt_ao_bake.vert', 'vk_rt_ao_bake.frag']
+    foreach shader : ['vk_rt_ao_bake.vert', 'vk_rt_ao_bake.frag',
+                      'vk_rt_reflection_trace.frag', 'vk_rt_reflection_filter.frag',
+                      'vk_rt_reflection_composite.frag']
       vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
         input: 'src/refresh' / shader,
         output: shader.underscorify() + '_spv.h',
-        command: [glslc, '--target-env=vulkan1.2', '-mfmt=c',
+        depend_files: files('src/refresh/vk_rt_reflection_common.glsl'),
+      command: [glslc, '--target-env=vulkan1.2', '-mfmt=c',
                   '@INPUT@', '-o', '@OUTPUT@'],
       )
     endforeach
@@ -865,6 +868,13 @@ if fsr_benchmark_parser_python.found()
     env: ['PYTHONDONTWRITEBYTECODE=1'],
     timeout: 120,
   )
+  if config.get('USE_VULKAN_RAYTRACING', 0) != 0
+    test('vulkan-rt-reflection-math', fsr_benchmark_parser_python,
+      args: [meson.current_source_dir() / 'tests/test_vk_reflections.py'],
+      env: ['PYTHONDONTWRITEBYTECODE=1'],
+      timeout: 30,
+    )
+  endif
 endif
 
 if system_wide
