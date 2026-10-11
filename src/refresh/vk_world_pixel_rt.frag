@@ -40,6 +40,7 @@ layout(set = 3, binding = 4) uniform sampler2D rt_material_sampler;
 struct RTTriangle {
     vec4 uv_layer[3];
     vec4 lighting[3];
+    vec4 normal;
 };
 layout(std430, set = 3, binding = 3) readonly buffer RTTriangleMaterials {
     RTTriangle triangles[];
@@ -63,9 +64,23 @@ vec3 trace_reflected_hit(vec3 origin, vec3 direction, float max_distance,
     hit_distance = -1.0;
     rayQueryEXT query;
     rayQueryInitializeEXT(query, scene,
-        gl_RayFlagsOpaqueEXT,
+        gl_RayFlagsNoOpaqueEXT,
         0x03, origin, 0.15, direction, max(max_distance, 0.2));
-    while (rayQueryProceedEXT(query)) { }
+    while (rayQueryProceedEXT(query)) {
+        if (rayQueryGetIntersectionTypeEXT(query, false) !=
+            gl_RayQueryCandidateIntersectionTriangleEXT)
+            continue;
+        uint candidate = rayQueryGetIntersectionPrimitiveIndexEXT(query, false);
+        bool model = rayQueryGetIntersectionInstanceCustomIndexEXT(query, false) == 1u;
+        if (model) {
+            if (candidate < uint(dynamic_triangles.length()))
+                rayQueryConfirmIntersectionEXT(query);
+        } else if (candidate < uint(triangles.length()) &&
+                   dot(triangles[candidate].normal.xyz, direction) < -0.00001) {
+            // BSP surface backs are not valid reflection-visible surfaces.
+            rayQueryConfirmIntersectionEXT(query);
+        }
+    }
     if (rayQueryGetIntersectionTypeEXT(query, true) ==
         gl_RayQueryCommittedIntersectionNoneEXT)
         return vec3(0.0);
@@ -77,6 +92,8 @@ vec3 trace_reflected_hit(vec3 origin, vec3 direction, float max_distance,
         return vec3(0.0);
     vec2 bary = rayQueryGetIntersectionBarycentricsEXT(query, true);
     hit_distance = rayQueryGetIntersectionTEXT(query, true);
+    if (pc.rt_params.y < -22.5)
+        return dynamic ? vec3(0.25, 0.0, 0.25) : vec3(0.0, 0.25, 0.0);
     RTTriangle triangle;
     if (dynamic)
         triangle = dynamic_triangles[primitive];
@@ -98,6 +115,8 @@ vec3 trace_reflected_hit(vec3 origin, vec3 direction, float max_distance,
             lighting += textureLod(rt_static_sampler, hit_lmuv, 0.0).rgb;
     }
     int slot = int(floor(triangle.uv_layer[0].z + 0.5));
+    if (slot < 0)
+        return vec3(0.0); // Untextured geometry still occludes reflections.
     vec2 tile = vec2(slot % 32, slot / 32) * 64.0;
     vec2 atlas_size = vec2(textureSize(rt_material_sampler, 0));
     vec2 atlas_uv = (tile + vec2(1.5) + fract(uv) * 61.0) / atlas_size;
@@ -107,37 +126,28 @@ vec3 trace_reflected_hit(vec3 origin, vec3 direction, float max_distance,
     return albedo * max(lighting, vec3(0.20));
 }
 
-// Fixed symmetric cone samples avoid stochastic noise and temporal shimmer.
-vec3 trace_reflected_world(vec3 origin, vec3 direction, float max_distance,
-                           out float hit_distance)
+// Diagnostic central-ray path: sparse cone taps produced displaced silhouettes.
+// Proper rough filtering must integrate silhouettes rather than overlay copies.
+vec3 trace_reflected_world(vec3 origin, vec3 direction, vec3 surface_normal,
+                           float max_distance, out float hit_distance)
 {
-    float roughness = mod(floor(max(pc.rt_params.z, 0.0)), 16.0) / 15.0;
-    float center_distance;
-    vec3 radiance = trace_reflected_hit(origin, direction, max_distance,
-                                       center_distance);
-    hit_distance = center_distance;
-    if (roughness < 0.15)
-        return radiance;
+    hit_distance = -1.0;
+    if (dot(direction, surface_normal) <= 0.0001)
+        return vec3(0.0);
+    return trace_reflected_hit(origin, direction, max_distance, hit_distance);
+}
 
-    vec3 axis = abs(direction.z) < 0.9 ? vec3(0.0, 0.0, 1.0) :
-                                             vec3(0.0, 1.0, 0.0);
-    vec3 tangent = normalize(cross(direction, axis));
-    vec3 bitangent = cross(direction, tangent);
-    float radius = roughness * roughness * 0.12;
-    const vec2 offsets[4] = vec2[4](
-        vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0));
-    for (int i = 0; i < 4; i++) {
-        vec3 sample_direction = normalize(direction + radius *
-            (tangent * offsets[i].x + bitangent * offsets[i].y));
-        float sample_distance;
-        radiance += trace_reflected_hit(origin, sample_direction, max_distance,
-                                        sample_distance);
-        if (sample_distance > 0.0)
-            hit_distance = hit_distance > 0.0 ?
-                min(hit_distance, sample_distance) : sample_distance;
-    }
-    // Misses contribute black rather than boosting the remaining samples.
-    return radiance / 5.0;
+float reflection_fresnel(vec3 normal, vec3 view_dir, float roughness)
+{
+    float nv = clamp(dot(normal, view_dir), 0.0, 1.0);
+    float edge = 1.0 - nv;
+    float fresnel = 0.04 + 0.96 * pow(edge, 5.0);
+    // Smith GGX view masking: rough surfaces must not become flat mirrors
+    // when viewed almost edge-on. Use the same normal as the reflection ray.
+    float alpha = max(roughness * roughness, 0.001);
+    float masking = (2.0 * nv) / max(nv +
+        sqrt(alpha * alpha + (1.0 - alpha * alpha) * nv * nv), 0.00001);
+    return fresnel * masking;
 }
 
 float trace_hit_distance(vec3 origin, vec3 direction, float max_distance)
@@ -820,14 +830,14 @@ void main()
     int rt_debug = pc.rt_params.x < 0.0 ?
         int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
         (pc.rt_params.y < -7.5 ?
-            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 22.0)) : 0);
-    if (rt_debug == 21) {
+            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 23.0)) : 0);
+    if (rt_debug == 21 || rt_debug == 23) {
         vec3 view_dir = normalize(pc.dlight.xyz - v_position);
         vec3 reflection_dir = reflect(-view_dir, normal);
         float hit_distance;
         vec3 hit_radiance = trace_reflected_world(
             v_position + normal * dynamic_ray_bias(v_position),
-            reflection_dir, 1536.0, hit_distance);
+            reflection_dir, normal, 1536.0, hit_distance);
         vec3 debug_color = hit_distance > 0.0 ?
             vec3(0.0, 0.12, 0.20) + clamp(hit_radiance * 4.0, 0.0, 1.0) :
             vec3(1.0, 0.0, 0.0);
@@ -841,10 +851,10 @@ void main()
         float hit_distance;
         vec3 hit_radiance = trace_reflected_world(
             v_position + normal * dynamic_ray_bias(v_position),
-            reflection_dir, 1536.0, hit_distance);
+            reflection_dir, normal, 1536.0, hit_distance);
         if (hit_distance > 0.0) {
-            float edge = 1.0 - max(dot(shading_normal, view_dir), 0.0);
-            float fresnel = 0.20 + 0.80 * pow(edge, 5.0);
+            float fresnel = reflection_fresnel(normal, view_dir,
+                                                material_roughness);
             float distance_fade = 1.0 - smoothstep(512.0, 1536.0,
                                                     hit_distance);
             float roughness_fade = mix(1.0, 0.50, material_roughness);
@@ -1099,10 +1109,10 @@ void main()
             float hit_distance;
             vec3 hit_radiance = trace_reflected_world(
                 v_position + normal * dynamic_ray_bias(v_position),
-                reflection_dir, 1536.0, hit_distance);
+                reflection_dir, normal, 1536.0, hit_distance);
             if (hit_distance > 0.0) {
-                float edge = 1.0 - max(dot(shading_normal, view_dir), 0.0);
-                float fresnel = 0.20 + 0.80 * pow(edge, 5.0);
+                float fresnel = reflection_fresnel(normal, view_dir,
+                                                    material_roughness);
                 float distance_fade = 1.0 - smoothstep(512.0, 1536.0,
                                                         hit_distance);
                 float roughness_fade = mix(1.0, 0.50,

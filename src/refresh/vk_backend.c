@@ -590,7 +590,12 @@ typedef struct {
 typedef struct {
     float uv_layer[3][4];
     float lighting[3][4];
+    float normal[4];
 } vk_gpu_rt_triangle_t;
+
+typedef char vk_rt_triangle_layout_check[
+    sizeof(vk_gpu_rt_triangle_t) == 112 &&
+    offsetof(vk_gpu_rt_triangle_t, normal) == 96 ? 1 : -1];
 
 #define VK_RT_MAX_FRAME_SCENES 16
 // Each image owns mutable RT resources until its rendering fence completes.
@@ -605,6 +610,8 @@ typedef struct {
     bool descriptor_initialized;
     VkCommandBuffer pending_cmd;
     VkFence update_fence;
+    vk_buffer_t upload_staging[4];
+    vk_buffer_t build_scratch[2];
     vk_buffer_t temporary[8];
     uint32_t temporary_count;
 } vk_rt_frame_scene_t;
@@ -1023,6 +1030,9 @@ typedef struct {
     vk_rt_frame_scene_t *rt_frame_scenes;
     uint32_t rt_frame_scene_count;
     VkDescriptorSet rt_frame_descriptor_set;
+    vk_buffer_t rt_upload_staging[4];
+    vk_buffer_t rt_build_scratch[2];
+    uint32_t rt_upload_cursor;
     vk_buffer_t rt_update_temporary[8];
     uint32_t rt_update_temporary_count;
 #endif
@@ -1691,6 +1701,9 @@ static cvar_t *vk_rt_electric_filaments;
 static cvar_t *vk_rt_landing_dust;
 static cvar_t *vk_rt_energy_collapse;
 static cvar_t *vk_rt_debug;
+#if USE_VULKAN_RAYTRACING
+static void vk_rt_probe_f(void);
+#endif
 #if USE_DEBUG
 static cvar_t *vk_showstats;
 #endif
@@ -2774,6 +2787,33 @@ static void vk_unmap_world_batch_indices(void)
 }
 
 #if USE_VULKAN_RAYTRACING
+static bool vk_allocate_rt_scratch(vk_buffer_t *scratch, VkDeviceSize size,
+                                    uint32_t slot)
+{
+    vk_buffer_t *target = vk.rt_update_cmd ? &vk.rt_build_scratch[slot] : scratch;
+    if (!target->buffer || target->size < size) {
+        VkDeviceSize capacity = max(size, target->size * 2);
+        vk_destroy_buffer(target);
+        if (!vk_create_buffer(capacity,
+                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                              VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                              &target->buffer, &target->memory))
+            return false;
+        target->size = capacity;
+    }
+    *scratch = *target;
+    return true;
+}
+
+static void vk_release_rt_scratch(vk_buffer_t *scratch)
+{
+    if (vk.rt_update_cmd)
+        memset(scratch, 0, sizeof(*scratch)); // Owned by this image's scene.
+    else
+        vk_destroy_buffer(scratch);
+}
+
 static bool vk_defer_rt_update_buffer(vk_buffer_t *buffer)
 {
     if (vk.rt_update_temporary_count >= q_countof(vk.rt_update_temporary)) {
@@ -2848,10 +2888,33 @@ static bool vk_upload_buffer(vk_buffer_t *dst, const void *data,
     VkBuffer device_buffer = VK_NULL_HANDLE;
     VkDeviceMemory device_memory = VK_NULL_HANDLE;
     bool buffer_reused = false;
+    bool persistent_staging = false;
 
     if (!data || !size)
         return true;
 
+#if USE_VULKAN_RAYTRACING
+    if (vk.rt_update_cmd) {
+        if (vk.rt_upload_cursor >= q_countof(vk.rt_upload_staging)) {
+            Com_SetLastError("RT update staging-buffer capacity exceeded");
+            goto fail;
+        }
+        vk_buffer_t *cached = &vk.rt_upload_staging[vk.rt_upload_cursor++];
+        if (!cached->buffer || cached->size < size) {
+            VkDeviceSize capacity = max(size, max(cached->size * 2, 4096));
+            vk_destroy_buffer(cached);
+            if (!vk_create_buffer(capacity, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                  &cached->buffer, &cached->memory))
+                goto fail;
+            cached->size = capacity;
+        }
+        staging = cached->buffer;
+        staging_memory = cached->memory;
+        persistent_staging = true;
+    } else
+#endif
     if (!vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -2908,9 +2971,11 @@ static bool vk_upload_buffer(vk_buffer_t *dst, const void *data,
             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
             0, NULL, 1, &barrier, 0, NULL);
-        vk_buffer_t temporary = { staging, staging_memory, size };
-        if (!vk_defer_rt_update_buffer(&temporary))
-            goto fail;
+        if (!persistent_staging) {
+            vk_buffer_t temporary = { staging, staging_memory, size };
+            if (!vk_defer_rt_update_buffer(&temporary))
+                goto fail;
+        }
         staging = VK_NULL_HANDLE;
         staging_memory = VK_NULL_HANDLE;
     } else
@@ -2932,9 +2997,9 @@ static bool vk_upload_buffer(vk_buffer_t *dst, const void *data,
     return true;
 
 fail:
-    if (staging)
+    if (staging && !persistent_staging)
         vk.DestroyBuffer(vk.device, staging, NULL);
-    if (staging_memory)
+    if (staging_memory && !persistent_staging)
         vk.FreeMemory(vk.device, staging_memory, NULL);
     if (device_buffer && !buffer_reused)
         vk.DestroyBuffer(vk.device, device_buffer, NULL);
@@ -2963,6 +3028,8 @@ static void vk_capture_rt_scene(vk_rt_frame_scene_t *scene)
     scene->descriptor = vk.rt_descriptor_set;
     scene->pending_cmd = vk.rt_update_pending_cmd;
     scene->update_fence = vk.rt_update_fence;
+    memcpy(scene->upload_staging, vk.rt_upload_staging, sizeof(scene->upload_staging));
+    memcpy(scene->build_scratch, vk.rt_build_scratch, sizeof(scene->build_scratch));
     memcpy(scene->temporary, vk.rt_update_temporary, sizeof(scene->temporary));
     scene->temporary_count = vk.rt_update_temporary_count;
 }
@@ -2978,6 +3045,9 @@ static void vk_restore_rt_scene(const vk_rt_frame_scene_t *scene)
     vk.rt_descriptor_set = scene->descriptor;
     vk.rt_update_pending_cmd = scene->pending_cmd;
     vk.rt_update_fence = scene->update_fence;
+    memcpy(vk.rt_upload_staging, scene->upload_staging, sizeof(scene->upload_staging));
+    memcpy(vk.rt_build_scratch, scene->build_scratch, sizeof(scene->build_scratch));
+    vk.rt_upload_cursor = 0;
     memcpy(vk.rt_update_temporary, scene->temporary, sizeof(scene->temporary));
     vk.rt_update_temporary_count = scene->temporary_count;
 }
@@ -2997,6 +3067,10 @@ static bool vk_free_rt_frame_scenes(bool queue_idle)
             vk.FreeCommandBuffers(vk.device, vk.command_pool, 1, &scene->pending_cmd);
         for (uint32_t j = 0; j < scene->temporary_count; j++)
             vk_destroy_buffer(&scene->temporary[j]);
+        for (uint32_t j = 0; j < q_countof(scene->upload_staging); j++)
+            vk_destroy_buffer(&scene->upload_staging[j]);
+        for (uint32_t j = 0; j < q_countof(scene->build_scratch); j++)
+            vk_destroy_buffer(&scene->build_scratch[j]);
         vk_destroy_acceleration_structure(&scene->tlas);
         vk_destroy_acceleration_structure(&scene->blas);
         vk_destroy_mesh(&scene->mesh);
@@ -4285,18 +4359,13 @@ static bool vk_build_mesh_blas(vk_acceleration_structure_t *as,
     }
 
     vk_buffer_t scratch = { 0 };
-    if (!vk_create_buffer(scratch_size,
-                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                          &scratch.buffer, &scratch.memory))
+    if (!vk_allocate_rt_scratch(&scratch, scratch_size, 0))
         goto fail;
-    scratch.size = scratch_size;
     build.dstAccelerationStructure = created.handle;
     build.scratchData.deviceAddress = vk_buffer_device_address(scratch.buffer);
     if (!build.scratchData.deviceAddress) {
         Com_SetLastError("BLAS scratch buffer has no device address");
-        vk_destroy_buffer(&scratch);
+        vk_release_rt_scratch(&scratch);
         goto fail;
     }
     VkAccelerationStructureBuildRangeInfoKHR range = {
@@ -4305,7 +4374,7 @@ static bool vk_build_mesh_blas(vk_acceleration_structure_t *as,
     const VkAccelerationStructureBuildRangeInfoKHR *ranges[] = { &range };
     VkCommandBuffer cmd = vk.rt_update_cmd;
     if (!cmd && !vk_begin_immediate(&cmd)) {
-        vk_destroy_buffer(&scratch);
+        vk_release_rt_scratch(&scratch);
         goto fail;
     }
     vk.CmdBuildAccelerationStructuresKHR(cmd, 1, &build, ranges);
@@ -4320,15 +4389,11 @@ static bool vk_build_mesh_blas(vk_acceleration_structure_t *as,
             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
             1, &barrier, 0, NULL, 0, NULL);
-        if (!vk_defer_rt_update_buffer(&scratch)) {
-            vk_destroy_buffer(&scratch);
-            goto fail;
-        }
     } else if (!vk_end_immediate(cmd)) {
-        vk_destroy_buffer(&scratch);
+        vk_release_rt_scratch(&scratch);
         goto fail;
     }
-    vk_destroy_buffer(&scratch);
+    vk_release_rt_scratch(&scratch);
 
     if (!update)
         vk_destroy_acceleration_structure(as);
@@ -4456,13 +4521,8 @@ static bool vk_build_world_tlas(void)
             goto fail;
         }
     }
-    if (!vk_create_buffer(scratch_size,
-                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                          &scratch.buffer, &scratch.memory))
+    if (!vk_allocate_rt_scratch(&scratch, scratch_size, 1))
         goto fail;
-    scratch.size = scratch_size;
     build.dstAccelerationStructure = created.handle;
     build.scratchData.deviceAddress = vk_buffer_device_address(scratch.buffer);
     if (!build.scratchData.deviceAddress) {
@@ -4487,11 +4547,9 @@ static bool vk_build_world_tlas(void)
             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
             1, &barrier, 0, NULL, 0, NULL);
-        if (!vk_defer_rt_update_buffer(&scratch))
-            goto fail;
     } else if (!vk_end_immediate(cmd))
         goto fail;
-    vk_destroy_buffer(&scratch);
+    vk_release_rt_scratch(&scratch);
 
     if (!update)
         vk_destroy_acceleration_structure(&vk.rt_tlas);
@@ -4515,7 +4573,7 @@ static bool vk_build_world_tlas(void)
     return true;
 
 fail:
-    vk_destroy_buffer(&scratch);
+    vk_release_rt_scratch(&scratch);
     if (!update)
         vk_destroy_acceleration_structure(&created);
     return false;
@@ -14635,7 +14693,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
                                                           emissive_flicker);
             params[1] = vk_rt_ao ?
                 Cvar_ClampValue(vk_rt_ao, 0.0f, 0.5f) : 0.0f;
-            if (requested_debug >= 8 && requested_debug <= 22)
+            if (requested_debug >= 8 && requested_debug <= 23)
                 params[1] = -(float)requested_debug;
             params[2] = packed_material;
         }
@@ -14646,7 +14704,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
             vk_world_pack_atmosphere_controls(1.0f, scattering,
                                               turbulence,
                                               emissive_flicker);
-        if (requested_debug >= 8 && requested_debug <= 22)
+        if (requested_debug >= 8 && requested_debug <= 23)
             params[1] = -(float)requested_debug;
         params[2] = packed_material;
     }
@@ -14662,7 +14720,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
             Cvar_ClampValue(vk_rt_liquids, 0.0f, 1.0f) : 0.65f;
     }
     static bool debug21_reported;
-    if ((requested_debug == 21 || requested_debug == 22) &&
+    if (requested_debug >= 21 && requested_debug <= 23 &&
         !debug21_reported) {
         Com_Printf("Vulkan RT reflection debug push: active=%d pixel-ready=%d "
                    "surface-lights=%d pixel-world=%d world=%d "
@@ -14674,7 +14732,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
                    reflection_strength, params[0], params[1],
                    params[2], params[3]);
         debug21_reported = true;
-    } else if (requested_debug != 21 && requested_debug != 22) {
+    } else if (requested_debug < 21 || requested_debug > 23) {
         debug21_reported = false;
     }
 #else
@@ -21115,8 +21173,7 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
             uint32_t texture_index = image ? image->texnum : MAX_RIMAGES;
             uint32_t texture_slot = texture_slots && texture_index < MAX_RIMAGES ?
                 texture_slots[texture_index] : UINT32_MAX;
-            if (texture_slot == UINT32_MAX)
-                continue;
+            // Texture availability must never remove opaque occluders.
             for (uint32_t j = 0; j + 2 < face->index_count; j += 3) {
                 const uint32_t *triangle_indices =
                     indices + face->first_index + j;
@@ -21127,7 +21184,8 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                         &vertices[triangle_indices[corner]];
                     triangle->uv_layer[corner][0] = vertex->uv[0];
                     triangle->uv_layer[corner][1] = vertex->uv[1];
-                    triangle->uv_layer[corner][2] = (float)texture_slot;
+                    triangle->uv_layer[corner][2] = texture_slot == UINT32_MAX ?
+                        -1.0f : (float)texture_slot;
                     // Spare components carry the shared world lightmap UV.
                     uint32_t vertex_index = triangle_indices[corner];
                     triangle->uv_layer[corner][3] = lmuv_data ?
@@ -21136,6 +21194,8 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                     triangle->lighting[corner][3] = lmuv_data ?
                         lmuv_data[vertex_index * 2 + 1] : -1.0f;
                 }
+                VectorCopy(vertices[triangle_indices[0]].normal, triangle->normal);
+                triangle->normal[3] = 1.0f;
             }
             memcpy(rt_indices + rt_index_count, indices + face->first_index,
                    sizeof(*rt_indices) * face->index_count);
@@ -22199,6 +22259,9 @@ bool VKR_Init(bool total)
     Cmd_AddCommand("strings", vk_strings_f);
     Cmd_AddCommand("fsr_retest", vk_fsr_retest_f);
     Cmd_AddCommand("modellist", vk_model_list_f);
+#if USE_VULKAN_RAYTRACING
+    Cmd_AddCommand("rtprobe", vk_rt_probe_f);
+#endif
 #if USE_DEBUG
     R_ClearDebugLines();
     Cmd_AddCommand("cleardebuglines", R_ClearDebugLines);
@@ -22256,6 +22319,9 @@ void VKR_Shutdown(bool total)
     Cmd_RemoveCommand("strings");
     Cmd_RemoveCommand("fsr_retest");
     Cmd_RemoveCommand("modellist");
+#if USE_VULKAN_RAYTRACING
+    Cmd_RemoveCommand("rtprobe");
+#endif
 #if USE_DEBUG
     Cmd_RemoveCommand("cleardebuglines");
     r_charset = 0;
@@ -22612,6 +22678,8 @@ static bool vk_refresh_rt_model_atlas(void)
 
 // Called only after acquiring this image and waiting for its rendering fence.
 // Mutable resources belong exclusively to the selected frame scene.
+#include "vk_rt_probe.h"
+
 static bool vk_update_rt_models(const refdef_t *fd)
 {
     if (!vk.raytracing_active || !vk.world.rt_triangles ||
@@ -22661,11 +22729,8 @@ static bool vk_update_rt_models(const refdef_t *fd)
         for (int b = 0; b < model->alias_batch_count; b++) {
             const vk_alias_batch_t *batch = &model->alias_batches[b];
             const image_t *skin = vk_skin_for_alias_batch(model, batch, ent);
-            if (!skin || skin->texnum >= MAX_RIMAGES)
-                continue;
-            uint32_t slot = vk.world.rt_texture_slots[skin->texnum];
-            if (slot == UINT32_MAX)
-                continue;
+            uint32_t slot = skin && skin->texnum < MAX_RIMAGES ?
+                vk.world.rt_texture_slots[skin->texnum] : UINT32_MAX;
             for (uint32_t j = 0; j + 2 < batch->index_count; j += 3) {
                 vk_gpu_rt_triangle_t *triangle =
                     &triangles[cursor / 3];
@@ -22686,7 +22751,8 @@ static bool vk_update_rt_models(const refdef_t *fd)
                         VectorMA(vertex->position, position[c], axis[c], vertex->position);
                     triangle->uv_layer[corner][0] = current->uv[0];
                     triangle->uv_layer[corner][1] = current->uv[1];
-                    triangle->uv_layer[corner][2] = (float)slot;
+                    triangle->uv_layer[corner][2] = slot == UINT32_MAX ?
+                        -1.0f : (float)slot;
                     triangle->uv_layer[corner][3] = -1.0f;
                     VectorCopy(color, triangle->lighting[corner]);
                     triangle->lighting[corner][3] = -1.0f;
@@ -22857,10 +22923,10 @@ void VKR_RenderFrame(const refdef_t *fd)
     static int last_rt_debug = -1;
     int rt_debug = vk_rt_debug ? vk_rt_debug->integer : 0;
     if (rt_debug != last_rt_debug) {
-        if (rt_debug == 21 || rt_debug == 22) {
-            Com_Printf("Vulkan RT debug cvar reached frame: active=%d supported=%d "
+        if (rt_debug >= 21 && rt_debug <= 23) {
+            Com_Printf("Vulkan RT debug cvar reached frame: mode=%d active=%d supported=%d "
                        "pixel-ready=%d descriptor=%d reason=\"%s\"\n",
-                       vk.raytracing_active, vk.raytracing_supported,
+                       rt_debug, vk.raytracing_active, vk.raytracing_supported,
                        vk.raytracing_pixel_ready, vk.rt_descriptor_set != VK_NULL_HANDLE,
                        vk.raytracing_reason);
         }
@@ -22984,6 +23050,8 @@ void VKR_RenderFrame(const refdef_t *fd)
     }
 
 #if USE_VULKAN_RAYTRACING
+    if (drawworld)
+        vk_rt_probe_frame(fd);
     if (drawworld && !vk_update_rt_models_for_frame(fd)) {
         Com_WPrintf("Couldn't update RT model resources: %s\n", Com_GetLastError());
         vk.raytracing_active = false;
