@@ -23,6 +23,9 @@ struct RTTriangle {
 layout(std430, set = 1, binding = 3) readonly buffer RTTriangleMaterials {
     RTTriangle triangles[];
 };
+layout(std430, set = 1, binding = 5) readonly buffer RTDynamicTriangleMaterials {
+    RTTriangle dynamic_triangles[];
+};
 layout(set = 1, binding = 4) uniform sampler2D rt_material_sampler;
 
 layout(location = 0) in vec4 v_color;
@@ -46,9 +49,17 @@ vec3 trace_reflected_hit(vec3 origin, vec3 direction, float max_distance,
         return vec3(0.0);
 
     uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(query, true);
+    bool dynamic = rayQueryGetIntersectionInstanceCustomIndexEXT(query, true) == 1u;
+    uint count = dynamic ? uint(dynamic_triangles.length()) : uint(triangles.length());
+    if (primitive >= count)
+        return vec3(0.0);
     vec2 bary = rayQueryGetIntersectionBarycentricsEXT(query, true);
     hit_distance = rayQueryGetIntersectionTEXT(query, true);
-    RTTriangle triangle = triangles[primitive];
+    RTTriangle triangle;
+    if (dynamic)
+        triangle = dynamic_triangles[primitive];
+    else
+        triangle = triangles[primitive];
     float b0 = 1.0 - bary.x - bary.y;
     vec2 uv = triangle.uv_layer[0].xy * b0 +
         triangle.uv_layer[1].xy * bary.x +
@@ -83,9 +94,11 @@ vec3 trace_reflected_world(vec3 origin, vec3 direction, float max_distance,
     vec3 tangent = normalize(cross(direction, axis));
     vec3 bitangent = cross(direction, tangent);
     float radius = roughness * roughness * 0.12;
-    const vec2 offsets[4] = vec2[4](vec2(1.0, 0.0), vec2(-1.0, 0.0),
-                                   vec2(0.0, 1.0), vec2(0.0, -1.0));
-    for (int i = 0; i < 4; i++) {
+    const vec2 offsets[8] = vec2[8](
+        vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0),
+        vec2(0.7071, 0.7071), vec2(-0.7071, 0.7071),
+        vec2(0.7071, -0.7071), vec2(-0.7071, -0.7071));
+    for (int i = 0; i < 8; i++) {
         vec3 sample_direction = normalize(direction + radius *
             (tangent * offsets[i].x + bitangent * offsets[i].y));
         float sample_distance;
@@ -96,7 +109,7 @@ vec3 trace_reflected_world(vec3 origin, vec3 direction, float max_distance,
                 min(hit_distance, sample_distance) : sample_distance;
     }
     // Misses contribute black rather than boosting the remaining samples.
-    return radiance * 0.2;
+    return radiance / 9.0;
 }
 
 float trace_hit_distance(vec3 origin, vec3 direction, float distance)

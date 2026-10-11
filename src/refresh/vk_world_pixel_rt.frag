@@ -44,6 +44,9 @@ struct RTTriangle {
 layout(std430, set = 3, binding = 3) readonly buffer RTTriangleMaterials {
     RTTriangle triangles[];
 };
+layout(std430, set = 3, binding = 5) readonly buffer RTDynamicTriangleMaterials {
+    RTTriangle dynamic_triangles[];
+};
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_uv;
@@ -68,9 +71,17 @@ vec3 trace_reflected_hit(vec3 origin, vec3 direction, float max_distance,
         return vec3(0.0);
 
     uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(query, true);
+    bool dynamic = rayQueryGetIntersectionInstanceCustomIndexEXT(query, true) == 1u;
+    uint count = dynamic ? uint(dynamic_triangles.length()) : uint(triangles.length());
+    if (primitive >= count)
+        return vec3(0.0);
     vec2 bary = rayQueryGetIntersectionBarycentricsEXT(query, true);
     hit_distance = rayQueryGetIntersectionTEXT(query, true);
-    RTTriangle triangle = triangles[primitive];
+    RTTriangle triangle;
+    if (dynamic)
+        triangle = dynamic_triangles[primitive];
+    else
+        triangle = triangles[primitive];
     float b0 = 1.0 - bary.x - bary.y;
     vec2 uv = triangle.uv_layer[0].xy * b0 +
         triangle.uv_layer[1].xy * bary.x +
@@ -78,6 +89,14 @@ vec3 trace_reflected_hit(vec3 origin, vec3 direction, float max_distance,
     vec3 lighting = triangle.lighting[0].rgb * b0 +
         triangle.lighting[1].rgb * bary.x +
         triangle.lighting[2].rgb * bary.y;
+    if (triangle.uv_layer[0].w >= 0.0) {
+        vec2 hit_lmuv = vec2(triangle.uv_layer[0].w, triangle.lighting[0].w) * b0 +
+            vec2(triangle.uv_layer[1].w, triangle.lighting[1].w) * bary.x +
+            vec2(triangle.uv_layer[2].w, triangle.lighting[2].w) * bary.y;
+        lighting = textureLod(lm_sampler, hit_lmuv, 0.0).rgb;
+        if (surface_info.z != 0u)
+            lighting += textureLod(rt_static_sampler, hit_lmuv, 0.0).rgb;
+    }
     int slot = int(floor(triangle.uv_layer[0].z + 0.5));
     vec2 tile = vec2(slot % 32, slot / 32) * 64.0;
     vec2 atlas_size = vec2(textureSize(rt_material_sampler, 0));
@@ -105,9 +124,11 @@ vec3 trace_reflected_world(vec3 origin, vec3 direction, float max_distance,
     vec3 tangent = normalize(cross(direction, axis));
     vec3 bitangent = cross(direction, tangent);
     float radius = roughness * roughness * 0.12;
-    const vec2 offsets[4] = vec2[4](vec2(1.0, 0.0), vec2(-1.0, 0.0),
-                                   vec2(0.0, 1.0), vec2(0.0, -1.0));
-    for (int i = 0; i < 4; i++) {
+    const vec2 offsets[8] = vec2[8](
+        vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0),
+        vec2(0.7071, 0.7071), vec2(-0.7071, 0.7071),
+        vec2(0.7071, -0.7071), vec2(-0.7071, -0.7071));
+    for (int i = 0; i < 8; i++) {
         vec3 sample_direction = normalize(direction + radius *
             (tangent * offsets[i].x + bitangent * offsets[i].y));
         float sample_distance;
@@ -118,7 +139,7 @@ vec3 trace_reflected_world(vec3 origin, vec3 direction, float max_distance,
                 min(hit_distance, sample_distance) : sample_distance;
     }
     // Misses contribute black rather than boosting the remaining samples.
-    return radiance * 0.2;
+    return radiance / 9.0;
 }
 
 float trace_hit_distance(vec3 origin, vec3 direction, float max_distance)

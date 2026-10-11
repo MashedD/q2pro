@@ -345,6 +345,9 @@ typedef struct {
 typedef struct {
     VkAccelerationStructureKHR handle;
     vk_buffer_t storage;
+    uint32_t primitive_count;
+    uint32_t vertex_count;
+    bool updateable;
 } vk_acceleration_structure_t;
 #endif
 
@@ -544,6 +547,10 @@ typedef struct {
     maliasskinname_t *skin_names;
     int skin_count;
     uint32_t vertex_count;
+#if USE_VULKAN_RAYTRACING
+    vk_vertex_t *rt_vertices;
+    uint32_t *rt_indices;
+#endif
 #if USE_MD5
     vk_mesh_t md5_mesh;
     vk_buffer_t md5_line_indices;
@@ -555,6 +562,10 @@ typedef struct {
     int md5_batch_count;
     int md5_skin_count;
     uint32_t md5_vertex_count;
+#if USE_VULKAN_RAYTRACING
+    vk_vertex_t *rt_md5_vertices;
+    uint32_t *rt_md5_indices;
+#endif
 #endif
 } vk_model_t;
 
@@ -636,7 +647,13 @@ typedef struct {
 #if USE_VULKAN_RAYTRACING
     vk_buffer_t rt_indices;
     vk_buffer_t rt_triangle_buffer;
+    vk_buffer_t rt_dynamic_triangle_buffer;
     vk_texture_t rt_material_texture;
+    uint32_t *rt_texture_slots;
+    vk_gpu_rt_triangle_t *rt_triangles;
+    vk_mesh_t rt_dynamic_mesh;
+    vk_acceleration_structure_t rt_dynamic_blas;
+    uint64_t rt_dynamic_hash;
     uint32_t rt_index_count;
     vk_acceleration_structure_t rt_blas;
     vk_texture_t rt_ao_texture;
@@ -944,11 +961,12 @@ typedef struct {
     uint32_t instance_api_version;
 #if USE_VULKAN_RAYTRACING
     bool raytracing_supported;
-    bool raytracing_active;
     bool raytracing_pixel_ready;
     bool raytracing_quad_sharing;
     char raytracing_reason[160];
 #endif
+    // Effect gates also compile in raster-only builds; this stays false there.
+    bool raytracing_active;
     VkDevice device;
     bool device_lost;
     VkQueue graphics_queue;
@@ -982,6 +1000,9 @@ typedef struct {
     VkPipeline rt_ao_pipeline;
     vk_acceleration_structure_t rt_tlas;
     vk_buffer_t rt_instance_buffer;
+    VkCommandBuffer rt_update_cmd;
+    vk_buffer_t rt_update_temporary[8];
+    uint32_t rt_update_temporary_count;
 #endif
     VkDescriptorPool descriptor_pool;
     VkSampler sampler;
@@ -1626,6 +1647,7 @@ static cvar_t *vk_rt_emissive_halo;
 static cvar_t *vk_rt_emissive_flicker;
 static cvar_t *vk_rt_reflections;
 static cvar_t *vk_rt_ssr;
+static cvar_t *vk_rt_models;
 static cvar_t *vk_rt_reflection_glints;
 static cvar_t *vk_rt_reflection_dispersion;
 static cvar_t *vk_rt_specular;
@@ -2729,6 +2751,36 @@ static void vk_unmap_world_batch_indices(void)
     }
 }
 
+#if USE_VULKAN_RAYTRACING
+static bool vk_defer_rt_update_buffer(vk_buffer_t *buffer)
+{
+    if (vk.rt_update_temporary_count >= q_countof(vk.rt_update_temporary)) {
+        Com_SetLastError("RT update temporary-buffer capacity exceeded");
+        return false;
+    }
+    vk.rt_update_temporary[vk.rt_update_temporary_count++] = *buffer;
+    memset(buffer, 0, sizeof(*buffer));
+    return true;
+}
+
+static bool vk_finish_rt_update(bool submit)
+{
+    VkCommandBuffer cmd = vk.rt_update_cmd;
+    vk.rt_update_cmd = VK_NULL_HANDLE;
+    bool ok = true;
+    if (cmd) {
+        if (submit)
+            ok = vk_end_immediate(cmd);
+        else
+            vk.FreeCommandBuffers(vk.device, vk.command_pool, 1, &cmd);
+    }
+    for (uint32_t i = 0; i < vk.rt_update_temporary_count; i++)
+        vk_destroy_buffer(&vk.rt_update_temporary[i]);
+    vk.rt_update_temporary_count = 0;
+    return ok;
+}
+#endif
+
 static bool vk_upload_buffer(vk_buffer_t *dst, const void *data,
                              VkDeviceSize size, VkBufferUsageFlags usage)
 {
@@ -2736,6 +2788,7 @@ static bool vk_upload_buffer(vk_buffer_t *dst, const void *data,
     VkDeviceMemory staging_memory = VK_NULL_HANDLE;
     VkBuffer device_buffer = VK_NULL_HANDLE;
     VkDeviceMemory device_memory = VK_NULL_HANDLE;
+    bool buffer_reused = false;
 
     if (!data || !size)
         return true;
@@ -2755,13 +2808,23 @@ static bool vk_upload_buffer(vk_buffer_t *dst, const void *data,
     memcpy(mapped, data, size);
     vk.UnmapMemory(vk.device, staging_memory);
 
+#if USE_VULKAN_RAYTRACING
+    if (vk.rt_update_cmd && dst->buffer && dst->size >= size) {
+        device_buffer = dst->buffer;
+        device_memory = dst->memory;
+        buffer_reused = true;
+    } else
+#endif
     if (!vk_create_buffer(size, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                           &device_buffer, &device_memory))
         goto fail;
 
-    VkCommandBuffer cmd;
-    if (!vk_begin_immediate(&cmd))
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+#if USE_VULKAN_RAYTRACING
+    cmd = vk.rt_update_cmd;
+#endif
+    if (!cmd && !vk_begin_immediate(&cmd))
         goto fail;
 
     VkBufferCopy copy = {
@@ -2769,16 +2832,44 @@ static bool vk_upload_buffer(vk_buffer_t *dst, const void *data,
     };
     vk.CmdCopyBuffer(cmd, staging, device_buffer, 1, &copy);
 
+#if USE_VULKAN_RAYTRACING
+    if (vk.rt_update_cmd) {
+        VkBufferMemoryBarrier barrier = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = device_buffer,
+            .offset = 0,
+            .size = size,
+        };
+        vk.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+            0, NULL, 1, &barrier, 0, NULL);
+        vk_buffer_t temporary = { staging, staging_memory, size };
+        if (!vk_defer_rt_update_buffer(&temporary))
+            goto fail;
+        staging = VK_NULL_HANDLE;
+        staging_memory = VK_NULL_HANDLE;
+    } else
+#endif
     if (!vk_end_immediate(cmd))
         goto fail;
 
-    vk_destroy_buffer(dst);
-    dst->buffer = device_buffer;
-    dst->memory = device_memory;
-    dst->size = size;
+    if (!buffer_reused) {
+        vk_destroy_buffer(dst);
+        dst->buffer = device_buffer;
+        dst->memory = device_memory;
+        dst->size = size;
+    }
 
-    vk.DestroyBuffer(vk.device, staging, NULL);
-    vk.FreeMemory(vk.device, staging_memory, NULL);
+    if (staging)
+        vk.DestroyBuffer(vk.device, staging, NULL);
+    if (staging_memory)
+        vk.FreeMemory(vk.device, staging_memory, NULL);
     return true;
 
 fail:
@@ -2786,9 +2877,9 @@ fail:
         vk.DestroyBuffer(vk.device, staging, NULL);
     if (staging_memory)
         vk.FreeMemory(vk.device, staging_memory, NULL);
-    if (device_buffer)
+    if (device_buffer && !buffer_reused)
         vk.DestroyBuffer(vk.device, device_buffer, NULL);
-    if (device_memory)
+    if (device_memory && !buffer_reused)
         vk.FreeMemory(vk.device, device_memory, NULL);
     return false;
 }
@@ -2829,7 +2920,15 @@ static void vk_free_world(void)
     vk_destroy_acceleration_structure(&vk.world.rt_blas);
     vk_destroy_buffer(&vk.world.rt_indices);
     vk_destroy_buffer(&vk.world.rt_triangle_buffer);
+    vk_destroy_buffer(&vk.world.rt_dynamic_triangle_buffer);
     vk_destroy_texture_resource(&vk.world.rt_material_texture);
+    vk_destroy_acceleration_structure(&vk.world.rt_dynamic_blas);
+    vk_destroy_mesh(&vk.world.rt_dynamic_mesh);
+    Z_Free(vk.world.rt_texture_slots);
+    Z_Free(vk.world.rt_triangles);
+    vk.world.rt_texture_slots = NULL;
+    vk.world.rt_triangles = NULL;
+    vk.world.rt_dynamic_hash = 0;
     vk.world.rt_index_count = 0;
     if (vk.world.rt_ao_framebuffer) {
         vk.DestroyFramebuffer(vk.device, vk.world.rt_ao_framebuffer, NULL);
@@ -2981,6 +3080,18 @@ static void vk_load_rt_materials(void)
 
 static void vk_free_model(vk_model_t *model)
 {
+#if USE_VULKAN_RAYTRACING
+    Z_Free(model->rt_vertices);
+    Z_Free(model->rt_indices);
+    model->rt_vertices = NULL;
+    model->rt_indices = NULL;
+#if USE_MD5
+    Z_Free(model->rt_md5_vertices);
+    Z_Free(model->rt_md5_indices);
+    model->rt_md5_vertices = NULL;
+    model->rt_md5_indices = NULL;
+#endif
+#endif
     if (model->frames) {
         Z_Free(model->frames);
         model->frames = NULL;
@@ -3312,6 +3423,14 @@ static bool vk_load_md5_variant(vk_model_t *model)
     model->md5_batch_count = md5->num_meshes;
     model->md5_skin_count = md5->num_skins;
     model->md5_vertex_count = vertex_count;
+#if USE_VULKAN_RAYTRACING
+    if (vk.raytracing_active) {
+        model->rt_md5_vertices = vertices;
+        model->rt_md5_indices = indices;
+        vertices = NULL;
+        indices = NULL;
+    }
+#endif
     ok = true;
 
 out:
@@ -3547,6 +3666,14 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
     vk_load_md5_variant(model);
 #endif
 
+#if USE_VULKAN_RAYTRACING
+    if (vk.raytracing_active) {
+        model->rt_vertices = vertices;
+        model->rt_indices = indices;
+        vertices = NULL;
+        indices = NULL;
+    }
+#endif
     handle = (model - vk.models) + 1;
 
 out:
@@ -3854,6 +3981,14 @@ static qhandle_t vk_load_md3_model(const char *name, const byte *rawdata, size_t
     vk_load_md5_variant(model);
 #endif
 
+#if USE_VULKAN_RAYTRACING
+    if (vk.raytracing_active) {
+        model->rt_vertices = vertices;
+        model->rt_indices = indices;
+        vertices = NULL;
+        indices = NULL;
+    }
+#endif
     handle = (model - vk.models) + 1;
 
 out:
@@ -3939,6 +4074,9 @@ static void vk_destroy_acceleration_structure(vk_acceleration_structure_t *as)
         vk.DestroyAccelerationStructureKHR(vk.device, as->handle, NULL);
     as->handle = VK_NULL_HANDLE;
     vk_destroy_buffer(&as->storage);
+    as->primitive_count = 0;
+    as->vertex_count = 0;
+    as->updateable = false;
 }
 
 static bool vk_build_mesh_blas(vk_acceleration_structure_t *as,
@@ -3971,11 +4109,17 @@ static bool vk_build_mesh_blas(vk_acceleration_structure_t *as,
         return false;
     }
     uint32_t primitive_count = index_count / 3;
+    bool dynamic = as == &vk.world.rt_dynamic_blas;
+    bool update = dynamic && as->handle && as->updateable &&
+        as->primitive_count == primitive_count && as->vertex_count == vertex_count;
     VkAccelerationStructureBuildGeometryInfoKHR build = {
         .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
         .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
-        .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
-        .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+        .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+            (dynamic ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0),
+        .mode = update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR :
+                         VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+        .srcAccelerationStructure = update ? as->handle : VK_NULL_HANDLE,
         .geometryCount = 1,
         .pGeometries = &geometry,
     };
@@ -3986,40 +4130,43 @@ static bool vk_build_mesh_blas(vk_acceleration_structure_t *as,
         vk.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
         &build, &primitive_count, &sizes);
 
-    vk_acceleration_structure_t created = { 0 };
-    if (!sizes.accelerationStructureSize || !sizes.buildScratchSize) {
+    vk_acceleration_structure_t created = update ? *as : (vk_acceleration_structure_t){ 0 };
+    VkDeviceSize scratch_size = update ? sizes.updateScratchSize : sizes.buildScratchSize;
+    if (!sizes.accelerationStructureSize || !scratch_size) {
         Com_SetLastError("Vulkan returned empty BLAS build sizes");
         goto fail;
     }
-    if (!vk_create_buffer(sizes.accelerationStructureSize,
-                          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
-                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                          &created.storage.buffer, &created.storage.memory))
-        goto fail;
-    created.storage.size = sizes.accelerationStructureSize;
+    if (!update) {
+        if (!vk_create_buffer(sizes.accelerationStructureSize,
+                              VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                              VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                              &created.storage.buffer, &created.storage.memory))
+            goto fail;
+        created.storage.size = sizes.accelerationStructureSize;
 
-    VkAccelerationStructureCreateInfoKHR create_info = {
-        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-        .buffer = created.storage.buffer,
-        .size = sizes.accelerationStructureSize,
-        .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
-    };
-    VkResult result = vk.CreateAccelerationStructureKHR(
-        vk.device, &create_info, NULL, &created.handle);
-    if (result != VK_SUCCESS) {
-        vk_fail_result("vkCreateAccelerationStructureKHR", result);
-        goto fail;
+        VkAccelerationStructureCreateInfoKHR create_info = {
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+            .buffer = created.storage.buffer,
+            .size = sizes.accelerationStructureSize,
+            .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+        };
+        VkResult result = vk.CreateAccelerationStructureKHR(
+            vk.device, &create_info, NULL, &created.handle);
+        if (result != VK_SUCCESS) {
+            vk_fail_result("vkCreateAccelerationStructureKHR", result);
+            goto fail;
+        }
     }
 
     vk_buffer_t scratch = { 0 };
-    if (!vk_create_buffer(sizes.buildScratchSize,
+    if (!vk_create_buffer(scratch_size,
                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                           VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                           &scratch.buffer, &scratch.memory))
         goto fail;
-    scratch.size = sizes.buildScratchSize;
+    scratch.size = scratch_size;
     build.dstAccelerationStructure = created.handle;
     build.scratchData.deviceAddress = vk_buffer_device_address(scratch.buffer);
     if (!build.scratchData.deviceAddress) {
@@ -4031,24 +4178,44 @@ static bool vk_build_mesh_blas(vk_acceleration_structure_t *as,
         .primitiveCount = primitive_count,
     };
     const VkAccelerationStructureBuildRangeInfoKHR *ranges[] = { &range };
-    VkCommandBuffer cmd;
-    if (!vk_begin_immediate(&cmd)) {
+    VkCommandBuffer cmd = vk.rt_update_cmd;
+    if (!cmd && !vk_begin_immediate(&cmd)) {
         vk_destroy_buffer(&scratch);
         goto fail;
     }
     vk.CmdBuildAccelerationStructuresKHR(cmd, 1, &build, ranges);
-    if (!vk_end_immediate(cmd)) {
+    if (vk.rt_update_cmd) {
+        VkMemoryBarrier barrier = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+            .dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
+        };
+        vk.CmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+            1, &barrier, 0, NULL, 0, NULL);
+        if (!vk_defer_rt_update_buffer(&scratch)) {
+            vk_destroy_buffer(&scratch);
+            goto fail;
+        }
+    } else if (!vk_end_immediate(cmd)) {
         vk_destroy_buffer(&scratch);
         goto fail;
     }
     vk_destroy_buffer(&scratch);
 
-    vk_destroy_acceleration_structure(as);
+    if (!update)
+        vk_destroy_acceleration_structure(as);
+    created.primitive_count = primitive_count;
+    created.vertex_count = vertex_count;
+    created.updateable = dynamic;
     *as = created;
     return true;
 
 fail:
-    vk_destroy_acceleration_structure(&created);
+    if (!update)
+        vk_destroy_acceleration_structure(&created);
     return false;
 }
 
@@ -4068,7 +4235,7 @@ static bool vk_build_world_tlas(void)
         return false;
     }
 
-    VkAccelerationStructureInstanceKHR instance = {
+    VkAccelerationStructureInstanceKHR instances[2] = { {
         .transform = { .matrix = {
             { 1.0f, 0.0f, 0.0f, 0.0f },
             { 0.0f, 1.0f, 0.0f, 0.0f },
@@ -4079,12 +4246,29 @@ static bool vk_build_world_tlas(void)
         .instanceShaderBindingTableRecordOffset = 0,
         .flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR,
         .accelerationStructureReference = blas_address,
-    };
+    } };
+    uint32_t instance_count = 1;
+    if (vk.world.rt_dynamic_blas.handle) {
+        address_info.accelerationStructure = vk.world.rt_dynamic_blas.handle;
+        VkDeviceAddress dynamic_address =
+            vk.GetAccelerationStructureDeviceAddressKHR(vk.device, &address_info);
+        if (!dynamic_address) {
+            Com_SetLastError("Dynamic BLAS has no device address");
+            return false;
+        }
+        instances[1] = instances[0];
+        instances[1].instanceCustomIndex = 1; // Dynamic hit-data buffer.
+        // Dynamic models participate in reflections, not the static bake.
+        instances[1].mask = 0x02;
+        instances[1].accelerationStructureReference = dynamic_address;
+        instance_count = 2;
+    }
+    instances[0].mask = 0x01;
     VkBufferUsageFlags instance_usage =
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
-    if (!vk_upload_buffer(&vk.rt_instance_buffer, &instance, sizeof(instance),
-                          instance_usage))
+    if (!vk_upload_buffer(&vk.rt_instance_buffer, instances,
+                          instance_count * sizeof(*instances), instance_usage))
         return false;
 
     VkAccelerationStructureGeometryKHR geometry = {
@@ -4097,12 +4281,17 @@ static bool vk_build_world_tlas(void)
                 vk_buffer_device_address(vk.rt_instance_buffer.buffer),
         },
     };
-    uint32_t primitive_count = 1;
+    uint32_t primitive_count = instance_count;
+    bool update = vk.rt_update_cmd && vk.rt_tlas.handle &&
+        vk.rt_tlas.updateable && vk.rt_tlas.primitive_count == primitive_count;
     VkAccelerationStructureBuildGeometryInfoKHR build = {
         .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
         .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
-        .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
-        .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+        .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                 VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
+        .mode = update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR :
+                         VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+        .srcAccelerationStructure = update ? vk.rt_tlas.handle : VK_NULL_HANDLE,
         .geometryCount = 1,
         .pGeometries = &geometry,
     };
@@ -4113,38 +4302,42 @@ static bool vk_build_world_tlas(void)
         vk.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
         &build, &primitive_count, &sizes);
 
-    vk_acceleration_structure_t created = { 0 };
+    vk_acceleration_structure_t created = update ? vk.rt_tlas :
+        (vk_acceleration_structure_t){ 0 };
     vk_buffer_t scratch = { 0 };
-    if (!sizes.accelerationStructureSize || !sizes.buildScratchSize) {
+    VkDeviceSize scratch_size = update ? sizes.updateScratchSize : sizes.buildScratchSize;
+    if (!sizes.accelerationStructureSize || !scratch_size) {
         Com_SetLastError("Vulkan returned empty TLAS build sizes");
         goto fail;
     }
-    if (!vk_create_buffer(sizes.accelerationStructureSize,
-                          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
-                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                          &created.storage.buffer, &created.storage.memory))
-        goto fail;
-    created.storage.size = sizes.accelerationStructureSize;
-    VkAccelerationStructureCreateInfoKHR create_info = {
-        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-        .buffer = created.storage.buffer,
-        .size = sizes.accelerationStructureSize,
-        .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
-    };
-    VkResult result = vk.CreateAccelerationStructureKHR(
-        vk.device, &create_info, NULL, &created.handle);
-    if (result != VK_SUCCESS) {
-        vk_fail_result("vkCreateAccelerationStructureKHR(TLAS)", result);
-        goto fail;
+    if (!update) {
+        if (!vk_create_buffer(sizes.accelerationStructureSize,
+                              VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                              VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                              &created.storage.buffer, &created.storage.memory))
+            goto fail;
+        created.storage.size = sizes.accelerationStructureSize;
+        VkAccelerationStructureCreateInfoKHR create_info = {
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+            .buffer = created.storage.buffer,
+            .size = sizes.accelerationStructureSize,
+            .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+        };
+        VkResult result = vk.CreateAccelerationStructureKHR(
+            vk.device, &create_info, NULL, &created.handle);
+        if (result != VK_SUCCESS) {
+            vk_fail_result("vkCreateAccelerationStructureKHR(TLAS)", result);
+            goto fail;
+        }
     }
-    if (!vk_create_buffer(sizes.buildScratchSize,
+    if (!vk_create_buffer(scratch_size,
                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                           VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                           &scratch.buffer, &scratch.memory))
         goto fail;
-    scratch.size = sizes.buildScratchSize;
+    scratch.size = scratch_size;
     build.dstAccelerationStructure = created.handle;
     build.scratchData.deviceAddress = vk_buffer_device_address(scratch.buffer);
     if (!build.scratchData.deviceAddress) {
@@ -4155,15 +4348,30 @@ static bool vk_build_world_tlas(void)
         .primitiveCount = primitive_count,
     };
     const VkAccelerationStructureBuildRangeInfoKHR *ranges[] = { &range };
-    VkCommandBuffer cmd;
-    if (!vk_begin_immediate(&cmd))
+    VkCommandBuffer cmd = vk.rt_update_cmd;
+    if (!cmd && !vk_begin_immediate(&cmd))
         goto fail;
     vk.CmdBuildAccelerationStructuresKHR(cmd, 1, &build, ranges);
-    if (!vk_end_immediate(cmd))
+    if (vk.rt_update_cmd) {
+        VkMemoryBarrier barrier = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+            .dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
+        };
+        vk.CmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+            1, &barrier, 0, NULL, 0, NULL);
+        if (!vk_defer_rt_update_buffer(&scratch))
+            goto fail;
+    } else if (!vk_end_immediate(cmd))
         goto fail;
     vk_destroy_buffer(&scratch);
 
-    vk_destroy_acceleration_structure(&vk.rt_tlas);
+    if (!update)
+        vk_destroy_acceleration_structure(&vk.rt_tlas);
+    created.primitive_count = primitive_count;
+    created.updateable = true;
     vk.rt_tlas = created;
     VkWriteDescriptorSetAccelerationStructureKHR as_write = {
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
@@ -4183,7 +4391,8 @@ static bool vk_build_world_tlas(void)
 
 fail:
     vk_destroy_buffer(&scratch);
-    vk_destroy_acceleration_structure(&created);
+    if (!update)
+        vk_destroy_acceleration_structure(&created);
     return false;
 }
 #endif
@@ -7483,6 +7692,12 @@ static bool vk_create_frame_resources(void)
                 .descriptorCount = 1,
                 .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
             },
+            {
+                .binding = 5,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            },
         };
         VkDescriptorSetLayoutCreateInfo rt_layout_info = {
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -7516,9 +7731,9 @@ static bool vk_create_frame_resources(void)
         };
         pool_sizes[pool_size_count++] = (VkDescriptorPoolSize) {
             .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 2,
+            .descriptorCount = 3,
         };
-        pool_sizes[0].descriptorCount++;
+        pool_sizes[0].descriptorCount += 2; // Static lighting and material atlas.
     }
 #endif
     VkDescriptorPoolCreateInfo pool_info_desc = {
@@ -15749,6 +15964,10 @@ static vk_model_t *vk_alias_geometry(vk_model_t *model, const entity_t *ent,
         view->alias_batch_count = model->md5_batch_count;
         view->skin_count = model->md5_skin_count;
         view->vertex_count = model->md5_vertex_count;
+#if USE_VULKAN_RAYTRACING
+        view->rt_vertices = model->rt_md5_vertices;
+        view->rt_indices = model->rt_md5_indices;
+#endif
         return view;
     }
     return model;
@@ -20334,7 +20553,7 @@ static bool vk_build_rt_material_atlas(const bsp_t *bsp,
     for (uint32_t i = 0; i < MAX_RIMAGES; i++)
         texture_slots[i] = UINT32_MAX;
 
-    const image_t **images = Z_Malloc(sizeof(*images) * face_count);
+    const image_t **images = Z_Malloc(sizeof(*images) * MAX_RIMAGES);
     uint32_t texture_count = 0;
     for (uint32_t i = 0; i < face_count; i++) {
         const mface_t *face = faces[i].face;
@@ -20343,6 +20562,17 @@ static bool vk_build_rt_material_atlas(const bsp_t *bsp,
             continue;
         const image_t *image = face->texinfo->image;
         if (!image || image->texnum >= MAX_RIMAGES ||
+            texture_slots[image->texnum] != UINT32_MAX)
+            continue;
+        texture_slots[image->texnum] = texture_count;
+        images[texture_count++] = image;
+    }
+
+    // Append registered skins after world textures, preserving world slots.
+    for (int i = 0; i < r_numImages; i++) {
+        const image_t *image = &r_images[i];
+        if (image->type != IT_SKIN || !image->name[0] ||
+            image->texnum >= MAX_RIMAGES ||
             texture_slots[image->texnum] != UINT32_MAX)
             continue;
         texture_slots[image->texnum] = texture_count;
@@ -20432,8 +20662,8 @@ static bool vk_build_rt_material_atlas(const bsp_t *bsp,
         IMG_FreePixels(source);
     }
 
-    vk_destroy_texture_resource(&vk.world.rt_material_texture);
-    bool uploaded = vk_upload_texture_data(&vk.world.rt_material_texture,
+    vk_texture_t uploaded_texture = { 0 };
+    bool uploaded = vk_upload_texture_data(&uploaded_texture,
                                            width, height, atlas, false);
     Z_Free(atlas);
     Z_Free(images);
@@ -20442,6 +20672,8 @@ static bool vk_build_rt_material_atlas(const bsp_t *bsp,
         return false;
     }
 
+    vk_destroy_texture_resource(&vk.world.rt_material_texture);
+    vk.world.rt_material_texture = uploaded_texture;
     vk_update_texture_descriptor_with_sampler(&vk.world.rt_material_texture,
                                               vk.postprocess_sampler);
     VkDescriptorImageInfo image_info = {
@@ -20463,30 +20695,43 @@ static bool vk_build_rt_material_atlas(const bsp_t *bsp,
     return true;
 }
 
-static bool vk_upload_rt_triangle_buffer(const vk_gpu_rt_triangle_t *triangles,
-                                         uint32_t triangle_count)
+static bool vk_upload_rt_hit_data(const vk_gpu_rt_triangle_t *triangles,
+                                  uint32_t triangle_count, bool dynamic)
 {
     if (!triangle_count)
         return true;
-    if (!vk_upload_buffer(&vk.world.rt_triangle_buffer, triangles,
+    vk_buffer_t *buffer = dynamic ? &vk.world.rt_dynamic_triangle_buffer :
+                                    &vk.world.rt_triangle_buffer;
+    if (!vk_upload_buffer(buffer, triangles,
                           (size_t)triangle_count * sizeof(*triangles),
                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT))
         return false;
 
     VkDescriptorBufferInfo buffer_info = {
-        .buffer = vk.world.rt_triangle_buffer.buffer,
+        .buffer = buffer->buffer,
         .range = VK_WHOLE_SIZE,
     };
     VkWriteDescriptorSet write = {
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .dstSet = vk.rt_descriptor_set,
-        .dstBinding = 3,
+        .dstBinding = dynamic ? 5 : 3,
         .descriptorCount = 1,
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .pBufferInfo = &buffer_info,
     };
     vk.UpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
+    if (!dynamic) {
+        // Binding 5 must be valid even before any model enters the scene.
+        write.dstBinding = 5;
+        vk.UpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
+    }
     return true;
+}
+
+static bool vk_upload_rt_triangle_buffer(const vk_gpu_rt_triangle_t *triangles,
+                                         uint32_t triangle_count)
+{
+    return vk_upload_rt_hit_data(triangles, triangle_count, false);
 }
 #endif
 
@@ -20737,7 +20982,7 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                 continue;
             const image_t *image = face->face->texinfo->image;
             uint32_t texture_index = image ? image->texnum : MAX_RIMAGES;
-            uint32_t texture_slot = texture_index < MAX_RIMAGES ?
+            uint32_t texture_slot = texture_slots && texture_index < MAX_RIMAGES ?
                 texture_slots[texture_index] : UINT32_MAX;
             if (texture_slot == UINT32_MAX)
                 continue;
@@ -20752,8 +20997,13 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                     triangle->uv_layer[corner][0] = vertex->uv[0];
                     triangle->uv_layer[corner][1] = vertex->uv[1];
                     triangle->uv_layer[corner][2] = (float)texture_slot;
+                    // Spare components carry the shared world lightmap UV.
+                    uint32_t vertex_index = triangle_indices[corner];
+                    triangle->uv_layer[corner][3] = lmuv_data ?
+                        lmuv_data[vertex_index * 2] : -1.0f;
                     VectorCopy(vertex->color, triangle->lighting[corner]);
-                    triangle->lighting[corner][3] = 1.0f;
+                    triangle->lighting[corner][3] = lmuv_data ?
+                        lmuv_data[vertex_index * 2 + 1] : -1.0f;
                 }
             }
             memcpy(rt_indices + rt_index_count, indices + face->first_index,
@@ -20801,9 +21051,14 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                             Com_GetLastError());
             }
         }
-        if (texture_slots)
+        Z_Free(vk.world.rt_texture_slots);
+        Z_Free(vk.world.rt_triangles);
+        vk.world.rt_texture_slots = rt_ok ? texture_slots : NULL;
+        vk.world.rt_triangles = rt_ok ? rt_triangles : NULL;
+        if (!rt_ok) {
             Z_Free(texture_slots);
-        Z_Free(rt_triangles);
+            Z_Free(rt_triangles);
+        }
         Z_Free(rt_indices);
         if (!rt_ok) {
             Com_WPrintf("Couldn't build Vulkan world ray-tracing geometry: %s; disabling ray tracing\n",
@@ -21678,7 +21933,8 @@ bool VKR_Init(bool total)
     vk_rt_emissive_flicker = Cvar_Get("vk_rt_emissive_flicker", "0.55",
                                       CVAR_ARCHIVE);
     vk_rt_reflections = Cvar_Get("vk_rt_reflections", "0.35", CVAR_ARCHIVE);
-    vk_rt_ssr = Cvar_Get("vk_rt_ssr", "1", CVAR_ARCHIVE);
+    vk_rt_ssr = Cvar_Get("vk_rt_ssr", "0", CVAR_ARCHIVE);
+    vk_rt_models = Cvar_Get("vk_rt_models", "1", CVAR_ARCHIVE);
     vk_rt_reflection_glints = Cvar_Get("vk_rt_reflection_glints", "0.55",
                                        CVAR_ARCHIVE);
     vk_rt_reflection_dispersion = Cvar_Get("vk_rt_reflection_dispersion",
@@ -22184,6 +22440,205 @@ void VKR_SetSky(const char *name, float rotate, bool autorotate, const vec3_t ax
     }
 }
 
+#if USE_VULKAN_RAYTRACING
+static vk_model_t *vk_rt_entity_geometry(const entity_t *ent,
+                                         const refdef_t *fd, vk_model_t *view)
+{
+    vk_model_t *model = vk_model_for_handle(ent->model);
+#if USE_MD5
+    if (model && model->type == VK_MODEL_ALIAS)
+        return vk_alias_geometry(model, ent, fd, view);
+#else
+    (void)fd;
+    (void)view;
+#endif
+    return model;
+}
+
+// Correctness-first dynamic scene update. Immediate uploads/builds serialize
+// with the queue; resources are not replaced while previous frames use them.
+static bool vk_update_rt_models(const refdef_t *fd)
+{
+    if (!vk.raytracing_active || !vk.world.rt_triangles ||
+        !vk.world.rt_texture_slots || !vk.world.rt_index_count)
+        return true;
+
+    uint32_t index_count = 0;
+    if (vk_rt_models && vk_rt_models->integer &&
+        !(fd->rdflags & RDF_NOWORLDMODEL)) {
+        for (int i = 0; i < fd->num_entities; i++) {
+            const entity_t *ent = &fd->entities[i];
+            vk_model_t view;
+            vk_model_t *model = vk_rt_entity_geometry(ent, fd, &view);
+            if (!model || model->type != VK_MODEL_ALIAS ||
+                !model->rt_vertices || !model->rt_indices ||
+                (ent->flags & (RF_WEAPONMODEL | RF_TRANSLUCENT | RF_BLOOM_ONLY)))
+                continue;
+            if (model->mesh.index_count > 262144 - index_count)
+                continue;
+            index_count += model->mesh.index_count;
+        }
+    }
+    if (!index_count && !vk.world.rt_dynamic_blas.handle)
+        return true;
+
+    // Newly registered/custom skins require rebuilding the shared atlas.
+    bool missing_skin = false;
+    for (int i = 0; i < r_numImages; i++) {
+        const image_t *image = &r_images[i];
+        if (image->type == IT_SKIN && image->name[0] &&
+            image->texnum < MAX_RIMAGES &&
+            vk.world.rt_texture_slots[image->texnum] == UINT32_MAX) {
+            missing_skin = true;
+            break;
+        }
+    }
+    if (missing_skin) {
+        VkResult result = vk.DeviceWaitIdle(vk.device);
+        if (result != VK_SUCCESS)
+            return vk_fail_result("vkDeviceWaitIdle(RT skin atlas)", result);
+        uint32_t *slots = NULL, count = 0;
+        if (!vk_build_rt_material_atlas(vk.world.cache, vk.world.faces,
+                                        vk.world.face_count, &slots, &count))
+            return false;
+        Z_Free(vk.world.rt_texture_slots);
+        vk.world.rt_texture_slots = slots;
+    }
+
+    vk_gpu_rt_triangle_t *triangles = index_count ? Z_Mallocz(
+        (size_t)(index_count / 3) * sizeof(*triangles)) : NULL;
+    vk_vertex_t *vertices = index_count ?
+        Z_Mallocz((size_t)index_count * sizeof(*vertices)) : NULL;
+    uint32_t *indices = index_count ?
+        Z_Malloc((size_t)index_count * sizeof(*indices)) : NULL;
+    uint32_t cursor = 0;
+    for (int i = 0; index_count && i < fd->num_entities; i++) {
+        const entity_t *ent = &fd->entities[i];
+        vk_model_t view;
+        vk_model_t *model = vk_rt_entity_geometry(ent, fd, &view);
+        if (!model || model->type != VK_MODEL_ALIAS ||
+            !model->rt_vertices || !model->rt_indices ||
+            (ent->flags & (RF_WEAPONMODEL | RF_TRANSLUCENT | RF_BLOOM_ONLY)) ||
+            model->mesh.index_count > index_count - cursor)
+            continue;
+        vk_alias_lerp_t lerp = vk_alias_lerp_for_entity(model, ent, fd);
+        vec3_t axis[3];
+        vk_entity_axis(ent, axis);
+        vec4_t color;
+        vk_entity_light_color(ent, fd, color);
+        for (int b = 0; b < model->alias_batch_count; b++) {
+            const vk_alias_batch_t *batch = &model->alias_batches[b];
+            const image_t *skin = vk_skin_for_alias_batch(model, batch, ent);
+            if (!skin || skin->texnum >= MAX_RIMAGES)
+                continue;
+            uint32_t slot = vk.world.rt_texture_slots[skin->texnum];
+            if (slot == UINT32_MAX)
+                continue;
+            for (uint32_t j = 0; j + 2 < batch->index_count; j += 3) {
+                vk_gpu_rt_triangle_t *triangle =
+                    &triangles[cursor / 3];
+                for (int corner = 0; corner < 3; corner++) {
+                    uint32_t source_index =
+                        model->rt_indices[batch->first_index + j + corner];
+                    const vk_vertex_t *current = &model->rt_vertices[
+                        (size_t)lerp.frame * model->vertex_count + source_index];
+                    const vk_vertex_t *old = &model->rt_vertices[
+                        (size_t)lerp.oldframe * model->vertex_count + source_index];
+                    vec3_t position;
+                    for (int c = 0; c < 3; c++)
+                        position[c] = current->position[c] * (1.0f - lerp.backlerp) +
+                                      old->position[c] * lerp.backlerp;
+                    vk_vertex_t *vertex = &vertices[cursor];
+                    VectorCopy(ent->origin, vertex->position);
+                    for (int c = 0; c < 3; c++)
+                        VectorMA(vertex->position, position[c], axis[c], vertex->position);
+                    triangle->uv_layer[corner][0] = current->uv[0];
+                    triangle->uv_layer[corner][1] = current->uv[1];
+                    triangle->uv_layer[corner][2] = (float)slot;
+                    triangle->uv_layer[corner][3] = -1.0f;
+                    VectorCopy(color, triangle->lighting[corner]);
+                    triangle->lighting[corner][3] = -1.0f;
+                    indices[cursor] = cursor;
+                    cursor++;
+                }
+            }
+        }
+    }
+
+    uint64_t scene_hash = UINT64_C(14695981039346656037);
+    const byte *hash_data[2] = { (const byte *)vertices,
+        (const byte *)triangles };
+    size_t hash_sizes[2] = { (size_t)cursor * sizeof(*vertices),
+        (size_t)(cursor / 3) * sizeof(*triangles) };
+    for (int block = 0; block < 2; block++) {
+        for (size_t i = 0; i < hash_sizes[block]; i++) {
+            scene_hash ^= hash_data[block][i];
+            scene_hash *= UINT64_C(1099511628211);
+        }
+    }
+    if (vk.world.rt_dynamic_hash == scene_hash) {
+        Z_Free(vertices);
+        Z_Free(indices);
+        Z_Free(triangles);
+        return true;
+    }
+    VkResult result = vk.DeviceWaitIdle(vk.device);
+    if (result != VK_SUCCESS) {
+        Z_Free(vertices);
+        Z_Free(indices);
+        Z_Free(triangles);
+        return vk_fail_result("vkDeviceWaitIdle(RT models)", result);
+    }
+    if (!vk_begin_immediate(&vk.rt_update_cmd)) {
+        Z_Free(vertices);
+        Z_Free(indices);
+        Z_Free(triangles);
+        return false;
+    }
+    bool ok = true;
+    if (cursor) {
+        VkBufferUsageFlags build_usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        ok = vk_upload_buffer(&vk.world.rt_dynamic_mesh.vertices, vertices,
+                               (size_t)cursor * sizeof(*vertices),
+                               build_usage | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) &&
+             vk_upload_buffer(&vk.world.rt_dynamic_mesh.indices, indices,
+                               (size_t)cursor * sizeof(*indices),
+                               build_usage | VK_BUFFER_USAGE_INDEX_BUFFER_BIT) &&
+             vk_build_mesh_blas(&vk.world.rt_dynamic_blas,
+                                &vk.world.rt_dynamic_mesh.vertices, cursor,
+                                &vk.world.rt_dynamic_mesh.indices, cursor);
+        vk.world.rt_dynamic_mesh.vertex_count = cursor;
+        vk.world.rt_dynamic_mesh.index_count = cursor;
+    } else {
+        vk_destroy_acceleration_structure(&vk.world.rt_dynamic_blas);
+        vk_destroy_mesh(&vk.world.rt_dynamic_mesh);
+    }
+    if (ok)
+        ok = vk_upload_rt_hit_data(triangles, cursor / 3, true) &&
+             vk_build_world_tlas();
+    bool submitted = vk_finish_rt_update(ok);
+    ok = ok && submitted;
+    Z_Free(vertices);
+    Z_Free(indices);
+    Z_Free(triangles);
+    if (!ok) {
+        vk.world.rt_dynamic_hash = 0;
+        Com_WPrintf("Dynamic RT scene update failed: %s; using world-only rays\n",
+                    Com_GetLastError());
+        vk_destroy_acceleration_structure(&vk.world.rt_dynamic_blas);
+        vk_destroy_mesh(&vk.world.rt_dynamic_mesh);
+        Cvar_Set("vk_rt_models", "0");
+        return vk_build_world_tlas();
+    }
+    if (!vk.world.rt_dynamic_hash && cursor)
+        Com_Printf("Vulkan RT models: %u animated/skinned triangles; "
+                   "batched scene uploads/builds\n", cursor / 3);
+    vk.world.rt_dynamic_hash = scene_hash;
+    return true;
+}
+#endif
+
 void VKR_EndRegistration(void)
 {
     vk_free_models(false);
@@ -22328,6 +22783,12 @@ void VKR_RenderFrame(const refdef_t *fd)
         vk.world.sky_visible = false;
     }
 
+#if USE_VULKAN_RAYTRACING
+    if (drawworld && !vk_update_rt_models(fd)) {
+        Com_WPrintf("Couldn't update RT model resources: %s\n", Com_GetLastError());
+        vk.raytracing_active = false;
+    }
+#endif
     vk_write_fsr_timestamp(VK_TIMESTAMP_SCENE_BEGIN);
     if (drawworld)
         vk_draw_skybox(fd);
