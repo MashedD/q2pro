@@ -1001,6 +1001,7 @@ typedef struct {
     vk_acceleration_structure_t rt_tlas;
     vk_buffer_t rt_instance_buffer;
     VkCommandBuffer rt_update_cmd;
+    VkCommandBuffer rt_update_pending_cmd;
     vk_buffer_t rt_update_temporary[8];
     uint32_t rt_update_temporary_count;
 #endif
@@ -2763,20 +2764,50 @@ static bool vk_defer_rt_update_buffer(vk_buffer_t *buffer)
     return true;
 }
 
+static bool vk_retire_rt_update(bool queue_idle)
+{
+    if (vk.rt_update_pending_cmd) {
+        if (!queue_idle && !vk.device_lost) {
+            VkResult result = vk.QueueWaitIdle(vk.graphics_queue);
+            if (result != VK_SUCCESS)
+                return vk_fail_result("vkQueueWaitIdle(RT update retirement)", result);
+        }
+        vk.FreeCommandBuffers(vk.device, vk.command_pool, 1,
+                               &vk.rt_update_pending_cmd);
+        vk.rt_update_pending_cmd = VK_NULL_HANDLE;
+    }
+    for (uint32_t i = 0; i < vk.rt_update_temporary_count; i++)
+        vk_destroy_buffer(&vk.rt_update_temporary[i]);
+    vk.rt_update_temporary_count = 0;
+    return true;
+}
+
 static bool vk_finish_rt_update(bool submit)
 {
     VkCommandBuffer cmd = vk.rt_update_cmd;
     vk.rt_update_cmd = VK_NULL_HANDLE;
     bool ok = true;
-    if (cmd) {
-        if (submit)
-            ok = vk_end_immediate(cmd);
-        else
-            vk.FreeCommandBuffers(vk.device, vk.command_pool, 1, &cmd);
+    if (cmd && submit) {
+        VkResult result = vk.EndCommandBuffer(cmd);
+        if (result == VK_SUCCESS) {
+            VkSubmitInfo info = {
+                .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                .commandBufferCount = 1,
+                .pCommandBuffers = &cmd,
+            };
+            result = vk.QueueSubmit(vk.graphics_queue, 1, &info, VK_NULL_HANDLE);
+        }
+        if (result == VK_SUCCESS) {
+            // The graphics frame follows this submission on the same queue.
+            // Its ray queries see the build through the recorded AS barrier.
+            vk.rt_update_pending_cmd = cmd;
+            return true;
+        }
+        ok = vk_fail_result("RT update submission", result);
     }
-    for (uint32_t i = 0; i < vk.rt_update_temporary_count; i++)
-        vk_destroy_buffer(&vk.rt_update_temporary[i]);
-    vk.rt_update_temporary_count = 0;
+    if (cmd)
+        vk.FreeCommandBuffers(vk.device, vk.command_pool, 1, &cmd);
+    vk_retire_rt_update(true);
     return ok;
 }
 #endif
@@ -2915,6 +2946,8 @@ static const vk_texture_t *vk_texture_for_index(unsigned index, bool allow_nobin
 static void vk_free_world(void)
 {
 #if USE_VULKAN_RAYTRACING
+    if (!vk_retire_rt_update(false))
+        return;
     vk_destroy_acceleration_structure(&vk.rt_tlas);
     vk_destroy_buffer(&vk.rt_instance_buffer);
     vk_destroy_acceleration_structure(&vk.world.rt_blas);
@@ -8289,6 +8322,9 @@ static void vk_destroy_swapchain(void)
         vk_handle_device_lost("vkDeviceWaitIdle",
                               vk.DeviceWaitIdle(vk.device));
 
+#if USE_VULKAN_RAYTRACING
+    vk_retire_rt_update(true);
+#endif
     vk.render_pass_active = false;
     vk.active_render_pass = VK_NULL_HANDLE;
     vk.active_target_extent = (VkExtent2D) { 0, 0 };
@@ -22455,8 +22491,9 @@ static vk_model_t *vk_rt_entity_geometry(const entity_t *ent,
     return model;
 }
 
-// Correctness-first dynamic scene update. Immediate uploads/builds serialize
-// with the queue; resources are not replaced while previous frames use them.
+// Shared scene resources require retiring previous graphics work before writes.
+// Batched uploads/refits submit without a completion wait; temporary resources
+// survive until the next safe retirement point.
 static bool vk_update_rt_models(const refdef_t *fd)
 {
     if (!vk.raytracing_active || !vk.world.rt_triangles ||
@@ -22494,9 +22531,9 @@ static bool vk_update_rt_models(const refdef_t *fd)
         }
     }
     if (missing_skin) {
-        VkResult result = vk.DeviceWaitIdle(vk.device);
+        VkResult result = vk.QueueWaitIdle(vk.graphics_queue);
         if (result != VK_SUCCESS)
-            return vk_fail_result("vkDeviceWaitIdle(RT skin atlas)", result);
+            return vk_fail_result("vkQueueWaitIdle(RT skin atlas)", result);
         uint32_t *slots = NULL, count = 0;
         if (!vk_build_rt_material_atlas(vk.world.cache, vk.world.faces,
                                         vk.world.face_count, &slots, &count))
@@ -22582,14 +22619,15 @@ static bool vk_update_rt_models(const refdef_t *fd)
         Z_Free(triangles);
         return true;
     }
-    VkResult result = vk.DeviceWaitIdle(vk.device);
+    VkResult result = vk.QueueWaitIdle(vk.graphics_queue);
     if (result != VK_SUCCESS) {
         Z_Free(vertices);
         Z_Free(indices);
         Z_Free(triangles);
-        return vk_fail_result("vkDeviceWaitIdle(RT models)", result);
+        return vk_fail_result("vkQueueWaitIdle(RT models)", result);
     }
-    if (!vk_begin_immediate(&vk.rt_update_cmd)) {
+    if (!vk_retire_rt_update(true) ||
+        !vk_begin_immediate(&vk.rt_update_cmd)) {
         Z_Free(vertices);
         Z_Free(indices);
         Z_Free(triangles);
@@ -22633,7 +22671,7 @@ static bool vk_update_rt_models(const refdef_t *fd)
     }
     if (!vk.world.rt_dynamic_hash && cursor)
         Com_Printf("Vulkan RT models: %u animated/skinned triangles; "
-                   "batched scene uploads/builds\n", cursor / 3);
+                   "batched uploads/refits, deferred build completion\n", cursor / 3);
     vk.world.rt_dynamic_hash = scene_hash;
     return true;
 }
