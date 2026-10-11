@@ -32,13 +32,13 @@ layout(location = 3) in vec3 v_position;
 layout(location = 0) out vec4 out_color;
 layout(location = 1) out vec4 out_bloom;
 
-vec3 trace_reflected_world(vec3 origin, vec3 direction, float max_distance,
+vec3 trace_reflected_hit(vec3 origin, vec3 direction, float max_distance,
                            out float hit_distance)
 {
     hit_distance = -1.0;
     rayQueryEXT query;
     rayQueryInitializeEXT(query, scene,
-        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+        gl_RayFlagsOpaqueEXT,
         0xff, origin, 0.15, direction, max(max_distance, 0.2));
     while (rayQueryProceedEXT(query)) { }
     if (rayQueryGetIntersectionTypeEXT(query, true) ==
@@ -60,8 +60,43 @@ vec3 trace_reflected_world(vec3 origin, vec3 direction, float max_distance,
     vec2 tile = vec2(slot % 32, slot / 32) * 64.0;
     vec2 atlas_size = vec2(textureSize(rt_material_sampler, 0));
     vec2 atlas_uv = (tile + vec2(1.5) + fract(uv) * 61.0) / atlas_size;
-    return max(texture(rt_material_sampler, atlas_uv).rgb * lighting,
-               vec3(0.0));
+    vec3 albedo = max(textureLod(rt_material_sampler, atlas_uv, 0.0).rgb, vec3(0.0));
+    // Sparse BSP lightmaps can leave vertex samples nearly black. Keep a
+    // modest ambient floor so reflected surfaces remain legible there.
+    return albedo * max(lighting, vec3(0.20));
+}
+
+// Fixed symmetric cone samples avoid stochastic noise and temporal shimmer.
+vec3 trace_reflected_world(vec3 origin, vec3 direction, float max_distance,
+                           out float hit_distance)
+{
+    float roughness = mod(floor(max(pc.rt_params.z, 0.0)), 16.0) / 15.0;
+    float center_distance;
+    vec3 radiance = trace_reflected_hit(origin, direction, max_distance,
+                                       center_distance);
+    hit_distance = center_distance;
+    if (roughness < 0.15)
+        return radiance;
+
+    vec3 axis = abs(direction.z) < 0.9 ? vec3(0.0, 0.0, 1.0) :
+                                             vec3(0.0, 1.0, 0.0);
+    vec3 tangent = normalize(cross(direction, axis));
+    vec3 bitangent = cross(direction, tangent);
+    float radius = roughness * roughness * 0.12;
+    const vec2 offsets[4] = vec2[4](vec2(1.0, 0.0), vec2(-1.0, 0.0),
+                                   vec2(0.0, 1.0), vec2(0.0, -1.0));
+    for (int i = 0; i < 4; i++) {
+        vec3 sample_direction = normalize(direction + radius *
+            (tangent * offsets[i].x + bitangent * offsets[i].y));
+        float sample_distance;
+        radiance += trace_reflected_hit(origin, sample_direction, max_distance,
+                                        sample_distance);
+        if (sample_distance > 0.0)
+            hit_distance = hit_distance > 0.0 ?
+                min(hit_distance, sample_distance) : sample_distance;
+    }
+    // Misses contribute black rather than boosting the remaining samples.
+    return radiance * 0.2;
 }
 
 float trace_hit_distance(vec3 origin, vec3 direction, float distance)
@@ -204,7 +239,8 @@ float fog_turbulence_scale(float packed, vec3 position, float time)
 
 vec4 rt_controls(float packed)
 {
-    uint bits = uint(clamp(floor(packed + 0.5), 0.0, 16777215.0));
+    // CPU supplies an exact integer; adding 0.5 can corrupt its low bits.
+    uint bits = uint(clamp(packed, 0.0, 16777215.0));
     return vec4(float(bits & 31u) / 31.0,
                 float((bits >> 5) & 31u) / 31.0,
                 float((bits >> 10) & 7u) / 7.0,
@@ -213,13 +249,13 @@ vec4 rt_controls(float packed)
 
 float rt_light_ripple_control(float packed)
 {
-    uint bits = uint(clamp(floor(packed + 0.5), 0.0, 16777215.0));
+    uint bits = uint(clamp(packed, 0.0, 16777215.0));
     return float((bits >> 16) & 7u) / 7.0;
 }
 
 float rt_reflection_control(float packed)
 {
-    uint bits = uint(clamp(floor(packed + 0.5), 0.0, 16777215.0));
+    uint bits = uint(clamp(packed, 0.0, 16777215.0));
     return float((bits >> 19) & 31u) / 31.0;
 }
 
@@ -447,10 +483,13 @@ void main()
     int rt_debug = pc.rt_params.x < 0.0 ?
         int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
         (pc.rt_params.y < -7.5 ?
-            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 21.0)) : 0);
+            int(clamp(floor(-pc.rt_params.y + 0.5), 8.0, 22.0)) : 0);
     vec2 material = material_params(pc.rt_params.z);
     float material_reflect = material.x;
     float material_roughness = material.y;
+    // Keep the initial material policy floor-only; roughness is filtered.
+    float reflection_surface_weight = smoothstep(0.62, 0.88, normal.z) *
+        mix(1.0, 0.35, material_roughness);
     vec4 material_texel = texture(tex_sampler, uv);
     float flicker_code = rt_emissive_flicker_code(pc.rt_params.x);
     float flicker_mask = smoothstep(0.28, 0.72,
@@ -484,6 +523,45 @@ void main()
         shading_normal = material_bump_normal(v_position, normal,
             material_texel.rgb, material_reflect, material_roughness,
             bump_mask, bump_control);
+    }
+    if (rt_debug == 21) {
+        vec3 view_dir = normalize(pc.dlight.xyz - v_position);
+        vec3 reflection_dir = reflect(-view_dir, normal);
+        float hit_distance;
+        vec3 hit_radiance = trace_reflected_world(
+            v_position + normal * dynamic_ray_bias(v_position),
+            reflection_dir, 1536.0, hit_distance);
+        vec3 debug_color = hit_distance > 0.0 ?
+            vec3(0.0, 0.12, 0.20) + clamp(hit_radiance * 4.0, 0.0, 1.0) :
+            vec3(1.0, 0.0, 0.0);
+        out_color = vec4(debug_color, 1.0);
+        out_bloom = vec4(0.0);
+        return;
+    }
+    if (rt_debug == 22) {
+        vec3 view_dir = normalize(pc.dlight.xyz - v_position);
+        vec3 reflection_dir = reflect(-view_dir, normal);
+        float hit_distance;
+        vec3 hit_radiance = trace_reflected_world(
+            v_position + normal * dynamic_ray_bias(v_position),
+            reflection_dir, 1536.0, hit_distance);
+        if (hit_distance > 0.0) {
+            float edge = 1.0 - max(dot(shading_normal, view_dir), 0.0);
+            float fresnel = 0.20 + 0.80 * pow(edge, 5.0);
+            float distance_fade = 1.0 - smoothstep(512.0, 1536.0,
+                                                    hit_distance);
+            float roughness_fade = mix(1.0, 0.50, material_roughness);
+            vec3 contribution = hit_radiance * reflection_surface_weight * material_reflect *
+                specular_control * rt_reflection_control(pc.rt_params.w) *
+                fresnel * distance_fade * roughness_fade * 2.0;
+            float luma = dot(contribution, vec3(0.2126, 0.7152, 0.0722));
+            contribution *= min(1.0, 0.15 / max(luma, 0.000001));
+            out_color = vec4(clamp(contribution * 8.0, 0.0, 1.0), 1.0);
+        } else {
+            out_color = vec4(1.0, 0.0, 0.0, 1.0);
+        }
+        out_bloom = vec4(0.0);
+        return;
     }
     if (rt_debug >= 1 && rt_debug <= 3) {
         out_color = rt_debug == 1 ? vec4(1.0) : vec4(0.0, 0.0, 0.0, 1.0);
@@ -657,36 +735,28 @@ void main()
 
             // Trace a reflection ray against the world BLAS, then shade its
             // hit using interpolated UV/light data and the RT material atlas.
-            if (rt_debug == 21 ||
-                (material_reflect > 0.001 && specular_control > 0.001)) {
+            if (reflection_surface_weight > 0.001 && material_reflect > 0.001 &&
+                specular_control > 0.001 && rt_reflection_control(pc.rt_params.w) > 0.001) {
                 vec3 view_dir = normalize(pc.dlight.xyz - v_position);
-                vec3 reflection_dir = reflect(-view_dir, shading_normal);
+                // Unfiltered procedural bump normals alias single-ray reflections.
+                vec3 reflection_dir = reflect(-view_dir, normal);
                 float hit_distance;
                 vec3 hit_radiance = trace_reflected_world(
                     v_position + normal * dynamic_ray_bias(v_position),
                     reflection_dir, 1536.0, hit_distance);
-                if (rt_debug == 21) {
-                    vec3 debug_color = hit_distance > 0.0 ?
-                        vec3(0.0, 0.12, 0.20) +
-                        clamp(hit_radiance * 4.0, 0.0, 1.0) :
-                        vec3(1.0, 0.0, 0.0);
-                    out_color = vec4(debug_color, 1.0);
-                    out_bloom = vec4(0.0);
-                    return;
-                }
                 if (hit_distance > 0.0) {
                     float edge = 1.0 - max(dot(shading_normal, view_dir), 0.0);
                     float fresnel = 0.20 + 0.80 * pow(edge, 5.0);
                     float distance_fade = 1.0 - smoothstep(512.0, 1536.0,
                                                             hit_distance);
-                    float roughness_fade = mix(1.0, 0.22,
+                    float roughness_fade = mix(1.0, 0.50,
                                                material_roughness);
-                    vec3 reflection = hit_radiance * material_reflect *
+                    vec3 reflection = hit_radiance * reflection_surface_weight * material_reflect *
                         specular_control * rt_reflection_control(
                             pc.rt_params.w) * fresnel * distance_fade *
-                        roughness_fade * 10.0;
+                        roughness_fade * 2.0;
                     float reflection_luma = dot(reflection, luma_weights);
-                    reflection *= min(1.0, 0.10 /
+                    reflection *= min(1.0, 0.15 /
                         max(reflection_luma, 0.000001));
                     out_color.rgb += reflection;
                 }

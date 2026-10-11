@@ -1625,6 +1625,7 @@ static cvar_t *vk_rt_sunlight;
 static cvar_t *vk_rt_emissive_halo;
 static cvar_t *vk_rt_emissive_flicker;
 static cvar_t *vk_rt_reflections;
+static cvar_t *vk_rt_ssr;
 static cvar_t *vk_rt_reflection_glints;
 static cvar_t *vk_rt_reflection_dispersion;
 static cvar_t *vk_rt_specular;
@@ -12151,7 +12152,8 @@ static bool vk_waterwarp_enabled_for_frame(void)
 static bool vk_ssr_enabled_for_frame(void)
 {
 #if USE_VULKAN_RAYTRACING
-    return vk.ssr_ready && vk.raytracing_active && vk_raytracing &&
+    return (!vk_rt_ssr || vk_rt_ssr->integer) &&
+        vk.ssr_ready && vk.raytracing_active && vk_raytracing &&
         vk_raytracing->integer && vk_rt_reflections &&
         vk_rt_reflections->value > 0.001f && vk.fd_valid &&
         (!vk_rt_debug || vk_rt_debug->integer < 8 ||
@@ -14289,7 +14291,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
                                                           emissive_flicker);
             params[1] = vk_rt_ao ?
                 Cvar_ClampValue(vk_rt_ao, 0.0f, 0.5f) : 0.0f;
-            if (requested_debug >= 8 && requested_debug <= 21)
+            if (requested_debug >= 8 && requested_debug <= 22)
                 params[1] = -(float)requested_debug;
             params[2] = packed_material;
         }
@@ -14300,7 +14302,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
             vk_world_pack_atmosphere_controls(1.0f, scattering,
                                               turbulence,
                                               emissive_flicker);
-        if (requested_debug >= 8 && requested_debug <= 21)
+        if (requested_debug >= 8 && requested_debug <= 22)
             params[1] = -(float)requested_debug;
         params[2] = packed_material;
     }
@@ -14314,6 +14316,22 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         params[2] = -((float)liquid_kind + specular * 0.99f);
         params[3] = vk_rt_liquids ?
             Cvar_ClampValue(vk_rt_liquids, 0.0f, 1.0f) : 0.65f;
+    }
+    static bool debug21_reported;
+    if ((requested_debug == 21 || requested_debug == 22) &&
+        !debug21_reported) {
+        Com_Printf("Vulkan RT reflection debug push: active=%d pixel-ready=%d "
+                   "surface-lights=%d pixel-world=%d world=%d "
+                   "reflect=%.2f rough=%.2f specular=%.2f strength=%.2f "
+                   "params=(%.0f, %.0f, %.0f, %.0f)\n",
+                   vk.raytracing_active, vk.raytracing_pixel_ready,
+                   vk.world.surface_lights_ready, pixel_world, world_entity,
+                   material_reflect, material_roughness, specular,
+                   reflection_strength, params[0], params[1],
+                   params[2], params[3]);
+        debug21_reported = true;
+    } else if (requested_debug != 21 && requested_debug != 22) {
+        debug21_reported = false;
     }
 #else
     (void)pixel_world;
@@ -21660,6 +21678,7 @@ bool VKR_Init(bool total)
     vk_rt_emissive_flicker = Cvar_Get("vk_rt_emissive_flicker", "0.55",
                                       CVAR_ARCHIVE);
     vk_rt_reflections = Cvar_Get("vk_rt_reflections", "0.35", CVAR_ARCHIVE);
+    vk_rt_ssr = Cvar_Get("vk_rt_ssr", "1", CVAR_ARCHIVE);
     vk_rt_reflection_glints = Cvar_Get("vk_rt_reflection_glints", "0.55",
                                        CVAR_ARCHIVE);
     vk_rt_reflection_dispersion = Cvar_Get("vk_rt_reflection_dispersion",
@@ -22179,6 +22198,20 @@ void VKR_RenderFrame(const refdef_t *fd)
         !vk.command_buffers || vk.current_image >= vk.swapchain_image_count)
         return;
 
+#if USE_VULKAN_RAYTRACING
+    static int last_rt_debug = -1;
+    int rt_debug = vk_rt_debug ? vk_rt_debug->integer : 0;
+    if (rt_debug != last_rt_debug) {
+        if (rt_debug == 21 || rt_debug == 22) {
+            Com_Printf("Vulkan RT debug cvar reached frame: active=%d supported=%d "
+                       "pixel-ready=%d descriptor=%d reason=\"%s\"\n",
+                       vk.raytracing_active, vk.raytracing_supported,
+                       vk.raytracing_pixel_ready, vk.rt_descriptor_set != VK_NULL_HANDLE,
+                       vk.raytracing_reason);
+        }
+        last_rt_debug = rt_debug;
+    }
+#endif
     vk.fd = *fd;
     R_SyncUnderwaterFlag(vk.world.cache, &vk.fd);
     vk.fd_valid = true;
