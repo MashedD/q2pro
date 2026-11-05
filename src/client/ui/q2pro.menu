@@ -111,6 +111,8 @@ begin sound
     toggle "enable music" ogg_enable
     toggle "shuffle tracks" ogg_shuffle
     toggle "underwater effect" s_underwater
+    values "HRTF mixing" al_hrtf "off" "default" "on"
+    pairs "reverb" al_reverb "off" 0 "light" 1 "strong" 2
     values "ambient sounds" s_ambient "no" "yes" "only player's own"
     values "chat beep" cl_chat_sound "disabled" "default" "alternative"
 end
