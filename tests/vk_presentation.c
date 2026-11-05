@@ -168,6 +168,22 @@ int Q2_FSR3_GetLastError(const q2_fsr3_context_t *context)
     (void)context;
     return 0;
 }
+/* Client state read by vk_entity_projection_matrix for weapon models only. */
+cvar_t *cl_adjustfov, *cl_gun, *cl_gunfov, *info_hand;
+float V_CalcFov(float fov_x, float width, float height);
+float V_CalcFov(float fov_x, float width, float height)
+{
+    (void)width;
+    (void)height;
+    return fov_x;
+}
+void AngleVectors(const vec3_t angles, vec3_t forward, vec3_t right, vec3_t up)
+{
+    (void)angles;
+    VectorSet(forward, 1, 0, 0);
+    VectorSet(right, 0, -1, 0);
+    VectorSet(up, 0, 0, 1);
+}
 bool Q2_FSR3_ConfigureProvider(q2_fsr3_context_t *context,
                                q2_fsr3_provider_t *provider,
                                bool enabled, bool allow_async_workloads,
@@ -731,6 +747,18 @@ static void check_fsr_temporal_contracts(void)
      * A point at view-space z=-1 has clip w=1. Velocity excludes this offset. */
     assert(fabsf(-(jittered[8] - unjittered[8]) - motion.jitter[0]) < 1e-6f);
     assert(fabsf(-(jittered[9] - unjittered[9]) - motion.jitter[1]) < 1e-6f);
+    /* The SDK expects geometry to move by +jitter in screen pixels on both axes. */
+    assert(fabsf(motion.jitter[0] - 2 * vk.fsr_jitter[0] / 852) < 1e-6f);
+    assert(fabsf(motion.jitter[1] - 2 * vk.fsr_jitter[1] / 480) < 1e-6f);
+    /* Entity motion must cancel the projection jitter exactly. */
+    refdef_t entity_fd = { .fov_x = 90, .fov_y = 60, .width = 1024, .height = 576 };
+    entity_t jitter_entity = { 0 };
+    const vec3_t entity_axis[3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+    mat4_t entity_mvp, world_mvp;
+    vk_entity_mvp_unjittered(entity_mvp, &entity_fd, &jitter_entity, entity_axis);
+    vk_viewproj_matrix(world_mvp, &entity_fd, false);
+    for (unsigned i = 0; i < 16; i++)
+        assert(fabsf(entity_mvp[i] - world_mvp[i]) < 1e-6f);
     assert(fabsf(motion.motion_scale[0] * 2 * vk.render_extent.width - 682) < 1e-4f);
     vk.frame_fsr = false;
     uint64_t samples[90];

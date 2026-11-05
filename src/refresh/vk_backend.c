@@ -12461,9 +12461,11 @@ static void vk_projection_matrix_internal(mat4_t m, float fov_x, float fov_y,
     m[14] = (znear * zfar) / (znear - zfar);
 
     if (jittered && vk.frame_fsr && vk.render_extent.width && vk.render_extent.height) {
-        /* FSR3 supplies jitter in render-resolution pixel space. Convert it
-         * to the Vulkan projection offsets used by the scene pass. */
-        m[8] += 2.0f * vk.fsr_jitter[0] /
+        /* FSR3 supplies jitter in render-resolution pixel space and expects
+         * geometry to move by +jitter on screen (its shaders unjitter with
+         * "pixel + 0.5 - Jitter()"). With w = -z, clip offsets are subtracted
+         * from NDC, and Vulkan NDC Y already points down the screen. */
+        m[8] -= 2.0f * vk.fsr_jitter[0] /
                 (float)vk.render_extent.width;
         m[9] -= 2.0f * vk.fsr_jitter[1] /
                 (float)vk.render_extent.height;
@@ -12635,7 +12637,7 @@ static void vk_entity_mvp_unjittered(mat4_t out, const refdef_t *fd,
     vk_entity_model_matrix(model, ent, axis);
     vk_entity_projection_matrix(proj, fd, ent);
     if (vk.frame_fsr && vk.render_extent.width && vk.render_extent.height) {
-        proj[8] -= 2.0f * vk.fsr_jitter[0] / vk.render_extent.width;
+        proj[8] += 2.0f * vk.fsr_jitter[0] / vk.render_extent.width;
         proj[9] += 2.0f * vk.fsr_jitter[1] / vk.render_extent.height;
     }
     vk_view_matrix(view, fd);
@@ -22859,7 +22861,7 @@ static void vk_fsr_motion_parameters(vk_fsr_motion_push_t *push, const refdef_t 
     Vector4Set(push->viewport, x, y, max(x2 - x, 1), max(y2 - y, 1));
     push->motion_scale[0] = 0.5f * push->viewport[2] / vk.render_extent.width;
     push->motion_scale[1] = 0.5f * push->viewport[3] / vk.render_extent.height;
-    push->jitter[0] = -2.0f * vk.fsr_jitter[0] / vk.render_extent.width;
+    push->jitter[0] = 2.0f * vk.fsr_jitter[0] / vk.render_extent.width;
     push->jitter[1] = 2.0f * vk.fsr_jitter[1] / vk.render_extent.height;
     push->alpha = 1.0f;
 }
