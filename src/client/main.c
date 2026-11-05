@@ -2766,11 +2766,11 @@ static void CL_InitLocal(void)
     cl_autopause = Cvar_Get("cl_autopause", "1", 0);
     cl_rollhack = Cvar_Get("cl_rollhack", "1", 0);
     cl_noglow = Cvar_Get("cl_noglow", "0", 0);
-    cl_itemhighlight = Cvar_Get("cl_itemhighlight", "0", 0);
-    cl_weaponhighlight = Cvar_Get("cl_weaponhighlight", "0", 0);
-    cl_ammohighlight = Cvar_Get("cl_ammohighlight", "0", 0);
-    cl_itemhighlight_glow = Cvar_Get("cl_itemhighlight_glow", "0", 0);
-    cl_playerhighlight = Cvar_Get("cl_playerhighlight", "0", 0);
+    cl_itemhighlight = Cvar_Get("cl_itemhighlight", "0", CVAR_ARCHIVE);
+    cl_weaponhighlight = Cvar_Get("cl_weaponhighlight", "0", CVAR_ARCHIVE);
+    cl_ammohighlight = Cvar_Get("cl_ammohighlight", "0", CVAR_ARCHIVE);
+    cl_itemhighlight_glow = Cvar_Get("cl_itemhighlight_glow", "0", CVAR_ARCHIVE);
+    cl_playerhighlight = Cvar_Get("cl_playerhighlight", "0", CVAR_ARCHIVE);
     cl_nobob = Cvar_Get("cl_nobob", "0", 0);
     cl_nolerp = Cvar_Get("cl_nolerp", "0", 0);
 
