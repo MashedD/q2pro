@@ -357,6 +357,11 @@ al_hrtf::
       - 1 — use OpenAL Soft default setting (typically auto)
       - 2 — force HRTF on
 
+al_reverb::
+    Selects an OpenAL EFX reverb preset for positional sounds: 0 disables reverb, 1
+    enables light reverb and 2 enables strong reverb. Default value is 0. This
+    requires an OpenAL implementation with EAX reverb support.
+
 al_merge_looping::
     Enables merging of looped OpenAL sources to make them play at similar
     volume compared to DMA sound engine. Default value is 1 (auto). If
@@ -1275,6 +1280,10 @@ ui_pingrate::
     Specifies the server pinging rate used by server browser, in packets per
     second. Default value is 0, which estimates the default pinging rate based
     on ‘rate’ client variable.
+
+ui_hide_bots::
+    Hides the `WallFly[BZZZ]` and `q2stats[BZZZ]` bots from server browser player
+    lists and player counts. Default value is 0 (shown).
 
 com_time_format::
     Time format used by ‘com_time’ macro. Default value is "%H.%M" on Win32 and

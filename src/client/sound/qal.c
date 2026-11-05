@@ -97,6 +97,7 @@ static const alsection_t sections[] = {
             QAL_FN(Listenerf),
             QAL_FN(Listenerfv),
             QAL_FN(Source3f),
+            QAL_FN(Source3i),
             QAL_FN(SourcePause),
             QAL_FN(SourcePlay),
             QAL_FN(SourceQueueBuffers),
@@ -115,6 +116,13 @@ static const alsection_t sections[] = {
             QAL_FN(Filterf),
             QAL_FN(Filteri),
             QAL_FN(GenFilters),
+            QAL_FN(DeleteEffects),
+            QAL_FN(Effectf),
+            QAL_FN(Effecti),
+            QAL_FN(GenEffects),
+            QAL_FN(DeleteAuxiliaryEffectSlots),
+            QAL_FN(AuxiliaryEffectSloti),
+            QAL_FN(GenAuxiliaryEffectSlots),
             { NULL }
         }
     },
@@ -204,8 +212,8 @@ int QAL_Init(void)
     ALCint major, minor;
     int i;
 
-    al_device = Cvar_Get("al_device", "", 0);
-    al_hrtf = Cvar_Get("al_hrtf", "0", 0);
+    al_device = Cvar_Get("al_device", "", CVAR_ARCHIVE);
+    al_hrtf = Cvar_Get("al_hrtf", "0", CVAR_ARCHIVE);
 
 #ifndef QAL_HARD_LINKED
     for (i = 0; i < q_countof(al_drivers); i++) {

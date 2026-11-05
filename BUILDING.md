@@ -93,6 +93,10 @@ Alternatively, configure with `-Dsystem-wide=false` to build a ‘portable’
 version that expects to be launched from the root of Quake 2 data tree (this
 is default when building for Windows).
 
+The saved configuration file is named `q2config.cfg` on Windows and `config.cfg`
+elsewhere. Use `-Dconfig-file=<name>` to choose another name, for example to use one
+configuration across systems.
+
 On Windows, Q2PRO automatically sets current directory to the directory Q2PRO
 executable is in. On other platforms current directory must be set before
 launching Q2PRO executable if portable version is built.
