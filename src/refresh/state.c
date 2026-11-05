@@ -49,12 +49,8 @@ void GL_BindTexture(glTmu_t tmu, GLuint texnum)
     if (gls.texnums[tmu] == texnum)
         return;
 
-    if (qglBindTextureUnit) {
-        qglBindTextureUnit(tmu, texnum);
-    } else {
-        GL_ActiveTexture(tmu);
-        qglBindTexture(GL_TEXTURE_2D, texnum);
-    }
+    GL_ActiveTexture(tmu);
+    qglBindTexture(GL_TEXTURE_2D, texnum);
     gls.texnums[tmu] = texnum;
 
     c.texSwitches++;
@@ -81,12 +77,8 @@ void GL_BindCubemap(GLuint texnum)
     if (gls.texnumcube == texnum)
         return;
 
-    if (qglBindTextureUnit) {
-        qglBindTextureUnit(TMU_TEXTURE, texnum);
-    } else {
-        GL_ActiveTexture(TMU_TEXTURE);
-        qglBindTexture(GL_TEXTURE_CUBE_MAP, texnum);
-    }
+    GL_ActiveTexture(TMU_TEXTURE);
+    qglBindTexture(GL_TEXTURE_CUBE_MAP, texnum);
     gls.texnumcube = texnum;
 
     c.texSwitches++;
