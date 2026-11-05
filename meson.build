@@ -224,6 +224,7 @@ if cc.get_argument_syntax() == 'gcc'
     '-Wpointer-arith',
     '-Wstrict-prototypes',
     '-fms-extensions',
+    '-fno-common',
     '-fno-math-errno',
     '-fno-trapping-math',
     '-fsigned-char',
