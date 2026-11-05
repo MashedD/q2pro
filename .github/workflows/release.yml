@@ -1,0 +1,117 @@
+name: release
+
+# Pushing a vMAJOR.MINOR.PATCH tag builds the packages and publishes a release
+# with notes from CHANGELOG.md. A tag with a suffix, such as v1.0.0-rc.1, makes
+# a pre-release. Running this workflow by hand builds the packages and keeps them
+# as workflow artifacts, without publishing anything, as does a pull request that
+# changes the packaging.
+
+on:
+  push:
+    tags: ['v[0-9]*']
+  pull_request:
+    branches: [master]
+    paths:
+      - .ci/**
+      - .github/workflows/release.yml
+      - version.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - run: ./.ci/package-source.sh dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: source
+          path: dist/*
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson libsdl2-dev libopenal-dev \
+          libpng-dev libjpeg-dev zlib1g-dev mesa-common-dev \
+          libcurl4-gnutls-dev libx11-dev libxi-dev \
+          libwayland-dev wayland-protocols libdecor-0-dev
+      - run: ./.ci/package-linux.sh dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        arch: [win32, win64]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/cache@v6
+        with:
+          path: subprojects/packagecache
+          key: ${{ hashFiles('subprojects/*.wrap') }}
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64 dos2unix nasm meson ninja-build zip
+      - run: ./.ci/package-windows.sh ${{ matrix.arch }} dist
+        env:
+          MESON_PACKAGE_CACHE_DIR: ${{ github.workspace }}/subprojects/packagecache
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [source, linux, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Check that the tag is on master
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/master
+      - name: Write release notes
+        run: python3 .ci/release-notes.py "$GITHUB_REF_NAME" > notes.md
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Write checksums
+        run: cd dist && sha256sum -- * > SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$GITHUB_REF_NAME" in
+          *-*) prerelease=--prerelease ;;
+          *) prerelease= ;;
+          esac
+          # shellcheck disable=SC2086
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md $prerelease

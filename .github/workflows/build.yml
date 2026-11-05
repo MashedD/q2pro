@@ -45,6 +45,13 @@ env:
     -Dwrap_mode=nofallback
 
 jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - run: shellcheck .ci/package-*.sh
+
   mingw:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
