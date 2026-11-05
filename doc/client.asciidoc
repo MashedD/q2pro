@@ -1135,6 +1135,30 @@ in_grab::
       - 1 — normal grabbing policy
       - 2 — smart grabbing policy
 
+cl_movement_feel_mode::
+    Selects client-side movement prediction feel. This affects local prediction
+    and rendering only; commands sent to the server and server-side physics are
+    not changed. Default value is 0.
+      - 0 — use Q2PRO prediction feel
+      - 1 — use R1Q2-style prediction feel, where only completed user commands
+      are predicted and the current in-progress command is not applied
+
+cl_step_smoothing_mode::
+    Selects how the camera smooths stair and step transitions during client
+    prediction. This is visual only and does not affect movement physics.
+    Default value is ‘q2pro’.
+      - q2pro — use standard Q2PRO stair smoothing
+      - r1q2-1 — use R1Q2 smoothsteps mode 1
+      - r1q2-2 — use R1Q2 smoothsteps mode 2
+      - r1q2-3 — use R1Q2 smoothsteps mode 3
+
+m_r1q2_mouse::
+    Enables R1Q2-style mouse movement logic. Mouse deltas are scaled only by
+    ‘sensitivity’ after optional ‘m_filter’ smoothing, bypassing Q2PRO mouse
+    acceleration and automatic FOV sensitivity scaling. When enabled,
+    ‘lookstrafe’ also follows R1Q2 behavior and strafes only while ‘+mlook’ is
+    held. Default value is 0 (disabled).
+
 m_autosens::
     Enables automatic scaling of mouse sensitivity proportional to the current
     player field of view. Values between 90 and 179 specify the default FOV
