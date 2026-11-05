@@ -44,8 +44,10 @@ cd "$tmp/build"
 mkdir -p "$out" baseq2
 cp "$src/src/client/ui/q2pro.menu" baseq2/
 mv "game$cpu.dll" baseq2/
-mv q2pro.exe "q2pro$suffix.exe"
-mv q2proded.exe "q2proded$suffix.exe"
+if [ -n "$suffix" ]; then
+    mv q2pro.exe "q2pro$suffix.exe"
+    mv q2proded.exe "q2proded$suffix.exe"
+fi
 
 sed -e "s/##VER##/$ver/" -e "s/##DATE##/$(date -R)/" \
     "$src/.ci/readme-template.txt" > README
