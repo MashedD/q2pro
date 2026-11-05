@@ -50,7 +50,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
-      - run: shellcheck .ci/package-*.sh
+      - run: shellcheck .ci/package-*.sh .ci/build-openal-windows.sh
 
   mingw:
     runs-on: ubuntu-24.04
