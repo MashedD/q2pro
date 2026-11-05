@@ -1,7 +1,7 @@
-Prerequisities
---------------
+Prerequisites
+-------------
 
-Q2PRO can be built on Linux, BSD and similar platfroms using a recent version
+Q2PRO can be built on Linux, BSD and similar platforms using a recent version
 of GCC or Clang.
 
 Q2PRO client requires either SDL2 or OpenAL for sound output. For video output,
