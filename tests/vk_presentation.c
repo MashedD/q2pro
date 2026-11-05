@@ -174,10 +174,12 @@ bool Q2_FSR3_ConfigureProvider(q2_fsr3_context_t *context,
                                uint64_t frame_id, VkImage hudless_color,
                                VkFormat hudless_color_format,
                                uint32_t hudless_color_width,
-                               uint32_t hudless_color_height)
+                               uint32_t hudless_color_height,
+                               uint32_t debug_mode)
 {
     (void)context;
     (void)provider;
+    (void)debug_mode;
     (void)hudless_color;
     (void)hudless_color_format;
     (void)hudless_color_width;

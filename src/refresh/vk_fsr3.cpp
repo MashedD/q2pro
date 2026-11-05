@@ -1767,7 +1767,8 @@ extern "C" bool Q2_FSR3_ConfigureProvider(
     q2_fsr3_context_t *context, q2_fsr3_provider_t *provider,
     bool enabled, bool allow_async_workloads, uint64_t frame_id,
     VkImage hudless_color, VkFormat hudless_color_format,
-    uint32_t hudless_color_width, uint32_t hudless_color_height)
+    uint32_t hudless_color_width, uint32_t hudless_color_height,
+    uint32_t debug_mode)
 {
     if (!context || !provider || provider->context != context ||
         !provider->swapchain || !context->full_context_created)
@@ -1797,6 +1798,11 @@ extern "C" bool Q2_FSR3_ConfigureProvider(
             hudless_color_width, hudless_color_height,
             FFX_RESOURCE_USAGE_READ_ONLY, FFX_RESOURCE_STATE_COMPUTE_READ);
     }
+    /* 1 shows generated frames alone; 2 shows the SDK's debug view, which the
+     * SDK also presents alone. */
+    config.onlyPresentInterpolated = enabled && debug_mode == 1;
+    config.flags = enabled && debug_mode == 2 ?
+        FFX_FSR3_FRAME_GENERATION_FLAG_DRAW_DEBUG_VIEW : 0;
     config.frameID = frame_id;
     config.interpolationRect = {
         0, 0, static_cast<int32_t>(context->display_width),
@@ -1856,7 +1862,7 @@ extern "C" q2_fsr3_provider_t *Q2_FSR3_CreateProvider(
 
 extern "C" bool Q2_FSR3_ConfigureProvider(
     q2_fsr3_context_t *, q2_fsr3_provider_t *, bool, bool, uint64_t,
-    VkImage, VkFormat, uint32_t, uint32_t)
+    VkImage, VkFormat, uint32_t, uint32_t, uint32_t)
 {
     return false;
 }

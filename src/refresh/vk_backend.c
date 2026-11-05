@@ -1596,6 +1596,7 @@ static cvar_t *r_fsr_mip_bias;
 static cvar_t *r_fsr_frame_generation;
 static cvar_t *r_fsr_frame_generation_compute_only;
 static cvar_t *r_fsr_frame_generation_async;
+static cvar_t *r_fsr_frame_generation_debug;
 static cvar_t *r_fsr_dynamic;
 static cvar_t *r_fsr_dynamic_target_ms;
 static cvar_t *r_fsr_dynamic_min_scale;
@@ -11061,7 +11062,7 @@ static bool vk_activate_fsr3_provider(
      * explicitly; interpolation is enabled only for a complete scene frame. */
     bool configured = Q2_FSR3_ConfigureProvider(
         vk.fsr3, provider, false, false, Q2_FSR3_GetCurrentFrameId(vk.fsr3),
-        VK_NULL_HANDLE, VK_FORMAT_UNDEFINED, 0, 0);
+        VK_NULL_HANDLE, VK_FORMAT_UNDEFINED, 0, 0, 0);
     if (!configured) {
         Com_WPrintf("Vulkan FSR3 provider frame-generation configuration failed; using native presentation\n");
         Q2_FSR3_DestroyProvider(vk.fsr3, provider, false);
@@ -11135,7 +11136,9 @@ static bool vk_configure_fsr3_provider_frame_generation_mode(
             hudless ? hudless->image : VK_NULL_HANDLE,
             hudless ? vk.fsr_output_format : VK_FORMAT_UNDEFINED,
             hudless ? hudless->width : 0,
-            hudless ? hudless->height : 0))
+            hudless ? hudless->height : 0,
+            r_fsr_frame_generation_debug ? (uint32_t)Q_clip(
+                r_fsr_frame_generation_debug->integer, 0, 2) : 0))
         return false;
 
     vk.fsr3_provider_frame_generation_enabled = enabled;
@@ -21464,6 +21467,8 @@ bool VKR_Init(bool total)
         "r_fsr_frame_generation_compute_only", "0", CVAR_ARCHIVE);
     r_fsr_frame_generation_async = Cvar_Get(
         "r_fsr_frame_generation_async", "1", CVAR_ARCHIVE);
+    r_fsr_frame_generation_debug = Cvar_Get(
+        "r_fsr_frame_generation_debug", "0", 0);
     r_fsr_dynamic = Cvar_Get("r_fsr_dynamic", "0", CVAR_ARCHIVE);
     r_fsr_dynamic_target_ms = Cvar_Get("r_fsr_dynamic_target_ms", "16.67", CVAR_ARCHIVE);
     r_fsr_dynamic_min_scale = Cvar_Get("r_fsr_dynamic_min_scale", "1.0", CVAR_ARCHIVE);

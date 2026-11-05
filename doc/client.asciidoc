@@ -809,6 +809,11 @@ r_fsr_frame_generation::
     archived cvar value is preserved. OpenGL ignores this cvar. Default value
     is 0.
 
+r_fsr_frame_generation_debug::
+    Diagnostic view for the frame-generation provider: 0 is normal output, 1
+    presents only generated frames, and 2 presents the SDK debug view. Not
+    archived. Default value is 0.
+
 r_fsr_composition_mask::
     Enables the separate FSR3 transparency-and-composition mask for translucent
     surfaces and effects. It is generated with the motion coverage pass and
