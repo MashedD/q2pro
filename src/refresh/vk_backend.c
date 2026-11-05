@@ -7778,6 +7778,16 @@ static VkPresentModeKHR vk_choose_present_mode(const VkPresentModeKHR *modes,
         return VK_PRESENT_MODE_FIFO_KHR;
     } else {
         requested = VK_PRESENT_MODE_IMMEDIATE_KHR;
+        /* Tearing through real and generated frames looks broken. An explicit
+         * vk_present_mode still takes precedence. */
+        if (vk_fsr_frame_generation_requested()) {
+            for (uint32_t i = 0; i < count; i++) {
+                if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
+                    Com_Printf("Vulkan FSR3 frame generation: using mailbox instead of immediate presentation\n");
+                    return modes[i];
+                }
+            }
+        }
     }
 
     for (uint32_t i = 0; i < count; i++) {

@@ -1636,6 +1636,9 @@ static FfxErrorCode q2_provider_frame_generation_callback(
         return FFX_ERROR_INVALID_POINTER;
 
     q2_fsr3_context_scope scope(context);
+    /* This command buffer may run on another queue, and the query pool is
+     * reset on the graphics queue. Profile only the upscaler dispatches. */
+    context->profile_active = false;
     const FfxErrorCode error = ffxFsr3DispatchFrameGeneration(description);
     context->last_error = error;
     if (error == FFX_OK)
