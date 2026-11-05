@@ -19,6 +19,13 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "client.h"
 
+extern cvar_t *gl_fontshadow;
+
+static int SCR_FontShadow(void)
+{
+    return gl_fontshadow ? Q_clip(gl_fontshadow->integer, 0, 2) : 0;
+}
+
 #define STAT_PICS       11
 #define STAT_MINUS      (STAT_PICS - 1)  // num frame for '-' stats digit
 
@@ -168,7 +175,7 @@ static void SCR_DrawStringMulti(int x, int y, int flags, size_t maxlen,
         last_y = y;
         maxlen -= len;
 
-        y += CONCHAR_HEIGHT;
+        y += CONCHAR_HEIGHT + SCR_FontShadow();
         s = p + 1;
     }
 
@@ -1038,7 +1045,7 @@ static void SCR_DrawTurtle(void)
 #define DF(f) \
     if (cl.frameflags & FF_##f) { \
         SCR_DrawString(x, y, UI_ALTCOLOR, #f); \
-        y += CONCHAR_HEIGHT; \
+        y += CONCHAR_HEIGHT + SCR_FontShadow(); \
     }
 
     if (scr_showturtle->integer > 1) {
@@ -1081,7 +1088,7 @@ static void SCR_DrawDebugStats(void)
         }
         R_DrawString(x, y, 0, MAX_STRING_CHARS, buffer, scr.font_pic);
         R_ClearColor();
-        y += CONCHAR_HEIGHT;
+        y += CONCHAR_HEIGHT + SCR_FontShadow();
     }
 }
 
@@ -1109,7 +1116,7 @@ static void SCR_DrawDebugPmove(void)
         i = PM_FREEZE;
 
     R_DrawString(x, y, 0, MAX_STRING_CHARS, types[i], scr.font_pic);
-    y += CONCHAR_HEIGHT;
+    y += CONCHAR_HEIGHT + SCR_FontShadow();
 
     j = cl.frame.ps.pmove.pm_flags;
     for (i = 0; i < 8; i++) {
@@ -1668,10 +1675,10 @@ static void SCR_DrawInventory(void)
     x += 24;
 
     HUD_DrawString(x, y, "hotkey ### item");
-    y += CONCHAR_HEIGHT;
+    y += CONCHAR_HEIGHT + SCR_FontShadow();
 
     HUD_DrawString(x, y, "------ --- ----");
-    y += CONCHAR_HEIGHT;
+    y += CONCHAR_HEIGHT + SCR_FontShadow();
 
     for (i = top; i < num && i < top + DISPLAY_ITEMS; i++) {
         item = index[i];
@@ -1691,7 +1698,7 @@ static void SCR_DrawInventory(void)
             }
         }
 
-        y += CONCHAR_HEIGHT;
+        y += CONCHAR_HEIGHT + SCR_FontShadow();
     }
 }
 
