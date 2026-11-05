@@ -572,6 +572,10 @@ images.
 ch_alpha::
     Opacity level of crosshair image. Default value is 1 (fully opaque).
 
+crosshair_paused::
+    Specifies if the crosshair is drawn while the game is paused. Set to 0 to keep
+    it off the "Paused" image. Default value is 1.
+
 ch_scale::
     Scaling factor of the crosshair image. Default value is 1 (original size).
 
