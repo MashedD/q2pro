@@ -11,7 +11,8 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 meson setup "$tmp/build" --buildtype=release --wrap-mode=nofallback \
-    -Davcodec=disabled -Dsystem-wide=false -Danticheat-server=true \
+    -Davcodec=disabled -Dsystem-wide=false -Dconfig-file=q2config.cfg \
+    -Danticheat-server=true \
     -Dwindows-crash-dumps=disabled -Dwerror=true
 meson compile -C "$tmp/build"
 

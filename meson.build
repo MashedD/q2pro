@@ -500,6 +500,9 @@ config.set_quoted('VERSION',      meson.project_version())
 config.set_quoted('CPUSTRING',    cpu)
 config.set_quoted('BUILDSTRING',  sys)
 config.set_quoted('BASEGAME',     get_option('base-game'))
+if get_option('config-file') != ''
+  config.set_quoted('COM_CONFIG_CFG', get_option('config-file'))
+endif
 config.set_quoted('DEFGAME',      get_option('default-game'))
 if not win32
   config.set_quoted('DATADIR',    datadir)

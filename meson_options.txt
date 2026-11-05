@@ -49,6 +49,11 @@ option('game-new-api',
   value: false,
   description: 'Build game using new API for big maps support')
 
+option('config-file',
+  type: 'string',
+  value: '',
+  description: 'Name of the saved configuration file. Default is q2config.cfg on Windows and config.cfg elsewhere')
+
 option('homedir',
   type: 'string',
   value: '~/.q2pro',
