@@ -25,6 +25,8 @@ cvar_t  *cl_noskins;
 cvar_t  *cl_footsteps;
 cvar_t  *cl_timeout;
 cvar_t  *cl_predict;
+cvar_t  *cl_movement_feel_mode;
+cvar_t  *cl_step_smoothing_mode;
 cvar_t  *cl_gun;
 cvar_t  *cl_gunalpha;
 cvar_t  *cl_gunfov;
@@ -2606,6 +2608,14 @@ static void cl_predict_changed(cvar_t *self)
     CL_UpdatePredictSetting();
 }
 
+static void cl_prediction_feel_changed(cvar_t *self)
+{
+    (void)self;
+    cl.predicted_step = 0;
+    cl.predicted_step_time = 0;
+    cl.r1q2_step_frame_valid = false;
+}
+
 #if USE_FPS
 static void cl_updaterate_changed(cvar_t *self)
 {
@@ -2736,6 +2746,10 @@ static void CL_InitLocal(void)
     cl_noskins->changed = cl_noskins_changed;
     cl_predict = Cvar_Get("cl_predict", "1", 0);
     cl_predict->changed = cl_predict_changed;
+    cl_movement_feel_mode = Cvar_Get("cl_movement_feel_mode", "0", CVAR_ARCHIVE);
+    cl_movement_feel_mode->changed = cl_prediction_feel_changed;
+    cl_step_smoothing_mode = Cvar_Get("cl_step_smoothing_mode", "q2pro", CVAR_ARCHIVE);
+    cl_step_smoothing_mode->changed = cl_prediction_feel_changed;
     cl_kickangles = Cvar_Get("cl_kickangles", "1", CVAR_CHEAT);
     cl_warn_on_fps_rounding = Cvar_Get("cl_warn_on_fps_rounding", "1", 0);
     cl_maxfps = Cvar_Get("cl_maxfps", "62", 0);
