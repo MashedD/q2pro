@@ -73,7 +73,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64 dos2unix nasm meson ninja-build zip
+          sudo apt-get install -y gcc-mingw-w64 g++-mingw-w64 cmake dos2unix nasm \
+          meson ninja-build zip
       - run: ./.ci/package-windows.sh ${{ matrix.arch }} dist
         env:
           MESON_PACKAGE_CACHE_DIR: ${{ github.workspace }}/subprojects/packagecache

@@ -1,6 +1,7 @@
 #!/bin/sh -eu
 # Cross-compile the Windows client and server packages for one architecture,
-# with FFmpeg statically linked for Ogg music and cinematics. The first argument
+# with FFmpeg and OpenAL Soft statically linked, for Ogg music, cinematics and the
+# OpenAL sound engine. The first argument
 # is win32 or win64, the second the output directory. Run from the repository
 # root with full git history, on a system with MinGW-w64.
 
@@ -32,9 +33,12 @@ export PKG_CONFIG_SYSROOT_DIR="$tmp/ffmpeg-prefix"
 export PKG_CONFIG_LIBDIR="$PKG_CONFIG_SYSROOT_DIR/lib/pkgconfig"
 
 cd "$src"
+.ci/build-openal-windows.sh "$triplet" "$tmp/openal-prefix"
+
 meson setup "$tmp/build" --cross-file ".ci/$triplet.txt" \
     --auto-features=enabled --fatal-meson-warnings -Dwerror=true \
     -Dwrap_mode=forcefallback \
+    -Dqal-hard-linked=true -Dqal-static-prefix="$tmp/openal-prefix" \
     -Dgame-build-options=optimization=s,b_lto=true \
     -Dsdl2=disabled -Dwayland=disabled -Dx11=disabled
 meson compile -C "$tmp/build"
@@ -52,9 +56,12 @@ fi
 sed -e "s/##VER##/$ver/" -e "s/##DATE##/$(date -R)/" \
     "$src/.ci/readme-template.txt" > README
 unix2dos -k -n "$src/LICENSE" LICENSE.txt README README.txt \
-    "$src/doc/client.asciidoc" MANUAL.txt
+    "$src/doc/client.asciidoc" MANUAL.txt \
+    "$src/subprojects/openal-soft-1.23.1/COPYING" LICENSE-OpenAL-Soft.txt \
+    "$tmp/ffmpeg/COPYING.LGPLv2.1" LICENSE-FFmpeg.txt
 zip -9 "$out/q2pro-$ver-$arch-client.zip" "q2pro$suffix.exe" LICENSE.txt \
-    MANUAL.txt README.txt baseq2/q2pro.menu "baseq2/game$cpu.dll"
+    LICENSE-OpenAL-Soft.txt LICENSE-FFmpeg.txt MANUAL.txt README.txt \
+    baseq2/q2pro.menu "baseq2/game$cpu.dll"
 
 unix2dos -k -n "$src/doc/server.asciidoc" MANUAL.txt
 zip -9 "$out/q2pro-$ver-$arch-server.zip" "q2proded$suffix.exe" LICENSE.txt \

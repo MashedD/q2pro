@@ -22,6 +22,11 @@ OpenAL sound backend requires OpenAL Soft development headers for compilation.
 At runtime, OpenAL library from any vendor can be used (but OpenAL Soft is
 strongly recommended).
 
+By default the OpenAL library is loaded at runtime. To link it into the executable
+instead, configure with `-Dqal-hard-linked=true`. On Windows this also needs a
+static OpenAL Soft build, which `.ci/build-openal-windows.sh` creates (it requires
+CMake), passed as `-Dqal-static-prefix=<prefix>`.
+
 To install the *full* set of dependencies for building Q2PRO on Debian or
 Ubuntu use the following command:
 

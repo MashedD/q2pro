@@ -190,3 +190,13 @@ option('zlib',
   type: 'feature',
   value: 'auto',
   description: 'zlib support')
+
+option('qal-hard-linked',
+  type: 'boolean',
+  value: false,
+  description: 'Link the OpenAL library directly instead of loading it at runtime')
+
+option('qal-static-prefix',
+  type: 'string',
+  value: '',
+  description: 'Prefix of a static OpenAL Soft build, for qal-hard-linked on Windows')
