@@ -348,6 +348,7 @@ void R_DrawFill32(int x, int y, int w, int h, uint32_t color)
 static inline void draw_char(int x, int y, int flags, int c, const image_t *image)
 {
     float s, t;
+    int shadow = Q_clip(gl_fontshadow->integer, 0, 2);
 
     if ((c & 127) == 32)
         return;
@@ -367,7 +368,7 @@ static inline void draw_char(int x, int y, int flags, int c, const image_t *imag
         GL_StretchPic(x + 1, y + 1, CONCHAR_WIDTH, CONCHAR_HEIGHT, s, t,
                       s + 0.0625f, t + 0.0625f, black, image);
 
-        if (gl_fontshadow->integer > 1)
+        if (shadow > 1)
             GL_StretchPic(x + 2, y + 2, CONCHAR_WIDTH, CONCHAR_HEIGHT, s, t,
                           s + 0.0625f, t + 0.0625f, black, image);
     }
@@ -378,7 +379,7 @@ static inline void draw_char(int x, int y, int flags, int c, const image_t *imag
 
 void R_DrawChar(int x, int y, int flags, int c, qhandle_t font)
 {
-    if (gl_fontshadow->integer > 0)
+    if (Q_clip(gl_fontshadow->integer, 0, 2) > 0)
         flags |= UI_DROPSHADOW;
 
     draw_char(x, y, flags, c & 255, IMG_ForHandle(font));
@@ -388,7 +389,7 @@ int R_DrawString(int x, int y, int flags, size_t maxlen, const char *s, qhandle_
 {
     const image_t *image = IMG_ForHandle(font);
 
-    if (gl_fontshadow->integer > 0)
+    if (Q_clip(gl_fontshadow->integer, 0, 2) > 0)
         flags |= UI_DROPSHADOW;
 
     while (maxlen-- && *s) {
