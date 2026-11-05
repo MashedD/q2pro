@@ -334,6 +334,37 @@ if openal.found()
   client_src += [ 'src/client/sound/al.c', 'src/client/sound/qal.c' ]
   client_deps += openal.partial_dependency(compile_args: true, includes: true)
   config.set10('USE_OPENAL', true)
+
+  if get_option('qal-hard-linked')
+    config.set('QAL_HARD_LINKED', true)
+
+    if win32
+      # OpenAL Soft only builds with CMake, so it is compiled beforehand and
+      # linked from a prefix. See .ci/build-openal-windows.sh.
+      qal_static_prefix = get_option('qal-static-prefix')
+      if qal_static_prefix == ''
+        error('qal-hard-linked on Windows requires qal-static-prefix')
+      endif
+
+      client_deps += declare_dependency(
+        compile_args: [
+          '-DAL_LIBTYPE_STATIC',
+          '-I' + qal_static_prefix / 'include',
+        ],
+        link_args: [
+          '-L' + qal_static_prefix / 'lib',
+          '-l:libOpenAL32.a',
+          # Name the archives so that the C++ runtime goes into the executable
+          # and no extra DLLs have to be shipped with it.
+          '-l:libstdc++.a',
+          '-l:libwinpthread.a',
+          '-lavrt',
+        ],
+      )
+    else
+      client_deps += openal
+    endif
+  endif
 endif
 
 # require FFmpeg >= 5.1.3
