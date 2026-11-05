@@ -44,6 +44,11 @@ env:
     -Dwindows-crash-dumps=disabled
     -Dwrap_mode=nofallback
 
+# A new push to a pull request replaces its older, unfinished run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     runs-on: ubuntu-24.04
@@ -67,9 +72,10 @@ jobs:
           key: ${{ hashFiles('subprojects/*.wrap') }}
 
       - name: Install dependencies
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64 nasm meson ninja-build
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y gcc-mingw-w64 nasm meson ninja-build
 
       - name: Build
         run: |
@@ -129,9 +135,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install dependencies
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y meson libsdl2-dev libopenal-dev \
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y meson libsdl2-dev libopenal-dev \
           libpng-dev libjpeg-dev zlib1g-dev mesa-common-dev \
           libcurl4-gnutls-dev libx11-dev libxi-dev \
           libwayland-dev wayland-protocols libdecor-0-dev

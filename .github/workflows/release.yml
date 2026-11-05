@@ -43,9 +43,10 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install dependencies
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y meson libsdl2-dev libopenal-dev \
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y meson libsdl2-dev libopenal-dev \
           libpng-dev libjpeg-dev zlib1g-dev mesa-common-dev \
           libcurl4-gnutls-dev libx11-dev libxi-dev \
           libwayland-dev wayland-protocols libdecor-0-dev
@@ -71,9 +72,10 @@ jobs:
           path: subprojects/packagecache
           key: ${{ hashFiles('subprojects/*.wrap') }}
       - name: Install dependencies
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64 g++-mingw-w64 cmake dos2unix nasm \
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y gcc-mingw-w64 g++-mingw-w64 cmake dos2unix nasm \
           meson ninja-build zip
       - run: ./.ci/package-windows.sh ${{ matrix.arch }} dist
         env:
