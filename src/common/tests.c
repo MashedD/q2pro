@@ -83,7 +83,10 @@ static void Com_Freeze_f(void)
 
 static q_noinline uint32_t *null_ptr(void)
 {
-    return (uint32_t *)1024;
+    // volatile hides the constant from GCC, which otherwise rejects this
+    // deliberate crash with -Warray-bounds under -Werror
+    volatile uintptr_t addr = 1024;
+    return (uint32_t *)addr;
 }
 
 // test crash dumps and NX support
