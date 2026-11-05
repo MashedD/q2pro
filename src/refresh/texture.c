@@ -995,15 +995,15 @@ static void gl_gamma_changed(cvar_t *self)
         vid->update_gamma(gammatable);
 }
 
-static const byte dottexture[8][8] = {
-    {0, 0, 0, 0, 0, 0, 0, 0},
-    {0, 0, 1, 1, 0, 0, 0, 0},
-    {0, 1, 1, 1, 1, 0, 0, 0},
-    {0, 1, 1, 1, 1, 0, 0, 0},
-    {0, 0, 1, 1, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0, 0, 0, 0},
+static const byte checktexture[8][8] = {
+    {0, 0, 0, 0, 1, 1, 1, 1},
+    {0, 0, 0, 0, 1, 1, 1, 1},
+    {0, 0, 0, 0, 1, 1, 1, 1},
+    {0, 0, 0, 0, 1, 1, 1, 1},
+    {1, 1, 1, 1, 0, 0, 0, 0},
+    {1, 1, 1, 1, 0, 0, 0, 0},
+    {1, 1, 1, 1, 0, 0, 0, 0},
+    {1, 1, 1, 1, 0, 0, 0, 0},
 };
 
 static void GL_InitDefaultTexture(void)
@@ -1016,9 +1016,15 @@ static void GL_InitDefaultTexture(void)
     dst = pixels;
     for (i = 0; i < 8; i++) {
         for (j = 0; j < 8; j++) {
-            dst[0] = dottexture[i & 3][j & 3] * 255;
-            dst[1] = 0;
-            dst[2] = 0;
+            if (checktexture[i][j]) {
+                dst[0] = 255;
+                dst[1] = 0;
+                dst[2] = 255;
+            } else {
+                dst[0] = 0;
+                dst[1] = 0;
+                dst[2] = 0;
+            }
             dst[3] = 255;
             dst += 4;
         }
