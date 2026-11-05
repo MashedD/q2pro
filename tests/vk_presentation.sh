@@ -198,9 +198,9 @@ require_contract 'generated_fps_from_frame_generation' "$repo_dir/tests/fsr_benc
 require_contract 'additional_present_intervals_us' "$repo_dir/tests/fsr_benchmark.py"
 require_contract 'async_workloads=%s' "$repo_dir/src/refresh/vk_backend.c"
 require_contract 'async_fallback=%s' "$repo_dir/src/refresh/vk_backend.c"
-require_contract 'Actively changes internal render resolution' \
+require_contract 'Adjusts internal resolution toward the target GPU frame time' \
     "$repo_dir/assets/baseq2/q2pro.menu"
-require_contract 'FSR3 compute-only frame generation' \
+require_contract 'compute-only frame generation' \
     "$repo_dir/assets/baseq2/q2pro.menu"
 require_contract 'r_fsr_frame_generation_compute_only' \
     "$repo_dir/assets/baseq2/q2pro.menu"
