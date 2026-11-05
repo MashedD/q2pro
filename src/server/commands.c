@@ -245,6 +245,7 @@ another level:
 
 static void abort_func(void *arg)
 {
+    SV_SetPendingMap(NULL);
     CM_FreeMap(arg);
 }
 
@@ -277,8 +278,10 @@ static void SV_Map(bool restart)
     SV_AutoSaveBegin(&cmd);
 
     // any error will drop from this point
+    SV_SetPendingMap(&cmd.cm);
     if (sv.state < ss_game || sv.state == ss_broadcast || restart)
         SV_InitGame(MVD_SPAWN_DISABLED);    // the game is just starting
+    SV_SetPendingMap(NULL);
 
     // clear pending CM
     Com_AbortFunc(NULL, NULL);

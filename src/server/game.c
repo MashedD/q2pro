@@ -22,6 +22,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 const game_export_t     *ge;
 const game_export_ex_t  *gex;
 
+static const cm_t       *pending_map_cm;
+
 static void PF_configstring(int index, const char *val);
 
 /*
@@ -343,6 +345,8 @@ Also sets mins and maxs for inline bmodels
 */
 static void PF_setmodel(edict_t *ent, const char *name)
 {
+    const cm_t *cm;
+
     if (!ent || !name)
         Com_Error(ERR_DROP, "PF_setmodel: NULL");
 
@@ -350,11 +354,17 @@ static void PF_setmodel(edict_t *ent, const char *name)
 
 // if it is an inline model, get the size information for it
     if (name[0] == '*') {
-        const mmodel_t *mod = CM_InlineModel(&sv.cm, name);
+        cm = sv.cm.cache ? &sv.cm : pending_map_cm;
+        const mmodel_t *mod = CM_InlineModel(cm, name);
         VectorCopy(mod->mins, ent->mins);
         VectorCopy(mod->maxs, ent->maxs);
         PF_LinkEdict(ent);
     }
+}
+
+void SV_SetPendingMap(const cm_t *cm)
+{
+    pending_map_cm = cm;
 }
 
 /*
