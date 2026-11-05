@@ -670,24 +670,12 @@ void GL_Flush3D(void)
 
     if (state & GLS_DEFAULT_SKY) {
         GL_BindCubemap(tess.texnum[TMU_TEXTURE]);
-    } else if (qglBindTextures) {
-#if USE_DEBUG
-        if (q_unlikely(gl_nobind->integer))
-            tess.texnum[TMU_TEXTURE] = TEXNUM_DEFAULT;
-#endif
-        int count = 0;
-        for (int i = 0; i < MAX_TMUS && tess.texnum[i]; i++) {
-            if (gls.texnums[i] != tess.texnum[i]) {
-                gls.texnums[i] = tess.texnum[i];
-                count = i + 1;
-                c.texSwitches++;
-            }
-        }
-        if (count)
-            qglBindTextures(0, count, tess.texnum);
     } else {
-        for (int i = 0; i < MAX_TMUS && tess.texnum[i]; i++)
+        for (int i = 0; i < MAX_TMUS; i++) {
+            if (!tess.texnum[i])
+                continue;
             GL_BindTexture(i, tess.texnum[i]);
+        }
     }
 
     GL_DrawIndexed(SHOWTRIS_WORLD);
