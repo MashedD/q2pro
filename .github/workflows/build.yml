@@ -47,13 +47,14 @@ env:
 jobs:
   mingw:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
       matrix:
         arch: ["i686", "x86_64"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: subprojects/packagecache
           key: ${{ hashFiles('subprojects/*.wrap') }}
@@ -71,13 +72,14 @@ jobs:
 
   msvc:
     runs-on: windows-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         arch: ["x86", "x64"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: subprojects/packagecache
           key: ${{ hashFiles('subprojects/*.wrap') }}
@@ -98,11 +100,12 @@ jobs:
 
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         cc: [gcc, clang]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         run: |
@@ -121,8 +124,9 @@ jobs:
 
   macos:
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         run: |
@@ -136,9 +140,9 @@ jobs:
 
   freebsd:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build
         uses: cross-platform-actions/action@v0.29.0
