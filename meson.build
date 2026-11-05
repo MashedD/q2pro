@@ -457,7 +457,14 @@ shared_library('game' + cpu, game_src,
   override_options:      get_option('game-build-options'),
 )
 
-config.set('REVISION',            meson.project_version().substring(1).split('~')[0].to_int())
+# Windows version resources take four numbers, so reduce the version to those.
+if meson.project_version().startswith('v')
+  version_numbers = meson.project_version().substring(1).split('-')[0].split('.') + ['0']
+else
+  version_numbers = [meson.project_version().substring(1).split('~')[0], '0', '0', '0']
+endif
+
+config.set('VERSION_NUMBERS',     ','.join(version_numbers))
 config.set_quoted('VERSION',      meson.project_version())
 config.set_quoted('CPUSTRING',    cpu)
 config.set_quoted('BUILDSTRING',  sys)
