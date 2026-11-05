@@ -82,6 +82,9 @@ Both should be patched to 3.20 point release.
 Run `sudo ninja -C builddir install` to install Q2PRO system-wide into
 configured prefix (`/usr/local` by default).
 
+**NOTE:** If not using `ninja install`, copy `src/client/ui/q2pro.menu` into your
+`baseq2` folder. In-game menus need this file.
+
 Copy `baseq2/pak*.pak` files and `baseq2/players` directory from unpacked
 Quake 2 data into `/usr/local/share/q2pro/baseq2` to complete the
 installation.
