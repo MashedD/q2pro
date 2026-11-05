@@ -1135,6 +1135,13 @@ in_grab::
       - 1 — normal grabbing policy
       - 2 — smart grabbing policy
 
+m_r1q2_mouse::
+    Enables R1Q2-style mouse movement logic. Mouse deltas are scaled only by
+    ‘sensitivity’ after optional ‘m_filter’ smoothing, bypassing Q2PRO mouse
+    acceleration and automatic FOV sensitivity scaling. When enabled,
+    ‘lookstrafe’ also follows R1Q2 behavior and strafes only while ‘+mlook’ is
+    held. Default value is 0 (disabled).
+
 m_autosens::
     Enables automatic scaling of mouse sensitivity proportional to the current
     player field of view. Values between 90 and 179 specify the default FOV
