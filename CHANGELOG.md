@@ -12,3 +12,33 @@ All notable changes to this fork are documented here. The format follows
 - `qal-hard-linked` build option to link OpenAL directly. The Windows packages use
   it, so the OpenAL sound engine (`s_enable 2`) works without installing OpenAL.
 - `al_reverb` for reverb on positional sounds, and an HRTF option in the sound menu.
+- `config-file` build option to name the saved configuration file. Release
+  packages use `q2config.cfg`; the default stays `config.cfg`.
+- `ui_hide_bots` hides WallFly and q2stats bots in the server browser.
+- `crosshair_paused` hides the crosshair while the game is paused.
+- Menus scroll with the keyboard and mouse when they do not fit on the screen,
+  and more common settings are reachable from the menus.
+- `m_r1q2_mouse`, `cl_movement_feel_mode` and `cl_step_smoothing_mode` for
+  R1Q2-style mouse handling and movement feel.
+- Missing textures are drawn as a checkerboard so that they are easy to spot.
+- `r_lava_glowmaps` controls glowmaps on lava, including lava without a lightmap.
+- `gl_intensity_2D` brightens the HUD, menus and console in OpenGL.
+- `cl_itemhighlight`, `cl_weaponhighlight`, `cl_ammohighlight`,
+  `cl_playerhighlight` and `cl_itemhighlight_glow` for optional color highlights.
+- `cl_projectiletrail_color` colors rocket and grenade trails.
+- `cl_disable_self_blood` hides blood from hits on your own player.
+
+All new options are off or keep upstream's behaviour by default.
+
+### Fixed
+
+- `scr_scale` no longer changes the crosshair size.
+- Text lines leave room for font shadows.
+- `exec` has its own loop limit, so a config that chains several files no longer
+  fails with "Infinite loop avoided" when nothing is looping.
+- Demos that begin with a frame based on one that was never recorded now play.
+- A Windows assertion when a game such as OpenTDM sets inline models while a map
+  is still loading.
+- Broken textures on OpenGL drivers that mishandle direct and multi-bind texture
+  calls.
+- A missing `q2pro.menu` is reported instead of failing silently.
