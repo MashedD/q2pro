@@ -715,6 +715,11 @@ static const image_t *GL_TextureAnimation(const mtexinfo_t *tex)
     return tex->image;
 }
 
+static bool GL_IsLavaFace(const mface_t *surf)
+{
+    return strstr(surf->texinfo->name, "lava");
+}
+
 static void GL_DrawFace(const mface_t *surf)
 {
     const image_t *image = GL_TextureAnimation(surf->texinfo);
@@ -728,7 +733,8 @@ static void GL_DrawFace(const mface_t *surf)
     texnum[TMU_TEXTURE] = image->texnum;
     if (q_likely(surf->light_m)) {
         texnum[TMU_LIGHTMAP] = lm.texnums[surf->light_m - lm.lightmaps];
-        texnum[TMU_GLOWMAP ] = image->texnum2;
+        if (r_lava_glowmaps->integer || !GL_IsLavaFace(surf))
+            texnum[TMU_GLOWMAP] = image->texnum2;
 
         if (q_unlikely(gl_lightmap->integer)) {
             texnum[TMU_TEXTURE] = TEXNUM_WHITE;
@@ -741,6 +747,13 @@ static void GL_DrawFace(const mface_t *surf)
             texnum[TMU_TEXTURE ] = TEXNUM_BLACK;
             state &= ~GLS_CLASSIC_SKY;
         }
+    } else if (q_unlikely(r_lava_glowmaps->integer > 1) && image->texnum2 &&
+               !gl_lightmap->integer && GL_IsLavaFace(surf)) {
+        // Lava is normally a warp surface with no lightmap, and the shader
+        // only reads a glowmap when a lightmap is bound. A white lightmap
+        // lets the glowmap through, so it also picks up gl_modulate.
+        texnum[TMU_LIGHTMAP] = TEXNUM_WHITE;
+        texnum[TMU_GLOWMAP ] = image->texnum2;
     }
 
     if (memcmp(tess.texnum, texnum, sizeof(texnum)) ||
