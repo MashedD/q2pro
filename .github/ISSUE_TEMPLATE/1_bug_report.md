@@ -9,9 +9,9 @@ assignees: ''
 
 ### Before reporting bugs
 
-Make sure the bug is reproducible with latest Q2PRO version. If you compile
-Q2PRO yourself, update to the latest version from git master. If you are using
-prebuilt Windows binaries, update to the latest nightly build.
+Make sure the bug is reproducible with the latest version. If you compile Q2PRO
+yourself, update to the latest version from git master. If you are using prebuilt
+binaries, update to the latest release.
 
 ### Important information
 
