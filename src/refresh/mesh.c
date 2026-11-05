@@ -689,6 +689,9 @@ static void draw_alias_mesh(const uint16_t *indices, int num_indices,
         state |= meshbits;
     else if (dotshading)
         state |= GLS_SHADE_SMOOTH;
+    if ((glr.ent->flags & RF_SKINTINT) &&
+        !(glr.ent->flags & RF_SHELL_MASK))
+        state |= GLS_SKINTINT;
 
     if (glr.ent->flags & RF_TRANSLUCENT)
         state |= GLS_BLEND_BLEND | GLS_DEPTHMASK_FALSE;
@@ -971,6 +974,8 @@ void GL_DrawAliasModel(const model_t *model)
 
     VectorCopy(ent->origin, origin);
 
+    buffer = model->buffers[0];
+
     // cull the shadow
     drawshadow = cull_shadow(model);
 
@@ -999,7 +1004,13 @@ void GL_DrawAliasModel(const model_t *model)
         shellscale = (ent->flags & RF_NOSHELLSCALE) ? 0 :
             (ent->flags & RF_WEAPONMODEL) ? WEAPONSHELL_SCALE : POWERSUIT_SCALE;
 
-    buffer = model->buffers[0];
+    // only tinted models read this, so leave the uniform block alone otherwise
+    if ((ent->flags & RF_SKINTINT) && !(ent->flags & RF_SHELL_MASK)) {
+        VectorScale(ent->skin_tint, SKINTINT_BRIGHTNESS, gls.u_block.skin_tint);
+        gls.u_block.skin_tint[3] = 1.0f;
+        gls.u_block_dirty = true;
+    }
+
     GL_BindBuffer(GL_ARRAY_BUFFER, model->buffers[0]);
     GL_BindBuffer(GL_ELEMENT_ARRAY_BUFFER, model->buffers[1]);
 

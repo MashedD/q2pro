@@ -33,6 +33,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define RF_NOBLOOM          BIT_ULL(33)
 #define RF_NOSHELLSCALE     BIT_ULL(34)
 #define RF_BLOOM_ONLY       BIT_ULL(35)
+#define RF_SKINTINT         BIT_ULL(36)
+#define SKINTINT_BRIGHTNESS 1.25f
 
 #define RF_SHELL_MASK       (RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE | \
                              RF_SHELL_DOUBLE | RF_SHELL_HALF_DAM | RF_SHELL_LITE_GREEN)
@@ -64,6 +66,7 @@ typedef struct entity_s {
 
     float   alpha;                  // ignore if RF_TRANSLUCENT isn't set
     color_t rgba;
+    vec3_t  skin_tint;     // RGB multiplier for the alias skin when RF_SKINTINT is set
 
     uint64_t    flags;
 
