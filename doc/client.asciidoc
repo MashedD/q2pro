@@ -1276,6 +1276,10 @@ ui_pingrate::
     second. Default value is 0, which estimates the default pinging rate based
     on ‘rate’ client variable.
 
+ui_hide_bots::
+    Hides the `WallFly[BZZZ]` and `q2stats[BZZZ]` bots from server browser player
+    lists and player counts. Default value is 0 (shown).
+
 com_time_format::
     Time format used by ‘com_time’ macro. Default value is "%H.%M" on Win32 and
     "%H:%M" on UNIX. See strftime(3) for syntax description.
