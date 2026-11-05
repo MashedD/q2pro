@@ -11,3 +11,4 @@ All notable changes to this fork are documented here. The format follows
 - Versioned release packages for Linux and Windows, built by CI.
 - `qal-hard-linked` build option to link OpenAL directly. The Windows packages use
   it, so the OpenAL sound engine (`s_enable 2`) works without installing OpenAL.
+- `al_reverb` for reverb on positional sounds, and an HRTF option in the sound menu.
