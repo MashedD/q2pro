@@ -68,6 +68,7 @@ begin video
     //title "Video Setup"
     banner m_banner_video
     values "video mode" vid_fullscreen windowed $$vid_modelist
+    field --numeric --width 4 "field of view" fov
     values "fov scaling" cl_adjustfov vert- hor+
     toggle "vertical sync" gl_swapinterval
     pairs "anti-aliasing" gl_multisamples no 0 "2x MSAA" 2 "4x MSAA" 4 "8x MSAA" 8
@@ -82,9 +83,15 @@ begin video
     pairs "anisotropic filter" gl_anisotropy no 1 2x 2 4x 4 8x 8 16x 16
     range "texture saturation" gl_saturation 0 1
     pairs "texture intensity" intensity 1x 1 2x 2 3x 3
+    range "2D intensity" gl_intensity_2D 1 5 0.1
     range "lightmap saturation" gl_coloredlightmaps 0 1
     range "lightmap brightness" gl_brightness 0 0.3
     values "rendering backend" gl_shaders legacy shaders
+    toggle "draw sky" gl_drawsky
+    toggle "gibs" cl_gibs
+    range "modulate" gl_modulate 1 5
+    range "modulate world" gl_modulate_world 1 5
+    range "modulate entities" gl_modulate_entities 1 5
 end
 
 begin options
@@ -113,7 +120,7 @@ begin sound
     toggle "underwater effect" s_underwater
     values "HRTF mixing" al_hrtf "off" "default" "on"
     pairs "reverb" al_reverb "off" 0 "light" 1 "strong" 2
-    values "ambient sounds" s_ambient "no" "yes" "only player's own"
+    values "ambient sounds" s_ambient "no" "yes" "visible entities" "player's own"
     values "chat beep" cl_chat_sound "disabled" "default" "alternative"
 end
 
@@ -156,7 +163,7 @@ end
 begin crosshair
     title "Crosshair Setup"
     values "crosshair type" crosshair none cross dot angle
-    pairs "crosshair scale" ch_scale 0.5x 0.5 1x 1 2x 2
+    pairs "crosshair scale" ch_scale 0.5x 0.5 1x 1 2x 2 4x 4 5x 5
     toggle "color by health" ch_health
     range "red channel" ch_red 0 1
     range "green channel" ch_green 0 1
@@ -171,9 +178,9 @@ begin screen
     values "demo bar" scr_demobar no yes verbose
     range "HUD opacity" scr_alpha 0 1
     range "console opacity" con_alpha 0 1
-    pairs "HUD scale" scr_scale auto 0 1x 1 2x 2 4x 4
-    pairs "console scale" con_scale auto 0 1x 1 2x 2 4x 4
-    pairs "menu scale" ui_scale auto 0 1x 1 2x 2 4x 4
+    pairs "HUD scale" scr_scale auto 0 1x 1 2x 2 4x 4 5x 5
+    pairs "console scale" con_scale auto 0 1x 1 2x 2 4x 4 5x 5
+    pairs "menu scale" ui_scale auto 0 1x 1 2x 2 4x 4 5x 5
     blank
     action --align "crosshair setup..." pushmenu crosshair
 end
