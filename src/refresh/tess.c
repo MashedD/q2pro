@@ -37,6 +37,10 @@ void GL_Flush2D(void)
     if (bits & GLS_BLEND_BLEND)
         bits &= ~GLS_ALPHATEST_ENABLE;
 
+    // keep the stock drawing path unless the user changed the intensity
+    if (q_unlikely(gl_intensity_2D->value != 1.0f))
+        bits |= GLS_INTENSITY_2D;
+
     Scrap_Upload();
 
     GL_BindTexture(TMU_TEXTURE, tess.texnum[TMU_TEXTURE]);

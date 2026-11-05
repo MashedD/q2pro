@@ -108,6 +108,9 @@ typedef struct menuFrameWork_s {
     int mins[2];
     int maxs[2];
 
+    int scrollOffset;
+    int maxVisible;
+
     qhandle_t banner;
     vrect_t banner_rc;
 
