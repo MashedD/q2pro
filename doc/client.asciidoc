@@ -281,7 +281,7 @@ cl_noglow::
 
 cl_itemhighlight::
     Adds colored tint to pickup items, excluding weapons and ammo. Health is
-    green, armor is cyan, and powerups are magenta.
+    pink, each armor type has its own color, and powerups are magenta.
     Default value is 0 (disabled).
 
 cl_weaponhighlight::
@@ -296,6 +296,25 @@ cl_ammohighlight::
 cl_playerhighlight::
     Adds colored tint to player models. Male models are green and female
     models are cyan/teal. Default value is 0 (disabled).
+
+cl_itemtint::
+    Recolors the skins of pickup items instead of adding a shell over them, in
+    the same colors as the highlights. This also covers ammo. Only effective
+    if ‘gl_shaders’ is enabled. Default value is 0 (disabled).
+
+cl_weapontint::
+    Recolors the skins of weapon pickups, of weapons held by players and of
+    your own view weapon. Only effective if ‘gl_shaders’ is enabled. Default
+    value is 0 (disabled).
+
+cl_ammotint::
+    Recolors the skins of ammo pickups only. Only effective if ‘gl_shaders’ is
+    enabled. Default value is 0 (disabled).
+
+cl_playertint::
+    Recolors the skins of player models: male models are white, female models
+    are green and other models are amber. Only effective if ‘gl_shaders’ is
+    enabled. Default value is 0 (disabled).
 
 cl_itemhighlight_glow::
     Controls bloom intensity for highlight tint shells. This
