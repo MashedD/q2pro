@@ -70,6 +70,16 @@ jobs:
           ${{ env.MESON_ARGS }} ${{ env.MESON_ARGS_WIN }} builddir
           meson compile -C builddir
 
+      - uses: actions/upload-artifact@v7
+        with:
+          name: q2pro-mingw-${{ matrix.arch }}
+          path: |
+            builddir/q2pro.exe
+            builddir/q2proded.exe
+            builddir/*.dll
+          if-no-files-found: error
+          retention-days: 30
+
   msvc:
     runs-on: windows-latest
     timeout-minutes: 30
@@ -121,6 +131,16 @@ jobs:
           meson compile -C builddir
         env:
           CC: ${{ matrix.cc }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: q2pro-linux-${{ matrix.cc }}
+          path: |
+            builddir/q2pro
+            builddir/q2proded
+            builddir/*.so
+          if-no-files-found: error
+          retention-days: 30
 
   macos:
     runs-on: macos-latest
