@@ -118,6 +118,9 @@ static q2_fsr3_context_t *q2_fsr3_active_context(void)
     return context;
 }
 
+/* A Quake unit is about one inch. */
+static constexpr float q2_fsr3_meters_per_unit = 0.0254f;
+
 struct q2_fsr3_dispatch_inputs {
     float jitter_x;
     float jitter_y;
@@ -1078,7 +1081,7 @@ extern "C" bool Q2_FSR3_Dispatch(
         description.cameraNear = inputs.camera_near;
         description.cameraFar = inputs.camera_far;
         description.cameraFovAngleVertical = inputs.vertical_fov_radians;
-        description.viewSpaceToMetersFactor = 1.0f;
+        description.viewSpaceToMetersFactor = q2_fsr3_meters_per_unit;
         description.frameID = context->current_frame_id;
         context->last_error = ffxFsr3ContextDispatchUpscale(
             &context->full_context, &description);
@@ -1115,7 +1118,7 @@ extern "C" bool Q2_FSR3_Dispatch(
         description.cameraNear = inputs.camera_near;
         description.cameraFar = inputs.camera_far;
         description.cameraFovAngleVertical = inputs.vertical_fov_radians;
-        description.viewSpaceToMetersFactor = 1.0f;
+        description.viewSpaceToMetersFactor = q2_fsr3_meters_per_unit;
         context->last_error = ffxFsr3UpscalerContextDispatch(
             &context->context, &description);
     }
@@ -1174,7 +1177,7 @@ extern "C" bool Q2_FSR3_PrepareFrameGeneration(
     description.cameraNear = inputs.camera_near;
     description.cameraFar = inputs.camera_far;
     description.cameraFovAngleVertical = inputs.vertical_fov_radians;
-    description.viewSpaceToMetersFactor = 1.0f;
+    description.viewSpaceToMetersFactor = q2_fsr3_meters_per_unit;
     description.frameID = context->current_frame_id;
     const FfxErrorCode error = ffxFsr3ContextDispatchFrameGenerationPrepare(
         &context->full_context, &description);
