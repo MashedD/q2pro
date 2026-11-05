@@ -80,6 +80,7 @@ static cvar_t   *scr_font;
 static cvar_t   *scr_scale;
 
 static cvar_t   *scr_crosshair;
+static cvar_t   *scr_crosshair_paused;
 
 static cvar_t   *scr_chathud;
 static cvar_t   *scr_chathud_lines;
@@ -1412,6 +1413,7 @@ void SCR_Init(void)
     scr_scale->changed = scr_scale_changed;
     scr_crosshair = Cvar_Get("crosshair", "0", CVAR_ARCHIVE);
     scr_crosshair->changed = scr_crosshair_changed;
+    scr_crosshair_paused = Cvar_Get("crosshair_paused", "1", 0);
 
     scr_netgraph = Cvar_Get("netgraph", "0", 0);
     scr_timegraph = Cvar_Get("timegraph", "0", 0);
@@ -2177,8 +2179,8 @@ static void SCR_DrawHitMarker(void)
     float frac = (float)(cls.realtime - cl.hit_marker_time) / scr_hit_marker_time->integer;
     float alpha = 1.0f - (frac * frac);
 
-    int x = (scr.hud_width - scr.hit_marker_width) / 2;
-    int y = (scr.hud_height - scr.hit_marker_height) / 2;
+    int x = (r_config.width - scr.hit_marker_width) / 2;
+    int y = (r_config.height - scr.hit_marker_height) / 2;
 
     R_SetColor(MakeColor(255, 0, 0, alpha * 255));
 
@@ -2197,9 +2199,11 @@ static void SCR_DrawCrosshair(void)
         return;
     if (cl.frame.ps.stats[STAT_LAYOUTS] & (LAYOUTS_HIDE_HUD | LAYOUTS_HIDE_CROSSHAIR))
         return;
+    if (!scr_crosshair_paused->integer && sv_paused->integer && cl_paused->integer)
+        return;
 
-    x = (scr.hud_width - scr.crosshair_width) / 2;
-    y = (scr.hud_height - scr.crosshair_height) / 2;
+    x = (r_config.width - scr.crosshair_width) / 2;
+    y = (r_config.height - scr.crosshair_height) / 2;
 
     R_SetColor(scr.crosshair_color.u32);
 
@@ -2251,10 +2255,7 @@ static void SCR_Draw2D(void)
     scr.hud_height = Q_rint(scr.hud_height * scr.hud_scale);
     scr.hud_width = Q_rint(scr.hud_width * scr.hud_scale);
 
-    // crosshair has its own color and alpha
-    SCR_DrawCrosshair();
-
-    // the rest of 2D elements share common alpha
+    // the 2D elements share common alpha
     R_ClearColor();
     R_SetAlpha(Cvar_ClampValue(scr_alpha, 0, 1));
 
@@ -2291,6 +2292,12 @@ static void SCR_Draw2D(void)
 #endif
 
     R_SetScale(1.0f);
+
+    // the crosshair has its own color, alpha and scale (ch_scale)
+    SCR_DrawCrosshair();
+
+    // restore the default color for the console and menus drawn next
+    R_ClearColor();
 }
 
 static void SCR_DrawActive(void)
