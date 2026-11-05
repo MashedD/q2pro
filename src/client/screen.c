@@ -149,7 +149,7 @@ SCR_DrawStringMulti
 static void SCR_DrawStringMulti(int x, int y, int flags, size_t maxlen,
                                 const char *s, qhandle_t font)
 {
-    char    *p;
+    const char *p;
     size_t  len;
     int     last_x = x;
     int     last_y = y;
