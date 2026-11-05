@@ -324,6 +324,7 @@ char *SV_GetSaveInfo(const char *dir)
 
 static void abort_func(void *arg)
 {
+    SV_SetPendingMap(NULL);
     CM_FreeMap(arg);
 }
 
@@ -385,7 +386,9 @@ static int read_server_file(void)
     }
 
     // start a new game fresh with new cvars
+    SV_SetPendingMap(&cmd.cm);
     SV_InitGame(MVD_SPAWN_DISABLED);
+    SV_SetPendingMap(NULL);
 
     // error out immediately if game doesn't support safe savegames
     if (!have_enhanced_savegames())

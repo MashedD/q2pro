@@ -774,6 +774,7 @@ extern const game_export_ex_t   *gex;
 
 void SV_InitGameProgs(void);
 void SV_ShutdownGameProgs(void);
+void SV_SetPendingMap(const cm_t *cm);
 
 void PF_Pmove(void *pm);
 
