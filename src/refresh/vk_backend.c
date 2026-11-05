@@ -283,6 +283,19 @@ typedef struct {
     uint32_t mip_levels;
 } vk_texture_t;
 
+/* Per-frame HUD-less copies of the upscaled scene for the frame-generation
+ * provider. Interpolation of frame N can still be running on the async queue
+ * while frame N+1 overwrites the upscaler output, so it reads one of these
+ * instead. Two slots suffice: the SDK's queuePresent blocks until interpolation
+ * N has completed before present N+1 returns, and slot N is only rewritten by
+ * frame N+2. Matches the SDK's own frameID & 1 per-frame state. */
+#define VK_FSR_HUDLESS_SLOTS 2
+typedef struct {
+    vk_texture_t textures[VK_FSR_HUDLESS_SLOTS];
+    VkImageLayout layouts[VK_FSR_HUDLESS_SLOTS];
+    VkFramebuffer framebuffers[VK_FSR_HUDLESS_SLOTS];
+} vk_fsr_hudless_ring_t;
+
 typedef struct {
     VkBuffer buffer;
     VkDeviceMemory memory;
@@ -332,6 +345,7 @@ typedef struct {
     vk_texture_t ssr_resolve_texture;
     vk_texture_t fsr_output_texture;
     vk_texture_t fsr_frame_generation_texture;
+    vk_fsr_hudless_ring_t fsr_hudless;
     vk_texture_t fsr_pause_texture;
     vk_texture_t fsr_motion_texture;
     vk_texture_t fsr_reactive_texture;
@@ -1206,6 +1220,7 @@ typedef struct {
     vk_texture_t ssr_resolve_texture;
     vk_texture_t fsr_output_texture;
     vk_texture_t fsr_frame_generation_texture;
+    vk_fsr_hudless_ring_t fsr_hudless;
     vk_texture_t fsr_pause_texture;
     vk_texture_t fsr_motion_texture;
     vk_texture_t fsr_reactive_texture;
@@ -1863,8 +1878,8 @@ static bool vk_fsr_frame_generation_async_enabled(void)
 {
     /* The provider keeps replacement buffers alive until its timeline
      * semaphores allow them to be reused. Async interpolation is also safe
-     * because the async configuration does not bind the single renderer-owned
-     * HUD-less target (see vk_configure_fsr3_provider_frame_generation_mode).
+     * because it reads a per-frame copy of the HUD-less target (see
+     * vk_fsr_hudless_ring_t), never the upscaler output being rewritten.
      * Putting interpolation on the game queue serializes optical flow with
      * rendering and can cut the source rate roughly in half. */
     return vk.provider_async_compute_available &&
@@ -4362,9 +4377,11 @@ static void vk_update_texture_descriptor(vk_texture_t *texture)
     vk_update_texture_descriptor_with_sampler(texture, vk.sampler);
 }
 
-static bool vk_create_image_target(vk_texture_t *texture, uint32_t width,
-                                   uint32_t height, VkFormat format,
-                                   VkImageUsageFlags usage)
+static bool vk_create_shared_image_target(vk_texture_t *texture, uint32_t width,
+                                          uint32_t height, VkFormat format,
+                                          VkImageUsageFlags usage,
+                                          uint32_t family_count,
+                                          const uint32_t *families)
 {
     vk_texture_t target = { 0 };
     VkImageCreateInfo image_info = {
@@ -4377,7 +4394,10 @@ static bool vk_create_image_target(vk_texture_t *texture, uint32_t width,
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = usage,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .sharingMode = family_count > 1 ? VK_SHARING_MODE_CONCURRENT :
+                                          VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = family_count > 1 ? family_count : 0,
+        .pQueueFamilyIndices = family_count > 1 ? families : NULL,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
 
@@ -4460,6 +4480,14 @@ fail:
     return false;
 }
 
+static bool vk_create_image_target(vk_texture_t *texture, uint32_t width,
+                                   uint32_t height, VkFormat format,
+                                   VkImageUsageFlags usage)
+{
+    return vk_create_shared_image_target(texture, width, height, format, usage,
+                                         0, NULL);
+}
+
 static bool vk_create_color_target(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, VkFormat format,
                                    VkImageUsageFlags extra_usage)
@@ -4480,6 +4508,44 @@ static bool vk_fsr_format_support(VkFormat format, VkFormatFeatureFlags required
     Com_WPrintf("Vulkan FSR3: %s format %d lacks optimal-tile features 0x%x\n",
                 name, format, missing);
     return false;
+}
+
+static void vk_destroy_fsr_hudless_ring_nowait(vk_fsr_hudless_ring_t *ring)
+{
+    for (uint32_t i = 0; i < VK_FSR_HUDLESS_SLOTS; i++) {
+        if (ring->framebuffers[i]) {
+            vk.DestroyFramebuffer(vk.device, ring->framebuffers[i], NULL);
+            ring->framebuffers[i] = VK_NULL_HANDLE;
+        }
+        vk_destroy_texture_resource_nowait(&ring->textures[i]);
+        ring->layouts[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+}
+
+static bool vk_create_fsr_hudless_ring(void)
+{
+    /* The async interpolation queue samples these images, usually from a
+     * different family than the renderer that fills them. */
+    const uint32_t families[2] = {
+        vk.queues.graphics_family, vk.provider_async_compute_queue_family
+    };
+    const uint32_t family_count = vk.provider_async_compute_available &&
+        families[0] != families[1] ? 2 : 0;
+
+    for (uint32_t i = 0; i < VK_FSR_HUDLESS_SLOTS; i++) {
+        if (!vk_create_shared_image_target(&vk.fsr_hudless.textures[i],
+                                           vk.swapchain_extent.width,
+                                           vk.swapchain_extent.height,
+                                           vk.fsr_output_format,
+                                           VK_IMAGE_USAGE_SAMPLED_BIT |
+                                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                           VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                                           family_count, families))
+            return false;
+        vk.fsr_hudless.layouts[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+    return true;
 }
 
 static void vk_reset_fsr_frame_generation_telemetry(void)
@@ -4592,6 +4658,7 @@ static void vk_destroy_fsr_resources_nowait(void)
     }
     vk_destroy_texture_resource_nowait(&vk.fsr_output_texture);
     vk_destroy_texture_resource_nowait(&vk.fsr_frame_generation_texture);
+    vk_destroy_fsr_hudless_ring_nowait(&vk.fsr_hudless);
     vk_destroy_texture_resource_nowait(&vk.fsr_pause_texture);
     vk_destroy_texture_resource_nowait(&vk.fsr_motion_texture);
     vk_destroy_texture_resource_nowait(&vk.fsr_reactive_texture);
@@ -4706,6 +4773,14 @@ static bool vk_create_fsr_resources(float scale_override)
                                 VK_IMAGE_USAGE_STORAGE_BIT |
                                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
         Com_WPrintf("Couldn't create Vulkan FSR3 frame-generation target: %s; rendering without frame generation\n",
+                    Com_GetLastError());
+        vk_destroy_fsr_resources_nowait();
+        return true;
+    }
+    if (frame_generation_requested &&
+        Q2_FSR3_FRAME_INTERPOLATION_PROVIDER_COMPILED &&
+        !vk_create_fsr_hudless_ring()) {
+        Com_WPrintf("Couldn't create Vulkan FSR3 HUD-less target: %s; rendering without frame generation\n",
                     Com_GetLastError());
         vk_destroy_fsr_resources_nowait();
         return true;
@@ -7809,6 +7884,7 @@ static void vk_internal_targets_take(vk_internal_targets_t *targets)
     VK_INTERNAL_TAKE(ssr_resolve_texture);
     VK_INTERNAL_TAKE(fsr_output_texture);
     VK_INTERNAL_TAKE(fsr_frame_generation_texture);
+    VK_INTERNAL_TAKE(fsr_hudless);
     VK_INTERNAL_TAKE(fsr_pause_texture);
     VK_INTERNAL_TAKE(fsr_motion_texture);
     VK_INTERNAL_TAKE(fsr_reactive_texture);
@@ -7862,6 +7938,7 @@ static void vk_internal_targets_put(vk_internal_targets_t *targets)
     VK_INTERNAL_PUT(ssr_resolve_texture);
     VK_INTERNAL_PUT(fsr_output_texture);
     VK_INTERNAL_PUT(fsr_frame_generation_texture);
+    VK_INTERNAL_PUT(fsr_hudless);
     VK_INTERNAL_PUT(fsr_pause_texture);
     VK_INTERNAL_PUT(fsr_motion_texture);
     VK_INTERNAL_PUT(fsr_reactive_texture);
@@ -7911,6 +7988,7 @@ static void vk_destroy_internal_targets_bundle_nowait(vk_internal_targets_t *tar
     }
     vk_destroy_texture_resource_nowait(&targets->fsr_output_texture);
     vk_destroy_texture_resource_nowait(&targets->fsr_frame_generation_texture);
+    vk_destroy_fsr_hudless_ring_nowait(&targets->fsr_hudless);
     vk_destroy_texture_resource_nowait(&targets->fsr_pause_texture);
     vk_destroy_texture_resource_nowait(&targets->fsr_motion_texture);
     vk_destroy_texture_resource_nowait(&targets->fsr_reactive_texture);
@@ -11043,20 +11121,21 @@ static bool vk_configure_fsr3_provider_frame_generation_mode(
     if (!enabled && !vk.fsr3_provider_frame_generation_enabled)
         return true;
 
-    /* HUDLessColor is the upscaled image for this frame. It is a single
-     * renderer target, so it cannot be sampled by an async interpolation
-     * dispatch while the next frame overwrites it. In the async case the
-     * provider's replacement backbuffer is the safe source instead. The
-     * graphics-queue path is ordered and can retain the HUD-less image. */
-    bool async_workloads = enabled && allow_async_workloads;
+    /* Both queues read this frame's HUD-less slot. Without one the SDK warps
+     * the HUD with the scene, because optical flow then sees the back buffer. */
+    const uint64_t frame_id = Q2_FSR3_GetCurrentFrameId(vk.fsr3);
+    const uint32_t slot = (uint32_t)(frame_id % VK_FSR_HUDLESS_SLOTS);
+    const vk_texture_t *hudless = enabled && vk.fsr_hudless.layouts[slot] ==
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ?
+        &vk.fsr_hudless.textures[slot] : NULL;
     if (!Q2_FSR3_ConfigureProvider(
             vk.fsr3, vk.fsr3_provider, enabled,
-            async_workloads,
-            Q2_FSR3_GetCurrentFrameId(vk.fsr3),
-            enabled && !async_workloads ? vk.fsr_output_texture.image : VK_NULL_HANDLE,
-            enabled && !async_workloads ? vk.fsr_output_format : VK_FORMAT_UNDEFINED,
-            enabled && !async_workloads ? vk.fsr_output_texture.width : 0,
-            enabled && !async_workloads ? vk.fsr_output_texture.height : 0))
+            enabled && allow_async_workloads,
+            frame_id,
+            hudless ? hudless->image : VK_NULL_HANDLE,
+            hudless ? vk.fsr_output_format : VK_FORMAT_UNDEFINED,
+            hudless ? hudless->width : 0,
+            hudless ? hudless->height : 0))
         return false;
 
     vk.fsr3_provider_frame_generation_enabled = enabled;
@@ -23232,6 +23311,95 @@ static bool vk_configure_fsr3_provider_for_present(void)
     return enabled && vk_configure_fsr3_provider_frame_generation(false);
 }
 
+/* Keep this image identical to the presented scene apart from the HUD: the SDK
+ * treats any remaining difference of about 10% as static HUD content. Screen
+ * tints are drawn after FSR, so they must be repeated here or the whole view
+ * would skip interpolation underwater and during damage or pickup flashes. */
+static void vk_draw_fsr_hudless_tint(VkCommandBuffer cmd, uint32_t slot)
+{
+    vk_texture_t *texture = &vk.fsr_hudless.textures[slot];
+    VkFramebuffer *framebuffer = &vk.fsr_hudless.framebuffers[slot];
+
+    if (!vk.fd_valid || !vk_polyblend || !vk_polyblend->integer ||
+        (!vk.fd.screen_blend[3] && !vk.fd.damage_blend[3]) ||
+        !vk.presentation_load_pass)
+        return;
+
+    if (!*framebuffer) {
+        VkFramebufferCreateInfo create_info = {
+            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .renderPass = vk.presentation_load_pass,
+            .attachmentCount = 1,
+            .pAttachments = &texture->view,
+            .width = texture->width,
+            .height = texture->height,
+            .layers = 1,
+        };
+        VkResult result = vk.CreateFramebuffer(vk.device, &create_info, NULL,
+                                               framebuffer);
+        if (result != VK_SUCCESS) {
+            *framebuffer = VK_NULL_HANDLE;
+            vk_fail_result("vkCreateFramebuffer(FSR HUD-less)", result);
+            return;
+        }
+    }
+
+    vk_transition_color_target(cmd, texture, &vk.fsr_hudless.layouts[slot],
+                               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                               VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    vk_begin_render_pass(vk.presentation_load_pass, *framebuffer,
+                         vk_frame_clear_color());
+    vk_draw_polyblend(&vk.fd);
+    vk.CmdEndRenderPass(cmd);
+    vk.render_pass_active = false;
+    vk_reset_bind_cache();
+}
+
+static void vk_capture_fsr_hudless(VkCommandBuffer cmd)
+{
+    const uint32_t slot = (uint32_t)(Q2_FSR3_GetCurrentFrameId(vk.fsr3) %
+                                     VK_FSR_HUDLESS_SLOTS);
+    vk_texture_t *texture = &vk.fsr_hudless.textures[slot];
+    VkImageLayout *layout = &vk.fsr_hudless.layouts[slot];
+
+    if (!texture->image)
+        return;
+
+    vk_transition_color_target(cmd, &vk.fsr_output_texture,
+                               &vk.fsr_output_layout,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               VK_ACCESS_TRANSFER_READ_BIT,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT);
+    /* The previous contents belong to frame N-2 and are fully overwritten. */
+    *layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk_transition_color_target(cmd, texture, layout,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               VK_ACCESS_TRANSFER_WRITE_BIT,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkImageCopy copy = {
+        .srcSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .layerCount = 1,
+        },
+        .dstSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .layerCount = 1,
+        },
+        .extent = { texture->width, texture->height, 1 },
+    };
+    vk.CmdCopyImage(cmd, vk.fsr_output_texture.image,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    1, &copy);
+    vk_draw_fsr_hudless_tint(cmd, slot);
+    vk_transition_color_target(cmd, texture, layout,
+                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                               VK_ACCESS_SHADER_READ_BIT,
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+}
+
 static bool vk_dispatch_fsr(void)
 {
     vk_texture_t *input_texture = vk.fsr_scene_direct ?
@@ -23517,14 +23685,16 @@ static bool vk_dispatch_fsr(void)
     vk_write_fsr_timestamp(VK_TIMESTAMP_PRESENT_BEGIN);
     bool presentation_copy = vk_copy_presentation_texture(
         cmd, presentation_texture, presentation_layout);
-    /* The SDK uses this scene-only output to separate the HUD from generated
-     * frames. It samples the image after the game submission completes. */
-    if (vk.fsr3_provider_active && frame_generation_prepared)
+    /* The SDK uses a scene-only copy to separate the HUD from generated
+     * frames. It samples the copy after the game submission completes. */
+    if (vk.fsr3_provider_active && frame_generation_prepared) {
+        vk_capture_fsr_hudless(cmd);
         vk_transition_color_target(cmd, &vk.fsr_output_texture,
                                    &vk.fsr_output_layout,
                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                    VK_ACCESS_SHADER_READ_BIT,
                                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    }
     /* The non-generated FSR output is also retained for pause reuse. The
      * frame-generation output is only the current presentation image. */
     if (!presentation_copy)
