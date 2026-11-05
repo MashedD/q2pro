@@ -806,7 +806,9 @@ r_fsr_frame_generation::
     generation reports an error or the
     Vulkan device is lost, it is disabled for the current session and the
     renderer falls back to normal Vulkan rendering or FSR upscaling; the
-    archived cvar value is preserved. OpenGL ignores this cvar. Default value
+    archived cvar value is preserved. When vk_present_mode is unset and swap
+    interval is 0, mailbox presentation is preferred over immediate to avoid
+    tearing through generated frames. OpenGL ignores this cvar. Default value
     is 0.
 
 r_fsr_frame_generation_debug::

@@ -59,6 +59,28 @@ trial measured native at 928 microseconds and Quality FSR at 3373 microseconds,
 and correctly returned to native without changing the selected quality.
 FSR dispatch remains the dominant cost on this lightweight scene.
 
+## Runtime verification, 2026-11-05
+
+Linux, 1280x720 windowed, q2dm1 turning in place, Quality profile, isolated
+home directory. Covers the HUD-less ring, horizontal jitter sign and depth scale.
+
+- Async on and off: output submits were twice source submits, async stayed
+  active, no fallback after startup, no device loss or kernel GPU faults.
+- `r_fsr_frame_generation_debug` 1 and 2 ran, with output equal to source rate.
+- A temporary build forcing screen and damage tints ran on both queues without
+  errors. This exercised the tint path only; its image was not inspected.
+- Source rate against the previous build: 48.2 vs 49.6 fps with defaults, and
+  49.2 vs 49.5 fps with `cl_async 0; cl_maxfps 0`.
+
+Not established by these runs: HUD stability and overall image quality, which
+need viewing. No Vulkan validation layer was installed, so the ring's
+synchronization rests on reading the SDK's `queuePresent` and interpolation
+semaphore waits. Windows was neither built nor run.
+
+Open question: source stays near 50 fps with frame generation on both builds,
+with about 19.5 ms per frame blocked in present and about 5.5 ms of game GPU
+time. Interpolation GPU cost was not measured, so the cause is unconfirmed.
+
 ## Remaining validation limits
 
 Temporal diagnostics now identify the reset cause (`camera_cut`, `resize`,
