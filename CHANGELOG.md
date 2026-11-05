@@ -25,6 +25,8 @@ All notable changes to this fork are documented here. The format follows
 - `gl_intensity_2D` brightens the HUD, menus and console in OpenGL.
 - `cl_itemhighlight`, `cl_weaponhighlight`, `cl_ammohighlight`,
   `cl_playerhighlight` and `cl_itemhighlight_glow` for optional color highlights.
+- `cl_itemtint`, `cl_weapontint`, `cl_ammotint` and `cl_playertint` recolor model
+  skins in the OpenGL shader backend.
 - `cl_projectiletrail_color` colors rocket and grenade trails.
 - `cl_disable_self_blood` hides blood from hits on your own player.
 
@@ -42,3 +44,4 @@ All new options are off or keep upstream's behaviour by default.
 - Broken textures on OpenGL drivers that mishandle direct and multi-bind texture
   calls.
 - A missing `q2pro.menu` is reported instead of failing silently.
+- A game module crash on maps where an actor's target does not exist.
