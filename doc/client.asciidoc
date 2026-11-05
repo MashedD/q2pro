@@ -238,6 +238,18 @@ cl_disable_particles::
       - 16 — blood splashes
       - 32 — blaster trails
 
+cl_disable_self_blood::
+    Hides ordinary blood particles only when their impact point is inside the
+    local player's bounding box. Blood particles from hits on other players and
+    monsters remain visible. This setting does not affect damage blending,
+    gibs, or the ‘cl_disable_particles’ bitmask. Default value is 0.
+
+cl_projectiletrail_color::
+    Overrides the particle color of flying rocket and grenade trails. The
+    setting accepts a color name or a value such as ‘#ff0000’. Set it to ‘none’
+    to keep the default trail colors. Changes apply immediately. Default value
+    is ‘none’.
+
 .Bitmasks
 TIP: Bitmask cvars allow multiple features to be enabled. To enable the needed
 set of features, their values need to be summed.
