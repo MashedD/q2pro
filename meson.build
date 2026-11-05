@@ -449,6 +449,9 @@ shared_library('game' + cpu, game_src,
   include_directories:   'inc',
   gnu_symbol_visibility: 'hidden',
   link_args:             dll_link_args,
+  # Original game code assigns gi.soundindex() to otherwise unused globals. The
+  # call precaches the sound, so the assignments have to stay.
+  c_args:                cc.get_supported_arguments('-Wno-unused-but-set-global'),
   install:               system_wide,
   install_dir:           libdir / get_option('base-game'),
   override_options:      get_option('game-build-options'),

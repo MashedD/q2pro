@@ -127,7 +127,7 @@ static void MVD_ParseMulticast(mvd_t *mvd, multicast_t to, int extrabits)
     mvd_client_t    *client;
     client_t        *cl;
     visrow_t        mask;
-    const mleaf_t   *leaf1, *leaf2;
+    const mleaf_t   *leaf1 = NULL, *leaf2;  // leaf1 is only read when "to" is set
     vec3_t          org;
     bool            reliable = false;
     byte            *data;
