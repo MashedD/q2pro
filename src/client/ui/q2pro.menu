@@ -142,6 +142,8 @@ begin effects
     toggle "rocket explosions" cl_disable_explosions ~1
     toggle --status "Hide blood particles only for impacts on your player" \
         "blood particles when hit" cl_disable_self_blood ~
+    strings "rocket and grenade trails" cl_projectiletrail_color \
+        none red green yellow blue cyan magenta white
     blank
     action --align "railgun trail setup..." pushmenu railtrail
 end
