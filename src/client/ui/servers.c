@@ -84,6 +84,25 @@ static m_servers_t  m_servers;
 static cvar_t   *ui_sortservers;
 static cvar_t   *ui_colorservers;
 static cvar_t   *ui_pingrate;
+static cvar_t   *ui_hide_bots;
+
+// Stats and bridge bots that sit on servers and do not play.
+static const char *const hidden_bots[] = {
+    "WallFly[BZZZ]",
+    "q2stats[BZZZ]",
+};
+
+static bool IsHiddenBot(const char *name)
+{
+    if (!ui_hide_bots->integer)
+        return false;
+
+    for (int i = 0; i < q_countof(hidden_bots); i++)
+        if (!strcmp(name, hidden_bots[i]))
+            return true;
+
+    return false;
+}
 
 static void UpdateSelection(void)
 {
@@ -219,7 +238,7 @@ void UI_StatusEvent(const serverStatus_t *status)
     const char *info = status->infostring;
     char key[MAX_INFO_STRING];
     char value[MAX_INFO_STRING];
-    int i;
+    int i, slotIndex, numPlayers = 0;
 
     // ignore unless menu is up
     if (!m_servers.args) {
@@ -227,7 +246,7 @@ void UI_StatusEvent(const serverStatus_t *status)
     }
 
     // see if already added
-    slot = FindSlot(&net_from, &i);
+    slot = FindSlot(&net_from, &slotIndex);
     if (!slot) {
         // reply to broadcast, create new slot
         if (m_servers.list.numItems >= MAX_STATUS_SERVERS) {
@@ -270,8 +289,12 @@ void UI_StatusEvent(const serverStatus_t *status)
     if (ping > 999)
         ping = 999;
 
+    for (i = 0; i < status->numPlayers; i++)
+        if (!IsHiddenBot(status->players[i].name))
+            numPlayers++;
+
     slot = UI_FormatColumns(SLOT_EXTRASIZE, host, mod, map,
-                            va("%d/%s", status->numPlayers, maxclients),
+                            va("%d/%s", numPlayers, maxclients),
                             va("%u", ping),
                             NULL);
     slot->status = SLOT_VALID;
@@ -279,7 +302,7 @@ void UI_StatusEvent(const serverStatus_t *status)
     slot->hostname = hostname;
     slot->color = ColorForStatus(status, ping);
 
-    m_servers.list.items[i] = slot;
+    m_servers.list.items[slotIndex] = slot;
 
     slot->numRules = 0;
     while (slot->numRules < MAX_STATUS_RULES) {
@@ -297,9 +320,11 @@ void UI_StatusEvent(const serverStatus_t *status)
             UI_FormatColumns(0, key, value, NULL);
     }
 
-    slot->numPlayers = status->numPlayers;
+    slot->numPlayers = 0;
     for (i = 0; i < status->numPlayers; i++) {
-        slot->players[i] =
+        if (IsHiddenBot(status->players[i].name))
+            continue;
+        slot->players[slot->numPlayers++] =
             UI_FormatColumns(0,
                              va("%d", status->players[i].score),
                              va("%d", status->players[i].ping),
@@ -1083,6 +1108,7 @@ void M_Menu_Servers(void)
     ui_colorservers = Cvar_Get("ui_colorservers", "0", 0);
     ui_colorservers->changed = ui_colorservers_changed;
     ui_pingrate = Cvar_Get("ui_pingrate", "0", 0);
+    ui_hide_bots = Cvar_Get("ui_hide_bots", "0", CVAR_ARCHIVE);
 
     m_servers.menu.name     = "servers";
     m_servers.menu.title    = "Server Browser";
