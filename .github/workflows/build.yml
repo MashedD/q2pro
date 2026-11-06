@@ -121,6 +121,9 @@ jobs:
           meson setup ${{ env.MESON_ARGS }} ${{ env.MESON_ARGS_WIN }} builddir
           meson compile -C builddir
 
+      - name: Test
+        run: meson test -C builddir --print-errorlogs
+
   linux:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -151,6 +154,9 @@ jobs:
         env:
           CC: ${{ matrix.cc }}
 
+      - name: Test
+        run: meson test -C builddir --print-errorlogs
+
       - uses: actions/upload-artifact@v7
         with:
           name: q2pro-linux-${{ matrix.cc }}-${{ matrix.buildtype }}
@@ -177,6 +183,9 @@ jobs:
           meson setup ${{ env.MESON_ARGS }} ${{ env.MESON_ARGS_MACOS }} builddir
           meson compile -C builddir
 
+      - name: Test
+        run: meson test -C builddir --print-errorlogs
+
   freebsd:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -195,3 +204,4 @@ jobs:
             sdl2 curl png jpeg-turbo libX11 libdecor evdev-proto wayland-protocols
             meson setup ${{ env.MESON_ARGS }} ${{ env.MESON_ARGS_FREEBSD }} builddir
             meson compile -C builddir
+            meson test -C builddir --print-errorlogs
