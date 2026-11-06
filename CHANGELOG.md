@@ -6,6 +6,10 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-06
+
+First release of the rebuilt fork, based on upstream Q2PRO at commit 601a8df.
+
 ### Added
 
 - Versioned release packages for Linux and Windows, built by CI.
@@ -47,3 +51,6 @@ All new options are off or keep upstream's behaviour by default.
   calls.
 - A missing `q2pro.menu` is reported instead of failing silently.
 - A game module crash on maps where an actor's target does not exist.
+
+[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/MashedD/q2pro/releases/tag/v1.0.0
