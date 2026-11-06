@@ -29,6 +29,16 @@ sed -e "s/##VER##/$ver/" -e "s/##DATE##/$(date -R)/" \
     .ci/readme-template.txt > "$pkg/README.txt"
 cat >> "$pkg/README.txt" <<'END'
 
+Extract the archive with tar, which keeps the files executable:
+
+    tar -xzf q2pro-*-linux-x86_64.tar.gz
+
+Some archive programs drop the executable permission. Then q2pro does not
+start, or reports that baseq2/gamex86_64.so is not executable. Fix it from
+the directory that contains q2pro:
+
+    chmod +x q2pro q2proded baseq2/gamex86_64.so
+
 This build needs SDL2, OpenAL, libpng, libjpeg, zlib and libcurl from your
 distribution. Ogg music and cinematics need FFmpeg, so build from source for
 those: see BUILDING.md in the source archive.

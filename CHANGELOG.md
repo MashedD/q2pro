@@ -14,6 +14,12 @@ All notable changes to this fork are documented here. The format follows
   open Q2PRO's menus, and Tab and F1 are swapped. Delete the file to use the
   game's original defaults.
 
+### Fixed
+
+- A game library without the executable permission is reported with the
+  `chmod` command that fixes it, instead of only "Permission denied". The Linux
+  package's README.txt explains how to extract it without losing permissions.
+
 ## [1.0.0] - 2026-11-06
 
 First release of the rebuilt fork, based on upstream Q2PRO at commit 601a8df.
