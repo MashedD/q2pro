@@ -6,6 +6,10 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Menu options show a short description at the bottom of the screen.
+
 ### Changed
 
 - The 64-bit Windows executables are now `q2pro.exe` and `q2proded.exe`, and the

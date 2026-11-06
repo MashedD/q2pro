@@ -67,32 +67,54 @@ color disabled #7f7f7f
 begin video
     //title "Video Setup"
     banner m_banner_video
-    values "video mode" vid_fullscreen windowed $$vid_modelist
-    field --numeric --width 4 "field of view" fov
-    values "fov scaling" cl_adjustfov vert- hor+
-    toggle "vertical sync" gl_swapinterval
-    pairs "anti-aliasing" gl_multisamples no 0 "2x MSAA" 2 "4x MSAA" 4 "8x MSAA" 8
-    range "texture gamma" vid_gamma 1.3 0.3
-    toggle "hardware gamma" vid_hwgamma
-    range "texture quality" gl_picmip 3 0 -1
-    pairs "texture filter" gl_texturemode \
+    values --status "Windowed, or a fullscreen mode from the list of video modes" \
+        "video mode" vid_fullscreen windowed $$vid_modelist
+    field --status "Horizontal field of view in degrees. The default is 90" \
+        --numeric --width 4 "field of view" fov
+    values --status "On wide screens, vert- keeps the 4:3 view and crops it, hor+ shows more at the sides" \
+        "fov scaling" cl_adjustfov vert- hor+
+    toggle --status "Match frames to the monitor refresh rate to stop tearing. Can add input lag" \
+        "vertical sync" gl_swapinterval
+    pairs --status "Smooth jagged edges with multisampling, at a cost in speed" \
+        "anti-aliasing" gl_multisamples no 0 "2x MSAA" 2 "4x MSAA" 4 "8x MSAA" 8
+    range --status "Brightness of the picture. Applies to textures only, unless hardware gamma is on" \
+        "texture gamma" vid_gamma 1.3 0.3
+    toggle --status "Apply gamma to the whole screen through the video driver instead of to textures" \
+        "hardware gamma" vid_hwgamma
+    range --status "Lower quality reduces texture resolution to save video memory" \
+        "texture quality" gl_picmip 3 0 -1
+    pairs --status "How textures are smoothed: nearest looks pixelated, trilinear is the smoothest" \
+        "texture filter" gl_texturemode \
         nearest GL_NEAREST \
         linear GL_LINEAR \
         bilinear GL_LINEAR_MIPMAP_NEAREST \
         trilinear GL_LINEAR_MIPMAP_LINEAR
-    pairs "anisotropic filter" gl_anisotropy no 1 2x 2 4x 4 8x 8 16x 16
-    range "texture saturation" gl_saturation 0 1
-    pairs "texture intensity" intensity 1x 1 2x 2 3x 3
-    range "2D intensity" gl_intensity_2D 1 5 0.1
-    values "lava glowmaps" r_lava_glowmaps "off" "with lightmap" "all"
-    range "lightmap saturation" gl_coloredlightmaps 0 1
-    range "lightmap brightness" gl_brightness 0 0.3
-    values "rendering backend" gl_shaders legacy shaders
-    toggle "draw sky" gl_drawsky
-    toggle "gibs" cl_gibs
-    range "modulate" gl_modulate 1 5
-    range "modulate world" gl_modulate_world 1 5
-    range "modulate entities" gl_modulate_entities 1 5
+    pairs --status "Keeps textures sharp on surfaces seen at a steep angle, such as floors" \
+        "anisotropic filter" gl_anisotropy no 1 2x 2 4x 4 8x 8 16x 16
+    range --status "Color strength of world textures. 0 makes them gray" \
+        "texture saturation" gl_saturation 0 1
+    pairs --status "Brightens textures. The default is 2x" \
+        "texture intensity" intensity 1x 1 2x 2 3x 3
+    range --status "Brightness of the HUD, menus and console" \
+        "2D intensity" gl_intensity_2D 1 5 0.1
+    values --status "Glowing lava, for textures that have glowmaps. All also covers lava without a lightmap" \
+        "lava glowmaps" r_lava_glowmaps "off" "with lightmap" "all"
+    range --status "Color strength of world lighting. 0 makes the lighting gray" \
+        "lightmap saturation" gl_coloredlightmaps 0 1
+    range --status "Adds light to the whole level, making dark areas lighter" \
+        "lightmap brightness" gl_brightness 0 0.3
+    values --status "Shaders needs OpenGL 3.0 and is required for bloom, skin tints and screen warping" \
+        "rendering backend" gl_shaders legacy shaders
+    toggle --status "Off draws the sky in solid black" \
+        "draw sky" gl_drawsky
+    toggle --status "Show flying body parts. Off also saves bandwidth on Q2PRO servers" \
+        "gibs" cl_gibs
+    range --status "Brightens the lighting of the level and of models" \
+        "modulate" gl_modulate 1 5
+    range --status "Brightens the lighting of the level only" \
+        "modulate world" gl_modulate_world 1 5
+    range --status "Brightens the lighting of models only, such as players and items" \
+        "modulate entities" gl_modulate_entities 1 5
 end
 
 begin options
@@ -112,56 +134,91 @@ end
 
 begin sound
     title "Sound Setup"
-    values "sound engine" s_enable "no sound" "software" "OpenAL"
-    range "sound latency" s_mixahead 0.05 0.2
-    range "sound volume" s_volume 0 1
-    range "music volume" ogg_volume 0 1
-    toggle "enable music" ogg_enable
-    toggle "shuffle tracks" ogg_shuffle
-    toggle "underwater effect" s_underwater
-    values "HRTF mixing" al_hrtf "off" "default" "on"
-    pairs "reverb" al_reverb "off" 0 "light" 1 "strong" 2
-    values "ambient sounds" s_ambient "no" "yes" "visible entities" "player's own"
-    values "chat beep" cl_chat_sound "disabled" "default" "alternative"
+    values --status "OpenAL adds positional 3D sound, HRTF and reverb. Software is the classic mixer" \
+        "sound engine" s_enable "no sound" "software" "OpenAL"
+    range --status "Raise it if sound stutters or crackles. Software engine only" \
+        "sound latency" s_mixahead 0.05 0.2
+    range --status "Volume of all game sounds" \
+        "sound volume" s_volume 0 1
+    range --status "Music volume, relative to the sound volume" \
+        "music volume" ogg_volume 0 1
+    toggle --status "Play background music from the music directory" \
+        "enable music" ogg_enable
+    toggle --status "Play all music tracks in random order instead of the track the map asks for" \
+        "shuffle tracks" ogg_shuffle
+    toggle --status "Muffle sounds while you are under water" \
+        "underwater effect" s_underwater
+    values --status "3D sound for headphones. OpenAL engine only. Default follows the OpenAL setting" \
+        "HRTF mixing" al_hrtf "off" "default" "on"
+    pairs --status "Room echo on positional sounds. OpenAL engine only" \
+        "reverb" al_reverb "off" 0 "light" 1 "strong" 2
+    values --status "Background sounds such as machinery. The last two keep only sounds from what you see or from you" \
+        "ambient sounds" s_ambient "no" "yes" "visible entities" "player's own"
+    values --status "Sound played when a chat message arrives" \
+        "chat beep" cl_chat_sound "disabled" "default" "alternative"
 end
 
 begin railtrail
     title "Railgun Trail Setup"
-    values "rail trail type" cl_railtrail_type \
+    values --status "Default is the original effect. The others draw a solid core, optionally with a spiral" \
+        "rail trail type" cl_railtrail_type \
         "default" "core only" "core and spiral"
-    range "rail trail duration" cl_railtrail_time 0.1 3.0 0.1
-    range "core width" cl_railcore_width 1 6 1
-    range "spiral radius" cl_railspiral_radius 1 6 1
-    strings "core color" cl_railcore_color \
+    range --status "How long the trail stays visible, in seconds" \
+        "rail trail duration" cl_railtrail_time 0.1 3.0 0.1
+    range --status "Width of the solid core" \
+        "core width" cl_railcore_width 1 6 1
+    range --status "Radius of the spiral" \
+        "spiral radius" cl_railspiral_radius 1 6 1
+    strings --status "Color of the solid core" \
+        "core color" cl_railcore_color \
         black red green yellow blue cyan magenta white
-    strings "spiral color" cl_railspiral_color \
+    strings --status "Color of the spiral" \
+        "spiral color" cl_railspiral_color \
         black red green yellow blue cyan magenta white
 end
 
 begin effects
     title "Effects Setup"
-    values "dynamic lighting" gl_dynamic "no" "yes" "only switchable"
-    values "entity cel-shading" gl_celshading no 1x 2x 3x
-    toggle "entity glowing" cl_noglow ~
-    toggle "item highlighting" cl_itemhighlight
-    toggle "weapon highlighting" cl_weaponhighlight
-    toggle "ammo highlighting" cl_ammohighlight
-    toggle "player highlighting" cl_playerhighlight
-    toggle "tint item skins" cl_itemtint
-    toggle "tint weapon skins" cl_weapontint
-    toggle "tint ammo skins" cl_ammotint
-    toggle "tint player skins" cl_playertint
+    values --status "Light from explosions, rockets and muzzle flashes. Only switchable keeps map lights that turn on and off" \
+        "dynamic lighting" gl_dynamic "no" "yes" "only switchable"
+    values --status "Draw black outlines around models" \
+        "entity cel-shading" gl_celshading no 1x 2x 3x
+    toggle --status "Pulsing glow around items such as ammo, health and armor" \
+        "entity glowing" cl_noglow ~
+    toggle --status "Colored shell around health, armor and powerups" \
+        "item highlighting" cl_itemhighlight
+    toggle --status "Colored shell around weapon pickups and weapons held by players" \
+        "weapon highlighting" cl_weaponhighlight
+    toggle --status "Colored shell around ammo, in the color of its weapon" \
+        "ammo highlighting" cl_ammohighlight
+    toggle --status "Colored shell around players: male white, female green, other models orange" \
+        "player highlighting" cl_playerhighlight
+    toggle --status "Recolor item skins instead of drawing a shell. Shaders backend only" \
+        "tint item skins" cl_itemtint
+    toggle --status "Recolor weapon skins, including your own view weapon. Shaders backend only" \
+        "tint weapon skins" cl_weapontint
+    toggle --status "Recolor ammo skins. Shaders backend only" \
+        "tint ammo skins" cl_ammotint
+    toggle --status "Recolor player skins: male white, female green, other models amber. Shaders backend only" \
+        "tint player skins" cl_playertint
     toggle --status "Glow around glowmaps and glowing highlights (shaders backend)" \
         "bloom" gl_bloom
-    range "highlight bloom" cl_itemhighlight_glow 0 5 1
-    values "ground shadows" gl_shadows no yes fade
-    toggle "screen blending" gl_polyblend
-    toggle "screen warping" gl_waterwarp
-    toggle "grenade explosions" cl_disable_explosions ~0
-    toggle "rocket explosions" cl_disable_explosions ~1
+    range --status "Glow strength of highlights. Needs bloom. 0 keeps a plain shell" \
+        "highlight bloom" cl_itemhighlight_glow 0 5 1
+    values --status "Shadows under models. Fade makes them lighter with distance" \
+        "ground shadows" gl_shadows no yes fade
+    toggle --status "Color the screen when you are hit, pick up items or are under water" \
+        "screen blending" gl_polyblend
+    toggle --status "Wavy screen while under water. Shaders backend only" \
+        "screen warping" gl_waterwarp
+    toggle --status "Show the explosion model for grenades. Off keeps only particles" \
+        "grenade explosions" cl_disable_explosions ~0
+    toggle --status "Show the explosion model for rockets. Off keeps only particles" \
+        "rocket explosions" cl_disable_explosions ~1
     toggle --status "Hide blood particles only for impacts on your player" \
         "blood particles when hit" cl_disable_self_blood ~
-    strings "rocket and grenade trails" cl_projectiletrail_color \
+    strings --status "Particle color of rocket and grenade trails. None keeps the original colors" \
+        "rocket and grenade trails" cl_projectiletrail_color \
         none red green yellow blue cyan magenta white
     blank
     action --align "railgun trail setup..." pushmenu railtrail
@@ -169,67 +226,108 @@ end
 
 begin crosshair
     title "Crosshair Setup"
-    values "crosshair type" crosshair none cross dot angle
-    pairs "crosshair scale" ch_scale 0.5x 0.5 1x 1 2x 2 4x 4 5x 5
-    toggle "color by health" ch_health
-    range "red channel" ch_red 0 1
-    range "green channel" ch_green 0 1
-    range "blue channel" ch_blue 0 1
-    range "alpha channel" ch_alpha 0 1
+    values --status "Crosshair image" \
+        "crosshair type" crosshair none cross dot angle
+    pairs --status "Crosshair size" \
+        "crosshair scale" ch_scale 0.5x 0.5 1x 1 2x 2 4x 4 5x 5
+    toggle --status "Color the crosshair by your health. Overrides the color settings below" \
+        "color by health" ch_health
+    range --status "Crosshair color. Ignored when coloring by health" \
+        "red channel" ch_red 0 1
+    range --status "Crosshair color. Ignored when coloring by health" \
+        "green channel" ch_green 0 1
+    range --status "Crosshair color. Ignored when coloring by health" \
+        "blue channel" ch_blue 0 1
+    range --status "Crosshair opacity" \
+        "alpha channel" ch_alpha 0 1
 end
 
 begin screen
     title "Screen Setup"
-    range "screen size" viewsize 40 100 10
-    toggle "ping graph" scr_lag_draw
-    values "demo bar" scr_demobar no yes verbose
-    range "HUD opacity" scr_alpha 0 1
-    range "console opacity" con_alpha 0 1
-    pairs "HUD scale" scr_scale auto 0 1x 1 2x 2 4x 4 5x 5
-    pairs "console scale" con_scale auto 0 1x 1 2x 2 4x 4 5x 5
-    pairs "menu scale" ui_scale auto 0 1x 1 2x 2 4x 4 5x 5
+    range --status "Size of the 3D view. Smaller sizes add a border" \
+        "screen size" viewsize 40 100 10
+    toggle --status "Small graph of your network latency" \
+        "ping graph" scr_lag_draw
+    values --status "Progress bar during demo playback. Verbose also shows the time" \
+        "demo bar" scr_demobar no yes verbose
+    range --status "Opacity of the HUD" \
+        "HUD opacity" scr_alpha 0 1
+    range --status "Opacity of the console background" \
+        "console opacity" con_alpha 0 1
+    pairs --status "Size of the HUD. Auto picks a size for the screen resolution" \
+        "HUD scale" scr_scale auto 0 1x 1 2x 2 4x 4 5x 5
+    pairs --status "Size of the console text. Auto picks a size for the screen resolution" \
+        "console scale" con_scale auto 0 1x 1 2x 2 4x 4 5x 5
+    pairs --status "Size of the menus. Auto picks a size for the screen resolution" \
+        "menu scale" ui_scale auto 0 1x 1 2x 2 4x 4 5x 5
     blank
     action --align "crosshair setup..." pushmenu crosshair
 end
 
 begin downloads
     title "Download Options"
-    toggle "allow downloading" allow_download
-    toggle "maps" allow_download_maps
-    toggle "player models/skins" allow_download_players
-    toggle "models" allow_download_models
-    toggle "sounds" allow_download_sounds
-    toggle "textures" allow_download_textures
-    toggle "pics" allow_download_pics
+    toggle --status "Download missing files from servers. The options below choose which" \
+        "allow downloading" allow_download
+    toggle --status "Download missing maps" \
+        "maps" allow_download_maps
+    toggle --status "Download missing player models, skins and sounds" \
+        "player models/skins" allow_download_players
+    toggle --status "Download missing item and effect models" \
+        "models" allow_download_models
+    toggle --status "Download missing sounds" \
+        "sounds" allow_download_sounds
+    toggle --status "Download missing map textures" \
+        "textures" allow_download_textures
+    toggle --status "Download missing HUD pictures" \
+        "pics" allow_download_pics
     blank
-    toggle "HTTP downloads" cl_http_downloads
+    toggle --status "Use the faster HTTP download server when the game server offers one" \
+        "HTTP downloads" cl_http_downloads
 end
 
 begin gameflags
     title "Deathmatch Flags"
-    toggle "falling damage" dmflags ~3
-    toggle "weapons stay" dmflags 2
-    toggle "instant powerups" dmflags 4
-    toggle "allow powerups" dmflags ~1
-    toggle "allow health" dmflags ~0
-    toggle "allow armor" dmflags ~11
-    toggle "spawn farthest" dmflags 9
-    toggle "same map" dmflags 5
-    toggle "force respawn" dmflags 10
-    toggle "infinite ammo" dmflags 13
-    toggle "fixed FOV" dmflags 15
-    toggle "quad drop" dmflags 14
+    toggle --status "Players take damage from long falls" \
+        "falling damage" dmflags ~3
+    toggle --status "Weapons stay in place after being picked up" \
+        "weapons stay" dmflags 2
+    toggle --status "Powerups are used on pickup instead of going to the inventory" \
+        "instant powerups" dmflags 4
+    toggle --status "Powerups such as quad damage appear on the map" \
+        "allow powerups" dmflags ~1
+    toggle --status "Health items appear on the map" \
+        "allow health" dmflags ~0
+    toggle --status "Armor appears on the map" \
+        "allow armor" dmflags ~11
+    toggle --status "Players respawn at the spawn point farthest from others" \
+        "spawn farthest" dmflags 9
+    toggle --status "Play the same map again instead of moving to the next one" \
+        "same map" dmflags 5
+    toggle --status "Dead players respawn automatically" \
+        "force respawn" dmflags 10
+    toggle --status "Weapons never run out of ammo" \
+        "infinite ammo" dmflags 13
+    toggle --status "Every player sees with a 90 degree field of view" \
+        "fixed FOV" dmflags 15
+    toggle --status "A player killed with quad damage drops it" \
+        "quad drop" dmflags 14
 end
 
 begin startserver
     //title "Start Server"
     banner m_banner_start_server
-    strings "initial map" _ui_nextserver $$com_maplist
-    values "rules" coop deathmatch cooperative
-    field --integer --status "0 - no time limit" --width 3 "time limit" timelimit
-    field --integer --status "0 - no frag limit" --width 3 "frag limit" fraglimit
-    field --integer --width 3 "max players" maxclients
-    field --width 16 "host name" hostname
+    strings --status "The first map of the server" \
+        "initial map" _ui_nextserver $$com_maplist
+    values --status "Deathmatch or cooperative play" \
+        "rules" coop deathmatch cooperative
+    field --status "Minutes until the map ends. 0 for no limit" \
+        --integer --width 3 "time limit" timelimit
+    field --status "Frags that end the map. 0 for no limit" \
+        --integer --width 3 "frag limit" fraglimit
+    field --status "Most players at once, including you" \
+        --integer --width 3 "max players" maxclients
+    field --status "Server name shown in server browsers" \
+        --width 16 "host name" hostname
     blank
     action --align "deathmatch flags..." pushmenu gameflags
     action --align "begin game!" "forcemenuoff; if $coop == 1 then deathmatch 0 else deathmatch 1; map $_ui_nextserver force"
@@ -339,14 +437,22 @@ end
 
 begin input
     title "Input Setup"
-    field --numeric --width 8 "mouse sens" sensitivity
-    toggle "auto sens" m_autosens
-    toggle "mouse filter" m_filter
-    toggle "R1Q2 mouse" m_r1q2_mouse
-    toggle "free look" freelook
-    toggle "always run" cl_run
-    pairs "movement feel" cl_movement_feel_mode Q2PRO 0 R1Q2 1
-    pairs "step smoothing" cl_step_smoothing_mode Q2PRO q2pro R1Q2-1 r1q2-1 R1Q2-2 r1q2-2 R1Q2-3 r1q2-3
+    field --status "Mouse sensitivity" \
+        --numeric --width 8 "mouse sens" sensitivity
+    toggle --status "Lower the sensitivity when the field of view narrows, such as when zooming" \
+        "auto sens" m_autosens
+    toggle --status "Smooth mouse movement by averaging it over two frames" \
+        "mouse filter" m_filter
+    toggle --status "R1Q2 mouse handling: no acceleration and no automatic sensitivity scaling" \
+        "R1Q2 mouse" m_r1q2_mouse
+    toggle --status "Look up and down with the mouse at all times" \
+        "free look" freelook
+    toggle --status "Run by default. Hold the run key to walk" \
+        "always run" cl_run
+    pairs --status "R1Q2 predicts only completed moves, as R1Q2 does. Changes feel only, not physics" \
+        "movement feel" cl_movement_feel_mode Q2PRO 0 R1Q2 1
+    pairs --status "How the view smooths stairs: Q2PRO, or one of the three R1Q2 modes. Visual only" \
+        "step smoothing" cl_step_smoothing_mode Q2PRO q2pro R1Q2-1 r1q2-1 R1Q2-2 r1q2-2 R1Q2-3 r1q2-3
 end
 
 begin keys

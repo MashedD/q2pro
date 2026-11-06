@@ -294,8 +294,9 @@ cl_ammohighlight::
     where applicable. Default value is 0 (disabled).
 
 cl_playerhighlight::
-    Adds colored tint to player models. Male models are green and female
-    models are cyan/teal. Default value is 0 (disabled).
+    Draws a colored shell around player models. Male models are white,
+    female models are green and other models are orange. Default value is 0
+    (disabled).
 
 cl_itemtint::
     Recolors the skins of pickup items instead of adding a shell over them, in
