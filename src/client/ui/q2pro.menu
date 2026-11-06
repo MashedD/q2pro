@@ -67,32 +67,54 @@ color disabled #7f7f7f
 begin video
     //title "Video Setup"
     banner m_banner_video
-    values "video mode" vid_fullscreen windowed $$vid_modelist
-    field --numeric --width 4 "field of view" fov
-    values "fov scaling" cl_adjustfov vert- hor+
-    toggle "vertical sync" gl_swapinterval
-    pairs "anti-aliasing" gl_multisamples no 0 "2x MSAA" 2 "4x MSAA" 4 "8x MSAA" 8
-    range "texture gamma" vid_gamma 1.3 0.3
-    toggle "hardware gamma" vid_hwgamma
-    range "texture quality" gl_picmip 3 0 -1
-    pairs "texture filter" gl_texturemode \
+    values --status "Windowed, or a fullscreen mode from the list of video modes" \
+        "video mode" vid_fullscreen windowed $$vid_modelist
+    field --status "Horizontal field of view in degrees. The default is 90" \
+        --numeric --width 4 "field of view" fov
+    values --status "On wide screens, vert- keeps the 4:3 view and crops it, hor+ shows more at the sides" \
+        "fov scaling" cl_adjustfov vert- hor+
+    toggle --status "Match frames to the monitor refresh rate to stop tearing. Can add input lag" \
+        "vertical sync" gl_swapinterval
+    pairs --status "Smooth jagged edges with multisampling, at a cost in speed" \
+        "anti-aliasing" gl_multisamples no 0 "2x MSAA" 2 "4x MSAA" 4 "8x MSAA" 8
+    range --status "Brightness of the picture. Applies to textures only, unless hardware gamma is on" \
+        "texture gamma" vid_gamma 1.3 0.3
+    toggle --status "Apply gamma to the whole screen through the video driver instead of to textures" \
+        "hardware gamma" vid_hwgamma
+    range --status "Lower quality reduces texture resolution to save video memory" \
+        "texture quality" gl_picmip 3 0 -1
+    pairs --status "How textures are smoothed: nearest looks pixelated, trilinear is the smoothest" \
+        "texture filter" gl_texturemode \
         nearest GL_NEAREST \
         linear GL_LINEAR \
         bilinear GL_LINEAR_MIPMAP_NEAREST \
         trilinear GL_LINEAR_MIPMAP_LINEAR
-    pairs "anisotropic filter" gl_anisotropy no 1 2x 2 4x 4 8x 8 16x 16
-    range "texture saturation" gl_saturation 0 1
-    pairs "texture intensity" intensity 1x 1 2x 2 3x 3
-    range "2D intensity" gl_intensity_2D 1 5 0.1
-    values "lava glowmaps" r_lava_glowmaps "off" "with lightmap" "all"
-    range "lightmap saturation" gl_coloredlightmaps 0 1
-    range "lightmap brightness" gl_brightness 0 0.3
-    values "rendering backend" gl_shaders legacy shaders
-    toggle "draw sky" gl_drawsky
-    toggle "gibs" cl_gibs
-    range "modulate" gl_modulate 1 5
-    range "modulate world" gl_modulate_world 1 5
-    range "modulate entities" gl_modulate_entities 1 5
+    pairs --status "Keeps textures sharp on surfaces seen at a steep angle, such as floors" \
+        "anisotropic filter" gl_anisotropy no 1 2x 2 4x 4 8x 8 16x 16
+    range --status "Color strength of world textures. 0 makes them gray" \
+        "texture saturation" gl_saturation 0 1
+    pairs --status "Brightens textures. The default is 2x" \
+        "texture intensity" intensity 1x 1 2x 2 3x 3
+    range --status "Brightness of the HUD, menus and console" \
+        "2D intensity" gl_intensity_2D 1 5 0.1
+    values --status "Glowing lava, for textures that have glowmaps. All also covers lava without a lightmap" \
+        "lava glowmaps" r_lava_glowmaps "off" "with lightmap" "all"
+    range --status "Color strength of world lighting. 0 makes the lighting gray" \
+        "lightmap saturation" gl_coloredlightmaps 0 1
+    range --status "Adds light to the whole level, making dark areas lighter" \
+        "lightmap brightness" gl_brightness 0 0.3
+    values --status "Shaders needs OpenGL 3.0 and is required for bloom, skin tints and screen warping" \
+        "rendering backend" gl_shaders legacy shaders
+    toggle --status "Off draws the sky in solid black" \
+        "draw sky" gl_drawsky
+    toggle --status "Show flying body parts. Off also saves bandwidth on Q2PRO servers" \
+        "gibs" cl_gibs
+    range --status "Brightens the lighting of the level and of models" \
+        "modulate" gl_modulate 1 5
+    range --status "Brightens the lighting of the level only" \
+        "modulate world" gl_modulate_world 1 5
+    range --status "Brightens the lighting of models only, such as players and items" \
+        "modulate entities" gl_modulate_entities 1 5
 end
 
 begin options
