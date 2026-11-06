@@ -69,6 +69,11 @@ option('libcurl',
   value: 'auto',
   description: 'libcurl support')
 
+option('curl-dlopen',
+  type: 'boolean',
+  value: false,
+  description: 'Load libcurl at runtime instead of linking it, so binaries start on systems that name it differently (Linux only)')
+
 option('libjpeg',
   type: 'feature',
   value: 'auto',
