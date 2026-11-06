@@ -14,10 +14,10 @@
 
 #ifdef _WIN64
 #define VER_FILEDESCRIPTION_STR     "Q2PRO client (64-bit)"
-#define VER_ORIGINALFILENAME_STR    "q2pro64.exe"
-#else
-#define VER_FILEDESCRIPTION_STR     "Q2PRO client"
 #define VER_ORIGINALFILENAME_STR    "q2pro.exe"
+#else
+#define VER_FILEDESCRIPTION_STR     "Q2PRO client (32-bit)"
+#define VER_ORIGINALFILENAME_STR    "q2pro32.exe"
 #endif
 
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
