@@ -6,6 +6,10 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Menu options show a short description at the bottom of the screen.
+
 ## [1.0.1] - 2026-11-06
 
 ### Added
