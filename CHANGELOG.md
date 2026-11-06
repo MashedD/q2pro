@@ -6,28 +6,6 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
-### Added
-
-- Menu options show a short description at the bottom of the screen.
-
-### Changed
-
-- The 64-bit Windows executables are now `q2pro.exe` and `q2proded.exe`, and the
-  32-bit ones `q2pro32.exe` and `q2proded32.exe`. Before, the 64-bit build had the
-  `64` suffix. Update shortcuts and server scripts that start `q2pro64.exe`.
-
-## [1.0.1] - 2026-11-06
-
-### Added
-
-- A bloom toggle in the effects menu. `gl_bloom` is now saved in the
-  configuration file.
-
-### Fixed
-
-- Highlights no longer disappear when `cl_itemhighlight_glow` is above 0 and
-  `gl_bloom` is off.
-
 ## [1.0.0] - 2026-11-06
 
 First release of the rebuilt fork, based on upstream Q2PRO at commit 601a8df.
@@ -43,7 +21,9 @@ First release of the rebuilt fork, based on upstream Q2PRO at commit 601a8df.
 - `ui_hide_bots` hides WallFly and q2stats bots in the server browser.
 - `crosshair_paused` hides the crosshair while the game is paused.
 - Menus scroll with the keyboard and mouse when they do not fit on the screen,
-  and more common settings are reachable from the menus.
+  and more common settings are reachable from the menus, including a bloom
+  toggle. `gl_bloom` is saved in the configuration file.
+- Menu options show a short description at the bottom of the screen.
 - `m_r1q2_mouse`, `cl_movement_feel_mode` and `cl_step_smoothing_mode` for
   R1Q2-style mouse handling and movement feel.
 - Missing textures are drawn as a checkerboard so that they are easy to spot.
@@ -57,6 +37,9 @@ First release of the rebuilt fork, based on upstream Q2PRO at commit 601a8df.
 - `cl_disable_self_blood` hides blood from hits on your own player.
 - Windows packages include `THIRD-PARTY-LICENSES.txt` with the licenses of the
   libraries built into the executables.
+- Windows packages name the 64-bit executables `q2pro.exe` and `q2proded.exe`,
+  and the 32-bit ones `q2pro32.exe` and `q2proded32.exe`. Upstream names the
+  64-bit build `q2pro64.exe`.
 
 All new options are off or keep upstream's behaviour by default.
 
@@ -74,6 +57,5 @@ All new options are off or keep upstream's behaviour by default.
 - A missing `q2pro.menu` is reported instead of failing silently.
 - A game module crash on maps where an actor's target does not exist.
 
-[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.0.1...HEAD
-[1.0.1]: https://github.com/MashedD/q2pro/compare/v1.0.0...v1.0.1
+[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/MashedD/q2pro/releases/tag/v1.0.0
