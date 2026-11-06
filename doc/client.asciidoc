@@ -319,8 +319,9 @@ cl_playertint::
 cl_itemhighlight_glow::
     Controls bloom intensity for highlight tint shells. This
     does not add dynamic lights. Value 0 disables highlight bloom and keeps
-    only the color tint. Higher values increase bloom strength, clamped to 5. Requires
-    ‘gl_bloom’ to be enabled. Default value is 0.
+    only the color tint. Higher values increase bloom strength, clamped to 5.
+    The glow needs ‘gl_bloom’; without bloom the highlight is drawn as a plain
+    translucent shell instead. Default value is 0.
 
 cl_nobob::
     Disables the bobbing effect on bonus entities like armor, weapons, etc.

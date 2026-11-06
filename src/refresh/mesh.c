@@ -642,12 +642,20 @@ static void bind_alias_arrays(const maliasmesh_t *mesh)
     }
 }
 
+// A bloom-only entity is drawn into the bloom buffer and nowhere else. Without
+// bloom it would be invisible, so it is drawn as a normal entity instead.
+static bool bloom_only_entity(void)
+{
+    return (glr.ent->flags & RF_BLOOM_ONLY) && glr.framebuffer_bound && gl_bloom->integer;
+}
+
 static void draw_alias_mesh(const uint16_t *indices, int num_indices,
                             const maliastc_t *tcoords, int num_verts,
                             image_t **skins, int num_skins)
 {
     glStateBits_t state;
     const image_t *skin;
+    const bool bloom_only = bloom_only_entity();
 
     c.trisDrawn += num_indices / 3;
 
@@ -667,7 +675,7 @@ static void draw_alias_mesh(const uint16_t *indices, int num_indices,
 
     // avoid drawing hidden faces by pre-filling depth buffer, but not for
     // explosions and muzzleflashes
-    if ((glr.ent->flags & (RF_FULLBRIGHT | RF_TRANSLUCENT | RF_BLOOM_ONLY)) == RF_TRANSLUCENT) {
+    if ((glr.ent->flags & (RF_FULLBRIGHT | RF_TRANSLUCENT)) == RF_TRANSLUCENT && !bloom_only) {
         if (gls.currentva) {
             GL_StateBits(GLS_DEFAULT);
             GL_ArrayBits(GLA_VERTEX);
@@ -695,7 +703,7 @@ static void draw_alias_mesh(const uint16_t *indices, int num_indices,
 
     if (glr.ent->flags & RF_TRANSLUCENT)
         state |= GLS_BLEND_BLEND | GLS_DEPTHMASK_FALSE;
-    if (glr.ent->flags & RF_BLOOM_ONLY)
+    if (bloom_only)
         state |= GLS_BLOOM_ONLY;
 
     skin = skin_for_mesh(skins, num_skins);
