@@ -6,32 +6,23 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
-### Added
-
-- Client packages include `baseq2/q2pro.pkz` with default key bindings and
-  settings: WASD movement, jump on the right mouse button, crouch on Ctrl,
-  weapons on the mouse wheel, running by default and a 120 fps limit. F-keys
-  open Q2PRO's menus, and Tab and F1 are swapped. Delete the file to use the
-  game's original defaults.
-
-### Fixed
-
-- The Linux package starts on any distribution with glibc 2.35 or newer, such
-  as Fedora, Bazzite, Arch, SteamOS, Debian 12 and Ubuntu 22.04. Before, it
-  needed Ubuntu's `libcurl-gnutls.so.4` and `libjpeg.so.8` and glibc 2.38. libcurl
-  is now loaded when the game starts, and without it only HTTP downloads are
-  unavailable.
-- A game library without the executable permission is reported with the
-  `chmod` command that fixes it, instead of only "Permission denied". The Linux
-  package's README.txt explains how to extract it without losing permissions.
-
 ## [1.0.0] - 2026-11-06
 
 First release of the rebuilt fork, based on upstream Q2PRO at commit 601a8df.
 
 ### Added
 
-- Versioned release packages for Linux and Windows, built by CI.
+- Versioned release packages for Linux and Windows, built by CI. The Linux
+  package runs on any distribution with glibc 2.35 or newer, such as Ubuntu
+  22.04, Debian 12, Fedora, Bazzite, Arch and SteamOS.
+- Client packages include `baseq2/q2pro.pkz` with default key bindings and
+  settings: WASD movement, jump on the right mouse button, crouch on Ctrl,
+  weapons on the mouse wheel, running by default and a 120 fps limit. F-keys
+  open Q2PRO's menus, and Tab and F1 are swapped. Delete the file to use the
+  game's original defaults.
+- `curl-dlopen` build option to load libcurl at runtime, so a binary starts on
+  systems that name it differently. Without libcurl only HTTP downloads are
+  unavailable. The Linux package uses it.
 - `qal-hard-linked` build option to link OpenAL directly. The Windows packages use
   it, so the OpenAL sound engine (`s_enable 2`) works without installing OpenAL.
 - `al_reverb` for reverb on positional sounds, and an HRTF option in the sound menu.
@@ -75,6 +66,8 @@ All new options are off or keep upstream's behaviour by default.
   calls.
 - A missing `q2pro.menu` is reported instead of failing silently.
 - A game module crash on maps where an actor's target does not exist.
+- A game library without the executable permission is reported with the
+  `chmod` command that fixes it, instead of only "Permission denied".
 
 [Unreleased]: https://github.com/MashedD/q2pro/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/MashedD/q2pro/releases/tag/v1.0.0
