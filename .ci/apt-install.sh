@@ -8,7 +8,9 @@
 # downloading the compiler. Each attempt is therefore limited to three
 # minutes. apt keeps partly downloaded files, so a new attempt resumes where
 # the last one stopped. From the second attempt on, the main Ubuntu archive
-# is used instead of the Azure mirror.
+# is used instead of the Azure mirror. The runners select their mirror
+# through /etc/apt/apt-mirrors.txt (a "mirror+file:" source), so that file
+# is what gets replaced.
 
 set -eu
 
@@ -21,6 +23,12 @@ limit=180
 for attempt in $(seq 1 $attempts); do
     if [ "$attempt" -gt 1 ]; then
         echo "::warning::apt attempt $((attempt - 1)) failed or took over ${limit}s; retrying with archive.ubuntu.com"
+        # The runners' sources point at a mirror list file rather than a
+        # host, so replace the list; also rewrite any direct references.
+        if [ -f /etc/apt/apt-mirrors.txt ]; then
+            echo "http://archive.ubuntu.com/ubuntu/" |
+                sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+        fi
         sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
             /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || :
     fi
