@@ -6,6 +6,8 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-06
+
 ### Added
 
 - A bloom toggle in the effects menu. `gl_bloom` is now saved in the
@@ -62,5 +64,6 @@ All new options are off or keep upstream's behaviour by default.
 - A missing `q2pro.menu` is reported instead of failing silently.
 - A game module crash on maps where an actor's target does not exist.
 
-[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/MashedD/q2pro/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/MashedD/q2pro/releases/tag/v1.0.0
