@@ -6,6 +6,12 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The 64-bit Windows executables are now `q2pro.exe` and `q2proded.exe`, and the
+  32-bit ones `q2pro32.exe` and `q2proded32.exe`. Before, the 64-bit build had the
+  `64` suffix. Update shortcuts and server scripts that start `q2pro64.exe`.
+
 ## [1.0.1] - 2026-11-06
 
 ### Added

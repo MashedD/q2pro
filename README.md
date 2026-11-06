@@ -41,7 +41,7 @@ You need the game data from a copy of Quake 2, such as `baseq2/pak0.pak`.
 1. Download the package for your system from the
    [Releases](https://github.com/MashedD/q2pro/releases) page.
 2. Extract it into your Quake 2 directory.
-3. Run `q2pro`, or `q2pro64` on 64-bit Windows.
+3. Run `q2pro`, or `q2pro32` on 32-bit Windows.
 
 To build from source, see [BUILDING.md](BUILDING.md).
 
