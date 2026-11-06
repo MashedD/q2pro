@@ -266,15 +266,23 @@ end
 
 begin downloads
     title "Download Options"
-    toggle "allow downloading" allow_download
-    toggle "maps" allow_download_maps
-    toggle "player models/skins" allow_download_players
-    toggle "models" allow_download_models
-    toggle "sounds" allow_download_sounds
-    toggle "textures" allow_download_textures
-    toggle "pics" allow_download_pics
+    toggle --status "Download missing files from servers. The options below choose which" \
+        "allow downloading" allow_download
+    toggle --status "Download missing maps" \
+        "maps" allow_download_maps
+    toggle --status "Download missing player models, skins and sounds" \
+        "player models/skins" allow_download_players
+    toggle --status "Download missing item and effect models" \
+        "models" allow_download_models
+    toggle --status "Download missing sounds" \
+        "sounds" allow_download_sounds
+    toggle --status "Download missing map textures" \
+        "textures" allow_download_textures
+    toggle --status "Download missing HUD pictures" \
+        "pics" allow_download_pics
     blank
-    toggle "HTTP downloads" cl_http_downloads
+    toggle --status "Use the faster HTTP download server when the game server offers one" \
+        "HTTP downloads" cl_http_downloads
 end
 
 begin gameflags
