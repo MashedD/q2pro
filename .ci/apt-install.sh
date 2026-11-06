@@ -1,0 +1,35 @@
+#!/bin/sh
+# Install Ubuntu packages on a GitHub Actions runner.
+#
+# Usage: .ci/apt-install.sh PACKAGE...
+#
+# The runners' default mirror, azure.archive.ubuntu.com, sometimes serves
+# files at a few dozen KB/s, which made jobs hit their time limit while
+# downloading the compiler. Each attempt is therefore limited to three
+# minutes. apt keeps partly downloaded files, so a new attempt resumes where
+# the last one stopped. From the second attempt on, the main Ubuntu archive
+# is used instead of the Azure mirror.
+
+set -eu
+
+[ $# -gt 0 ] || { echo "usage: $0 PACKAGE..." >&2; exit 2; }
+
+opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=30"
+attempts=3
+limit=180
+
+for attempt in $(seq 1 $attempts); do
+    if [ "$attempt" -gt 1 ]; then
+        echo "::warning::apt attempt $((attempt - 1)) failed or took over ${limit}s; retrying with archive.ubuntu.com"
+        sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || :
+    fi
+    # shellcheck disable=SC2086 # $opts holds several words on purpose
+    if sudo timeout "$limit" apt-get $opts update &&
+       sudo timeout "$limit" apt-get $opts install -y --no-install-recommends "$@"; then
+        exit 0
+    fi
+done
+
+echo "::error::could not install packages after $attempts attempts" >&2
+exit 1
