@@ -12,8 +12,8 @@ out=$(realpath -m "$2")
 ffmpeg_tag=n8.1.3
 
 case $arch in
-win32) triplet=i686-w64-mingw32 ; cpu=x86 ; suffix= ;;
-win64) triplet=x86_64-w64-mingw32 ; cpu=x86_64 ; suffix=64 ;;
+win32) triplet=i686-w64-mingw32 ; cpu=x86 ; suffix=32 ;;
+win64) triplet=x86_64-w64-mingw32 ; cpu=x86_64 ; suffix= ;;
 *) echo "unknown architecture: $arch" >&2 ; exit 2 ;;
 esac
 
