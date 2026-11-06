@@ -20,6 +20,8 @@ pkg=$tmp/q2pro-$ver-linux-x86_64
 mkdir -p "$pkg/baseq2"
 cp "$tmp/build/q2pro" "$tmp/build/q2proded" "$pkg/"
 cp "$tmp/build/gamex86_64.so" src/client/ui/q2pro.menu "$pkg/baseq2/"
+# Default settings, packed so that they take priority over pak0's default.cfg.
+(cd data/baseq2 && zip -q -X -9 "$pkg/baseq2/q2pro.pkz" default.cfg)
 strip "$pkg/q2pro" "$pkg/q2proded" "$pkg/baseq2/gamex86_64.so"
 cp LICENSE "$pkg/LICENSE.txt"
 cp doc/client.asciidoc "$pkg/MANUAL.txt"

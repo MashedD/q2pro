@@ -43,6 +43,12 @@ You need the game data from a copy of Quake 2, such as `baseq2/pak0.pak`.
 2. Extract it into your Quake 2 directory.
 3. Run `q2pro`, or `q2pro32` on 32-bit Windows.
 
+The client packages include `baseq2/q2pro.pkz`, which replaces the game's
+original default key bindings and settings: WASD movement, the mouse wheel
+for weapons, running by default and more (see
+[data/baseq2/default.cfg](data/baseq2/default.cfg)). They only apply until you
+change them, and deleting the file brings back the original defaults.
+
 To build from source, see [BUILDING.md](BUILDING.md).
 
 ## Documentation
