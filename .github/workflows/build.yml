@@ -154,13 +154,15 @@ jobs:
       - name: Test
         run: meson test -C builddir --print-errorlogs
 
+      # Artifacts are stored as zip files, which drop Unix permissions, so
+      # pack the binaries in a tarball to keep them executable.
+      - name: Pack binaries
+        run: tar -czf q2pro-linux.tar.gz -C builddir q2pro q2proded $(cd builddir && ls *.so)
+
       - uses: actions/upload-artifact@v7
         with:
           name: q2pro-linux-${{ matrix.cc }}-${{ matrix.buildtype }}
-          path: |
-            builddir/q2pro
-            builddir/q2proded
-            builddir/*.so
+          path: q2pro-linux.tar.gz
           if-no-files-found: error
           retention-days: 30
 

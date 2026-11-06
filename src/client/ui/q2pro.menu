@@ -151,6 +151,8 @@ begin effects
     toggle "tint weapon skins" cl_weapontint
     toggle "tint ammo skins" cl_ammotint
     toggle "tint player skins" cl_playertint
+    toggle --status "Glow around glowmaps and glowing highlights (shaders backend)" \
+        "bloom" gl_bloom
     range "highlight bloom" cl_itemhighlight_glow 0 5 1
     values "ground shadows" gl_shadows no yes fade
     toggle "screen blending" gl_polyblend
