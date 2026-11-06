@@ -72,6 +72,14 @@ Finally, invoke build command:
 
 To enable verbose output during the build, use `meson compile -C builddir -v`.
 
+Builds configured with `-Dtests=true` include self-checks for string, path
+and checksum functions. Run them with:
+
+    meson test -C builddir
+
+That option also adds commands that deliberately crash the engine, so don't
+use it for builds you distribute.
+
 
 Installation
 ------------

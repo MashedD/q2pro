@@ -464,7 +464,7 @@ executable('q2pro', common_src, client_src, refresh_src,
   install:               system_wide,
 )
 
-executable('q2proded', common_src, server_src,
+q2proded = executable('q2proded', common_src, server_src,
   dependencies:          common_deps + server_deps,
   include_directories:   'inc',
   gnu_symbol_visibility: 'hidden',
@@ -473,6 +473,14 @@ executable('q2proded', common_src, server_src,
   c_args:                ['-DUSE_SERVER=1', engine_args],
   install:               system_wide,
 )
+
+if get_option('tests')
+  # Runs the built-in string, path and checksum checks (`meson test`).
+  test('self-tests', find_program('python3'),
+    args:    [files('tests/self-tests.py'), q2proded],
+    timeout: 120,
+  )
+endif
 
 shared_library('game' + cpu, game_src,
   name_prefix:           '',
