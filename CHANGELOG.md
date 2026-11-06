@@ -29,6 +29,8 @@ All notable changes to this fork are documented here. The format follows
   skins in the OpenGL shader backend.
 - `cl_projectiletrail_color` colors rocket and grenade trails.
 - `cl_disable_self_blood` hides blood from hits on your own player.
+- Windows packages include `THIRD-PARTY-LICENSES.txt` with the licenses of the
+  libraries built into the executables.
 
 All new options are off or keep upstream's behaviour by default.
 
