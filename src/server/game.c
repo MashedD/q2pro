@@ -964,8 +964,17 @@ static void *SV_LoadGameLibrary(const char *libdir, const char *gamedir)
         return NULL;
     }
 
+    // Only libraries with the executable bit are loaded, so that files a
+    // server sent to the home directory are never run as code.
     if (os_access(path, X_OK)) {
-        Com_Printf("Can't access %s: %s\n", path, strerror(errno));
+        if (errno == EACCES && !os_access(path, F_OK)) {
+            // Archive tools sometimes drop the executable bit when unpacking
+            // a release. Say how to fix it instead of only "Permission denied".
+            Com_EPrintf("%s is not executable, so it was not loaded. If you "
+                        "installed it yourself, run: chmod +x \"%s\"\n", path, path);
+        } else {
+            Com_Printf("Can't access %s: %s\n", path, strerror(errno));
+        }
         return NULL;
     }
 

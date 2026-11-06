@@ -43,6 +43,10 @@ You need the game data from a copy of Quake 2, such as `baseq2/pak0.pak`.
 2. Extract it into your Quake 2 directory.
 3. Run `q2pro`, or `q2pro32` on 32-bit Windows.
 
+On Linux, extract with `tar -xzf`, which keeps the programs executable. If an
+archive tool dropped that permission, run
+`chmod +x q2pro q2proded baseq2/gamex86_64.so` in the extracted directory.
+
 To build from source, see [BUILDING.md](BUILDING.md).
 
 ## Documentation
