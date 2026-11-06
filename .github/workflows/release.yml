@@ -45,7 +45,7 @@ jobs:
       - name: Install dependencies
         timeout-minutes: 20
         run: |
-          .ci/apt-install.sh meson libsdl2-dev libopenal-dev libpng-dev libjpeg-dev zlib1g-dev \
+          .ci/apt-install.sh meson zip libsdl2-dev libopenal-dev libpng-dev libjpeg-dev zlib1g-dev \
             mesa-common-dev libcurl4-gnutls-dev libx11-dev libxi-dev \
             libwayland-dev wayland-protocols libdecor-0-dev
       - run: ./.ci/package-linux.sh dist

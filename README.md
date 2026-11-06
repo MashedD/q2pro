@@ -47,6 +47,12 @@ On Linux, extract with `tar -xzf`, which keeps the programs executable. If an
 archive tool dropped that permission, run
 `chmod +x q2pro q2proded baseq2/gamex86_64.so` in the extracted directory.
 
+The client packages include `baseq2/q2pro.pkz`, which replaces the game's
+original default key bindings and settings: WASD movement, the mouse wheel
+for weapons, running by default and more (see
+[data/baseq2/default.cfg](data/baseq2/default.cfg)). They only apply until you
+change them, and deleting the file brings back the original defaults.
+
 To build from source, see [BUILDING.md](BUILDING.md).
 
 ## Documentation

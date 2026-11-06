@@ -6,6 +6,14 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Client packages include `baseq2/q2pro.pkz` with default key bindings and
+  settings: WASD movement, jump on the right mouse button, crouch on Ctrl,
+  weapons on the mouse wheel, running by default and a 120 fps limit. F-keys
+  open Q2PRO's menus, and Tab and F1 are swapped. Delete the file to use the
+  game's original defaults.
+
 ### Fixed
 
 - A game library without the executable permission is reported with the

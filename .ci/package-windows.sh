@@ -47,6 +47,8 @@ cd "$tmp/build"
 "$triplet-strip" q2pro.exe q2proded.exe "game$cpu.dll"
 mkdir -p "$out" baseq2
 cp "$src/src/client/ui/q2pro.menu" baseq2/
+# Default settings, packed so that they take priority over pak0's default.cfg.
+(cd "$src/data/baseq2" && zip -q -X -9 "$OLDPWD/baseq2/q2pro.pkz" default.cfg)
 mv "game$cpu.dll" baseq2/
 if [ -n "$suffix" ]; then
     mv q2pro.exe "q2pro$suffix.exe"
@@ -62,7 +64,7 @@ unix2dos -k -n "$src/LICENSE" LICENSE.txt README README.txt \
     "$tmp/ffmpeg/COPYING.LGPLv2.1" LICENSE-FFmpeg.txt
 zip -9 "$out/q2pro-$ver-$arch-client.zip" "q2pro$suffix.exe" LICENSE.txt \
     THIRD-PARTY-LICENSES.txt LICENSE-FFmpeg.txt MANUAL.txt README.txt \
-    baseq2/q2pro.menu "baseq2/game$cpu.dll"
+    baseq2/q2pro.menu baseq2/q2pro.pkz "baseq2/game$cpu.dll"
 
 unix2dos -k -n "$src/doc/server.asciidoc" MANUAL.txt
 zip -9 "$out/q2pro-$ver-$arch-server.zip" "q2proded$suffix.exe" LICENSE.txt \
