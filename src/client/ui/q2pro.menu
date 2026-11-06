@@ -134,17 +134,28 @@ end
 
 begin sound
     title "Sound Setup"
-    values "sound engine" s_enable "no sound" "software" "OpenAL"
-    range "sound latency" s_mixahead 0.05 0.2
-    range "sound volume" s_volume 0 1
-    range "music volume" ogg_volume 0 1
-    toggle "enable music" ogg_enable
-    toggle "shuffle tracks" ogg_shuffle
-    toggle "underwater effect" s_underwater
-    values "HRTF mixing" al_hrtf "off" "default" "on"
-    pairs "reverb" al_reverb "off" 0 "light" 1 "strong" 2
-    values "ambient sounds" s_ambient "no" "yes" "visible entities" "player's own"
-    values "chat beep" cl_chat_sound "disabled" "default" "alternative"
+    values --status "OpenAL adds positional 3D sound, HRTF and reverb. Software is the classic mixer" \
+        "sound engine" s_enable "no sound" "software" "OpenAL"
+    range --status "Raise it if sound stutters or crackles. Software engine only" \
+        "sound latency" s_mixahead 0.05 0.2
+    range --status "Volume of all game sounds" \
+        "sound volume" s_volume 0 1
+    range --status "Music volume, relative to the sound volume" \
+        "music volume" ogg_volume 0 1
+    toggle --status "Play background music from the music directory" \
+        "enable music" ogg_enable
+    toggle --status "Play all music tracks in random order instead of the track the map asks for" \
+        "shuffle tracks" ogg_shuffle
+    toggle --status "Muffle sounds while you are under water" \
+        "underwater effect" s_underwater
+    values --status "3D sound for headphones. OpenAL engine only. Default follows the OpenAL setting" \
+        "HRTF mixing" al_hrtf "off" "default" "on"
+    pairs --status "Room echo on positional sounds. OpenAL engine only" \
+        "reverb" al_reverb "off" 0 "light" 1 "strong" 2
+    values --status "Background sounds such as machinery. The last two keep only sounds from what you see or from you" \
+        "ambient sounds" s_ambient "no" "yes" "visible entities" "player's own"
+    values --status "Sound played when a chat message arrives" \
+        "chat beep" cl_chat_sound "disabled" "default" "alternative"
 end
 
 begin railtrail
