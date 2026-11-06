@@ -16,6 +16,11 @@ All notable changes to this fork are documented here. The format follows
 
 ### Fixed
 
+- The Linux package starts on any distribution with glibc 2.35 or newer, such
+  as Fedora, Bazzite, Arch, SteamOS, Debian 12 and Ubuntu 22.04. Before, it
+  needed Ubuntu's `libcurl-gnutls.so.4` and `libjpeg.so.8` and glibc 2.38. libcurl
+  is now loaded when the game starts, and without it only HTTP downloads are
+  unavailable.
 - A game library without the executable permission is reported with the
   `chmod` command that fixes it, instead of only "Permission denied". The Linux
   package's README.txt explains how to extract it without losing permissions.
