@@ -226,25 +226,40 @@ end
 
 begin crosshair
     title "Crosshair Setup"
-    values "crosshair type" crosshair none cross dot angle
-    pairs "crosshair scale" ch_scale 0.5x 0.5 1x 1 2x 2 4x 4 5x 5
-    toggle "color by health" ch_health
-    range "red channel" ch_red 0 1
-    range "green channel" ch_green 0 1
-    range "blue channel" ch_blue 0 1
-    range "alpha channel" ch_alpha 0 1
+    values --status "Crosshair image" \
+        "crosshair type" crosshair none cross dot angle
+    pairs --status "Crosshair size" \
+        "crosshair scale" ch_scale 0.5x 0.5 1x 1 2x 2 4x 4 5x 5
+    toggle --status "Color the crosshair by your health. Overrides the color settings below" \
+        "color by health" ch_health
+    range --status "Crosshair color. Ignored when coloring by health" \
+        "red channel" ch_red 0 1
+    range --status "Crosshair color. Ignored when coloring by health" \
+        "green channel" ch_green 0 1
+    range --status "Crosshair color. Ignored when coloring by health" \
+        "blue channel" ch_blue 0 1
+    range --status "Crosshair opacity" \
+        "alpha channel" ch_alpha 0 1
 end
 
 begin screen
     title "Screen Setup"
-    range "screen size" viewsize 40 100 10
-    toggle "ping graph" scr_lag_draw
-    values "demo bar" scr_demobar no yes verbose
-    range "HUD opacity" scr_alpha 0 1
-    range "console opacity" con_alpha 0 1
-    pairs "HUD scale" scr_scale auto 0 1x 1 2x 2 4x 4 5x 5
-    pairs "console scale" con_scale auto 0 1x 1 2x 2 4x 4 5x 5
-    pairs "menu scale" ui_scale auto 0 1x 1 2x 2 4x 4 5x 5
+    range --status "Size of the 3D view. Smaller sizes add a border" \
+        "screen size" viewsize 40 100 10
+    toggle --status "Small graph of your network latency" \
+        "ping graph" scr_lag_draw
+    values --status "Progress bar during demo playback. Verbose also shows the time" \
+        "demo bar" scr_demobar no yes verbose
+    range --status "Opacity of the HUD" \
+        "HUD opacity" scr_alpha 0 1
+    range --status "Opacity of the console background" \
+        "console opacity" con_alpha 0 1
+    pairs --status "Size of the HUD. Auto picks a size for the screen resolution" \
+        "HUD scale" scr_scale auto 0 1x 1 2x 2 4x 4 5x 5
+    pairs --status "Size of the console text. Auto picks a size for the screen resolution" \
+        "console scale" con_scale auto 0 1x 1 2x 2 4x 4 5x 5
+    pairs --status "Size of the menus. Auto picks a size for the screen resolution" \
+        "menu scale" ui_scale auto 0 1x 1 2x 2 4x 4 5x 5
     blank
     action --align "crosshair setup..." pushmenu crosshair
 end
