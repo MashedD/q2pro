@@ -287,29 +287,47 @@ end
 
 begin gameflags
     title "Deathmatch Flags"
-    toggle "falling damage" dmflags ~3
-    toggle "weapons stay" dmflags 2
-    toggle "instant powerups" dmflags 4
-    toggle "allow powerups" dmflags ~1
-    toggle "allow health" dmflags ~0
-    toggle "allow armor" dmflags ~11
-    toggle "spawn farthest" dmflags 9
-    toggle "same map" dmflags 5
-    toggle "force respawn" dmflags 10
-    toggle "infinite ammo" dmflags 13
-    toggle "fixed FOV" dmflags 15
-    toggle "quad drop" dmflags 14
+    toggle --status "Players take damage from long falls" \
+        "falling damage" dmflags ~3
+    toggle --status "Weapons stay in place after being picked up" \
+        "weapons stay" dmflags 2
+    toggle --status "Powerups are used on pickup instead of going to the inventory" \
+        "instant powerups" dmflags 4
+    toggle --status "Powerups such as quad damage appear on the map" \
+        "allow powerups" dmflags ~1
+    toggle --status "Health items appear on the map" \
+        "allow health" dmflags ~0
+    toggle --status "Armor appears on the map" \
+        "allow armor" dmflags ~11
+    toggle --status "Players respawn at the spawn point farthest from others" \
+        "spawn farthest" dmflags 9
+    toggle --status "Play the same map again instead of moving to the next one" \
+        "same map" dmflags 5
+    toggle --status "Dead players respawn automatically" \
+        "force respawn" dmflags 10
+    toggle --status "Weapons never run out of ammo" \
+        "infinite ammo" dmflags 13
+    toggle --status "Every player sees with a 90 degree field of view" \
+        "fixed FOV" dmflags 15
+    toggle --status "A player killed with quad damage drops it" \
+        "quad drop" dmflags 14
 end
 
 begin startserver
     //title "Start Server"
     banner m_banner_start_server
-    strings "initial map" _ui_nextserver $$com_maplist
-    values "rules" coop deathmatch cooperative
-    field --integer --status "0 - no time limit" --width 3 "time limit" timelimit
-    field --integer --status "0 - no frag limit" --width 3 "frag limit" fraglimit
-    field --integer --width 3 "max players" maxclients
-    field --width 16 "host name" hostname
+    strings --status "The first map of the server" \
+        "initial map" _ui_nextserver $$com_maplist
+    values --status "Deathmatch or cooperative play" \
+        "rules" coop deathmatch cooperative
+    field --status "Minutes until the map ends. 0 for no limit" \
+        --integer --width 3 "time limit" timelimit
+    field --status "Frags that end the map. 0 for no limit" \
+        --integer --width 3 "frag limit" fraglimit
+    field --status "Most players at once, including you" \
+        --integer --width 3 "max players" maxclients
+    field --status "Server name shown in server browsers" \
+        --width 16 "host name" hostname
     blank
     action --align "deathmatch flags..." pushmenu gameflags
     action --align "begin game!" "forcemenuoff; if $coop == 1 then deathmatch 0 else deathmatch 1; map $_ui_nextserver force"
