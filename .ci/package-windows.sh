@@ -55,14 +55,15 @@ fi
 
 sed -e "s/##VER##/$ver/" -e "s/##DATE##/$(date -R)/" \
     "$src/.ci/readme-template.txt" > README
+(cd "$src" && .ci/third-party-licenses.sh "$tmp/build/THIRD-PARTY")
 unix2dos -k -n "$src/LICENSE" LICENSE.txt README README.txt \
     "$src/doc/client.asciidoc" MANUAL.txt \
-    "$src/subprojects/openal-soft-1.23.1/COPYING" LICENSE-OpenAL-Soft.txt \
+    THIRD-PARTY THIRD-PARTY-LICENSES.txt \
     "$tmp/ffmpeg/COPYING.LGPLv2.1" LICENSE-FFmpeg.txt
 zip -9 "$out/q2pro-$ver-$arch-client.zip" "q2pro$suffix.exe" LICENSE.txt \
-    LICENSE-OpenAL-Soft.txt LICENSE-FFmpeg.txt MANUAL.txt README.txt \
+    THIRD-PARTY-LICENSES.txt LICENSE-FFmpeg.txt MANUAL.txt README.txt \
     baseq2/q2pro.menu "baseq2/game$cpu.dll"
 
 unix2dos -k -n "$src/doc/server.asciidoc" MANUAL.txt
 zip -9 "$out/q2pro-$ver-$arch-server.zip" "q2proded$suffix.exe" LICENSE.txt \
-    MANUAL.txt README.txt
+    THIRD-PARTY-LICENSES.txt MANUAL.txt README.txt
