@@ -160,41 +160,65 @@ end
 
 begin railtrail
     title "Railgun Trail Setup"
-    values "rail trail type" cl_railtrail_type \
+    values --status "Default is the original effect. The others draw a solid core, optionally with a spiral" \
+        "rail trail type" cl_railtrail_type \
         "default" "core only" "core and spiral"
-    range "rail trail duration" cl_railtrail_time 0.1 3.0 0.1
-    range "core width" cl_railcore_width 1 6 1
-    range "spiral radius" cl_railspiral_radius 1 6 1
-    strings "core color" cl_railcore_color \
+    range --status "How long the trail stays visible, in seconds" \
+        "rail trail duration" cl_railtrail_time 0.1 3.0 0.1
+    range --status "Width of the solid core" \
+        "core width" cl_railcore_width 1 6 1
+    range --status "Radius of the spiral" \
+        "spiral radius" cl_railspiral_radius 1 6 1
+    strings --status "Color of the solid core" \
+        "core color" cl_railcore_color \
         black red green yellow blue cyan magenta white
-    strings "spiral color" cl_railspiral_color \
+    strings --status "Color of the spiral" \
+        "spiral color" cl_railspiral_color \
         black red green yellow blue cyan magenta white
 end
 
 begin effects
     title "Effects Setup"
-    values "dynamic lighting" gl_dynamic "no" "yes" "only switchable"
-    values "entity cel-shading" gl_celshading no 1x 2x 3x
-    toggle "entity glowing" cl_noglow ~
-    toggle "item highlighting" cl_itemhighlight
-    toggle "weapon highlighting" cl_weaponhighlight
-    toggle "ammo highlighting" cl_ammohighlight
-    toggle "player highlighting" cl_playerhighlight
-    toggle "tint item skins" cl_itemtint
-    toggle "tint weapon skins" cl_weapontint
-    toggle "tint ammo skins" cl_ammotint
-    toggle "tint player skins" cl_playertint
+    values --status "Light from explosions, rockets and muzzle flashes. Only switchable keeps map lights that turn on and off" \
+        "dynamic lighting" gl_dynamic "no" "yes" "only switchable"
+    values --status "Draw black outlines around models" \
+        "entity cel-shading" gl_celshading no 1x 2x 3x
+    toggle --status "Pulsing glow around items such as ammo, health and armor" \
+        "entity glowing" cl_noglow ~
+    toggle --status "Colored shell around health, armor and powerups" \
+        "item highlighting" cl_itemhighlight
+    toggle --status "Colored shell around weapon pickups and weapons held by players" \
+        "weapon highlighting" cl_weaponhighlight
+    toggle --status "Colored shell around ammo, in the color of its weapon" \
+        "ammo highlighting" cl_ammohighlight
+    toggle --status "Colored shell around players: male white, female green, other models orange" \
+        "player highlighting" cl_playerhighlight
+    toggle --status "Recolor item skins instead of drawing a shell. Shaders backend only" \
+        "tint item skins" cl_itemtint
+    toggle --status "Recolor weapon skins, including your own view weapon. Shaders backend only" \
+        "tint weapon skins" cl_weapontint
+    toggle --status "Recolor ammo skins. Shaders backend only" \
+        "tint ammo skins" cl_ammotint
+    toggle --status "Recolor player skins: male white, female green, other models amber. Shaders backend only" \
+        "tint player skins" cl_playertint
     toggle --status "Glow around glowmaps and glowing highlights (shaders backend)" \
         "bloom" gl_bloom
-    range "highlight bloom" cl_itemhighlight_glow 0 5 1
-    values "ground shadows" gl_shadows no yes fade
-    toggle "screen blending" gl_polyblend
-    toggle "screen warping" gl_waterwarp
-    toggle "grenade explosions" cl_disable_explosions ~0
-    toggle "rocket explosions" cl_disable_explosions ~1
+    range --status "Glow strength of highlights. Needs bloom. 0 keeps a plain shell" \
+        "highlight bloom" cl_itemhighlight_glow 0 5 1
+    values --status "Shadows under models. Fade makes them lighter with distance" \
+        "ground shadows" gl_shadows no yes fade
+    toggle --status "Color the screen when you are hit, pick up items or are under water" \
+        "screen blending" gl_polyblend
+    toggle --status "Wavy screen while under water. Shaders backend only" \
+        "screen warping" gl_waterwarp
+    toggle --status "Show the explosion model for grenades. Off keeps only particles" \
+        "grenade explosions" cl_disable_explosions ~0
+    toggle --status "Show the explosion model for rockets. Off keeps only particles" \
+        "rocket explosions" cl_disable_explosions ~1
     toggle --status "Hide blood particles only for impacts on your player" \
         "blood particles when hit" cl_disable_self_blood ~
-    strings "rocket and grenade trails" cl_projectiletrail_color \
+    strings --status "Particle color of rocket and grenade trails. None keeps the original colors" \
+        "rocket and grenade trails" cl_projectiletrail_color \
         none red green yellow blue cyan magenta white
     blank
     action --align "railgun trail setup..." pushmenu railtrail
