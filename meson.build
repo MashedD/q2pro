@@ -288,6 +288,16 @@ curl = dependency('libcurl',
 if curl.found()
   client_src += 'src/client/http.c'
   config.set10('USE_CURL', true)
+
+  # Only the headers are needed when libcurl is loaded at runtime. See
+  # load_curl() in src/client/http.c.
+  if get_option('curl-dlopen')
+    if win32
+      error('curl-dlopen is only supported on Unix-like systems')
+    endif
+    config.set10('USE_CURL_DLOPEN', true)
+    curl = curl.partial_dependency(compile_args: true, includes: true)
+  endif
 endif
 
 sdl2 = dependency('sdl2', required: get_option('sdl2'))
@@ -566,6 +576,7 @@ summary({
   'game-new-api'       : config.get('USE_NEW_GAME_API', 0) != 0,
   'icmp-errors'        : config.get('USE_ICMP', 0) != 0,
   'libcurl'            : config.get('USE_CURL', 0) != 0,
+  'curl-dlopen'        : config.get('USE_CURL_DLOPEN', 0) != 0,
   'libjpeg'            : config.get('USE_JPG', 0) != 0,
   'libpng'             : config.get('USE_PNG', 0) != 0,
   'md3'                : config.get('USE_MD3', 0) != 0,

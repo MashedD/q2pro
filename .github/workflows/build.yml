@@ -133,6 +133,10 @@ jobs:
         include:
           - cc: gcc
             buildtype: release
+          # Load libcurl at runtime, as the Linux release package does.
+          - cc: clang
+            buildtype: debugoptimized
+            extra: -Dcurl-dlopen=true
     steps:
       - uses: actions/checkout@v7
 
@@ -146,7 +150,7 @@ jobs:
       - name: Build
         run: |
           meson setup --buildtype=${{ matrix.buildtype }} \
-          ${{ env.MESON_ARGS }} ${{ env.MESON_ARGS_LINUX }} builddir
+          ${{ env.MESON_ARGS }} ${{ env.MESON_ARGS_LINUX }} ${{ matrix.extra }} builddir
           meson compile -C builddir
         env:
           CC: ${{ matrix.cc }}

@@ -20,6 +20,13 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "client.h"
 #include <assert.h>
+
+#if USE_CURL_DLOPEN
+// curl.h turns curl_easy_setopt() and friends into type checking macros when
+// compiling with GCC. They have to stay plain function names here, because
+// they are redirected to pointers loaded at runtime below.
+#define CURL_DISABLE_TYPECHECK
+#endif
 #include <curl/curl.h>
 
 #include "shared/atomic.h"
@@ -72,6 +79,107 @@ static int              download_percent;
 
 static bool         curl_initialized;
 static CURLM        *curl_multi;
+
+#if USE_CURL_DLOPEN
+
+/*
+libcurl is loaded at runtime instead of being linked, for binaries that must
+start on any Linux distribution. Distributions name the library differently
+(libcurl-gnutls.so.4 on Debian and Ubuntu, libcurl.so.4 elsewhere), so a
+binary linked against one of them fails to start with "error while loading
+shared libraries" on the others. Loading it at runtime also means the game
+still starts without libcurl; only HTTP downloads are unavailable then.
+*/
+
+#define CURL_FUNCTIONS \
+    CURL_FUNC(curl_easy_cleanup) \
+    CURL_FUNC(curl_easy_getinfo) \
+    CURL_FUNC(curl_easy_init) \
+    CURL_FUNC(curl_easy_perform) \
+    CURL_FUNC(curl_easy_setopt) \
+    CURL_FUNC(curl_easy_strerror) \
+    CURL_FUNC(curl_global_cleanup) \
+    CURL_FUNC(curl_global_init) \
+    CURL_FUNC(curl_multi_add_handle) \
+    CURL_FUNC(curl_multi_cleanup) \
+    CURL_FUNC(curl_multi_info_read) \
+    CURL_FUNC(curl_multi_init) \
+    CURL_FUNC(curl_multi_perform) \
+    CURL_FUNC(curl_multi_poll) \
+    CURL_FUNC(curl_multi_remove_handle) \
+    CURL_FUNC(curl_multi_setopt) \
+    CURL_FUNC(curl_multi_strerror) \
+    CURL_FUNC(curl_multi_wakeup) \
+    CURL_FUNC(curl_version)
+
+#define CURL_FUNC(name) static __typeof__(name) *q##name;
+CURL_FUNCTIONS
+#undef CURL_FUNC
+
+static void *curl_library;
+
+static void unload_curl(void)
+{
+    if (curl_library) {
+        Sys_FreeLibrary(curl_library);
+        curl_library = NULL;
+    }
+}
+
+static bool load_curl(void)
+{
+    static const char *const names[] = { "libcurl.so.4", "libcurl-gnutls.so.4" };
+    int i;
+
+    for (i = 0; i < q_countof(names); i++) {
+        Sys_LoadLibrary(names[i], NULL, &curl_library);
+        if (curl_library)
+            break;
+    }
+    if (!curl_library) {
+        Com_Printf("libcurl not found, HTTP downloads are disabled. "
+                   "Install your distribution's libcurl package to enable them.\n");
+        return false;
+    }
+
+#define CURL_FUNC(name) \
+    if (!(*(void **)&q##name = Sys_GetProcAddress(curl_library, #name))) { \
+        Com_EPrintf("%s lacks %s, HTTP downloads are disabled\n", names[i], #name); \
+        unload_curl(); \
+        return false; \
+    }
+    CURL_FUNCTIONS
+#undef CURL_FUNC
+
+    return true;
+}
+
+// From here on, calls go through the loaded pointers. Recent curl.h versions
+// define a few of these names as function-like macros, so drop those first.
+#undef curl_easy_getinfo
+#undef curl_easy_setopt
+#undef curl_multi_setopt
+#define curl_easy_cleanup qcurl_easy_cleanup
+#define curl_easy_getinfo qcurl_easy_getinfo
+#define curl_easy_init qcurl_easy_init
+#define curl_easy_perform qcurl_easy_perform
+#define curl_easy_setopt qcurl_easy_setopt
+#define curl_easy_strerror qcurl_easy_strerror
+#define curl_global_cleanup qcurl_global_cleanup
+#define curl_global_init qcurl_global_init
+#define curl_multi_add_handle qcurl_multi_add_handle
+#define curl_multi_cleanup qcurl_multi_cleanup
+#define curl_multi_info_read qcurl_multi_info_read
+#define curl_multi_init qcurl_multi_init
+#define curl_multi_perform qcurl_multi_perform
+#define curl_multi_poll qcurl_multi_poll
+#define curl_multi_remove_handle qcurl_multi_remove_handle
+#define curl_multi_setopt qcurl_multi_setopt
+#define curl_multi_strerror qcurl_multi_strerror
+#define curl_multi_wakeup qcurl_multi_wakeup
+#define curl_version qcurl_version
+
+#endif // USE_CURL_DLOPEN
 
 static atomic_int   worker_terminate;
 static atomic_int   worker_status;
@@ -335,6 +443,11 @@ int HTTP_FetchFile(const char *url, void **data)
 
     *data = NULL;
 
+    if (!curl_initialized) {
+        Com_Printf("[HTTP] Can't fetch %s: libcurl is not available.\n", url);
+        return -1;
+    }
+
     curl = curl_easy_init();
     if (!curl)
         return -1;
@@ -449,8 +562,16 @@ void HTTP_Init(void)
     cl_http_blocking_timeout = Cvar_Get("cl_http_blocking_timeout", "15", 0);
 #endif
 
+#if USE_CURL_DLOPEN
+    if (!load_curl())
+        return;
+#endif
+
     if (curl_global_init(CURL_GLOBAL_NOTHING)) {
         Com_EPrintf("curl_global_init failed\n");
+#if USE_CURL_DLOPEN
+        unload_curl();
+#endif
         return;
     }
 
@@ -467,6 +588,9 @@ void HTTP_Shutdown(void)
 
     curl_global_cleanup();
     curl_initialized = false;
+#if USE_CURL_DLOPEN
+    unload_curl();
+#endif
 }
 
 /*
