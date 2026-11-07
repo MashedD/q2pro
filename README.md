@@ -21,6 +21,8 @@ This is a fork of [Q2PRO](https://github.com/q2pro/q2pro) by Andrey Nazarov.
 **Graphics and sound**
 
 - Unified OpenGL renderer supporting a wide range of OpenGL versions
+- Optional Vulkan renderer (`vid_ref vk`) that reads the same settings, with
+  per-pixel lighting, bloom, MSAA and GPU selection
 - JPEG and PNG textures and screenshots
 - MD3 and MD5 (re-release) models, and compatibility with re-release assets
 - Ogg Vorbis music and Ogg Theora cinematics

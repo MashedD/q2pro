@@ -696,6 +696,16 @@ vid_driver::
       - x11 — native X11
       - sdl — SDL2 video driver
 
+vid_ref::
+    Selects the renderer. Default value is "gl". Changing it restarts the
+    renderer.
+      - gl — OpenGL
+      - vk — Vulkan, if the client was built with it (see ‘Vulkan Renderer’)
+    Unknown values fall back to OpenGL with a message. Vulkan needs a video
+    driver that can create Vulkan surfaces: the SDL driver on Linux and the
+    native drivers on Windows. When the selected driver can't, the client tries
+    the other available drivers.
+
 .Setting video modes
 ====================
 The following lines define 2 video modes: 640x480 and 800x600 at 75 Hz vertical refresh and
@@ -745,6 +755,49 @@ sys_exitonerror::
     Exit on fatal error instead of showing error message. Can be set from
     command line only.
 
+
+Vulkan Renderer
+~~~~~~~~~~~~~~~
+
+The Vulkan renderer is optional and selected with ‘vid_ref vk’. It loads the
+system's Vulkan library (libvulkan.so.1, or vulkan-1.dll on Windows) when it
+starts, so the client also starts on systems without Vulkan. It reads the same
+settings as the OpenGL renderer wherever they apply, such as texture filtering,
+lighting, shadows, bloom, fog and the ‘gl_show*’ developer views, so switching
+renderers keeps the look.
+
+vk_device::
+    Selects the GPU, either by its number in the device list printed when the
+    renderer starts, or by part of its name. Default value is empty (automatic):
+    follow the MESA_VK_DEVICE_SELECT and DRI_PRIME environment variables when
+    set, otherwise prefer the integrated GPU, which drives the display on
+    hybrid laptops, so frames don't have to be copied between GPUs. Changing it
+    restarts the renderer.
+
+vk_devicelist::
+    Read-only list of the usable GPUs as label and value pairs, filled when the
+    Vulkan renderer starts. The video menu uses it.
+
+vk_frames_in_flight::
+    Number of frames the CPU may prepare while the GPU is still drawing earlier
+    ones, from 1 to 3. Higher values can raise the frame rate, lower values
+    reduce input latency. Default value is 2.
+
+vk_pixel_lightmaps::
+    Controls how the world is lit. Default value is 2.
+      - 0 — per vertex, from the lightmaps
+      - 1 — per vertex, but also build and upload the lightmap atlas (for
+        debugging)
+      - 2 — per pixel, from the lightmap atlas, like the OpenGL renderer
+
+vk_bloom_downsample::
+    Factor by which the bloom buffer is smaller than the view before it is
+    blurred, from 1 to 16. Larger values are faster and give a wider, softer
+    glow. Default value is 4.
+
+vk_perf_stats::
+    When set, prints a line per second with the present mode, frames in flight
+    and the number of draws, batches and binds per category. Default value is 0.
 
 OpenGL Renderer
 ~~~~~~~~~~~~~~~

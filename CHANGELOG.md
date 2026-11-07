@@ -6,6 +6,15 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- An optional Vulkan renderer, selected with `vid_ref vk` or the new
+  "renderer" entry in the video menu. It draws everything the OpenGL renderer
+  does and reads the same settings, adds per-pixel lighting, bloom, MSAA,
+  stencil shadows and frames in flight, and can pick the GPU (`vk_device`).
+  OpenGL stays the default. The release packages include it for Linux and
+  Windows. See "Vulkan Renderer" in the client manual.
+
 ## [1.0.1] - 2026-11-07
 
 ### Added
