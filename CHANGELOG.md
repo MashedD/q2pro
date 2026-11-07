@@ -6,8 +6,18 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The default settings in the release packages (`q2pro.pkz`) turn vertical
+  sync off, because it adds noticeable input lag. It can be turned back on in
+  the video menu or with `gl_swapinterval 1`.
+
 ### Fixed
 
+- The game module no longer crashes when the `give` cheat command hands out an
+  item that the deathmatch flags forbid, such as armor with "no armor" set.
+- Skin tints (`cl_itemtint`, `cl_weapontint`, `cl_ammotint`, `cl_playertint`)
+  work in the Vulkan renderer.
 - Vulkan particles were about twice as large as in the OpenGL renderer.
 
 ## [1.1.0] - 2026-11-07

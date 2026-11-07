@@ -141,6 +141,14 @@ static const uint32_t vk_alias_shadow_frag_spv[] =
 #include "vk_alias_shadow_frag_spv.h"
 ;
 
+static const uint32_t vk_alias_frag_spv[] =
+#include "vk_alias_frag_spv.h"
+;
+
+static const uint32_t vk_alias_alpha_frag_spv[] =
+#include "vk_alias_alpha_frag_spv.h"
+;
+
 typedef struct {
     float rect[4];
     float color[4];
@@ -396,6 +404,8 @@ typedef struct {
     float fog[4];
     float intensity;
     float desaturation;
+    float _pad2[2];         // skin_tint starts on a 16-byte boundary
+    float skin_tint[4];     // rgb multiplier, alpha 1 when tinted
 } vk_alias_push_t;
 
 typedef struct {
@@ -5691,10 +5701,10 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
         vk_create_shader_module(vk_alias_shadow_frag_spv,
                                 sizeof(vk_alias_shadow_frag_spv)) :
         alpha_test ?
-        vk_create_shader_module(vk_world_alpha_frag_spv,
-                                sizeof(vk_world_alpha_frag_spv)) :
-        vk_create_shader_module(vk_world_frag_spv,
-                                sizeof(vk_world_frag_spv));
+        vk_create_shader_module(vk_alias_alpha_frag_spv,
+                                sizeof(vk_alias_alpha_frag_spv)) :
+        vk_create_shader_module(vk_alias_frag_spv,
+                                sizeof(vk_alias_frag_spv));
     if (!frag) {
         vk.DestroyShaderModule(vk.device, vert, NULL);
         return false;
@@ -9329,6 +9339,7 @@ static void vk_draw_alias_cel_edges(VkCommandBuffer cmd,
         return;
 
     vk_alias_push_t push = *base_push;
+    Vector4Clear(push.skin_tint);
     float width = Cvar_ClampValue(vk_celshading, 0.0f, 10.0f) * alpha;
     float distance = max(Distance(ent->origin, fd->vieworg), 1.0f);
     float view_height = max(fd->height, 1);
@@ -9391,6 +9402,7 @@ static void vk_draw_alias_outlines(VkCommandBuffer cmd,
         return;
 
     vk_alias_push_t outline = *push;
+    Vector4Clear(outline.skin_tint);
     Vector4Set(outline.color, 0.0f, 0.0f, 0.0f, 1.0f);
     Vector4Clear(outline.shadedir);
     outline.depthscale = 0.0f;
@@ -9669,6 +9681,14 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     vk_fog_params(fd, push.fog);
     push.intensity = vk_texture_intensity();
     push.desaturation = 0.0f;
+    push._pad2[0] = push._pad2[1] = 0.0f;
+    // Skin tints, as in the OpenGL renderer: shells keep their own color.
+    if ((ent->flags & RF_SKINTINT) && !(ent->flags & RF_SHELL_MASK)) {
+        VectorScale(ent->skin_tint, SKINTINT_BRIGHTNESS, push.skin_tint);
+        push.skin_tint[3] = 1.0f;
+    } else {
+        Vector4Clear(push.skin_tint);
+    }
 
     for (int i = 0; i < model->alias_batch_count; i++) {
         const vk_alias_batch_t *batch = &model->alias_batches[i];
@@ -9707,6 +9727,8 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 
             if (glow) {
                 vk_alias_push_t glow_push = push;
+                // Glowmaps are added untinted, as in the OpenGL renderer.
+                Vector4Clear(glow_push.skin_tint);
 
                 glow_push.intensity = vk_glowmap_intensity();
                 vk_draw_alias_pass(cmd, vk.drawing_bloom ? vk.alias_bloom_pipeline :
