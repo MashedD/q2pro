@@ -107,12 +107,6 @@ cvar_t  *info_hand;
 cvar_t  *info_gender;
 cvar_t  *info_uf;
 
-#if USE_REF
-extern cvar_t *gl_modulate_world;
-extern cvar_t *gl_modulate_entities;
-extern cvar_t *gl_brightness;
-#endif
-
 client_static_t cls;
 client_state_t  cl;
 
@@ -664,6 +658,34 @@ static void CL_Rcon_c(genctx_t *ctx, int argnum)
     Com_Generic_c(ctx, argnum - 1);
 }
 
+#if USE_REF
+/*
+=====================
+CL_ProtectModulateCvars
+
+Sets or clears CVAR_CHEAT on the renderer's lighting modulation cvars. They
+are looked up by name because the active renderer registers them, and a
+renderer that isn't running has none.
+=====================
+*/
+static void CL_ProtectModulateCvars(bool protect)
+{
+    static const char *const names[] = {
+        "gl_modulate_world", "gl_modulate_entities", "gl_brightness"
+    };
+
+    for (int i = 0; i < q_countof(names); i++) {
+        cvar_t *var = Cvar_FindVar(names[i]);
+        if (!var)
+            continue;
+        if (protect)
+            var->flags |= CVAR_CHEAT;
+        else
+            var->flags &= ~CVAR_CHEAT;
+    }
+}
+#endif
+
 /*
 =====================
 CL_ClearState
@@ -696,9 +718,7 @@ void CL_ClearState(void)
 
 #if USE_REF
     // unprotect our custom modulate cvars
-    gl_modulate_world->flags &= ~CVAR_CHEAT;
-    gl_modulate_entities->flags &= ~CVAR_CHEAT;
-    gl_brightness->flags &= ~CVAR_CHEAT;
+    CL_ProtectModulateCvars(false);
 #endif
 }
 
@@ -1688,9 +1708,7 @@ void CL_Begin(void)
 #if USE_REF
     if (!Q_stricmp(cl.gamedir, "gloom")) {
         // cheat protect our custom modulate cvars
-        gl_modulate_world->flags |= CVAR_CHEAT;
-        gl_modulate_entities->flags |= CVAR_CHEAT;
-        gl_brightness->flags |= CVAR_CHEAT;
+        CL_ProtectModulateCvars(true);
     }
 #endif
 
