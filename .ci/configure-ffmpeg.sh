@@ -28,7 +28,9 @@ OPTS_COMMON="--disable-everything \
     --disable-w32threads"
 
 config_linux() {
-    ../configure --prefix="$1" $OPTS_COMMON
+    # Position-independent code, because the static libraries are linked
+    # into a position-independent executable.
+    ../configure --prefix="$1" --enable-pic $OPTS_COMMON
 }
 
 config_win32() {

@@ -7,18 +7,24 @@
 # in from its Meson wrap. libcurl's name differs too (libcurl-gnutls.so.4 on
 # Debian and Ubuntu), so it is loaded at runtime under either name
 # (-Dcurl-dlopen). Other libraries are taken from the system only if every
-# distribution names them the same; check-linux-deps.sh enforces that. FFmpeg is disabled because its
-# library versions differ between distributions.
+# distribution names them the same; check-linux-deps.sh enforces that.
+# FFmpeg's library versions differ between distributions too, so a small
+# FFmpeg for Ogg music and cinematics is built in (see build-ffmpeg.sh), as in
+# the Windows packages.
 
 out=$(realpath -m "$1")
 ver=$(python3 version.py)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# libjpeg-turbo calls setenv(), which C11 without GNU extensions hides.
+./.ci/build-ffmpeg.sh linux "$tmp/ffmpeg-prefix"
+
+# Only FFmpeg's static libraries exist in that prefix, so the linker takes
+# those. libjpeg-turbo calls setenv(), which C11 without GNU extensions hides.
+PKG_CONFIG_PATH="$tmp/ffmpeg-prefix/lib/pkgconfig" \
 meson setup "$tmp/build" --buildtype=release --wrap-mode=nofallback \
     --force-fallback-for=libjpeg -Dlibjpeg-turbo:c_std=gnu11 -Dcurl-dlopen=true \
-    -Davcodec=disabled -Dsystem-wide=false -Dconfig-file=q2config.cfg \
+    -Davcodec=enabled -Dsystem-wide=false -Dconfig-file=q2config.cfg \
     -Danticheat-server=true \
     -Dwindows-crash-dumps=disabled -Dwerror=true
 meson compile -C "$tmp/build"
@@ -32,6 +38,7 @@ cp "$tmp/build/gamex86_64.so" src/client/ui/q2pro.menu "$pkg/baseq2/"
 strip "$pkg/q2pro" "$pkg/q2proded" "$pkg/baseq2/gamex86_64.so"
 ./.ci/check-linux-deps.sh "$pkg/q2pro" "$pkg/q2proded" "$pkg/baseq2/gamex86_64.so"
 cp LICENSE "$pkg/LICENSE.txt"
+cp "$tmp/ffmpeg-prefix/LICENSE-FFmpeg.txt" "$pkg/"
 cp doc/client.asciidoc "$pkg/MANUAL.txt"
 sed -e "s/##VER##/$ver/" -e "s/##DATE##/$(date -R)/" \
     .ci/readme-template.txt > "$pkg/README.txt"
@@ -51,8 +58,8 @@ This build runs on distributions with glibc 2.35 or newer, such as Ubuntu
 22.04, Debian 12, Fedora, Arch, SteamOS and Bazzite. It uses SDL2, libpng
 and zlib from your system, plus OpenAL for 3D sound and libcurl for HTTP
 downloads if they are installed; most desktops have them already.
-Ogg music and cinematics need FFmpeg, so build from source for those: see
-BUILDING.md in the source archive.
+Ogg Vorbis music and Ogg Theora cinematics are built in, using FFmpeg under
+the LGPL (see LICENSE-FFmpeg.txt).
 END
 
 mkdir -p "$out"

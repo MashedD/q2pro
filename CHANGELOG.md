@@ -6,6 +6,11 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The Linux package plays Ogg Vorbis music and Ogg Theora cinematics, like the
+  Windows packages. Before, that needed a build from source.
+
 ## [1.0.0] - 2026-11-06
 
 First release of the rebuilt fork, based on upstream Q2PRO at commit 601a8df.
