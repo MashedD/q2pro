@@ -312,7 +312,21 @@ client_deps = [png, curl, sdl2]
 server_deps = []
 game_deps = [zlib]
 
-vulkan = dependency('vulkan', required: get_option('vulkan'))
+vulkan = dependency('vulkan', required: false)
+if not vulkan.found() and host_machine.system() == 'windows'
+  # The Windows backend loads vulkan-1.dll dynamically, so cross builds only
+  # need the platform-independent Vulkan headers.  Linux distributions
+  # commonly install those in /usr/include without providing a MinGW pkg-config
+  # file.  Search that directory after the MinGW compiler's native headers so
+  # standard C and Windows headers still come from the cross toolchain.
+  vulkan_header_args = ['-idirafter', '/usr/include']
+  if cc.has_header('vulkan/vulkan.h', args: vulkan_header_args)
+    vulkan = declare_dependency(compile_args: vulkan_header_args)
+  endif
+endif
+if get_option('vulkan').enabled() and not vulkan.found()
+  error('Vulkan support was enabled, but Vulkan headers were not found')
+endif
 if vulkan.found()
   glslc = find_program('glslc', required: get_option('vulkan'))
   vk_shader_headers = []
@@ -326,6 +340,8 @@ if vulkan.found()
                     'vk_world_lit_alpha.frag',
                     'vk_world_pixel.vert', 'vk_world_pixel.frag',
                     'vk_world_pixel_alpha.frag',
+                    'vk_world_pixel_glow.frag',
+                    'vk_world_pixel_glow_alpha.frag',
                     'vk_world_glow.frag',
                     'vk_alias.vert', 'vk_alias_shadow.vert',
                     'vk_alias_shadow.frag']
@@ -335,7 +351,7 @@ if vulkan.found()
       command: [glslc, '-mfmt=c', '@INPUT@', '-o', '@OUTPUT@'],
     )
   endforeach
-  client_deps += vulkan.partial_dependency(compile_args: true, includes: true)
+  common_deps += vulkan.partial_dependency(compile_args: true, includes: true)
   refresh_src += ['src/refresh/vk_backend.c', vk_shader_headers]
   config.set10('USE_VULKAN', true)
 endif

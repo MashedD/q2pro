@@ -166,6 +166,11 @@ bool R_Init(bool total)
 {
     cvar_t *vid_ref = Cvar_Get("vid_ref", "gl", CVAR_ARCHIVE | CVAR_REFRESH);
 
+    // The video menu lists Vulkan devices from this cvar. Register it here
+    // so the menu also works while OpenGL runs, and in builds without
+    // Vulkan, where it only offers "automatic".
+    Cvar_Get("vk_devicelist", "\"automatic\" \"\"", CVAR_ROM);
+
     backend = find_backend(vid_ref->string);
     if (!backend) {
         Com_Printf("No such renderer: %s, falling back to gl.\n", vid_ref->string);

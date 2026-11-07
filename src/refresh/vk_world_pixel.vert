@@ -9,6 +9,7 @@ layout(push_constant) uniform Push {
     vec4 dlight_colors[3];
     vec4 fog;
     float intensity;
+    float desaturation;
     vec2 lm_scale;
     vec2 lm_offset;
 } pc;
