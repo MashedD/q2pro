@@ -10276,9 +10276,12 @@ static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
     }
 }
 
+// A light style index is a byte, so it is always below MAX_LIGHTSTYLES.
+_Static_assert(MAX_LIGHTSTYLES >= 256, "light style indices are bytes");
+
 static float vk_lightstyle_value(const refdef_t *fd, byte style)
 {
-    if (!fd || !fd->lightstyles || style >= MAX_LIGHTSTYLES)
+    if (!fd || !fd->lightstyles)
         return 1.0f;
     return fd->lightstyles[style].white;
 }
