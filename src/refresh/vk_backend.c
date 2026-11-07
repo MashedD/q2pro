@@ -58,6 +58,10 @@ static const uint32_t vk_world_frag_spv[] =
 #include "vk_world_frag_spv.h"
 ;
 
+static const uint32_t vk_world_alpha_frag_spv[] =
+#include "vk_world_alpha_frag_spv.h"
+;
+
 static const uint32_t vk_alias_vert_spv[] =
 #include "vk_alias_vert_spv.h"
 ;
@@ -89,6 +93,7 @@ typedef struct {
     float position[3];
     float color[4];
     float uv[2];
+    float normal[3];
 } vk_vertex_t;
 
 typedef struct {
@@ -109,13 +114,21 @@ typedef struct {
     uint32_t first_vertex;
     uint32_t edge_count;
     uint32_t texture_index;
+    vec3_t center;
     mface_t *face;
 } vk_world_build_face_t;
+
+typedef enum {
+    VK_WORLD_OPAQUE,
+    VK_WORLD_ALPHA,
+    VK_WORLD_ENTITY_ALPHA,
+} vk_world_pass_t;
 
 typedef struct {
     mface_t *face;
     uint32_t first_index;
     uint32_t index_count;
+    vec3_t center;
 } vk_world_face_t;
 
 typedef struct {
@@ -127,6 +140,11 @@ typedef struct {
 } vk_sprite_frame_t;
 
 typedef struct {
+    vec3_t bounds[2];
+    float radius;
+} vk_alias_frame_t;
+
+typedef struct {
     enum {
         VK_MODEL_FREE,
         VK_MODEL_ALIAS,
@@ -135,6 +153,7 @@ typedef struct {
     char name[MAX_QPATH];
     unsigned registration_sequence;
     vk_sprite_frame_t *frames;
+    vk_alias_frame_t *alias_frames;
     int frame_count;
     vk_mesh_t mesh;
     image_t **skins;
@@ -168,7 +187,17 @@ typedef struct {
 typedef struct {
     mat4_t mvp;
     float color[4];
+    float scroll[4];
+    float dlight[4];
+} vk_world_push_t;
+
+typedef struct {
+    mat4_t mvp;
+    float color[4];
+    float shadedir[4];
     float backlerp;
+    float shellscale;
+    float depthscale;
 } vk_alias_push_t;
 
 typedef struct {
@@ -284,10 +313,17 @@ typedef struct {
     VkPipeline rect_pipeline;
     VkPipeline texture_pipeline;
     VkPipeline color3d_pipeline;
+    VkPipeline line3d_pipeline;
+    VkPipeline beam_pipeline;
     VkPipeline world_pipeline;
+    VkPipeline world_alpha_pipeline;
     VkPipeline sky_pipeline;
     VkPipeline sprite_pipeline;
+    VkPipeline sprite_alpha_pipeline;
+    VkPipeline particle_add_pipeline;
     VkPipeline alias_pipeline;
+    VkPipeline alias_alpha_pipeline;
+    VkPipeline alias_depth_pipeline;
     VkPipeline alias_blend_pipeline;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
@@ -316,9 +352,11 @@ typedef struct {
     clipRect_t clip;
     bool clip_set;
     vk_texture_t raw_texture;
+    vk_texture_t particle_texture;
     vk_mesh_t test_triangle;
     vk_mesh_t skybox;
     vk_mesh_t sprite_quad;
+    vk_mesh_t null_model;
     uint32_t sky_images[6];
     vk_world_t world;
     vk_model_t models[MAX_MODELS];
@@ -330,6 +368,22 @@ static vk_state_t vk;
 static cvar_t *vk_show_test_triangle;
 static cvar_t *vk_drawentities;
 static cvar_t *vk_drawsky;
+static cvar_t *vk_partscale;
+static cvar_t *vk_partstyle;
+static cvar_t *vk_beamstyle;
+static cvar_t *vk_lightgrid;
+static cvar_t *vk_fullbright;
+static cvar_t *vk_cull_models;
+static cvar_t *vk_dotshading;
+static cvar_t *vk_draworder;
+static cvar_t *vk_showorigins;
+static cvar_t *vk_modulate;
+static cvar_t *vk_modulate_entities;
+static cvar_t *vk_doublelight_entities;
+static cvar_t *vk_modulate_world;
+static cvar_t *vk_dynamic;
+static cvar_t *vk_dlight_falloff;
+static cvar_t *vk_brightness;
 static cvar_t *vk_world_textures;
 static cvar_t *vk_world_vis;
 static cvar_t *vk_world_cull;
@@ -342,11 +396,78 @@ static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
 static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, const void *pixels);
 static void vk_destroy_texture_resource(vk_texture_t *texture);
+static void vk_entity_axis(const entity_t *ent, vec3_t axis[3]);
+static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
+                          const entity_t *ent, const vec3_t axis[3]);
 static bool vk_create_swapchain(int width, int height);
 static bool vk_create_test_triangle(void);
 static void vk_destroy_mesh(vk_mesh_t *mesh);
 static void vk_free_world(void);
+// Computes each face's lightmap extents, which only the OpenGL renderer
+// computes otherwise. The same arithmetic as build_surface_light in surf.c.
+static void vk_prepare_face_lightmaps(bsp_t *bsp)
+{
+    for (int i = 0; i < bsp->numfaces; i++) {
+        mface_t *face = &bsp->faces[i];
+
+        if (!face->texinfo)
+            continue;
+
+        if (bsp->lm_decoupled) {
+            float len0 = VectorLength(face->lm_axis[0]);
+            float len1 = VectorLength(face->lm_axis[1]);
+            face->lm_scale[0] = len0 ? 1.0f / len0 : 0.0f;
+            face->lm_scale[1] = len1 ? 1.0f / len1 : 0.0f;
+            continue;
+        }
+
+        vec2_t mins = { 99999.0f, 99999.0f };
+        vec2_t maxs = { -99999.0f, -99999.0f };
+        bool valid = face->numsurfedges > 0;
+
+        for (int j = 0; j < face->numsurfedges && valid; j++) {
+            const msurfedge_t *surfedge = face->firstsurfedge + j;
+            if (surfedge->edge >= (uint32_t)bsp->numedges) {
+                valid = false;
+                break;
+            }
+            const medge_t *edge = &bsp->edges[surfedge->edge];
+            if (edge->v[surfedge->vert] >= (uint32_t)bsp->numvertices) {
+                valid = false;
+                break;
+            }
+            const mvertex_t *vert = &bsp->vertices[edge->v[surfedge->vert]];
+
+            for (int axis = 0; axis < 2; axis++) {
+                float tc = DotProduct(vert->point, face->texinfo->axis[axis]) +
+                           face->texinfo->offset[axis];
+                mins[axis] = min(mins[axis], tc);
+                maxs[axis] = max(maxs[axis], tc);
+            }
+        }
+        if (!valid)
+            continue;
+
+        int bmins[2], bmaxs[2];
+        bmins[0] = floorf(mins[0] / 16.0f);
+        bmins[1] = floorf(mins[1] / 16.0f);
+        bmaxs[0] = ceilf(maxs[0] / 16.0f);
+        bmaxs[1] = ceilf(maxs[1] / 16.0f);
+
+        VectorScale(face->texinfo->axis[0], 1.0f / 16.0f, face->lm_axis[0]);
+        VectorScale(face->texinfo->axis[1], 1.0f / 16.0f, face->lm_axis[1]);
+        face->lm_offset[0] = face->texinfo->offset[0] / 16.0f - bmins[0];
+        face->lm_offset[1] = face->texinfo->offset[1] / 16.0f - bmins[1];
+        face->lm_width = bmaxs[0] - bmins[0] + 1;
+        face->lm_height = bmaxs[1] - bmins[1] + 1;
+        face->lm_scale[0] = 16.0f;
+        face->lm_scale[1] = 16.0f;
+    }
+}
+
 static void vk_load_world(const char *name);
+static bool vk_static_light_point(const vec3_t origin, const refdef_t *fd,
+                                  vec3_t light);
 
 static void vk_upload_image(image_t *image, byte *pic)
 {
@@ -664,6 +785,10 @@ static void vk_free_model(vk_model_t *model)
         Z_Free(model->frames);
         model->frames = NULL;
     }
+    if (model->alias_frames) {
+        Z_Free(model->alias_frames);
+        model->alias_frames = NULL;
+    }
     if (model->skins) {
         Z_Free(model->skins);
         model->skins = NULL;
@@ -801,6 +926,7 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
     uint16_t *remap = NULL;
     vk_vertex_t *vertices = NULL;
     uint32_t *indices = NULL;
+    vk_alias_frame_t *alias_frames = NULL;
     uint32_t numindices = 0;
     uint32_t numverts = 0;
     qhandle_t handle = 0;
@@ -885,6 +1011,7 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
 
     vertices = Z_Malloc(sizeof(*vertices) * numverts * header.num_frames);
     indices = Z_Malloc(sizeof(*indices) * numindices);
+    alias_frames = Z_Mallocz(sizeof(*alias_frames) * header.num_frames);
 
     for (uint32_t i = 0; i < numindices; i++)
         indices[i] = final_indices[i];
@@ -898,6 +1025,7 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
 
         LittleVector(src_frame->scale, scale);
         LittleVector(src_frame->translate, translate);
+        ClearBounds(alias_frames[frame].bounds[0], alias_frames[frame].bounds[1]);
 
         for (uint32_t i = 0; i < numindices; i++) {
             if (remap[i] != i)
@@ -909,13 +1037,22 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
             dst->position[0] = src_vert->v[0] * scale[0] + translate[0];
             dst->position[1] = src_vert->v[1] * scale[1] + translate[1];
             dst->position[2] = src_vert->v[2] * scale[2] + translate[2];
+            AddPointToBounds(dst->position, alias_frames[frame].bounds[0],
+                             alias_frames[frame].bounds[1]);
             dst->color[0] = 1.0f;
             dst->color[1] = 1.0f;
             dst->color[2] = 1.0f;
             dst->color[3] = 1.0f;
             dst->uv[0] = (int16_t)LittleShort(src_tc[tc_indices[i]].s) * scale_s;
             dst->uv[1] = (int16_t)LittleShort(src_tc[tc_indices[i]].t) * scale_t;
+            if (src_vert->lightnormalindex < NUMVERTEXNORMALS)
+                VectorCopy(bytedirs[src_vert->lightnormalindex], dst->normal);
+            else
+                VectorSet(dst->normal, 0.0f, 0.0f, 1.0f);
         }
+
+        alias_frames[frame].radius = RadiusFromBounds(alias_frames[frame].bounds[0],
+                                                      alias_frames[frame].bounds[1]);
     }
 
     model = vk_alloc_model();
@@ -926,6 +1063,8 @@ static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t
     model->type = VK_MODEL_ALIAS;
     model->registration_sequence = r_registration_sequence;
     model->frame_count = header.num_frames;
+    model->alias_frames = alias_frames;
+    alias_frames = NULL;
     model->vertex_count = numverts;
     model->skin_count = header.num_skins;
     if (model->skin_count)
@@ -963,6 +1102,8 @@ out:
         Z_Free(vertices);
     if (indices)
         Z_Free(indices);
+    if (alias_frames)
+        Z_Free(alias_frames);
     return handle;
 }
 
@@ -1578,12 +1719,12 @@ static bool vk_create_frame_resources(void)
 
     VkDescriptorPoolSize pool_size = {
         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = MAX_RIMAGES + 1,
+        .descriptorCount = MAX_RIMAGES + 4,
     };
     VkDescriptorPoolCreateInfo pool_info_desc = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-        .maxSets = MAX_RIMAGES + 1,
+        .maxSets = MAX_RIMAGES + 4,
         .poolSizeCount = 1,
         .pPoolSizes = &pool_size,
     };
@@ -1609,8 +1750,8 @@ static bool vk_create_frame_resources(void)
     VkPushConstantRange push_range = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
-        .size = max(max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
-                    sizeof(vk_alias_push_t)),
+        .size = max(max(max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
+                        sizeof(vk_world_push_t)), sizeof(vk_alias_push_t)),
     };
     VkPipelineLayoutCreateInfo layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1722,9 +1863,24 @@ static void vk_destroy_swapchain(void)
         vk.color3d_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.line3d_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.line3d_pipeline, NULL);
+        vk.line3d_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.beam_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.beam_pipeline, NULL);
+        vk.beam_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.world_pipeline) {
         vk.DestroyPipeline(vk.device, vk.world_pipeline, NULL);
         vk.world_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.world_alpha_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.world_alpha_pipeline, NULL);
+        vk.world_alpha_pipeline = VK_NULL_HANDLE;
     }
 
     if (vk.sky_pipeline) {
@@ -1737,9 +1893,29 @@ static void vk_destroy_swapchain(void)
         vk.sprite_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.sprite_alpha_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.sprite_alpha_pipeline, NULL);
+        vk.sprite_alpha_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.particle_add_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.particle_add_pipeline, NULL);
+        vk.particle_add_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.alias_pipeline) {
         vk.DestroyPipeline(vk.device, vk.alias_pipeline, NULL);
         vk.alias_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.alias_alpha_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_alpha_pipeline, NULL);
+        vk.alias_alpha_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.alias_depth_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_depth_pipeline, NULL);
+        vk.alias_depth_pipeline = VK_NULL_HANDLE;
     }
 
     if (vk.alias_blend_pipeline) {
@@ -2235,7 +2411,8 @@ static bool vk_create_texture_pipeline(void)
     return true;
 }
 
-static bool vk_create_color3d_pipeline(void)
+static bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_write,
+                                       bool blend, VkPrimitiveTopology topology)
 {
     VkShaderModule vert = vk_create_shader_module(vk_color3d_vert_spv,
                                                   sizeof(vk_color3d_vert_spv));
@@ -2291,7 +2468,7 @@ static bool vk_create_color3d_pipeline(void)
     };
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .topology = topology,
     };
     VkViewport viewport = {
         .x = 0.0f,
@@ -2324,6 +2501,13 @@ static bool vk_create_color3d_pipeline(void)
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
     };
     VkPipelineColorBlendAttachmentState color_blend_attachment = {
+        .blendEnable = blend,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
     };
@@ -2335,7 +2519,7 @@ static bool vk_create_color3d_pipeline(void)
     VkPipelineDepthStencilStateCreateInfo depth_stencil = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = VK_TRUE,
-        .depthWriteEnable = VK_TRUE,
+        .depthWriteEnable = depth_write,
         .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
     };
 
@@ -2357,7 +2541,7 @@ static bool vk_create_color3d_pipeline(void)
 
     VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
                                                  &create_info, NULL,
-                                                 &vk.color3d_pipeline);
+                                                 pipeline);
     vk.DestroyShaderModule(vk.device, frag, NULL);
     vk.DestroyShaderModule(vk.device, vert, NULL);
 
@@ -2368,15 +2552,19 @@ static bool vk_create_color3d_pipeline(void)
 }
 
 static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
-                                     bool depth_write, bool blend)
+                                     bool depth_write, bool blend,
+                                     bool alpha_test, bool additive)
 {
     VkShaderModule vert = vk_create_shader_module(vk_world_vert_spv,
                                                   sizeof(vk_world_vert_spv));
     if (!vert)
         return false;
 
-    VkShaderModule frag = vk_create_shader_module(vk_world_frag_spv,
-                                                  sizeof(vk_world_frag_spv));
+    VkShaderModule frag = alpha_test ?
+        vk_create_shader_module(vk_world_alpha_frag_spv,
+                                sizeof(vk_world_alpha_frag_spv)) :
+        vk_create_shader_module(vk_world_frag_spv,
+                                sizeof(vk_world_frag_spv));
     if (!frag) {
         vk.DestroyShaderModule(vk.device, vert, NULL);
         return false;
@@ -2465,10 +2653,12 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
     VkPipelineColorBlendAttachmentState color_blend_attachment = {
         .blendEnable = blend,
         .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
-        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .dstColorBlendFactor = additive ?
+            VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .colorBlendOp = VK_BLEND_OP_ADD,
         .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .dstAlphaBlendFactor = additive ?
+            VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .alphaBlendOp = VK_BLEND_OP_ADD,
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
@@ -2513,15 +2703,20 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
     return true;
 }
 
-static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write, bool blend)
+static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
+                                     bool blend, bool color_write,
+                                     bool alpha_test)
 {
     VkShaderModule vert = vk_create_shader_module(vk_alias_vert_spv,
                                                   sizeof(vk_alias_vert_spv));
     if (!vert)
         return false;
 
-    VkShaderModule frag = vk_create_shader_module(vk_world_frag_spv,
-                                                  sizeof(vk_world_frag_spv));
+    VkShaderModule frag = alpha_test ?
+        vk_create_shader_module(vk_world_alpha_frag_spv,
+                                sizeof(vk_world_alpha_frag_spv)) :
+        vk_create_shader_module(vk_world_frag_spv,
+                                sizeof(vk_world_frag_spv));
     if (!frag) {
         vk.DestroyShaderModule(vk.device, vert, NULL);
         return false;
@@ -2578,6 +2773,18 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write, boo
             .format = VK_FORMAT_R32G32B32_SFLOAT,
             .offset = offsetof(vk_vertex_t, position),
         },
+        {
+            .location = 4,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, normal),
+        },
+        {
+            .location = 5,
+            .binding = 1,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, normal),
+        },
     };
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -2628,8 +2835,9 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write, boo
         .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .alphaBlendOp = VK_BLEND_OP_ADD,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        .colorWriteMask = color_write ?
+            (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT) : 0,
     };
     VkPipelineColorBlendStateCreateInfo color_blend = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -2797,12 +3005,22 @@ static bool vk_create_swapchain(int width, int height)
     if (!vk_create_render_pass() ||
         !vk_create_rect_pipeline() ||
         !vk_create_texture_pipeline() ||
-        !vk_create_color3d_pipeline() ||
-        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE) ||
-        !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE) ||
-        !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE) ||
-        !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE) ||
+        !vk_create_color3d_pipeline(&vk.color3d_pipeline, VK_TRUE, VK_FALSE,
+                                    VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
+        !vk_create_color3d_pipeline(&vk.line3d_pipeline, VK_TRUE, VK_FALSE,
+                                    VK_PRIMITIVE_TOPOLOGY_LINE_LIST) ||
+        !vk_create_color3d_pipeline(&vk.beam_pipeline, VK_FALSE, VK_TRUE,
+                                    VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
+        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.particle_add_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE) ||
+        !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
+        !vk_create_alias_pipeline(&vk.alias_alpha_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE) ||
+        !vk_create_alias_pipeline(&vk.alias_depth_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE) ||
         !vk_create_depth_resources() ||
         !vk_create_framebuffers())
         return false;
@@ -3074,6 +3292,39 @@ static void vk_view_matrix(mat4_t matrix, const refdef_t *fd)
     matrix[15] = 1.0f;
 }
 
+static void vk_entity_projection_matrix(mat4_t matrix, const refdef_t *fd,
+                                        const entity_t *ent)
+{
+    extern cvar_t *cl_adjustfov;
+    extern cvar_t *cl_gun;
+    extern cvar_t *cl_gunfov;
+    extern cvar_t *info_hand;
+    extern float V_CalcFov(float fov_x, float width, float height);
+
+    float fov_x = fd->fov_x;
+    float fov_y = fd->fov_y;
+    float reflect_x = 1.0f;
+
+    if (ent->flags & RF_WEAPONMODEL) {
+        if (cl_gunfov && cl_gunfov->value > 0.0f) {
+            fov_x = Cvar_ClampValue(cl_gunfov, 30.0f, 160.0f);
+            if (cl_adjustfov && cl_adjustfov->integer) {
+                fov_y = V_CalcFov(fov_x, 4.0f, 3.0f);
+                fov_x = V_CalcFov(fov_y, fd->height, fd->width);
+            } else {
+                fov_y = V_CalcFov(fov_x, fd->width, fd->height);
+            }
+        }
+
+        if ((info_hand && cl_gun && info_hand->integer == 1 && cl_gun->integer == 1) ||
+            (cl_gun && cl_gun->integer == 3))
+            reflect_x = -1.0f;
+    }
+
+    vk_projection_matrix(matrix, fov_x, fov_y);
+    matrix[0] *= reflect_x;
+}
+
 static void vk_matrix_multiply(mat4_t out, const mat4_t a, const mat4_t b)
 {
     mat4_t tmp;
@@ -3137,7 +3388,7 @@ static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
     model[14] = ent->origin[2];
     model[15] = 1.0f;
 
-    vk_projection_matrix(proj, fd->fov_x, fd->fov_y);
+    vk_entity_projection_matrix(proj, fd, ent);
     vk_view_matrix(view, fd);
     vk_matrix_multiply(view_model, view, model);
     vk_matrix_multiply(out, proj, view_model);
@@ -3151,6 +3402,96 @@ static void vk_model_mvp(mat4_t out, const refdef_t *fd, const mat4_t model)
     vk_view_matrix(view, fd);
     vk_matrix_multiply(view_model, view, model);
     vk_matrix_multiply(out, proj, view_model);
+}
+
+static bool vk_cull_box(const vec3_t bounds[2])
+{
+    if (!vk_cull_models || !vk_cull_models->integer)
+        return false;
+
+    for (int i = 0; i < 4; i++) {
+        if (BoxOnPlaneSide(bounds[0], bounds[1], &vk.world.frustum[i]) == BOX_BEHIND)
+            return true;
+    }
+
+    return false;
+}
+
+static bool vk_cull_sphere(const vec3_t origin, float radius)
+{
+    if (!vk_cull_models || !vk_cull_models->integer)
+        return false;
+
+    for (int i = 0; i < 4; i++) {
+        if (PlaneDiff(origin, &vk.world.frustum[i]) < -radius)
+            return true;
+    }
+
+    return false;
+}
+
+static bool vk_cull_local_box(const vec3_t origin, const vec3_t bounds[2],
+                              const vec3_t axis[3])
+{
+    vec3_t points[8];
+
+    if (!vk_cull_models || !vk_cull_models->integer)
+        return false;
+
+    for (int i = 0; i < 8; i++) {
+        VectorCopy(origin, points[i]);
+        VectorMA(points[i], bounds[(i >> 0) & 1][0], axis[0], points[i]);
+        VectorMA(points[i], bounds[(i >> 1) & 1][1], axis[1], points[i]);
+        VectorMA(points[i], bounds[(i >> 2) & 1][2], axis[2], points[i]);
+    }
+
+    for (int i = 0; i < 4; i++) {
+        bool infront = false;
+
+        for (int j = 0; j < 8; j++) {
+            if (PlaneDiff(points[j], &vk.world.frustum[i]) >= 0.0f) {
+                infront = true;
+                break;
+            }
+        }
+        if (!infront)
+            return true;
+    }
+
+    return false;
+}
+
+static bool vk_alias_model_culled(const vk_model_t *model, const entity_t *ent,
+                                  const vec3_t axis[3], uint32_t frame,
+                                  uint32_t oldframe)
+{
+    vec3_t bounds[2];
+
+    if (!model->alias_frames || (ent->flags & RF_WEAPONMODEL))
+        return false;
+
+    if (frame == oldframe) {
+        VectorCopy(model->alias_frames[frame].bounds[0], bounds[0]);
+        VectorCopy(model->alias_frames[frame].bounds[1], bounds[1]);
+    } else {
+        UnionBounds(model->alias_frames[frame].bounds,
+                    model->alias_frames[oldframe].bounds, bounds);
+    }
+
+    if (!VectorEmpty(ent->angles) || (ent->scale && ent->scale != 1.0f)) {
+        float scale = ent->scale ? ent->scale : 1.0f;
+        float radius = frame == oldframe ?
+            model->alias_frames[frame].radius :
+            max(model->alias_frames[frame].radius, model->alias_frames[oldframe].radius);
+
+        if (vk_cull_sphere(ent->origin, radius * scale))
+            return true;
+        return vk_cull_local_box(ent->origin, bounds, axis);
+    }
+
+    VectorAdd(bounds[0], ent->origin, bounds[0]);
+    VectorAdd(bounds[1], ent->origin, bounds[1]);
+    return vk_cull_box(bounds);
 }
 
 static bool vk_create_test_triangle(void)
@@ -3225,6 +3566,42 @@ static bool vk_create_sprite_quad(void)
                           indices, q_countof(indices));
 }
 
+static bool vk_create_null_model(void)
+{
+    static const vk_vertex_t vertices[] = {
+        { {  0.0f,  0.0f,  0.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+        { { 16.0f,  0.0f,  0.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+        { {  0.0f,  0.0f,  0.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
+        { {  0.0f, 16.0f,  0.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
+        { {  0.0f,  0.0f,  0.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } },
+        { {  0.0f,  0.0f, 16.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } },
+    };
+    static const uint32_t indices[] = { 0, 1, 2, 3, 4, 5 };
+
+    return vk_upload_mesh(&vk.null_model, vertices, q_countof(vertices),
+                          indices, q_countof(indices));
+}
+
+static bool vk_create_particle_texture(void)
+{
+    uint32_t pixels[16 * 16];
+
+    for (int y = 0; y < 16; y++) {
+        for (int x = 0; x < 16; x++) {
+            float fx = x - 16 / 2 + 0.5f;
+            float fy = y - 16 / 2 + 0.5f;
+            float f = sqrtf(fx * fx + fy * fy);
+            byte alpha;
+
+            f = 1.0f - f / (16 / 2 - 0.5f);
+            alpha = 255 * Q_clipf(f, 0.0f, 1.0f);
+            pixels[y * 16 + x] = MakeColor(255, 255, 255, alpha);
+        }
+    }
+
+    return vk_upload_texture_data(&vk.particle_texture, 16, 16, pixels);
+}
+
 static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float color[4])
 {
     if (!vk.render_pass_active || !vk.color3d_pipeline ||
@@ -3247,28 +3624,231 @@ static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float co
     vk.CmdDrawIndexed(cmd, mesh->index_count, 1, 0, 0, 0);
 }
 
-static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only)
+static void vk_draw_null_model(const entity_t *ent, const refdef_t *fd)
 {
-    const vk_mesh_t *mesh = &vk.world.mesh;
-    bool use_marked = marked_only ||
-        (vk_world_vis && vk_world_vis->integer && vk.world.face_count);
-
-    if (!vk.render_pass_active || !vk.world_pipeline ||
-        !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count ||
-        !vk.world.batch_count)
+    if ((ent->flags & RF_WEAPONMODEL) || !vk.render_pass_active ||
+        !vk.line3d_pipeline || !vk.null_model.vertices.buffer ||
+        !vk.null_model.indices.buffer)
         return;
 
+    vec3_t axis[3];
+    mat4_t mvp;
     vk_color3d_push_t push;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    vk_entity_axis(ent, axis);
+    vk_entity_mvp(mvp, fd, ent, axis);
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     push.color[0] = 1.0f;
     push.color[1] = 1.0f;
     push.color[2] = 1.0f;
     push.color[3] = 1.0f;
 
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.line3d_pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.null_model.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.null_model.indices.buffer, 0,
+                          VK_INDEX_TYPE_UINT32);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, vk.null_model.index_count, 1, 0, 0, 0);
+}
+
+static float vk_world_face_alpha(const mface_t *face)
+{
+    if (face->drawflags & SURF_TRANS33)
+        return 0.33f;
+    if (face->drawflags & SURF_TRANS66)
+        return 0.66f;
+    return 1.0f;
+}
+
+static bool vk_world_face_in_pass(const mface_t *face, vk_world_pass_t pass)
+{
+    bool translucent = face->drawflags & SURF_TRANS_MASK;
+
+    if (pass == VK_WORLD_ENTITY_ALPHA)
+        return true;
+    return pass == VK_WORLD_ALPHA ? translucent : !translucent;
+}
+
+static VkPipeline vk_world_face_pipeline(const mface_t *face, VkPipeline pipeline,
+                                         vk_world_pass_t pass)
+{
+    if (pass == VK_WORLD_OPAQUE && (face->drawflags & SURF_ALPHATEST) &&
+        vk.world_alpha_pipeline) {
+        return vk.world_alpha_pipeline;
+    }
+
+    return pipeline;
+}
+
+static void vk_world_face_scroll(const mface_t *face, float time, float scroll[4])
+{
+    float speed;
+
+    Vector4Clear(scroll);
+
+    if (!(face->drawflags & (SURF_FLOWING | SURF_N64_SCROLL_X | SURF_N64_SCROLL_Y)))
+        return;
+
+    if (face->drawflags & (SURF_N64_SCROLL_X | SURF_N64_SCROLL_Y))
+        speed = 0.78125f;
+    else if (face->drawflags & SURF_WARP)
+        speed = 0.5f;
+    else
+        speed = 1.6f;
+
+    if (face->drawflags & SURF_N64_SCROLL_FLIP)
+        speed = -speed;
+
+    speed *= time;
+
+    if (face->drawflags & SURF_N64_SCROLL_Y)
+        scroll[1] = speed;
+    else
+        scroll[0] = -speed;
+}
+
+static void vk_world_light_params(const mface_t *face, float color[4], float scroll[4])
+{
+    bool fullbright = vk_fullbright && vk_fullbright->integer;
+
+    color[0] = 1.0f;
+    color[1] = 1.0f;
+    color[2] = 1.0f;
+    scroll[2] = fullbright ? 1.0f : 0.0f;
+    scroll[3] = 0.0f;
+
+    if (fullbright || (face->drawflags & SURF_COLOR_MASK))
+        return;
+
+    color[0] = Cvar_ClampValue(vk_modulate, 0.0f, 1e6f) *
+        Cvar_ClampValue(vk_modulate_world, 0.0f, 1e6f);
+    color[1] = color[0];
+    color[2] = color[0];
+    scroll[3] = Cvar_ClampValue(vk_brightness, -1.0f, 1.0f);
+}
+
+static void vk_world_face_center(const vk_world_face_t *face, const entity_t *ent,
+                                 const vec3_t axis[3], vec3_t center)
+{
+    if (!ent || !axis) {
+        VectorCopy(face->center, center);
+        return;
+    }
+
+    VectorCopy(ent->origin, center);
+    VectorMA(center, face->center[0], axis[0], center);
+    VectorMA(center, face->center[1], axis[1], center);
+    VectorMA(center, face->center[2], axis[2], center);
+}
+
+static float vk_world_face_light_plane_dist(const mface_t *face, const dlight_t *light,
+                                            const entity_t *ent, const vec3_t axis[3])
+{
+    if (!ent || !axis)
+        return PlaneDiffFast(light->origin, face->plane);
+
+    vec3_t local;
+    vec3_t delta;
+
+    VectorSubtract(light->origin, ent->origin, delta);
+    local[0] = DotProduct(delta, axis[0]) / DotProduct(axis[0], axis[0]);
+    local[1] = DotProduct(delta, axis[1]) / DotProduct(axis[1], axis[1]);
+    local[2] = DotProduct(delta, axis[2]) / DotProduct(axis[2], axis[2]);
+    return PlaneDiffFast(local, face->plane);
+}
+
+static float vk_world_dynamic_light_fraction(const dlight_t *light,
+                                             const vec3_t center,
+                                             float plane_dist)
+{
+    float rad = light->intensity - fabsf(plane_dist);
+    float minlight, scale, dist, dist2;
+
+    if (rad < DLIGHT_CUTOFF)
+        return 0.0f;
+
+    if (vk_dlight_falloff && vk_dlight_falloff->integer) {
+        minlight = rad - DLIGHT_CUTOFF * 0.8f;
+        scale = rad / minlight;
+    } else {
+        minlight = rad - DLIGHT_CUTOFF;
+        scale = 1.0f;
+    }
+
+    dist = Distance(light->origin, center);
+    dist2 = dist * dist - plane_dist * plane_dist;
+    dist = dist2 > 0.0f ? sqrtf(dist2) : 0.0f;
+
+    if (dist >= minlight)
+        return 0.0f;
+
+    return rad - dist * scale;
+}
+
+static void vk_world_dynamic_light(const vk_world_face_t *face,
+                                   const refdef_t *fd, const entity_t *ent,
+                                   const vec3_t axis[3], float dlight[4])
+{
+    vec3_t center;
+
+    Vector4Clear(dlight);
+
+    if (!fd || (vk_dynamic && !vk_dynamic->integer) ||
+        (face->face->drawflags & SURF_COLOR_MASK))
+        return;
+
+    vk_world_face_center(face, ent, axis, center);
+
+    for (int i = 0; i < fd->num_dlights; i++) {
+        const dlight_t *light = &fd->dlights[i];
+        float plane_dist = fabsf(vk_world_face_light_plane_dist(face->face, light,
+                                                                ent, axis));
+        float f;
+
+        f = vk_world_dynamic_light_fraction(light, center, plane_dist);
+        if (f <= 0.0f)
+            continue;
+
+        f *= 1.0f / 255.0f;
+        VectorMA(dlight, f, light->color, dlight);
+    }
+
+    dlight[0] = Q_clipf(dlight[0], 0.0f, 1.0f);
+    dlight[1] = Q_clipf(dlight[1], 0.0f, 1.0f);
+    dlight[2] = Q_clipf(dlight[2], 0.0f, 1.0f);
+}
+
+static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
+                               VkPipeline pipeline, vk_world_pass_t pass,
+                               float entity_alpha, const refdef_t *fd,
+                               const entity_t *ent, const vec3_t axis[3])
+{
+    const vk_mesh_t *mesh = &vk.world.mesh;
+    bool use_marked = marked_only ||
+        (vk_world_vis && vk_world_vis->integer && vk.world.face_count);
+
+    if (!vk.render_pass_active || !pipeline ||
+        !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count ||
+        !vk.world.batch_count)
+        return;
+
+    vk_world_push_t push;
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    push.color[0] = 1.0f;
+    push.color[1] = 1.0f;
+    push.color[2] = 1.0f;
+    push.color[3] = entity_alpha;
+    Vector4Clear(push.scroll);
+    Vector4Clear(push.dlight);
+
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.world_pipeline);
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
@@ -3288,18 +3868,31 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only)
                                  vk.rect_pipeline_layout, 0, 1,
                                  &texture->descriptor_set, 0, NULL);
 
-        if (!use_marked) {
-            vk.CmdDrawIndexed(cmd, batch->index_count, 1, batch->first_index, 0, 0);
-            continue;
-        }
-
         for (uint32_t j = 0; j < batch->face_count; j++) {
             const vk_world_face_t *face = &vk.world.faces[batch->first_face + j];
+            VkPipeline face_pipeline;
 
-            if (face->face->drawframe != vk.world.drawframe)
+            if (use_marked && face->face->drawframe != vk.world.drawframe)
+                continue;
+            if (!vk_world_face_in_pass(face->face, pass))
                 continue;
 
+            face_pipeline = vk_world_face_pipeline(face->face, pipeline, pass);
+            if (face_pipeline != pipeline)
+                vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, face_pipeline);
+
+            push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
+            vk_world_face_scroll(face->face, fd ? fd->time : 0.0f, push.scroll);
+            vk_world_light_params(face->face, push.color, push.scroll);
+            vk_world_dynamic_light(face, fd, ent, axis, push.dlight);
+            push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
+            vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                0, sizeof(push), &push);
             vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
+
+            if (face_pipeline != pipeline)
+                vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         }
     }
 }
@@ -3531,7 +4124,8 @@ static void vk_mark_world_faces(const refdef_t *fd)
 #define VK_BACKFACE_EPSILON 0.01f
 
 static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
-                                 const refdef_t *fd, const vec3_t axis[3])
+                                 const refdef_t *fd, const vec3_t axis[3],
+                                 bool translucent)
 {
     vec3_t transformed;
 
@@ -3546,7 +4140,9 @@ static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
         mface_t *face = model->firstface + i;
         vec_t dot;
 
-        if (face->drawflags & (SURF_SKY | SURF_NODRAW | SURF_TRANS_MASK))
+        if (face->drawflags & (SURF_SKY | SURF_NODRAW))
+            continue;
+        if (!translucent && (face->drawflags & SURF_TRANS_MASK))
             continue;
         if (!face->texinfo->image || !face->texinfo->image->texnum ||
             face->texinfo->image->texnum >= MAX_RIMAGES)
@@ -3574,9 +4170,6 @@ static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd)
         return;
     if (!vk_world_textures || !vk_world_textures->integer)
         return;
-    if (ent->flags & RF_TRANSLUCENT)
-        return;
-
     model = &bsp->models[index];
     if (!model->numfaces)
         return;
@@ -3585,8 +4178,12 @@ static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd)
     vk_entity_mvp(mvp, fd, ent, axis);
 
     vk.world.drawframe++;
-    vk_mark_bmodel_faces(model, ent, fd, axis);
-    vk_draw_world_mesh(mvp, true);
+    bool translucent = ent->flags & RF_TRANSLUCENT;
+    vk_mark_bmodel_faces(model, ent, fd, axis, translucent);
+    vk_draw_world_mesh(mvp, true,
+                       translucent ? vk.sprite_pipeline : vk.world_pipeline,
+                       translucent ? VK_WORLD_ENTITY_ALPHA : VK_WORLD_OPAQUE,
+                       translucent ? ent->alpha : 1.0f, fd, ent, axis);
 }
 
 static vk_model_t *vk_model_for_handle(qhandle_t handle)
@@ -3603,6 +4200,8 @@ static vk_model_t *vk_model_for_handle(qhandle_t handle)
 
 static const image_t *vk_skin_for_model(const vk_model_t *model, const entity_t *ent)
 {
+    if (ent->flags & RF_SHELL_MASK)
+        return R_SHELLTEXTURE;
     if (ent->skin)
         return IMG_ForHandle(ent->skin);
     if (!model->skin_count)
@@ -3614,14 +4213,142 @@ static const image_t *vk_skin_for_model(const vk_model_t *model, const entity_t 
     return model->skins[ent->skinnum];
 }
 
+static void vk_add_dynamic_lights(const refdef_t *fd, const vec3_t origin, vec3_t color)
+{
+    if (vk_dynamic && !vk_dynamic->integer)
+        return;
+
+    const dlight_t *light = fd->dlights;
+
+    for (int i = 0; i < fd->num_dlights; i++, light++) {
+        float f = light->intensity - DLIGHT_CUTOFF - Distance(light->origin, origin);
+        if (f > 0.0f) {
+            f *= 1.0f / 255.0f;
+            VectorMA(color, f, light->color, color);
+        }
+    }
+}
+
+static float vk_entity_light_modulate(void)
+{
+    return Cvar_ClampValue(vk_modulate, 0.0f, 1e6f) *
+           Cvar_ClampValue(vk_modulate_entities, 0.0f, 1e6f);
+}
+
+static void vk_entity_light_color(const entity_t *ent, const refdef_t *fd, vec4_t color)
+{
+    uint64_t flags = ent->flags;
+    float f, m;
+
+    if (flags & RF_SHELL_MASK) {
+        VectorClear(color);
+        if (flags & RF_SHELL_LITE_GREEN)
+            VectorSet(color, 0.56f, 0.93f, 0.56f);
+        if (flags & RF_SHELL_HALF_DAM)
+            VectorSet(color, 0.56f, 0.59f, 0.45f);
+        if (flags & RF_SHELL_DOUBLE) {
+            color[0] = 0.9f;
+            color[1] = 0.7f;
+        }
+        if (flags & RF_SHELL_RED)
+            color[0] = 1.0f;
+        if (flags & RF_SHELL_GREEN)
+            color[1] = 1.0f;
+        if (flags & RF_SHELL_BLUE)
+            color[2] = 1.0f;
+    } else if (flags & RF_FULLBRIGHT) {
+        VectorSet(color, 1.0f, 1.0f, 1.0f);
+    } else if ((flags & RF_IR_VISIBLE) && (fd->rdflags & RDF_IRGOGGLES)) {
+        VectorSet(color, 1.0f, 0.0f, 0.0f);
+    } else if (flags & RF_TRACKER) {
+        VectorClear(color);
+    } else {
+        if ((vk_fullbright && vk_fullbright->integer) ||
+            !vk_static_light_point(ent->origin, fd, color)) {
+            VectorSet(color, 1.0f, 1.0f, 1.0f);
+        }
+
+        vk_add_dynamic_lights(fd, ent->origin, color);
+
+        if (vk_doublelight_entities && vk_doublelight_entities->integer)
+            VectorScale(color, vk_entity_light_modulate(), color);
+
+        if (flags & RF_MINLIGHT) {
+            f = VectorLength(color);
+            if (!f)
+                VectorSet(color, 0.1f, 0.1f, 0.1f);
+            else if (f < 0.1f)
+                VectorScale(color, 0.1f / f, color);
+        }
+
+        if (flags & RF_GLOW) {
+            f = 0.1f * sinf(fd->time * 7.0f);
+            for (int i = 0; i < 3; i++) {
+                m = color[i] * 0.8f;
+                color[i] += f;
+                if (color[i] < m)
+                    color[i] = m;
+            }
+        }
+
+        color[0] = Q_clipf(color[0], 0.0f, 1.0f);
+        color[1] = Q_clipf(color[1], 0.0f, 1.0f);
+        color[2] = Q_clipf(color[2], 0.0f, 1.0f);
+    }
+
+    color[3] = (flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f;
+}
+
+static void vk_alias_shadedir(const entity_t *ent, vec4_t shadedir)
+{
+    float yaw, cy, sy, cp, sp;
+
+    Vector4Clear(shadedir);
+
+    if (!vk_dotshading || !vk_dotshading->integer)
+        return;
+    if (ent->flags & (RF_SHELL_MASK | RF_TRACKER))
+        return;
+
+    yaw = -DEG2RAD(ent->angles[YAW]);
+    cy = cosf(yaw);
+    sy = sinf(yaw);
+    cp = cosf(-M_PIf / 4.0f);
+    sp = sinf(-M_PIf / 4.0f);
+
+    shadedir[0] = cp * cy;
+    shadedir[1] = cp * sy;
+    shadedir[2] = -sp;
+    shadedir[3] = 1.0f;
+}
+
+static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
+                               const VkBuffer buffers[2],
+                               const VkDeviceSize offsets[2],
+                               const vk_model_t *model,
+                               const vk_texture_t *texture,
+                               const vk_alias_push_t *push)
+{
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 2, buffers, offsets);
+    vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.rect_pipeline_layout, 0, 1,
+                             &texture->descriptor_set, 0, NULL);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(*push), push);
+    vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0, 0, 0);
+}
+
 static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 {
     vk_model_t *model = vk_model_for_handle(ent->model);
 
     bool translucent = ent->flags & RF_TRANSLUCENT;
-    VkPipeline pipeline = translucent ? vk.alias_blend_pipeline : vk.alias_pipeline;
+    VkPipeline pipeline;
 
-    if (!model || model->type != VK_MODEL_ALIAS || !pipeline ||
+    if (!model || model->type != VK_MODEL_ALIAS ||
         !model->mesh.vertices.buffer || !model->mesh.indices.buffer ||
         !model->vertex_count)
         return;
@@ -3632,6 +4359,16 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
 
     const vk_texture_t *texture = &vk.textures[skin->texnum];
     if (!texture->descriptor_set)
+        return;
+
+    if (translucent)
+        pipeline = vk.alias_blend_pipeline;
+    else if ((skin->flags & IF_TRANSPARENT) && vk.alias_alpha_pipeline)
+        pipeline = vk.alias_alpha_pipeline;
+    else
+        pipeline = vk.alias_pipeline;
+
+    if (!pipeline)
         return;
 
     vec3_t axis[3];
@@ -3650,24 +4387,23 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     };
 
     vk_entity_axis(ent, axis);
+    if (vk_alias_model_culled(model, ent, axis, frame, oldframe))
+        return;
+
     vk_entity_mvp(mvp, fd, ent, axis);
     memcpy(push.mvp, mvp, sizeof(push.mvp));
-    push.color[0] = 1.0f;
-    push.color[1] = 1.0f;
-    push.color[2] = 1.0f;
-    push.color[3] = translucent ? ent->alpha : 1.0f;
+    vk_entity_light_color(ent, fd, push.color);
+    vk_alias_shadedir(ent, push.shadedir);
     push.backlerp = Q_clip(ent->backlerp, 0.0f, 1.0f);
+    push.shellscale = (ent->flags & RF_SHELL_MASK) ?
+        ((ent->flags & RF_WEAPONMODEL) ? WEAPONSHELL_SCALE : POWERSUIT_SCALE) : 0.0f;
+    push.depthscale = (ent->flags & RF_DEPTHHACK) ? 0.25f : 1.0f;
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vk.CmdBindVertexBuffers(cmd, 0, q_countof(buffers), buffers, offsets);
-    vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                             vk.rect_pipeline_layout, 0, 1,
-                             &texture->descriptor_set, 0, NULL);
-    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(push), &push);
-    vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0, 0, 0);
+    if (translucent && !(ent->flags & RF_FULLBRIGHT) && vk.alias_depth_pipeline)
+        vk_draw_alias_pass(cmd, vk.alias_depth_pipeline, buffers, offsets,
+                           model, texture, &push);
+
+    vk_draw_alias_pass(cmd, pipeline, buffers, offsets, model, texture, &push);
 }
 
 static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
@@ -3685,6 +4421,16 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     const vk_texture_t *texture = &vk.textures[frame->image->texnum];
     if (!texture->descriptor_set)
         return;
+
+    bool translucent = ent->flags & RF_TRANSLUCENT;
+    VkPipeline pipeline = vk.sprite_pipeline;
+
+    if (!translucent &&
+        (frame->image->flags & (IF_TRANSPARENT | IF_PALETTED)) ==
+            (IF_TRANSPARENT | IF_PALETTED) &&
+        vk.sprite_alpha_pipeline) {
+        pipeline = vk.sprite_alpha_pipeline;
+    }
 
     vec3_t viewaxis[3], left, right, down, up, xaxis, yaxis, origin;
     float scale = ent->scale ? ent->scale : 1.0f;
@@ -3720,9 +4466,9 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     push.color[0] = 1.0f;
     push.color[1] = 1.0f;
     push.color[2] = 1.0f;
-    push.color[3] = (ent->flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f;
+    push.color[3] = translucent ? ent->alpha : 1.0f;
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sprite_pipeline);
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -3734,7 +4480,425 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
 }
 
-static void vk_draw_entities(const refdef_t *fd)
+#define VK_PARTICLE_SIZE    (1.0f + M_SQRT1_2f)
+#define VK_PARTICLE_SCALE   (1.0f / (2.0f * VK_PARTICLE_SIZE))
+
+static void vk_draw_particles(const refdef_t *fd)
+{
+    if (!fd->num_particles || !fd->particles ||
+        !vk.sprite_pipeline || !vk.particle_texture.descriptor_set ||
+        !vk.sprite_quad.vertices.buffer || !vk.sprite_quad.indices.buffer)
+        return;
+
+    vec3_t viewaxis[3];
+    VkPipeline pipeline = (vk_partstyle && vk_partstyle->integer &&
+        vk.particle_add_pipeline) ? vk.particle_add_pipeline : vk.sprite_pipeline;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    AnglesToAxis(fd->viewangles, viewaxis);
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.rect_pipeline_layout, 0, 1,
+                             &vk.particle_texture.descriptor_set, 0, NULL);
+
+    for (int i = 0; i < fd->num_particles; i++) {
+        const particle_t *particle = &fd->particles[i];
+        vec3_t transformed, left, right, down, up, xaxis, yaxis, origin;
+        vec_t dist, scale, scale2;
+        mat4_t model_matrix, mvp;
+        vk_color3d_push_t push;
+        color_t color;
+
+        VectorSubtract(particle->origin, fd->vieworg, transformed);
+        dist = DotProduct(transformed, viewaxis[0]);
+
+        scale = 1.0f;
+        if (dist > 20.0f)
+            scale += dist * 0.004f;
+        scale *= (vk_partscale ? vk_partscale->value : 2.0f) * particle->scale;
+        scale2 = scale * VK_PARTICLE_SCALE;
+
+        VectorScale(viewaxis[1], scale2, left);
+        VectorScale(viewaxis[1], -scale, right);
+        VectorScale(viewaxis[2], -scale2, down);
+        VectorScale(viewaxis[2], scale, up);
+        VectorSubtract(right, left, xaxis);
+        VectorSubtract(up, down, yaxis);
+        VectorAdd3(particle->origin, left, down, origin);
+
+        memset(model_matrix, 0, sizeof(model_matrix));
+        model_matrix[0] = xaxis[0];
+        model_matrix[1] = xaxis[1];
+        model_matrix[2] = xaxis[2];
+        model_matrix[4] = yaxis[0];
+        model_matrix[5] = yaxis[1];
+        model_matrix[6] = yaxis[2];
+        model_matrix[10] = 1.0f;
+        model_matrix[12] = origin[0];
+        model_matrix[13] = origin[1];
+        model_matrix[14] = origin[2];
+        model_matrix[15] = 1.0f;
+
+        vk_model_mvp(mvp, fd, model_matrix);
+        memcpy(push.mvp, mvp, sizeof(push.mvp));
+
+        if (particle->color == -1)
+            color.u32 = particle->rgba.u32;
+        else
+            color.u32 = d_8to24table[particle->color & 0xff];
+        color.u8[3] *= particle->alpha;
+
+        push.color[0] = color.u8[0] / 255.0f;
+        push.color[1] = color.u8[1] / 255.0f;
+        push.color[2] = color.u8[2] / 255.0f;
+        push.color[3] = color.u8[3] / 255.0f;
+
+        vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                            0, sizeof(push), &push);
+        vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+    }
+}
+
+static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
+                                 const refdef_t *fd, const float color[4],
+                                 float width)
+{
+    vec3_t dir, to_view, normal, xaxis, yaxis, origin;
+    mat4_t model_matrix, mvp;
+    vk_color3d_push_t push;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    VectorSubtract(end, start, dir);
+    VectorSubtract(fd->vieworg, start, to_view);
+    CrossProduct(dir, to_view, normal);
+    if (VectorNormalize(normal) < 0.1f)
+        return;
+
+    VectorScale(normal, width, normal);
+    VectorCopy(dir, xaxis);
+    VectorScale(normal, -2.0f, yaxis);
+    VectorAdd(start, normal, origin);
+
+    memset(model_matrix, 0, sizeof(model_matrix));
+    model_matrix[0] = xaxis[0];
+    model_matrix[1] = xaxis[1];
+    model_matrix[2] = xaxis[2];
+    model_matrix[4] = yaxis[0];
+    model_matrix[5] = yaxis[1];
+    model_matrix[6] = yaxis[2];
+    model_matrix[10] = 1.0f;
+    VectorAdd(start, normal, origin);
+    model_matrix[12] = origin[0];
+    model_matrix[13] = origin[1];
+    model_matrix[14] = origin[2];
+    model_matrix[15] = 1.0f;
+
+    vk_model_mvp(mvp, fd, model_matrix);
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    memcpy(push.color, color, sizeof(push.color));
+
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+}
+
+#define VK_MIN_LIGHTNING_SEGMENTS   3
+#define VK_MAX_LIGHTNING_SEGMENTS   7
+#define VK_MIN_SEGMENT_LENGTH       16
+
+static void vk_draw_lightning_beam(const vec3_t start, const vec3_t end,
+                                   const refdef_t *fd, const float color[4],
+                                   float width)
+{
+    vec3_t dir, segments[VK_MAX_LIGHTNING_SEGMENTS + 1];
+    vec3_t right, up;
+    vec_t length, segment_length;
+    int num_segments, max_segments;
+
+    VectorSubtract(end, start, dir);
+    length = VectorNormalize(dir);
+    if (length < 0.1f)
+        return;
+
+    max_segments = Q_clip(length / VK_MIN_SEGMENT_LENGTH, 1, VK_MAX_LIGHTNING_SEGMENTS);
+    if (max_segments <= VK_MIN_LIGHTNING_SEGMENTS)
+        num_segments = max_segments;
+    else
+        num_segments = VK_MIN_LIGHTNING_SEGMENTS +
+            Com_SlowRand() % (max_segments - VK_MIN_LIGHTNING_SEGMENTS + 1);
+
+    if (num_segments > 1)
+        MakeNormalVectors(dir, right, up);
+
+    segment_length = length / num_segments;
+    for (int i = 1; i < num_segments; i++) {
+        vec3_t point;
+        float offs;
+
+        VectorMA(start, i * segment_length, dir, point);
+
+        offs = Com_SlowCrand() * (segment_length * 0.35f);
+        VectorMA(point, offs, right, point);
+
+        offs = Com_SlowCrand() * (segment_length * 0.35f);
+        VectorMA(point, offs, up, segments[i]);
+    }
+
+    VectorCopy(start, segments[0]);
+    VectorCopy(end, segments[num_segments]);
+
+    for (int i = 0; i < num_segments; i++)
+        vk_draw_beam_segment(segments[i], segments[i + 1], fd, color, width);
+}
+
+static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
+{
+    if (!vk.beam_pipeline || !vk.sprite_quad.vertices.buffer ||
+        !vk.sprite_quad.indices.buffer || !ent->frame)
+        return;
+
+    color_t color;
+    float push_color[4];
+    float scale = (vk_beamstyle && vk_beamstyle->integer) ? 0.5f : 1.2f;
+    float width = abs((int16_t)ent->frame) * scale;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+
+    if (ent->skinnum == -1)
+        color.u32 = ent->rgba.u32;
+    else
+        color.u32 = d_8to24table[ent->skinnum & 0xff];
+    color.u8[3] *= ent->alpha;
+
+    push_color[0] = color.u8[0] / 255.0f;
+    push_color[1] = color.u8[1] / 255.0f;
+    push_color[2] = color.u8[2] / 255.0f;
+    push_color[3] = color.u8[3] / 255.0f;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.beam_pipeline);
+
+    if (ent->flags & RF_GLOW)
+        vk_draw_lightning_beam(ent->origin, ent->oldorigin, fd, push_color, width);
+    else
+        vk_draw_beam_segment(ent->origin, ent->oldorigin, fd, push_color, width);
+}
+
+static float vk_lightstyle_value(const refdef_t *fd, byte style)
+{
+    if (!fd || !fd->lightstyles || style >= MAX_LIGHTSTYLES)
+        return 1.0f;
+    return fd->lightstyles[style].white;
+}
+
+static void vk_sample_lightpoint(const lightpoint_t *point, const refdef_t *fd,
+                                 vec3_t color)
+{
+    const mface_t *surf = point->surf;
+    const byte *lightmap = surf->lightmap;
+    int s = point->s;
+    int t = point->t;
+    int smax = surf->lm_width;
+    int tmax = surf->lm_height;
+    int size = smax * tmax * 3;
+    float fracu = point->s - s;
+    float fracv = point->t - t;
+    float w1 = (1.0f - fracu) * (1.0f - fracv);
+    float w2 = fracu * (1.0f - fracv);
+    float w3 = fracu * fracv;
+    float w4 = (1.0f - fracu) * fracv;
+
+    VectorClear(color);
+
+    if (!lightmap || s < 0 || t < 0 || s + 1 >= smax || t + 1 >= tmax)
+        return;
+
+    for (int i = 0; i < surf->numstyles; i++) {
+        const byte *b1 = &lightmap[3 * ((t + 0) * smax + (s + 0))];
+        const byte *b2 = &lightmap[3 * ((t + 0) * smax + (s + 1))];
+        const byte *b3 = &lightmap[3 * ((t + 1) * smax + (s + 1))];
+        const byte *b4 = &lightmap[3 * ((t + 1) * smax + (s + 0))];
+
+        float style = vk_lightstyle_value(fd, surf->styles[i]);
+
+        color[0] += style * (w1 * b1[0] + w2 * b2[0] + w3 * b3[0] + w4 * b4[0]);
+        color[1] += style * (w1 * b1[1] + w2 * b2[1] + w3 * b3[1] + w4 * b4[1]);
+        color[2] += style * (w1 * b1[2] + w2 * b2[2] + w3 * b3[2] + w4 * b4[2]);
+
+        lightmap += size;
+    }
+
+    VectorScale(color, vk_entity_light_modulate() * (1.0f / 255.0f), color);
+}
+
+static bool vk_lightgrid_point(const lightgrid_t *grid, const vec3_t start,
+                               const refdef_t *fd, vec3_t color)
+{
+    vec3_t point, avg;
+    uint32_t point_i[3];
+    vec3_t samples[8];
+    int mask = 0;
+    int numsamples = 0;
+
+    if (!grid->numleafs || (vk_lightgrid && !vk_lightgrid->integer))
+        return false;
+
+    point[0] = (start[0] - grid->mins[0]) * grid->scale[0];
+    point[1] = (start[1] - grid->mins[1]) * grid->scale[1];
+    point[2] = (start[2] - grid->mins[2]) * grid->scale[2];
+
+    point_i[0] = point[0];
+    point_i[1] = point[1];
+    point_i[2] = point[2];
+    VectorClear(avg);
+
+    for (int i = 0; i < 8; i++) {
+        uint32_t tmp[3];
+        const lightgrid_sample_t *sample;
+        int j;
+
+        tmp[0] = point_i[0] + ((i >> 0) & 1);
+        tmp[1] = point_i[1] + ((i >> 1) & 1);
+        tmp[2] = point_i[2] + ((i >> 2) & 1);
+
+        sample = BSP_LookupLightgrid(grid, tmp);
+        if (!sample)
+            continue;
+
+        VectorClear(samples[i]);
+        for (j = 0; j < grid->numstyles && sample->style != 255; j++, sample++) {
+            float style = vk_lightstyle_value(fd, sample->style);
+
+            samples[i][0] += style * sample->rgb[0];
+            samples[i][1] += style * sample->rgb[1];
+            samples[i][2] += style * sample->rgb[2];
+        }
+
+        if (j) {
+            mask |= BIT(i);
+            VectorAdd(avg, samples[i], avg);
+            numsamples++;
+        }
+    }
+
+    if (!mask)
+        return false;
+
+    if (mask != 255) {
+        VectorScale(avg, 1.0f / numsamples, avg);
+        for (int i = 0; i < 8; i++) {
+            if (!(mask & BIT(i)))
+                VectorCopy(avg, samples[i]);
+        }
+    }
+
+    float fx = point[0] - point_i[0];
+    float fy = point[1] - point_i[1];
+    float fz = point[2] - point_i[2];
+    vec3_t lerp_x[4];
+    vec3_t lerp_y[2];
+
+    LerpVector2(samples[0], samples[1], 1.0f - fx, fx, lerp_x[0]);
+    LerpVector2(samples[2], samples[3], 1.0f - fx, fx, lerp_x[1]);
+    LerpVector2(samples[4], samples[5], 1.0f - fx, fx, lerp_x[2]);
+    LerpVector2(samples[6], samples[7], 1.0f - fx, fx, lerp_x[3]);
+    LerpVector2(lerp_x[0], lerp_x[1], 1.0f - fy, fy, lerp_y[0]);
+    LerpVector2(lerp_x[2], lerp_x[3], 1.0f - fy, fy, lerp_y[1]);
+    LerpVector2(lerp_y[0], lerp_y[1], 1.0f - fz, fz, color);
+    VectorScale(color, vk_entity_light_modulate() * (1.0f / 255.0f), color);
+    return true;
+}
+
+static bool vk_static_light_point(const vec3_t origin, const refdef_t *fd,
+                                  vec3_t light)
+{
+    const bsp_t *bsp = vk.world.cache;
+    lightpoint_t point;
+    vec3_t end;
+
+    if (!bsp)
+        return false;
+
+    if (vk_lightgrid_point(&bsp->lightgrid, origin, fd, light))
+        return true;
+
+    if (!bsp->lightmap)
+        return false;
+
+    end[0] = origin[0];
+    end[1] = origin[1];
+    end[2] = origin[2] - 8192.0f;
+
+    BSP_LightPoint(&point, origin, end, bsp->nodes,
+                   SURF_SKY | SURF_NODRAW | SURF_TRANS_MASK);
+    if (!point.surf)
+        return false;
+
+    vk_sample_lightpoint(&point, fd, light);
+    return true;
+}
+
+typedef enum {
+    VK_ENTITY_BMODEL,
+    VK_ENTITY_OPAQUE,
+    VK_ENTITY_ALPHA_BACK,
+    VK_ENTITY_BEAM,
+    VK_ENTITY_ALPHA_FRONT,
+} vk_entity_pass_t;
+
+static bool vk_entity_in_pass(const entity_t *ent, vk_entity_pass_t pass)
+{
+    if (ent->flags & RF_BEAM)
+        return pass == VK_ENTITY_BEAM;
+
+    if (!(ent->flags & RF_TRANSLUCENT))
+        return (ent->model & BIT(31)) ?
+            pass == VK_ENTITY_BMODEL : pass == VK_ENTITY_OPAQUE;
+
+    if ((ent->flags & RF_WEAPONMODEL) ||
+        ent->alpha <= (vk_draworder ? vk_draworder->value : 1.0f)) {
+        return pass == VK_ENTITY_ALPHA_FRONT;
+    }
+
+    return pass == VK_ENTITY_ALPHA_BACK;
+}
+
+static void vk_draw_entity(const entity_t *ent, const refdef_t *fd,
+                           vk_entity_pass_t pass)
+{
+    if (pass == VK_ENTITY_BEAM) {
+        vk_draw_beam(ent, fd);
+        return;
+    }
+
+    if (ent->model & BIT(31)) {
+        vk_draw_bmodel(ent, fd);
+        return;
+    }
+
+    vk_model_t *model = vk_model_for_handle(ent->model);
+
+    if (!model) {
+        vk_draw_null_model(ent, fd);
+        return;
+    }
+    if (model->type == VK_MODEL_SPRITE)
+        vk_draw_sprite(ent, fd);
+    else if (model->type == VK_MODEL_ALIAS)
+        vk_draw_alias_model(ent, fd);
+
+    if (vk_showorigins && vk_showorigins->integer)
+        vk_draw_null_model(ent, fd);
+}
+
+static void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass)
 {
     if (!vk_drawentities || !vk_drawentities->integer)
         return;
@@ -3742,20 +4906,8 @@ static void vk_draw_entities(const refdef_t *fd)
     for (int i = 0; i < fd->num_entities; i++) {
         const entity_t *ent = &fd->entities[i];
 
-        if (ent->flags & RF_BEAM)
-            continue;
-        if (ent->model & BIT(31))
-            vk_draw_bmodel(ent, fd);
-        else {
-            vk_model_t *model = vk_model_for_handle(ent->model);
-
-            if (!model)
-                continue;
-            if (model->type == VK_MODEL_SPRITE)
-                vk_draw_sprite(ent, fd);
-            else if (model->type == VK_MODEL_ALIAS)
-                vk_draw_alias_model(ent, fd);
-        }
+        if (vk_entity_in_pass(ent, pass))
+            vk_draw_entity(ent, fd, pass);
     }
 }
 
@@ -3768,6 +4920,74 @@ static void vk_surface_color(const mface_t *face, float color[4])
     color[1] = (0.35f + ((hash >> 8) & 255) / 255.0f * 0.55f) * shade;
     color[2] = (0.35f + ((hash >> 16) & 255) / 255.0f * 0.55f) * shade;
     color[3] = 1.0f;
+}
+
+static bool vk_sample_surface_light(const bsp_t *bsp, const mface_t *face,
+                                    const vec3_t point, float color[4])
+{
+    float s, t, fracs, fract;
+    int s0, t0, s1, t1;
+    int smax = face->lm_width;
+    int tmax = face->lm_height;
+    int size = smax * tmax * 3;
+    ptrdiff_t offset;
+
+    if (!face->lightmap || !face->numstyles || smax < 1 || tmax < 1)
+        return false;
+    if (face->drawflags & SURF_COLOR_MASK)
+        return false;
+    if (!bsp->lightmap || face->lightmap < bsp->lightmap)
+        return false;
+
+    offset = face->lightmap - bsp->lightmap;
+    if (offset < 0 || offset + size > bsp->numlightmapbytes)
+        return false;
+
+    s = DotProduct(point, face->lm_axis[0]) + face->lm_offset[0];
+    t = DotProduct(point, face->lm_axis[1]) + face->lm_offset[1];
+
+    s = Q_clipf(s, 0.0f, smax - 1.0f);
+    t = Q_clipf(t, 0.0f, tmax - 1.0f);
+    s0 = floorf(s);
+    t0 = floorf(t);
+    s1 = min(s0 + 1, smax - 1);
+    t1 = min(t0 + 1, tmax - 1);
+    fracs = s - s0;
+    fract = t - t0;
+
+    Vector4Clear(color);
+    const byte *lightmap = face->lightmap;
+    const byte *b1 = &lightmap[3 * (t0 * smax + s0)];
+    const byte *b2 = &lightmap[3 * (t0 * smax + s1)];
+    const byte *b3 = &lightmap[3 * (t1 * smax + s1)];
+    const byte *b4 = &lightmap[3 * (t1 * smax + s0)];
+    float w1 = (1.0f - fracs) * (1.0f - fract);
+    float w2 = fracs * (1.0f - fract);
+    float w3 = fracs * fract;
+    float w4 = (1.0f - fracs) * fract;
+
+    color[0] = w1 * b1[0] + w2 * b2[0] + w3 * b3[0] + w4 * b4[0];
+    color[1] = w1 * b1[1] + w2 * b2[1] + w3 * b3[1] + w4 * b4[1];
+    color[2] = w1 * b1[2] + w2 * b2[2] + w3 * b3[2] + w4 * b4[2];
+
+    color[0] = Q_clipf(color[0] / 255.0f, 0.0f, 1.0f);
+    color[1] = Q_clipf(color[1] / 255.0f, 0.0f, 1.0f);
+    color[2] = Q_clipf(color[2] / 255.0f, 0.0f, 1.0f);
+    color[3] = 1.0f;
+    return true;
+}
+
+static void vk_surface_vertex_color(const bsp_t *bsp, const mface_t *face,
+                                    const vec3_t point, const float fallback[4],
+                                    float color[4])
+{
+    if (face->drawflags & SURF_COLOR_MASK) {
+        Vector4Set(color, 1.0f, 1.0f, 1.0f, 1.0f);
+        return;
+    }
+
+    if (!vk_sample_surface_light(bsp, face, point, color))
+        memcpy(color, fallback, sizeof(float) * 4);
 }
 
 static bool vk_face_is_drawable(mface_t *face)
@@ -3827,17 +5047,23 @@ static bool vk_build_world_mesh(bsp_t *bsp)
             continue;
 
         uint32_t first = v;
-        float color[4];
-        vk_surface_color(face, color);
+        float fallback_color[4];
+        vk_surface_color(face, fallback_color);
         float scale_s = image->width ? 1.0f / image->width : 1.0f;
         float scale_t = image->height ? 1.0f / image->height : 1.0f;
+        vec3_t center;
+
+        VectorClear(center);
 
         for (int j = 0; j < face->numsurfedges; j++) {
             const msurfedge_t *surfedge = face->firstsurfedge + j;
             const medge_t *edge = bsp->edges + surfedge->edge;
             const mvertex_t *src = bsp->vertices + edge->v[surfedge->vert];
+            float color[4];
 
             VectorCopy(src->point, vertices[v].position);
+            VectorAdd(center, src->point, center);
+            vk_surface_vertex_color(bsp, face, src->point, fallback_color, color);
             memcpy(vertices[v].color, color, sizeof(vertices[v].color));
             vertices[v].uv[0] = (DotProduct(src->point, face->texinfo->axis[0]) +
                                  face->texinfo->offset[0]) * scale_s;
@@ -3846,10 +5072,13 @@ static bool vk_build_world_mesh(bsp_t *bsp)
             v++;
         }
 
+        VectorScale(center, 1.0f / face->numsurfedges, center);
+
         build_faces[face_index++] = (vk_world_build_face_t) {
             .first_vertex = first,
             .edge_count = face->numsurfedges,
             .texture_index = image->texnum,
+            .center = { center[0], center[1], center[2] },
             .face = face,
         };
         texture_index_counts[image->texnum] += (face->numsurfedges - 2) * 3;
@@ -3897,6 +5126,7 @@ static bool vk_build_world_mesh(bsp_t *bsp)
                 .face = face->face,
                 .first_index = first_index,
                 .index_count = face_index_count,
+                .center = { face->center[0], face->center[1], face->center[2] },
             };
             world_batch->face_count++;
         }
@@ -3967,6 +5197,7 @@ static void vk_load_world(const char *name)
 
     vk_free_world();
     vk.world.cache = bsp;
+    vk_prepare_face_lightmaps(bsp);
 
     vk_register_world_images(bsp);
 
@@ -4003,6 +5234,22 @@ bool VKR_Init(bool total)
     vk_show_test_triangle = Cvar_Get("vk_show_test_triangle", "0", 0);
     vk_drawentities = Cvar_Get("vk_drawentities", "1", CVAR_CHEAT);
     vk_drawsky = Cvar_Get("vk_drawsky", "1", 0);
+    vk_partscale = Cvar_Get("gl_partscale", "2", 0);
+    vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
+    vk_beamstyle = Cvar_Get("gl_beamstyle", "0", 0);
+    vk_lightgrid = Cvar_Get("vk_lightgrid", "1", 0);
+    vk_fullbright = Cvar_Get("r_fullbright", "0", CVAR_CHEAT);
+    vk_cull_models = Cvar_Get("gl_cull_models", "1", 0);
+    vk_dotshading = Cvar_Get("gl_dotshading", "1", 0);
+    vk_draworder = Cvar_Get("gl_draworder", "1", 0);
+    vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
+    vk_modulate = Cvar_Get("gl_modulate", "1", CVAR_ARCHIVE);
+    vk_modulate_entities = Cvar_Get("gl_modulate_entities", "1", 0);
+    vk_doublelight_entities = Cvar_Get("gl_doublelight_entities", "1", 0);
+    vk_modulate_world = Cvar_Get("gl_modulate_world", "1", 0);
+    vk_dynamic = Cvar_Get("gl_dynamic", "1", 0);
+    vk_dlight_falloff = Cvar_Get("gl_dlight_falloff", "1", 0);
+    vk_brightness = Cvar_Get("gl_brightness", "0", 0);
     vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
     vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
     vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
@@ -4026,6 +5273,10 @@ bool VKR_Init(bool total)
         Com_WPrintf("Couldn't create Vulkan skybox mesh: %s\n", Com_GetLastError());
     if (!vk_create_sprite_quad())
         Com_WPrintf("Couldn't create Vulkan sprite quad: %s\n", Com_GetLastError());
+    if (!vk_create_null_model())
+        Com_WPrintf("Couldn't create Vulkan null model: %s\n", Com_GetLastError());
+    if (!vk_create_particle_texture())
+        Com_WPrintf("Couldn't create Vulkan particle texture: %s\n", Com_GetLastError());
 
     r_registration_sequence = 1;
     IMG_Init();
@@ -4047,6 +5298,7 @@ void VKR_Shutdown(bool total)
     }
 
     vk_destroy_texture_resource(&vk.raw_texture);
+    vk_destroy_texture_resource(&vk.particle_texture);
 
     vk_destroy_swapchain();
 
@@ -4078,6 +5330,7 @@ void VKR_Shutdown(bool total)
     vk_destroy_mesh(&vk.test_triangle);
     vk_destroy_mesh(&vk.skybox);
     vk_destroy_mesh(&vk.sprite_quad);
+    vk_destroy_mesh(&vk.null_model);
 
     if (vk.sampler) {
         vk.DestroySampler(vk.device, vk.sampler, NULL);
@@ -4228,6 +5481,8 @@ void VKR_RenderFrame(const refdef_t *fd)
     if (!fd)
         return;
 
+    vk_setup_world_frustum(fd);
+
     if (!(fd->rdflags & RDF_NOWORLDMODEL))
         vk_draw_skybox(fd);
 
@@ -4238,20 +5493,39 @@ void VKR_RenderFrame(const refdef_t *fd)
         if (vk_world_textures && vk_world_textures->integer) {
             if (vk_world_vis && vk_world_vis->integer)
                 vk_mark_world_faces(fd);
-            vk_draw_world_mesh(mvp, false);
+            vk_draw_world_mesh(mvp, false, vk.world_pipeline, VK_WORLD_OPAQUE,
+                               1.0f, fd, NULL, NULL);
         } else {
             const float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
             vk_draw_mesh(&vk.world.mesh, mvp, color);
         }
     }
 
-    vk_draw_entities(fd);
+    vk_draw_entities(fd, VK_ENTITY_BMODEL);
+    vk_draw_entities(fd, VK_ENTITY_OPAQUE);
+    vk_draw_entities(fd, VK_ENTITY_ALPHA_BACK);
+    if (!(fd->rdflags & RDF_NOWORLDMODEL) && vk.world.mesh.index_count &&
+        vk_world_textures && vk_world_textures->integer) {
+        mat4_t mvp;
+
+        vk_world_mvp(mvp, fd);
+        vk_draw_world_mesh(mvp, false, vk.sprite_pipeline, VK_WORLD_ALPHA,
+                           1.0f, fd, NULL, NULL);
+    }
+    vk_draw_entities(fd, VK_ENTITY_BEAM);
+    vk_draw_particles(fd);
+    vk_draw_entities(fd, VK_ENTITY_ALPHA_FRONT);
     vk_draw_test_triangle(fd);
 }
 
 void VKR_LightPoint(const vec3_t origin, vec3_t light)
 {
-    VectorClear(light);
+    if (!vk_static_light_point(origin, NULL, light))
+        VectorSet(light, 1.0f, 1.0f, 1.0f);
+
+    light[0] = Q_clipf(light[0], 0.0f, 1.0f);
+    light[1] = Q_clipf(light[1], 0.0f, 1.0f);
+    light[2] = Q_clipf(light[2], 0.0f, 1.0f);
 }
 
 void VKR_ClearColor(void)
