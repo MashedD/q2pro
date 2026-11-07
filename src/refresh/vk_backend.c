@@ -18,6 +18,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include "format/md2.h"
 #include "format/sp2.h"
 #include "images.h"
+#include "gl.h"
 #include "refresh/refresh.h"
 #include "system/system.h"
 #include "vk_backend.h"
@@ -313,6 +314,7 @@ typedef struct {
     VkDescriptorSetLayout texture_set_layout;
     VkDescriptorPool descriptor_pool;
     VkSampler sampler;
+    VkSampler nearest_sampler;
     VkPipelineLayout rect_pipeline_layout;
     VkPipeline rect_pipeline;
     VkPipeline texture_pipeline;
@@ -1220,13 +1222,14 @@ static void vk_texture_barrier(VkCommandBuffer cmd, VkImage image,
                           0, 0, NULL, 0, NULL, 1, &barrier);
 }
 
-static void vk_update_texture_descriptor(vk_texture_t *texture)
+static void vk_update_texture_descriptor_with_sampler(vk_texture_t *texture,
+                                                      VkSampler sampler)
 {
-    if (!texture->descriptor_set || !texture->view || !vk.sampler)
+    if (!texture->descriptor_set || !texture->view || !sampler)
         return;
 
     VkDescriptorImageInfo image_info = {
-        .sampler = vk.sampler,
+        .sampler = sampler,
         .imageView = texture->view,
         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
     };
@@ -1242,10 +1245,19 @@ static void vk_update_texture_descriptor(vk_texture_t *texture)
     vk.UpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
 }
 
+static void vk_update_texture_descriptor(vk_texture_t *texture)
+{
+    vk_update_texture_descriptor_with_sampler(texture, vk.sampler);
+}
+
 static void vk_update_texture_descriptors(void)
 {
-    for (uint32_t i = 0; i < MAX_RIMAGES; i++)
-        vk_update_texture_descriptor(&vk.textures[i]);
+    for (uint32_t i = 0; i < MAX_RIMAGES; i++) {
+        VkSampler sampler = (i < (uint32_t)r_numImages &&
+                             r_images[i].type == IT_FONT &&
+                             vk.nearest_sampler) ? vk.nearest_sampler : vk.sampler;
+        vk_update_texture_descriptor_with_sampler(&vk.textures[i], sampler);
+    }
 
     vk_update_texture_descriptor(&vk.raw_texture);
     vk_update_texture_descriptor(&vk.particle_texture);
@@ -1406,6 +1418,8 @@ static bool vk_upload_texture(image_t *image, byte *pic)
     image->sh = 1;
     image->tl = 0;
     image->th = 1;
+    if (image->type == IT_FONT && vk.nearest_sampler)
+        vk_update_texture_descriptor_with_sampler(texture, vk.nearest_sampler);
 
     return true;
 }
@@ -1854,6 +1868,25 @@ static bool vk_create_sampler(VkSampler *sampler)
     return true;
 }
 
+static bool vk_create_nearest_sampler(VkSampler *sampler)
+{
+    VkSamplerCreateInfo sampler_info = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_NEAREST,
+        .minFilter = VK_FILTER_NEAREST,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .maxLod = 0.0f,
+    };
+    VkResult result = vk.CreateSampler(vk.device, &sampler_info, NULL, sampler);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateSampler", result);
+
+    return true;
+}
+
 static void vk_texturemode_changed(cvar_t *self)
 {
     (void)self;
@@ -1923,6 +1956,8 @@ static bool vk_create_frame_resources(void)
         return vk_fail_result("vkCreateDescriptorPool", result);
 
     if (!vk_create_sampler(&vk.sampler))
+        return false;
+    if (!vk_create_nearest_sampler(&vk.nearest_sampler))
         return false;
 
     VkPushConstantRange push_range = {
@@ -3224,9 +3259,9 @@ static bool vk_create_swapchain(int width, int height)
     if (!vk_allocate_swapchain_commands())
         return false;
 
-    Com_Printf("Vulkan swapchain: %ux%u, %u images\n",
-               vk.swapchain_extent.width, vk.swapchain_extent.height,
-               vk.swapchain_image_count);
+    Com_Printf("Vulkan swapchain: requested %dx%d, actual %ux%u, %u images\n",
+               width, height, vk.swapchain_extent.width,
+               vk.swapchain_extent.height, vk.swapchain_image_count);
     return true;
 }
 
@@ -3310,17 +3345,30 @@ static VkClearColorValue vk_frame_clear_color(void)
     return vk_color_to_clear(color.u32);
 }
 
+static int vk_2d_width(void)
+{
+    int width = r_config.width > 0 ? r_config.width : (int)vk.swapchain_extent.width;
+
+    if (vk.scale > 0.0f && vk.scale != 1.0f)
+        width = Q_rint(width * vk.scale);
+
+    return max(width, 1);
+}
+
+static int vk_2d_height(void)
+{
+    int height = r_config.height > 0 ? r_config.height : (int)vk.swapchain_extent.height;
+
+    if (vk.scale > 0.0f && vk.scale != 1.0f)
+        height = Q_rint(height * vk.scale);
+
+    return max(height, 1);
+}
+
 static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
 {
     if (!vk.render_pass_active || !vk.rect_pipeline || w <= 0 || h <= 0)
         return;
-
-    if (vk.scale != 0 && vk.scale != 1.0f) {
-        x = Q_rint(x * vk.scale);
-        y = Q_rint(y * vk.scale);
-        w = Q_rint(w * vk.scale);
-        h = Q_rint(h * vk.scale);
-    }
 
     if (vk.clip_set) {
         int x2 = min(x + w, vk.clip.right);
@@ -3333,8 +3381,10 @@ static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
             return;
     }
 
-    int x2 = min(x + w, (int)vk.swapchain_extent.width);
-    int y2 = min(y + h, (int)vk.swapchain_extent.height);
+    int screen_w = vk_2d_width();
+    int screen_h = vk_2d_height();
+    int x2 = min(x + w, screen_w);
+    int y2 = min(y + h, screen_h);
     x = max(x, 0);
     y = max(y, 0);
     w = x2 - x;
@@ -3352,8 +3402,8 @@ static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
             clear.float32[3],
         },
         .screen = {
-            vk.swapchain_extent.width,
-            vk.swapchain_extent.height,
+            screen_w,
+            screen_h,
         },
     };
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
@@ -3372,6 +3422,8 @@ static void vk_blend_rect(int x, int y, int w, int h, const vec4_t color)
         return;
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    int screen_w = vk_2d_width();
+    int screen_h = vk_2d_height();
     vk_rect_push_t push = {
         .rect = { x, y, w, h },
         .color = {
@@ -3381,8 +3433,8 @@ static void vk_blend_rect(int x, int y, int w, int h, const vec4_t color)
             Q_clipf(color[3], 0.0f, 1.0f),
         },
         .screen = {
-            vk.swapchain_extent.width,
-            vk.swapchain_extent.height,
+            screen_w,
+            screen_h,
         },
     };
 
@@ -3427,7 +3479,7 @@ static void vk_draw_tearing(void)
     scale = vk.scale;
     vk.clip_set = false;
     vk.scale = 1.0f;
-    vk_clear_rect(0, 0, vk.swapchain_extent.width, vk.swapchain_extent.height,
+    vk_clear_rect(0, 0, vk_2d_width(), vk_2d_height(),
                   (++frame & 1) ? U32_WHITE : MakeColor(255, 0, 0, 255));
     vk.scale = scale;
     vk.clip_set = clip_set;
@@ -3441,13 +3493,6 @@ static void vk_draw_texture_resource(int x, int y, int w, int h,
         return;
     if (!texture->descriptor_set)
         return;
-
-    if (vk.scale != 0 && vk.scale != 1.0f) {
-        x = Q_rint(x * vk.scale);
-        y = Q_rint(y * vk.scale);
-        w = Q_rint(w * vk.scale);
-        h = Q_rint(h * vk.scale);
-    }
 
     float rw = w;
     float rh = h;
@@ -3475,8 +3520,10 @@ static void vk_draw_texture_resource(int x, int y, int w, int h,
         h = ny2 - ny1;
     }
 
-    int x2i = min(x + w, (int)vk.swapchain_extent.width);
-    int y2i = min(y + h, (int)vk.swapchain_extent.height);
+    int screen_w = vk_2d_width();
+    int screen_h = vk_2d_height();
+    int x2i = min(x + w, screen_w);
+    int y2i = min(y + h, screen_h);
     int nx = max(x, 0);
     int ny = max(y, 0);
     if (x2i <= nx || y2i <= ny)
@@ -3503,8 +3550,8 @@ static void vk_draw_texture_resource(int x, int y, int w, int h,
             c.u8[3] / 255.0f,
         },
         .screen = {
-            vk.swapchain_extent.width,
-            vk.swapchain_extent.height,
+            screen_w,
+            screen_h,
         },
         .uv = { s1, t1, s2, t2 },
     };
@@ -4180,7 +4227,9 @@ static void vk_world_dynamic_light(const vk_world_face_t *face,
 
     Vector4Clear(dlight);
 
-    if (!fd || (vk_dynamic && !vk_dynamic->integer) ||
+    if (!face || !face->face || !face->face->plane ||
+        !fd || fd->num_dlights <= 0 || !fd->dlights ||
+        (vk_dynamic && !vk_dynamic->integer) ||
         (face->face->drawflags & SURF_COLOR_MASK))
         return;
 
@@ -4216,7 +4265,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
 
     if (!vk.render_pass_active || !pipeline ||
         !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count ||
-        !vk.world.batch_count)
+        !vk.world.batch_count || !vk.world.batches || !vk.world.faces)
         return;
 
     vk_world_push_t push;
@@ -4251,10 +4300,16 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                  vk.rect_pipeline_layout, 0, 1,
                                  &texture->descriptor_set, 0, NULL);
 
+        if (batch->first_face > vk.world.face_count ||
+            batch->face_count > vk.world.face_count - batch->first_face)
+            continue;
+
         for (uint32_t j = 0; j < batch->face_count; j++) {
             const vk_world_face_t *face = &vk.world.faces[batch->first_face + j];
             VkPipeline face_pipeline;
 
+            if (!face->face || !face->face->texinfo || !face->face->plane)
+                continue;
             if (use_marked && face->face->drawframe != vk.world.drawframe)
                 continue;
             if (!vk_world_face_in_pass(face->face, pass))
@@ -4398,14 +4453,18 @@ static bool vk_clip_world_node(const mnode_t *node, int *clipflags)
 
 static void vk_mark_world_leaf(const mleaf_t *leaf, const refdef_t *fd)
 {
+    if (!leaf || (leaf->numleaffaces > 0 && !leaf->firstleafface))
+        return;
     if (leaf->contents[0] == CONTENTS_SOLID)
         return;
 
     if (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area))
         return;
 
-    for (int i = 0; i < leaf->numleaffaces; i++)
-        leaf->firstleafface[i]->drawframe = vk.world.drawframe;
+    for (int i = 0; i < leaf->numleaffaces; i++) {
+        if (leaf->firstleafface[i])
+            leaf->firstleafface[i]->drawframe = vk.world.drawframe;
+    }
 }
 
 static void vk_mark_world_visible_nodes(const refdef_t *fd)
@@ -4416,7 +4475,7 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
     int cluster1, cluster2;
     vec3_t tmp;
 
-    if (!bsp)
+    if (!bsp || !bsp->nodes || !bsp->leafs)
         return;
 
     if (vk_lockpvs && vk_lockpvs->integer)
@@ -4425,6 +4484,8 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
     vk.world.visframe++;
 
     leaf = BSP_PointLeaf(bsp->nodes, fd->vieworg);
+    if (!leaf)
+        return;
     cluster1 = cluster2 = leaf->cluster;
     VectorCopy(fd->vieworg, tmp);
     if (!leaf->contents[0])
@@ -4432,6 +4493,8 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
     else
         tmp[2] += 16;
     leaf = BSP_PointLeaf(bsp->nodes, tmp);
+    if (!leaf)
+        return;
     if (!(leaf->contents[0] & CONTENTS_SOLID))
         cluster2 = leaf->cluster;
 
@@ -4470,7 +4533,10 @@ static void vk_mark_world_visible_nodes(const refdef_t *fd)
 
 static void vk_mark_world_node_faces(const mnode_t *node, const refdef_t *fd, int clipflags)
 {
-    while (node->visframe == vk.world.visframe) {
+    if (!node)
+        return;
+
+    while (node && node->visframe == vk.world.visframe) {
         int side;
         vec_t dot;
 
@@ -4485,7 +4551,8 @@ static void vk_mark_world_node_faces(const mnode_t *node, const refdef_t *fd, in
         dot = PlaneDiffFast(fd->vieworg, node->plane);
         side = dot < 0;
 
-        vk_mark_world_node_faces(node->children[side], fd, clipflags);
+        if (node->children[side])
+            vk_mark_world_node_faces(node->children[side], fd, clipflags);
 
         node = node->children[side ^ 1];
     }
@@ -4496,7 +4563,7 @@ static void vk_mark_world_faces(const refdef_t *fd)
     const bsp_t *bsp = vk.world.cache;
     int clipflags;
 
-    if (!bsp)
+    if (!bsp || !bsp->nodes)
         return;
 
     vk.world.drawframe++;
@@ -4517,6 +4584,9 @@ static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
 {
     vec3_t transformed;
 
+    if (!model || (model->numfaces > 0 && !model->firstface))
+        return;
+
     VectorSubtract(fd->vieworg, ent->origin, transformed);
     if (!VectorEmpty(ent->angles) || (ent->scale && ent->scale != 1.0f)) {
         vec3_t temp;
@@ -4528,6 +4598,8 @@ static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
         mface_t *face = model->firstface + i;
         vec_t dot;
 
+        if (!face->texinfo || !face->plane)
+            continue;
         if (face->drawflags & (SURF_SKY | SURF_NODRAW))
             continue;
         if (!translucent && (face->drawflags & SURF_TRANS_MASK))
@@ -4604,6 +4676,8 @@ static const image_t *vk_skin_for_model(const vk_model_t *model, const entity_t 
 static void vk_add_dynamic_lights(const refdef_t *fd, const vec3_t origin, vec3_t color)
 {
     if (vk_dynamic && !vk_dynamic->integer)
+        return;
+    if (!fd || fd->num_dlights <= 0 || !fd->dlights)
         return;
 
     const dlight_t *light = fd->dlights;
@@ -5384,7 +5458,7 @@ static bool vk_static_light_point(const vec3_t origin, const refdef_t *fd,
     lightpoint_t point;
     vec3_t end;
 
-    if (!bsp)
+    if (!bsp || !bsp->nodes)
         return false;
 
     if (vk_lightgrid_point(&bsp->lightgrid, origin, fd, light))
@@ -5463,6 +5537,8 @@ static void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass)
 {
     if ((vk_drawentities && !vk_drawentities->integer) ||
         (vk_gl_drawentities && !vk_gl_drawentities->integer))
+        return;
+    if (fd->num_entities <= 0 || !fd->entities)
         return;
 
     for (int i = 0; i < fd->num_entities; i++) {
@@ -5560,6 +5636,9 @@ static void vk_surface_vertex_color(const bsp_t *bsp, const mface_t *face,
 
 static bool vk_face_is_drawable(mface_t *face)
 {
+    if (!face || !face->texinfo || !face->plane)
+        return false;
+
     face->drawflags |= face->texinfo->c.flags & ~DSURF_PLANEBACK;
 
     if (face->numsurfedges < 3)
@@ -5572,16 +5651,57 @@ static bool vk_face_is_drawable(mface_t *face)
     return true;
 }
 
+static bool vk_face_edges_are_valid(const bsp_t *bsp, const mface_t *face)
+{
+    if (!bsp || !face || !face->firstsurfedge || !bsp->surfedges ||
+        !bsp->edges || !bsp->vertices || bsp->numsurfedges <= 0 ||
+        bsp->numedges <= 0 || bsp->numvertices <= 0)
+        return false;
+
+    uintptr_t surfedges_begin = (uintptr_t)bsp->surfedges;
+    uintptr_t surfedges_end = surfedges_begin +
+        sizeof(*bsp->surfedges) * (uintptr_t)bsp->numsurfedges;
+    uintptr_t first = (uintptr_t)face->firstsurfedge;
+    uintptr_t last = first +
+        sizeof(*face->firstsurfedge) * (uintptr_t)face->numsurfedges;
+
+    if (first < surfedges_begin || first >= surfedges_end ||
+        last < first || last > surfedges_end)
+        return false;
+
+    for (int j = 0; j < face->numsurfedges; j++) {
+        const msurfedge_t *surfedge = face->firstsurfedge + j;
+        if (surfedge->edge >= (uint32_t)bsp->numedges)
+            return false;
+
+        const medge_t *edge = &bsp->edges[surfedge->edge];
+        if (edge->v[surfedge->vert] >= (uint32_t)bsp->numvertices)
+            return false;
+    }
+
+    return true;
+}
+
 static bool vk_build_world_mesh(bsp_t *bsp)
 {
+    if (!bsp || !bsp->faces) {
+        Com_SetLastError("No BSP faces for Vulkan world mesh");
+        return false;
+    }
+
     uint64_t vertex_count = 0;
     uint64_t index_count = 0;
     uint32_t face_count = 0;
+    uint32_t skipped_bad_edges = 0;
 
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *face = &bsp->faces[i];
         if (!vk_face_is_drawable(face))
             continue;
+        if (!vk_face_edges_are_valid(bsp, face)) {
+            skipped_bad_edges++;
+            continue;
+        }
         if (!face->texinfo->image ||
             face->texinfo->image->texnum >= MAX_RIMAGES)
             continue;
@@ -5609,6 +5729,8 @@ static bool vk_build_world_mesh(bsp_t *bsp)
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *face = &bsp->faces[i];
         if (!vk_face_is_drawable(face))
+            continue;
+        if (!vk_face_edges_are_valid(bsp, face))
             continue;
         image_t *image = face->texinfo->image;
         if (!image || image->texnum >= MAX_RIMAGES)
@@ -5722,6 +5844,9 @@ static bool vk_build_world_mesh(bsp_t *bsp)
         Z_Free(batches);
     if (draw_faces)
         Z_Free(draw_faces);
+    if (skipped_bad_edges)
+        Com_WPrintf("Skipped %u Vulkan world faces with invalid edges\n",
+                    skipped_bad_edges);
     return ok;
 }
 
@@ -5770,6 +5895,9 @@ static void vk_register_world_images(bsp_t *bsp)
 {
     char buffer[MAX_QPATH];
 
+    if (!bsp || !bsp->texinfo)
+        return;
+
     for (int i = 0; i < bsp->numtexinfo; i++) {
         mtexinfo_t *info = &bsp->texinfo[i];
 
@@ -5794,6 +5922,7 @@ static void vk_load_world(const char *name)
         return;
 
     Q_concat(buffer, sizeof(buffer), "maps/", name, ".bsp");
+    Com_Printf("Vulkan world: loading %s\n", buffer);
     ret = BSP_Load(buffer, &bsp);
     if (!bsp)
         Com_Error(ERR_DROP, "%s: couldn't load %s: %s",
@@ -5814,8 +5943,8 @@ static void vk_load_world(const char *name)
     if (!vk_build_world_mesh(bsp))
         Com_WPrintf("Couldn't build Vulkan world mesh: %s\n", Com_GetLastError());
     else
-        Com_DPrintf("Vulkan world mesh: %u indices, %u faces, %u batches\n",
-                    vk.world.mesh.index_count, vk.world.face_count, vk.world.batch_count);
+        Com_Printf("Vulkan world mesh: %u indices, %u faces, %u batches\n",
+                   vk.world.mesh.index_count, vk.world.face_count, vk.world.batch_count);
     vk_clear_world_lighting_modified();
 }
 
@@ -5899,6 +6028,10 @@ bool VKR_Init(bool total)
     vk_dynamic = Cvar_Get("gl_dynamic", "1", 0);
     vk_dlight_falloff = Cvar_Get("gl_dlight_falloff", "1", 0);
     vk_brightness = Cvar_Get("gl_brightness", "0", 0);
+
+    gl_modulate_world = vk_modulate_world;
+    gl_modulate_entities = vk_modulate_entities;
+    gl_brightness = vk_brightness;
     vk_znear = Cvar_Get("gl_znear", "2", CVAR_CHEAT);
     vk_drawworld = Cvar_Get("gl_drawworld", "1", CVAR_CHEAT);
     vk_novis = Cvar_Get("gl_novis", "0", 0);
@@ -6004,6 +6137,10 @@ void VKR_Shutdown(bool total)
         vk.DestroySampler(vk.device, vk.sampler, NULL);
         vk.sampler = VK_NULL_HANDLE;
     }
+    if (vk.nearest_sampler) {
+        vk.DestroySampler(vk.device, vk.nearest_sampler, NULL);
+        vk.nearest_sampler = VK_NULL_HANDLE;
+    }
 
     if (vk.descriptor_pool) {
         vk.DestroyDescriptorPool(vk.device, vk.descriptor_pool, NULL);
@@ -6048,6 +6185,7 @@ void VKR_Shutdown(bool total)
 
 void VKR_BeginRegistration(const char *map)
 {
+    Com_Printf("Vulkan registration: %s\n", map && *map ? map : "<none>");
     r_registration_sequence++;
     vk_load_world(map);
 }
