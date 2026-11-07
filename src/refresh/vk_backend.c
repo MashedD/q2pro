@@ -12,6 +12,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include "common/cmd.h"
 #include "common/common.h"
 #include "common/math.h"
+#include "common/prompt.h"
 #include "common/utils.h"
 #include "common/zone.h"
 #include "client/client.h"
@@ -192,6 +193,7 @@ typedef struct {
     cplane_t frustum[4];
     vec3_t vieworg;
     int viewcluster;
+    int nolm_mask;
     unsigned drawframe;
     unsigned visframe;
     float lightstyles[MAX_LIGHTSTYLES];
@@ -353,6 +355,7 @@ typedef struct {
     VkSampler sampler;
     VkSampler sky_sampler;
     VkSampler nearest_sampler;
+    VkSampler sky_nearest_sampler;
     VkPipelineLayout rect_pipeline_layout;
     VkPipeline rect_pipeline;
     VkPipeline texture_pipeline;
@@ -396,6 +399,7 @@ typedef struct {
     bool render_pass_active;
     float scale;
     color_t color;
+    color_t alt_color;
     bool color_set;
     clipRect_t clip;
     bool clip_set;
@@ -433,6 +437,16 @@ static cvar_t *vk_swapinterval;
 static cvar_t *vk_finish;
 static cvar_t *vk_texturemode;
 static cvar_t *vk_anisotropy;
+static cvar_t *vk_round_down;
+static cvar_t *vk_picmip;
+static cvar_t *vk_downsample_skins;
+static cvar_t *vk_bilerp_chars;
+static cvar_t *vk_bilerp_pics;
+static cvar_t *vk_bilerp_skies;
+static cvar_t *vk_saturation;
+static cvar_t *vk_invert;
+static cvar_t *vk_gamma;
+static cvar_t *vk_gamma_scale_pics;
 static cvar_t *vk_partscale;
 static cvar_t *vk_partstyle;
 static cvar_t *vk_partshape;
@@ -457,6 +471,7 @@ static cvar_t *vk_dlight_falloff;
 static cvar_t *vk_brightness;
 static cvar_t *vk_fog;
 static cvar_t *vk_intensity;
+static cvar_t *vk_shaders;
 static cvar_t *vk_znear;
 static cvar_t *vk_drawworld;
 static cvar_t *vk_novis;
@@ -475,6 +490,7 @@ static cvar_t *vk_world_cull;
 #if USE_DEBUG
 static cvar_t *vk_debug_distfrac;
 #endif
+static byte vk_gammatable[256];
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static void vk_destroy_texture(image_t *image);
@@ -562,6 +578,116 @@ static void vk_prepare_face_lightmaps(bsp_t *bsp)
 static void vk_load_world(const char *name);
 static bool vk_static_light_point(const vec3_t origin, const refdef_t *fd,
                                   vec3_t light);
+
+static void vk_resample_texture(const byte *in, int inwidth, int inheight,
+                                byte *out, int outwidth, int outheight)
+{
+    unsigned p1[MAX_TEXTURE_SIZE], p2[MAX_TEXTURE_SIZE];
+    unsigned fracstep = inwidth * 0x10000 / outwidth;
+    unsigned frac = fracstep >> 2;
+
+    Q_assert(outwidth <= MAX_TEXTURE_SIZE);
+
+    for (int i = 0; i < outwidth; i++) {
+        p1[i] = 4 * (frac >> 16);
+        frac += fracstep;
+    }
+    frac = 3 * (fracstep >> 2);
+    for (int i = 0; i < outwidth; i++) {
+        p2[i] = 4 * (frac >> 16);
+        frac += fracstep;
+    }
+
+    float height_scale = (float)inheight / outheight;
+    int row_stride = inwidth << 2;
+    for (int i = 0; i < outheight; i++) {
+        const byte *inrow1 = in + row_stride * (int)((i + 0.25f) * height_scale);
+        const byte *inrow2 = in + row_stride * (int)((i + 0.75f) * height_scale);
+        for (int j = 0; j < outwidth; j++) {
+            const byte *pix1 = inrow1 + p1[j];
+            const byte *pix2 = inrow1 + p2[j];
+            const byte *pix3 = inrow2 + p1[j];
+            const byte *pix4 = inrow2 + p2[j];
+            out[0] = (pix1[0] + pix2[0] + pix3[0] + pix4[0]) >> 2;
+            out[1] = (pix1[1] + pix2[1] + pix3[1] + pix4[1]) >> 2;
+            out[2] = (pix1[2] + pix2[2] + pix3[2] + pix4[2]) >> 2;
+            out[3] = (pix1[3] + pix2[3] + pix3[3] + pix4[3]) >> 2;
+            out += 4;
+        }
+    }
+}
+
+static void vk_color_transform_texture(byte *pic, int width, int height,
+                                       imagetype_t type, imageflags_t flags)
+{
+    float saturation = vk_saturation ?
+        Cvar_ClampValue(vk_saturation, 0.0f, 1.0f) : 1.0f;
+    bool world = type == IT_WALL && !(flags & IF_TURBULENT);
+    bool invert = world && vk_invert && vk_invert->integer;
+    bool scale_pics = !(r_config.flags & QVF_GAMMARAMP) &&
+        vk_gamma_scale_pics && vk_gamma_scale_pics->integer &&
+        type != IT_WALL && type != IT_SKIN;
+
+    if (!world && !scale_pics)
+        return;
+    if (world && saturation == 1.0f && !invert && !scale_pics)
+        return;
+
+    byte *p = pic;
+    int count = width * height;
+    for (int i = 0; i < count; i++, p += 4) {
+        float r = p[0];
+        float g = p[1];
+        float b = p[2];
+
+        if (world) {
+            float y = LUMINANCE(r, g, b);
+            r = y + (r - y) * saturation;
+            g = y + (g - y) * saturation;
+            b = y + (b - y) * saturation;
+        }
+
+        p[0] = invert ? 255 - Q_clipf(r, 0.0f, 255.0f) :
+            Q_clipf(r, 0.0f, 255.0f);
+        p[1] = invert ? 255 - Q_clipf(g, 0.0f, 255.0f) :
+            Q_clipf(g, 0.0f, 255.0f);
+        p[2] = invert ? 255 - Q_clipf(b, 0.0f, 255.0f) :
+            Q_clipf(b, 0.0f, 255.0f);
+
+        if (scale_pics) {
+            p[0] = vk_gammatable[p[0]];
+            p[1] = vk_gammatable[p[1]];
+            p[2] = vk_gammatable[p[2]];
+        }
+    }
+}
+
+static void vk_build_gamma_table(void)
+{
+    float gamma = vk_gamma ? vk_gamma->value : 1.0f;
+
+    if (gamma == 1.0f) {
+        for (int i = 0; i < 256; i++)
+            vk_gammatable[i] = i;
+        return;
+    }
+
+    gamma = 1.0f / gamma;
+    for (int i = 0; i < 256; i++) {
+        float value = 255.0f * powf((i + 0.5f) / 255.5f, gamma) + 0.5f;
+        vk_gammatable[i] = min(value, 255);
+    }
+}
+
+static void vk_gamma_changed(cvar_t *self)
+{
+    (void)self;
+
+    vk_build_gamma_table();
+
+    if ((r_config.flags & QVF_GAMMARAMP) && vid && vid->update_gamma)
+        vid->update_gamma(vk_gammatable);
+}
 
 static void vk_upload_image(image_t *image, byte *pic)
 {
@@ -1719,22 +1845,57 @@ static void vk_update_texture_descriptor(vk_texture_t *texture)
     vk_update_texture_descriptor_with_sampler(texture, vk.sampler);
 }
 
+static VkSampler vk_sampler_for_image(const image_t *image)
+{
+    if (!image)
+        return vk.sampler;
+
+    if (image->flags & IF_NEAREST)
+        return vk.nearest_sampler ? vk.nearest_sampler : vk.sampler;
+
+    if (image->type == IT_SKY) {
+        if (vk_bilerp_skies && !vk_bilerp_skies->integer && vk.sky_nearest_sampler)
+            return vk.sky_nearest_sampler;
+        return vk.sky_sampler ? vk.sky_sampler : vk.sampler;
+    }
+
+    if (image->type == IT_FONT &&
+        (!vk_bilerp_chars || !vk_bilerp_chars->integer))
+        return vk.nearest_sampler ? vk.nearest_sampler : vk.sampler;
+
+    if (image->type == IT_PIC && vk_bilerp_pics) {
+        bool scrap = image->flags & IF_SCRAP;
+        if (!vk_bilerp_pics->integer ||
+            (scrap && vk_bilerp_pics->integer == 1))
+            return vk.nearest_sampler ? vk.nearest_sampler : vk.sampler;
+    }
+
+    return vk.sampler;
+}
+
+static VkSampler vk_sampler_for_pic_flags(imageflags_t flags)
+{
+    image_t image = {
+        .type = IT_PIC,
+        .flags = flags,
+    };
+
+    return vk_sampler_for_image(&image);
+}
+
 static void vk_update_texture_descriptors(void)
 {
     for (uint32_t i = 0; i < MAX_RIMAGES; i++) {
-        VkSampler sampler = vk.sampler;
-        if (i < (uint32_t)r_numImages && r_images[i].type == IT_SKY &&
-            vk.sky_sampler) {
-            sampler = vk.sky_sampler;
-        } else if (i < (uint32_t)r_numImages && r_images[i].type == IT_FONT &&
-                   vk.nearest_sampler) {
-            sampler = vk.nearest_sampler;
-        }
+        VkSampler sampler = i < (uint32_t)r_numImages ?
+            vk_sampler_for_image(&r_images[i]) : vk.sampler;
         vk_update_texture_descriptor_with_sampler(&vk.textures[i], sampler);
     }
 
-    vk_update_texture_descriptor(&vk.raw_texture);
-    vk_update_texture_descriptor(&vk.particle_texture);
+    vk_update_texture_descriptor_with_sampler(&vk.raw_texture,
+                                              vk_sampler_for_pic_flags(IF_NONE));
+    vk_update_texture_descriptor_with_sampler(&vk.particle_texture,
+        vk_sampler_for_pic_flags((vk_partshape && vk_partshape->integer == 1) ?
+                                 IF_NEAREST : IF_NONE));
     vk_update_texture_descriptor(&vk.beam_texture);
 }
 
@@ -1878,8 +2039,52 @@ static bool vk_upload_texture(image_t *image, byte *pic)
     uint32_t index = image - r_images;
     vk_texture_t *texture = &vk.textures[index];
 
-    if (!vk_upload_texture_data(texture, image->upload_width,
-                                image->upload_height, pic)) {
+    uint32_t width = image->upload_width;
+    uint32_t height = image->upload_height;
+    uint32_t scaled_width = width;
+    uint32_t scaled_height = height;
+    byte *scaled = pic;
+
+    vk_color_transform_texture(pic, width, height, image->type, image->flags);
+
+    if (image->type == IT_WALL ||
+        (image->type == IT_SKIN && (!vk_downsample_skins || vk_downsample_skins->integer))) {
+        if (vk_round_down && vk_round_down->integer) {
+            uint32_t pot_width = Q_npot32(scaled_width);
+            uint32_t pot_height = Q_npot32(scaled_height);
+            if (pot_width > scaled_width)
+                scaled_width = max(pot_width >> 1, 1);
+            if (pot_height > scaled_height)
+                scaled_height = max(pot_height >> 1, 1);
+        }
+
+        int shift = vk_picmip ? Cvar_ClampInteger(vk_picmip, 0, 31) : 0;
+        while (shift-- > 0 && (scaled_width > 1 || scaled_height > 1)) {
+            scaled_width = max(scaled_width >> 1, 1);
+            scaled_height = max(scaled_height >> 1, 1);
+        }
+    }
+
+    uint32_t max_size = min(vk.physical_device_properties.limits.maxImageDimension2D,
+                            MAX_TEXTURE_SIZE);
+    while (max_size > 0 && (scaled_width > max_size || scaled_height > max_size)) {
+        scaled_width = max(scaled_width >> 1, 1);
+        scaled_height = max(scaled_height >> 1, 1);
+    }
+
+    if (scaled_width != width || scaled_height != height) {
+        scaled = FS_AllocTempMem(scaled_width * scaled_height * 4);
+        vk_resample_texture(pic, width, height, scaled, scaled_width, scaled_height);
+    }
+
+    image->upload_width = scaled_width;
+    image->upload_height = scaled_height;
+
+    bool ok = vk_upload_texture_data(texture, scaled_width, scaled_height, scaled);
+    if (scaled != pic)
+        FS_FreeTempMem(scaled);
+
+    if (!ok) {
         image->texnum = texture->descriptor_set ? index : 0;
         image->sl = 0;
         image->sh = 1;
@@ -1893,10 +2098,7 @@ static bool vk_upload_texture(image_t *image, byte *pic)
     image->sh = 1;
     image->tl = 0;
     image->th = 1;
-    if (image->type == IT_SKY && vk.sky_sampler)
-        vk_update_texture_descriptor_with_sampler(texture, vk.sky_sampler);
-    else if (image->type == IT_FONT && vk.nearest_sampler)
-        vk_update_texture_descriptor_with_sampler(texture, vk.nearest_sampler);
+    vk_update_texture_descriptor_with_sampler(texture, vk_sampler_for_image(image));
 
     return true;
 }
@@ -2424,16 +2626,17 @@ static bool vk_create_sky_sampler(VkSampler *sampler)
     return true;
 }
 
-static bool vk_create_nearest_sampler(VkSampler *sampler)
+static bool vk_create_nearest_sampler(VkSampler *sampler,
+                                      VkSamplerAddressMode address_mode)
 {
     VkSamplerCreateInfo sampler_info = {
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .magFilter = VK_FILTER_NEAREST,
         .minFilter = VK_FILTER_NEAREST,
         .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeU = address_mode,
+        .addressModeV = address_mode,
+        .addressModeW = address_mode,
         .maxLod = 0.0f,
     };
     VkResult result = vk.CreateSampler(vk.device, &sampler_info, NULL, sampler);
@@ -2472,6 +2675,33 @@ static void vk_texturemode_changed(cvar_t *self)
     vk_update_texture_descriptors();
 }
 
+static void vk_texturemode_g(genctx_t *ctx)
+{
+    static const char *modes[] = {
+        "GL_NEAREST",
+        "GL_LINEAR",
+        "GL_NEAREST_MIPMAP_NEAREST",
+        "GL_LINEAR_MIPMAP_NEAREST",
+        "GL_NEAREST_MIPMAP_LINEAR",
+        "GL_LINEAR_MIPMAP_LINEAR",
+        "MAG_NEAREST",
+    };
+
+    ctx->ignorecase = true;
+    for (int i = 0; i < q_countof(modes); i++)
+        Prompt_AddMatch(ctx, modes[i]);
+}
+
+static void vk_sampler_selection_changed(cvar_t *self)
+{
+    (void)self;
+
+    if (!vk.device)
+        return;
+
+    vk_update_texture_descriptors();
+}
+
 static void vk_swapinterval_changed(cvar_t *self)
 {
     (void)self;
@@ -2480,6 +2710,15 @@ static void vk_swapinterval_changed(cvar_t *self)
         return;
 
     vk_recreate_swapchain();
+}
+
+static void vk_drawsky_changed(cvar_t *self)
+{
+    extern void CL_SetSky(void);
+
+    (void)self;
+
+    CL_SetSky();
 }
 
 static bool vk_create_frame_resources(void)
@@ -2521,7 +2760,11 @@ static bool vk_create_frame_resources(void)
         return false;
     if (!vk_create_sky_sampler(&vk.sky_sampler))
         return false;
-    if (!vk_create_nearest_sampler(&vk.nearest_sampler))
+    if (!vk_create_nearest_sampler(&vk.nearest_sampler,
+                                   VK_SAMPLER_ADDRESS_MODE_REPEAT))
+        return false;
+    if (!vk_create_nearest_sampler(&vk.sky_nearest_sampler,
+                                   VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE))
         return false;
 
     VkPushConstantRange push_range = {
@@ -4667,7 +4910,12 @@ static bool vk_create_particle_texture(void)
         }
     }
 
-    return vk_upload_texture_data(&vk.particle_texture, 16, 16, pixels);
+    if (!vk_upload_texture_data(&vk.particle_texture, 16, 16, pixels))
+        return false;
+
+    vk_update_texture_descriptor_with_sampler(&vk.particle_texture,
+        vk_sampler_for_pic_flags(shape == 1 ? IF_NEAREST : IF_NONE));
+    return true;
 }
 
 static bool vk_create_beam_texture(void)
@@ -5172,7 +5420,7 @@ static void vk_world_light_params(const mface_t *face, float color[4], float scr
         (warp ? 4.0f : 0.0f);
     scroll[3] = 0.0f;
 
-    if (fullbright || (face->drawflags & SURF_COLOR_MASK))
+    if (fullbright || (face->drawflags & vk.world.nolm_mask))
         return;
 
     color[0] = Cvar_ClampValue(vk_modulate, 0.0f, 1e6f) *
@@ -5229,6 +5477,22 @@ static float vk_texture_intensity(void)
     return Cvar_ClampValue(vk_intensity, 1.0f, 5.0f);
 }
 
+static void vk_transform_to_entity_local(const vec3_t point, const entity_t *ent,
+                                         const vec3_t axis[3], vec3_t local)
+{
+    vec3_t delta;
+    float len0, len1, len2;
+
+    VectorSubtract(point, ent->origin, delta);
+    len0 = DotProduct(axis[0], axis[0]);
+    len1 = DotProduct(axis[1], axis[1]);
+    len2 = DotProduct(axis[2], axis[2]);
+
+    local[0] = len0 ? DotProduct(delta, axis[0]) / len0 : 0.0f;
+    local[1] = len1 ? DotProduct(delta, axis[1]) / len1 : 0.0f;
+    local[2] = len2 ? DotProduct(delta, axis[2]) / len2 : 0.0f;
+}
+
 static float vk_world_face_light_plane_dist(const mface_t *face, const dlight_t *light,
                                             const entity_t *ent, const vec3_t axis[3])
 {
@@ -5236,12 +5500,8 @@ static float vk_world_face_light_plane_dist(const mface_t *face, const dlight_t 
         return PlaneDiffFast(light->origin, face->plane);
 
     vec3_t local;
-    vec3_t delta;
 
-    VectorSubtract(light->origin, ent->origin, delta);
-    local[0] = DotProduct(delta, axis[0]) / DotProduct(axis[0], axis[0]);
-    local[1] = DotProduct(delta, axis[1]) / DotProduct(axis[1], axis[1]);
-    local[2] = DotProduct(delta, axis[2]) / DotProduct(axis[2], axis[2]);
+    vk_transform_to_entity_local(light->origin, ent, axis, local);
     return PlaneDiffFast(local, face->plane);
 }
 
@@ -5253,12 +5513,7 @@ static void vk_world_face_light_origin(const dlight_t *light, const entity_t *en
         return;
     }
 
-    vec3_t delta;
-
-    VectorSubtract(light->origin, ent->origin, delta);
-    origin[0] = DotProduct(delta, axis[0]) / DotProduct(axis[0], axis[0]);
-    origin[1] = DotProduct(delta, axis[1]) / DotProduct(axis[1], axis[1]);
-    origin[2] = DotProduct(delta, axis[2]) / DotProduct(axis[2], axis[2]);
+    vk_transform_to_entity_local(light->origin, ent, axis, origin);
 }
 
 static float vk_world_dynamic_light_fraction(const dlight_t *light,
@@ -5300,7 +5555,7 @@ static void vk_world_dynamic_light(const vk_world_face_t *face,
     if (!face || !face->face || !face->face->plane ||
         !fd || fd->num_dlights <= 0 || !fd->dlights ||
         !vk_dynamic_lights_enabled() ||
-        (face->face->drawflags & SURF_COLOR_MASK))
+        (face->face->drawflags & vk.world.nolm_mask))
         return;
 
     vk_world_face_center(face, ent, axis, center);
@@ -5324,6 +5579,23 @@ static void vk_world_dynamic_light(const vk_world_face_t *face,
     dlight[0] = Q_clipf(dlight[0], 0.0f, 1.0f);
     dlight[1] = Q_clipf(dlight[1], 0.0f, 1.0f);
     dlight[2] = Q_clipf(dlight[2], 0.0f, 1.0f);
+}
+
+static const image_t *vk_world_face_image(const mface_t *face,
+                                          const refdef_t *fd,
+                                          const entity_t *ent)
+{
+    const mtexinfo_t *tex = face->texinfo;
+
+    if (tex && tex->next) {
+        int frame = ent ? ent->frame : (int)((fd ? fd->time : 0.0f) * 2.0f);
+        int c = frame % tex->numframes;
+
+        while (c-- > 0 && tex->next)
+            tex = tex->next;
+    }
+
+    return tex ? tex->image : NULL;
 }
 
 static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
@@ -5373,6 +5645,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                  vk.rect_pipeline_layout, 0, 1,
                                  &texture->descriptor_set, 0, NULL);
+        uint32_t bound_texture_index = batch->texture_index;
 
         if (batch->first_face > vk.world.face_count ||
             batch->face_count > vk.world.face_count - batch->first_face)
@@ -5388,6 +5661,19 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 continue;
             if (!vk_world_face_in_pass(face->face, pass))
                 continue;
+
+            const image_t *image = vk_world_face_image(face->face, fd, ent);
+            if (!image || image->texnum >= MAX_RIMAGES)
+                continue;
+            if (image->texnum != bound_texture_index) {
+                texture = vk_texture_for_index(image->texnum, true);
+                if (!texture)
+                    continue;
+                vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                         vk.rect_pipeline_layout, 0, 1,
+                                         &texture->descriptor_set, 0, NULL);
+                bound_texture_index = image->texnum;
+            }
 
             face_pipeline = vk_world_face_pipeline(face->face, pipeline, pass);
             if (face_pipeline != pipeline)
@@ -5685,9 +5971,11 @@ static void vk_mark_world_faces(const refdef_t *fd)
         return;
 
     vk.world.drawframe++;
-    vk.world.visframe++;
     vk_update_world_view(fd);
-    vk_mark_world_visible_nodes(fd);
+    if (!vk_lockpvs || !vk_lockpvs->integer) {
+        vk.world.visframe++;
+        vk_mark_world_visible_nodes(fd);
+    }
     vk_setup_world_frustum(fd);
 
     clipflags = (!vk_cull_nodes || vk_cull_nodes->integer) &&
@@ -5707,12 +5995,10 @@ static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
     if (!model || (model->numfaces > 0 && !model->firstface))
         return;
 
-    VectorSubtract(fd->vieworg, ent->origin, transformed);
-    if (!VectorEmpty(ent->angles) || (ent->scale && ent->scale != 1.0f)) {
-        vec3_t temp;
-        VectorCopy(transformed, temp);
-        VectorRotate(temp, axis, transformed);
-    }
+    if (!VectorEmpty(ent->angles) || (ent->scale && ent->scale != 1.0f))
+        vk_transform_to_entity_local(fd->vieworg, ent, axis, transformed);
+    else
+        VectorSubtract(fd->vieworg, ent->origin, transformed);
 
     for (int i = 0; i < model->numfaces; i++) {
         mface_t *face = model->firstface + i;
@@ -5738,6 +6024,43 @@ static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
     }
 }
 
+static bool vk_bmodel_culled(const mmodel_t *model, const entity_t *ent,
+                             const vec3_t axis[3])
+{
+    vec3_t points[8];
+
+    if (!vk_cull_models || !vk_cull_models->integer)
+        return false;
+    if (!model || !ent || !axis)
+        return false;
+
+    for (int i = 0; i < 8; i++) {
+        VectorCopy(ent->origin, points[i]);
+        VectorMA(points[i], (i & 1) ? model->maxs[0] : model->mins[0],
+                 axis[0], points[i]);
+        VectorMA(points[i], (i & 2) ? model->maxs[1] : model->mins[1],
+                 axis[1], points[i]);
+        VectorMA(points[i], (i & 4) ? model->maxs[2] : model->mins[2],
+                 axis[2], points[i]);
+    }
+
+    for (int i = 0; i < 4; i++) {
+        bool infront = false;
+
+        for (int j = 0; j < 8; j++) {
+            if (PlaneDiffFast(points[j], &vk.world.frustum[i]) >= 0.0f) {
+                infront = true;
+                break;
+            }
+        }
+
+        if (!infront)
+            return true;
+    }
+
+    return false;
+}
+
 static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd,
                            bool translucent_faces)
 {
@@ -5756,6 +6079,9 @@ static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd,
         return;
 
     vk_entity_axis(ent, axis);
+    if (vk_bmodel_culled(model, ent, axis))
+        return;
+
     vk_entity_mvp(mvp, fd, ent, axis);
 
     vk.world.drawframe++;
@@ -5842,6 +6168,31 @@ static float vk_entity_light_modulate(void)
 {
     return Cvar_ClampValue(vk_modulate, 0.0f, 1e6f) *
            Cvar_ClampValue(vk_modulate_entities, 0.0f, 1e6f);
+}
+
+static void vk_adjust_entity_light(vec3_t color)
+{
+    float add = 255.0f * Cvar_ClampValue(vk_brightness, -1.0f, 1.0f);
+    float modulate = vk_entity_light_modulate();
+    float scale = Cvar_ClampValue(vk_coloredlightmaps, 0.0f, 1.0f);
+    float maxc;
+
+    color[0] = max((color[0] + add) * modulate, 0.0f);
+    color[1] = max((color[1] + add) * modulate, 0.0f);
+    color[2] = max((color[2] + add) * modulate, 0.0f);
+
+    maxc = max(max(color[0], color[1]), color[2]);
+    if (maxc > 255.0f)
+        VectorScale(color, 255.0f / maxc, color);
+
+    if (scale != 1.0f) {
+        float y = LUMINANCE(color[0], color[1], color[2]);
+        color[0] = y + (color[0] - y) * scale;
+        color[1] = y + (color[1] - y) * scale;
+        color[2] = y + (color[2] - y) * scale;
+    }
+
+    VectorScale(color, 1.0f / 255.0f, color);
 }
 
 static void vk_entity_light_color(const entity_t *ent, const refdef_t *fd, vec4_t color)
@@ -6032,7 +6383,7 @@ static void vk_trace_bmodel_light_points(const refdef_t *fd, const bsp_t *bsp,
         lightpoint_t model_point;
         BSP_TransformedLightPoint(&model_point, origin, end,
                                   model->headnode,
-                                  SURF_SKY | SURF_NODRAW | SURF_TRANS_MASK,
+                                  vk.world.nolm_mask | SURF_TRANS_MASK,
                                   ent->origin, angles);
         if (model_point.fraction < point->fraction)
             *point = model_point;
@@ -6051,7 +6402,7 @@ static bool vk_alias_shadow_point(const entity_t *ent, const refdef_t *fd,
     VectorCopy(ent->origin, end);
     end[2] -= 8192.0f;
     BSP_LightPoint(point, ent->origin, end, bsp->nodes,
-                   SURF_SKY | SURF_NODRAW | SURF_TRANS_MASK);
+                   vk.world.nolm_mask | SURF_TRANS_MASK);
     vk_trace_bmodel_light_points(fd, bsp, ent->origin, end, point);
     return point->surf != NULL;
 }
@@ -6228,7 +6579,8 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         if (!pipeline)
             continue;
 
-        if (translucent && !(ent->flags & RF_FULLBRIGHT) &&
+        if (translucent &&
+            (ent->flags & (RF_FULLBRIGHT | RF_BLOOM_ONLY)) == 0 &&
             vk.alias_depth_pipeline) {
             vk_draw_alias_pass(cmd, vk.alias_depth_pipeline, buffers, offsets,
                                model, batch, texture, &push);
@@ -6307,7 +6659,7 @@ static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
     vk_fog_params(fd, push.fog);
-    push.intensity = vk_texture_intensity();
+    push.intensity = 1.0f;
 
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
@@ -6406,7 +6758,7 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
     vk_fog_params(fd, push.fog);
-    push.intensity = def ? -1.0f : vk_texture_intensity();
+    push.intensity = def ? -1.0f : 1.0f;
 
     VkPipeline pipeline = (def && vk.particle_add_pipeline) ?
         vk.particle_add_pipeline : vk.sprite_pipeline;
@@ -6502,7 +6854,7 @@ static void vk_draw_particles(const refdef_t *fd)
         Vector4Clear(push.scroll);
         Vector4Clear(push.dlight);
         vk_fog_params(fd, push.fog);
-        push.intensity = vk_texture_intensity();
+        push.intensity = 1.0f;
 
         vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -6552,7 +6904,7 @@ static void vk_draw_beam_segment(const vec3_t start, const vec3_t end,
     Vector4Clear(push.scroll);
     Vector4Clear(push.dlight);
     vk_fog_params(fd, push.fog);
-    push.intensity = vk_texture_intensity();
+    push.intensity = 1.0f;
 
     vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
@@ -6765,7 +7117,7 @@ static void vk_sample_lightpoint(const lightpoint_t *point, const refdef_t *fd,
         lightmap += size;
     }
 
-    VectorScale(color, vk_entity_light_modulate() * (1.0f / 255.0f), color);
+    vk_adjust_entity_light(color);
 }
 
 static bool vk_lightgrid_point(const lightgrid_t *grid, const vec3_t start,
@@ -6844,7 +7196,7 @@ static bool vk_lightgrid_point(const lightgrid_t *grid, const vec3_t start,
     LerpVector2(lerp_x[0], lerp_x[1], 1.0f - fy, fy, lerp_y[0]);
     LerpVector2(lerp_x[2], lerp_x[3], 1.0f - fy, fy, lerp_y[1]);
     LerpVector2(lerp_y[0], lerp_y[1], 1.0f - fz, fz, color);
-    VectorScale(color, vk_entity_light_modulate() * (1.0f / 255.0f), color);
+    vk_adjust_entity_light(color);
     return true;
 }
 
@@ -6869,7 +7221,7 @@ static bool vk_static_light_point(const vec3_t origin, const refdef_t *fd,
     end[2] = origin[2] - 8192.0f;
 
     BSP_LightPoint(&point, origin, end, bsp->nodes,
-                   SURF_SKY | SURF_NODRAW | SURF_TRANS_MASK);
+                   vk.world.nolm_mask | SURF_TRANS_MASK);
     vk_trace_bmodel_light_points(fd, bsp, origin, end, &point);
 
     if (!point.surf)
@@ -6952,7 +7304,7 @@ static void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass)
     if (fd->num_entities <= 0 || !fd->entities)
         return;
 
-    for (int i = 0; i < fd->num_entities; i++) {
+    for (int i = fd->num_entities - 1; i >= 0; i--) {
         const entity_t *ent = &fd->entities[i];
 
         if (vk_entity_in_pass(ent, pass))
@@ -6962,6 +7314,24 @@ static void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass)
 
 static void vk_surface_color(const mface_t *face, float color[4])
 {
+    float intensity = vk_texture_intensity();
+
+    if (face->drawflags & SURF_TRANS33) {
+        Vector4Set(color, 1.0f / intensity, 1.0f / intensity,
+                   1.0f / intensity, 0.33f);
+        return;
+    }
+    if (face->drawflags & SURF_TRANS66) {
+        Vector4Set(color, 1.0f / intensity, 1.0f / intensity,
+                   1.0f / intensity, 0.66f);
+        return;
+    }
+    if (face->drawflags & SURF_WARP) {
+        Vector4Set(color, 1.0f / intensity, 1.0f / intensity,
+                   1.0f / intensity, 1.0f);
+        return;
+    }
+
     uint32_t hash = FS_HashPath(face->texinfo->name, UINT32_MAX);
     float shade = 0.35f + fabsf(face->plane->normal[2]) * 0.35f;
 
@@ -6984,7 +7354,7 @@ static bool vk_sample_surface_light(const bsp_t *bsp, const mface_t *face,
 
     if (!face->lightmap || !face->numstyles || smax < 1 || tmax < 1)
         return false;
-    if (face->drawflags & SURF_COLOR_MASK)
+    if (face->drawflags & vk.world.nolm_mask)
         return false;
     if (!bsp->lightmap || face->lightmap < bsp->lightmap)
         return false;
@@ -7045,7 +7415,7 @@ static void vk_surface_vertex_color(const bsp_t *bsp, const mface_t *face,
                                     const vec3_t point, const float fallback[4],
                                     float color[4])
 {
-    if (face->drawflags & SURF_COLOR_MASK) {
+    if (face->drawflags & vk.world.nolm_mask) {
         Vector4Set(color, 1.0f, 1.0f, 1.0f, 1.0f);
         return;
     }
@@ -7295,7 +7665,13 @@ static float vk_world_size_for_bsp(const bsp_t *bsp)
 
 static bool vk_world_lighting_modified(void)
 {
-    return (vk_coloredlightmaps && vk_coloredlightmaps->modified) ||
+    return (vk_modulate && vk_modulate->modified) ||
+           (vk_modulate_world && vk_modulate_world->modified) ||
+           (vk_brightness && vk_brightness->modified) ||
+           (vk_intensity && vk_intensity->modified) ||
+           (vk_dynamic && vk_dynamic->modified) ||
+           (vk_fullbright && vk_fullbright->modified) ||
+           (vk_coloredlightmaps && vk_coloredlightmaps->modified) ||
            (vk_vertexlight && vk_vertexlight->modified);
 }
 
@@ -7331,6 +7707,18 @@ static void vk_save_world_lightstyles(const refdef_t *fd)
 
 static void vk_clear_world_lighting_modified(void)
 {
+    if (vk_modulate)
+        vk_modulate->modified = false;
+    if (vk_modulate_world)
+        vk_modulate_world->modified = false;
+    if (vk_brightness)
+        vk_brightness->modified = false;
+    if (vk_intensity)
+        vk_intensity->modified = false;
+    if (vk_dynamic)
+        vk_dynamic->modified = false;
+    if (vk_fullbright)
+        vk_fullbright->modified = false;
     if (vk_coloredlightmaps)
         vk_coloredlightmaps->modified = false;
     if (vk_vertexlight)
@@ -7379,6 +7767,8 @@ static void vk_prepare_world_surfaces(bsp_t *bsp)
     if (!bsp || !bsp->faces)
         return;
 
+    int n64surfs = 0;
+
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *face = &bsp->faces[i];
 
@@ -7389,7 +7779,14 @@ static void vk_prepare_world_surfaces(bsp_t *bsp)
 
         if ((face->drawflags & SURF_NODRAW) && !bsp->has_bspx)
             face->drawflags &= ~SURF_NODRAW;
+
+        if (face->drawflags & (SURF_N64_UV | SURF_N64_SCROLL_X | SURF_N64_SCROLL_Y))
+            n64surfs++;
     }
+
+    vk.world.nolm_mask = SURF_NOLM_MASK_DEFAULT;
+    if (bsp->has_bspx || n64surfs > 100)
+        vk.world.nolm_mask = SURF_NOLM_MASK_REMASTER;
 }
 
 static void vk_mark_world_images_registered(bsp_t *bsp)
@@ -7490,15 +7887,40 @@ bool VKR_Init(bool total)
     vk_drawentities = Cvar_Get("vk_drawentities", "1", CVAR_CHEAT);
     vk_gl_drawentities = Cvar_Get("gl_drawentities", "1", CVAR_CHEAT);
     vk_drawsky = Cvar_Get("vk_drawsky", "1", 0);
+    vk_drawsky->changed = vk_drawsky_changed;
     vk_gl_drawsky = Cvar_Get("gl_drawsky", "1", 0);
+    vk_gl_drawsky->changed = vk_drawsky_changed;
     vk_swapinterval = Cvar_Get("gl_swapinterval", "1", CVAR_ARCHIVE);
     vk_swapinterval->changed = vk_swapinterval_changed;
     vk_finish = Cvar_Get("gl_finish", "0", 0);
     vk_texturemode = Cvar_Get("gl_texturemode", "GL_LINEAR_MIPMAP_LINEAR",
                               CVAR_ARCHIVE);
     vk_texturemode->changed = vk_texturemode_changed;
+    vk_texturemode->generator = vk_texturemode_g;
     vk_anisotropy = Cvar_Get("gl_anisotropy", "1", 0);
     vk_anisotropy->changed = vk_texturemode_changed;
+    vk_round_down = Cvar_Get("gl_round_down", "0", CVAR_FILES);
+    vk_picmip = Cvar_Get("gl_picmip", "0", CVAR_FILES);
+    vk_downsample_skins = Cvar_Get("gl_downsample_skins", "1", CVAR_FILES);
+    vk_bilerp_chars = Cvar_Get("gl_bilerp_chars", "0", 0);
+    vk_bilerp_chars->changed = vk_sampler_selection_changed;
+    vk_bilerp_pics = Cvar_Get("gl_bilerp_pics", "1", 0);
+    vk_bilerp_pics->changed = vk_sampler_selection_changed;
+    vk_bilerp_skies = Cvar_Get("gl_bilerp_skies", "1", 0);
+    vk_bilerp_skies->changed = vk_sampler_selection_changed;
+    vk_saturation = Cvar_Get("gl_saturation", "1", CVAR_FILES);
+    vk_invert = Cvar_Get("gl_invert", "0", CVAR_FILES);
+    vk_gamma_scale_pics = Cvar_Get("gl_gamma_scale_pics", "0", CVAR_FILES);
+    vk_gamma = Cvar_Get("vid_gamma", "1", CVAR_ARCHIVE);
+    if (r_config.flags & QVF_GAMMARAMP) {
+        vk_gamma->changed = vk_gamma_changed;
+        vk_gamma->flags &= ~CVAR_FILES;
+    } else {
+        vk_gamma->flags |= CVAR_FILES;
+    }
+    vk_build_gamma_table();
+    if (r_config.flags & QVF_GAMMARAMP)
+        vk_gamma_changed(vk_gamma);
     vk_partscale = Cvar_Get("gl_partscale", "2", 0);
     vk_partstyle = Cvar_Get("gl_partstyle", "0", 0);
     vk_partshape = Cvar_Get("gl_partshape", "0", 0);
@@ -7513,6 +7935,7 @@ bool VKR_Init(bool total)
     vk_draworder = Cvar_Get("gl_draworder", "1", 0);
     vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
     vk_showtearing = Cvar_Get("gl_showtearing", "0", CVAR_CHEAT);
+    gl_showtris = Cvar_Get("gl_showtris", "0", CVAR_CHEAT);
     vk_modulate = Cvar_Get("gl_modulate", "1", CVAR_ARCHIVE);
     vk_modulate_entities = Cvar_Get("gl_modulate_entities", "1", 0);
     vk_doublelight_entities = Cvar_Get("gl_doublelight_entities", "1", 0);
@@ -7524,7 +7947,10 @@ bool VKR_Init(bool total)
     vk_brightness = Cvar_Get("gl_brightness", "0", 0);
     vk_fog = Cvar_Get("gl_fog", "1", 0);
     vk_intensity = Cvar_Get("intensity", "2", 0);
+    vk_shaders = Cvar_Get("gl_shaders", "1", CVAR_FILES);
 
+    gl_intensity = vk_intensity;
+    gl_shaders = vk_shaders;
     gl_modulate_world = vk_modulate_world;
     gl_modulate_entities = vk_modulate_entities;
     gl_brightness = vk_brightness;
@@ -7613,8 +8039,22 @@ void VKR_Shutdown(bool total)
         vk_swapinterval->changed = NULL;
     if (vk_texturemode)
         vk_texturemode->changed = NULL;
+    if (vk_texturemode)
+        vk_texturemode->generator = NULL;
+    if (vk_drawsky)
+        vk_drawsky->changed = NULL;
+    if (vk_gl_drawsky)
+        vk_gl_drawsky->changed = NULL;
     if (vk_anisotropy)
         vk_anisotropy->changed = NULL;
+    if (vk_bilerp_chars)
+        vk_bilerp_chars->changed = NULL;
+    if (vk_bilerp_pics)
+        vk_bilerp_pics->changed = NULL;
+    if (vk_bilerp_skies)
+        vk_bilerp_skies->changed = NULL;
+    if (vk_gamma)
+        vk_gamma->changed = NULL;
     if (vk_partshape)
         vk_partshape->changed = NULL;
     if (vk_clearcolor)
@@ -7684,6 +8124,10 @@ void VKR_Shutdown(bool total)
     if (vk.nearest_sampler) {
         vk.DestroySampler(vk.device, vk.nearest_sampler, NULL);
         vk.nearest_sampler = VK_NULL_HANDLE;
+    }
+    if (vk.sky_nearest_sampler) {
+        vk.DestroySampler(vk.device, vk.sky_nearest_sampler, NULL);
+        vk.sky_nearest_sampler = VK_NULL_HANDLE;
     }
 
     if (vk.descriptor_pool) {
@@ -7931,25 +8375,43 @@ void VKR_LightPoint(const vec3_t origin, vec3_t light)
 
 void VKR_ClearColor(void)
 {
+    vk.color.u32 = U32_WHITE;
+    vk.alt_color.u32 = U32_WHITE;
     vk.color_set = false;
 }
 
 void VKR_SetAlpha(float alpha)
 {
-    if (vk.color_set)
-        vk.color.u8[3] = Q_clip(alpha, 0.0f, 1.0f) * 255;
+    byte a = Q_clip(alpha, 0.0f, 1.0f) * 255;
+    if (!vk.color_set) {
+        vk.color.u32 = U32_WHITE;
+        vk.alt_color.u32 = U32_WHITE;
+        vk.color_set = true;
+    }
+    vk.color.u8[3] = a;
+    vk.alt_color.u8[3] = a;
 }
 
 void VKR_SetColor(uint32_t color)
 {
     vk.color.u32 = color;
+    vk.alt_color.u32 = U32_WHITE;
+    vk.alt_color.u8[3] = vk.color.u8[3];
     vk.color_set = true;
 }
 
 void VKR_SetClipRect(const clipRect_t *clip)
 {
     if (clip) {
-        vk.clip = *clip;
+        vk.clip.left = max(clip->left, 0);
+        vk.clip.top = max(clip->top, 0);
+        vk.clip.right = min(clip->right, vk_2d_width());
+        vk.clip.bottom = min(clip->bottom, vk_2d_height());
+        if (vk.clip.right < vk.clip.left ||
+            vk.clip.bottom < vk.clip.top) {
+            vk.clip_set = false;
+            return;
+        }
         vk.clip_set = true;
     } else {
         vk.clip_set = false;
@@ -7964,7 +8426,24 @@ float VKR_ClampScale(cvar_t *var)
     if (var->value)
         return 1.0f / Cvar_ClampValue(var, 1.0f, 10.0f);
 
-    return 1.0f;
+    int scale = 1;
+
+    if (r_config.height < r_config.width) {
+        if (r_config.height >= 2160)
+            scale = 4;
+        else if (r_config.height >= 1080)
+            scale = 2;
+    } else {
+        if (r_config.width >= 3840)
+            scale = 4;
+        else if (r_config.width >= 1920)
+            scale = 2;
+    }
+
+    if (vid && vid->get_dpi_scale)
+        scale = max(scale, vid->get_dpi_scale());
+
+    return 1.0f / scale;
 }
 
 void VKR_SetScale(float scale)
@@ -7987,11 +8466,13 @@ void VKR_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
 
     float s = (ch & 15) * 0.0625f;
     float t = ((ch & 255) >> 4) * 0.0625f;
+    color_t saved = vk.color;
+    bool saved_set = vk.color_set;
+    color_t draw_color = (ch & 0x80) ?
+        vk.alt_color : (vk.color_set ? vk.color : (color_t){ .u32 = U32_WHITE });
 
     if ((flags & UI_DROPSHADOW) && ch != 0x83) {
-        color_t saved = vk.color;
-        bool saved_set = vk.color_set;
-        byte alpha = saved_set ? saved.u8[3] : 255;
+        byte alpha = draw_color.u8[3];
 
         vk.color.u32 = MakeColor(0, 0, 0, alpha);
         vk.color_set = true;
@@ -8006,8 +8487,12 @@ void VKR_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
         vk.color_set = saved_set;
     }
 
+    vk.color = draw_color;
+    vk.color_set = true;
     vk_draw_texture_rect(x, y, CONCHAR_WIDTH, CONCHAR_HEIGHT,
                          s, t, s + 0.0625f, t + 0.0625f, font);
+    vk.color = saved;
+    vk.color_set = saved_set;
 }
 
 int VKR_DrawString(int x, int y, int flags, size_t max_chars,
@@ -8063,7 +8548,14 @@ void VKR_DrawKeepAspectPic(int x, int y, int w, int h, qhandle_t pic)
 
 void VKR_DrawStretchRaw(int x, int y, int w, int h)
 {
+    color_t saved = vk.color;
+    bool saved_set = vk.color_set;
+
+    vk.color.u32 = U32_WHITE;
+    vk.color_set = true;
     vk_draw_texture_resource(x, y, w, h, 0, 0, 1, 1, &vk.raw_texture);
+    vk.color = saved;
+    vk.color_set = saved_set;
 }
 
 void VKR_UpdateRawPic(int pic_w, int pic_h, const uint32_t *pic)
@@ -8074,27 +8566,33 @@ void VKR_UpdateRawPic(int pic_w, int pic_h, const uint32_t *pic)
     if (!vk_upload_texture_data(&vk.raw_texture, pic_w, pic_h, pic)) {
         Com_WPrintf("Couldn't upload Vulkan raw texture: %s\n",
                     Com_GetLastError());
+    } else {
+        vk_update_texture_descriptor_with_sampler(&vk.raw_texture,
+                                                  vk_sampler_for_pic_flags(IF_NONE));
     }
 }
 
 void VKR_TileClear(int x, int y, int w, int h, qhandle_t pic)
 {
     const float div64 = 1.0f / 64.0f;
+    color_t saved = vk.color;
+    bool saved_set = vk.color_set;
 
+    vk.color.u32 = U32_WHITE;
+    vk.color_set = true;
     vk_draw_texture_rect(x, y, w, h, x * div64, y * div64,
                          (x + w) * div64, (y + h) * div64, pic);
+    vk.color = saved;
+    vk.color_set = saved_set;
 }
 
 void VKR_DrawFill8(int x, int y, int w, int h, int c)
 {
-    uint32_t color = vk.color_set ? vk.color.u32 : d_8to24table[c & 0xff];
-    vk_clear_rect(x, y, w, h, color);
+    vk_clear_rect(x, y, w, h, d_8to24table[c & 0xff]);
 }
 
 void VKR_DrawFill32(int x, int y, int w, int h, uint32_t color)
 {
-    if (vk.color_set)
-        color = vk.color.u32;
     vk_clear_rect(x, y, w, h, color);
 }
 
