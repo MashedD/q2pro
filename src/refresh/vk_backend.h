@@ -48,4 +48,5 @@ void VKR_EndFrame(void);
 void VKR_ModeChanged(int width, int height, int flags);
 bool VKR_VideoSync(void);
 int VKR_ReadPixels(struct screenshot_s *s);
+r_opengl_config_t VKR_GetGLConfig(void);
 #endif
