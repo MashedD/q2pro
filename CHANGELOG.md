@@ -6,6 +6,12 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The default settings in the release packages (`q2pro.pkz`) turn vertical
+  sync off, because it adds noticeable input lag. It can be turned back on in
+  the video menu or with `gl_swapinterval 1`.
+
 ## [1.1.0] - 2026-11-07
 
 ### Added
