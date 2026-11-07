@@ -6,6 +6,8 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-07
+
 ### Added
 
 - The Linux package plays Ogg Vorbis music and Ogg Theora cinematics, like the
@@ -74,5 +76,6 @@ All new options are off or keep upstream's behaviour by default.
 - A game library without the executable permission is reported with the
   `chmod` command that fixes it, instead of only "Permission denied".
 
-[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/MashedD/q2pro/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/MashedD/q2pro/releases/tag/v1.0.0
