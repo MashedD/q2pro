@@ -6,6 +6,11 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Skin tints (`cl_itemtint`, `cl_weapontint`, `cl_ammotint`, `cl_playertint`)
+  work in the Vulkan renderer.
+
 ## [1.1.0] - 2026-11-07
 
 ### Added
