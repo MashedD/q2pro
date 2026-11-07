@@ -19,6 +19,8 @@ All notable changes to this fork are documented here. The format follows
 - Skin tints (`cl_itemtint`, `cl_weapontint`, `cl_ammotint`, `cl_playertint`)
   work in the Vulkan renderer.
 - Vulkan particles were about twice as large as in the OpenGL renderer.
+- `r_maxfps` limits the frame rate to the value set. Rates that don't divide
+  1000 evenly used to be rounded up, so 288 gave 333 fps and 60 gave 62.
 
 ## [1.1.0] - 2026-11-07
 

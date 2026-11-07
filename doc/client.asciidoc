@@ -84,7 +84,9 @@ blocking on buffer swaps, reducing input lag.
 
 r_maxfps::
     Specifies maximum rendering frame rate if ‘cl_async’ is set to 1, otherwise
-    ignored.  Default value is 0, which means no particular limit.
+    ignored. Rates that don't divide 1000 evenly, such as 288, are exact on
+    average rather than rounded to a whole number of milliseconds. Default
+    value is 0, which means no particular limit.
 
 cl_maxfps::
     Specifies client physics frame rate if ‘cl_async’ 1 or 2 is used.
@@ -126,8 +128,8 @@ cl_updaterate::
     update rate available (that is, native server frame rate).
 
 cl_warn_on_fps_rounding::
-    Print a warning if value specified for ‘cl_maxfps’ or ‘r_maxfps’ is inexact
-    due to rounding. Default value is 1 (enabled).
+    Print a warning if value specified for ‘cl_maxfps’ is inexact due to
+    rounding. ‘r_maxfps’ is never rounded. Default value is 1 (enabled).
 
 Network
 ~~~~~~~
