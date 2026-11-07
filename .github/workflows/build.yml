@@ -32,6 +32,7 @@ env:
     -Dbuildtype=release
     -Dicmp-errors=disabled
     -Dpkg_config_path=/opt/homebrew/opt/openal-soft/lib/pkgconfig
+    -Dvulkan=disabled
     -Dwayland=disabled
     -Dwindows-crash-dumps=disabled
     -Dwrap_mode=nofallback
@@ -74,7 +75,7 @@ jobs:
       - name: Install dependencies
         timeout-minutes: 20
         run: |
-          .ci/apt-install.sh gcc-mingw-w64 nasm meson ninja-build
+          .ci/apt-install.sh gcc-mingw-w64 nasm meson ninja-build glslc libvulkan-dev
 
       - name: Build
         run: |
@@ -117,7 +118,7 @@ jobs:
 
       - name: Build
         run: |
-          meson setup ${{ env.MESON_ARGS }} ${{ env.MESON_ARGS_WIN }} builddir
+          meson setup ${{ env.MESON_ARGS }} ${{ env.MESON_ARGS_WIN }} -Dvulkan=disabled builddir
           meson compile -C builddir
 
       - name: Test
@@ -143,7 +144,7 @@ jobs:
       - name: Install dependencies
         timeout-minutes: 20
         run: |
-          .ci/apt-install.sh meson libsdl2-dev libopenal-dev libpng-dev libjpeg-dev zlib1g-dev \
+          .ci/apt-install.sh meson libsdl2-dev libopenal-dev libpng-dev libjpeg-dev zlib1g-dev glslc libvulkan-dev \
             mesa-common-dev libcurl4-gnutls-dev libx11-dev libxi-dev \
             libwayland-dev wayland-protocols libdecor-0-dev
 
@@ -203,7 +204,7 @@ jobs:
           version: '15.1'
           run: |
             sudo pkg update
-            sudo pkg install -y git meson pkgconf openal-soft \
+            sudo pkg install -y git meson pkgconf openal-soft vulkan-headers shaderc \
             sdl2 curl png jpeg-turbo libX11 libdecor evdev-proto wayland-protocols
             meson setup ${{ env.MESON_ARGS }} ${{ env.MESON_ARGS_FREEBSD }} builddir
             meson compile -C builddir

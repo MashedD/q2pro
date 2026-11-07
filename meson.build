@@ -313,12 +313,16 @@ server_deps = []
 game_deps = [zlib]
 
 vulkan = dependency('vulkan', required: false)
-if not vulkan.found() and host_machine.system() == 'windows'
+if host_machine.system() == 'windows' and not (vulkan.found() and
+    cc.has_header('vulkan/vulkan.h', dependencies: vulkan))
   # The Windows backend loads vulkan-1.dll dynamically, so cross builds only
   # need the platform-independent Vulkan headers.  Linux distributions
   # commonly install those in /usr/include without providing a MinGW pkg-config
-  # file.  Search that directory after the MinGW compiler's native headers so
-  # standard C and Windows headers still come from the cross toolchain.
+  # file, and a cross build that uses the host's pkg-config finds the Linux
+  # package, whose include path /usr/include pkg-config omits.  Search that
+  # directory after the MinGW compiler's native headers so standard C and
+  # Windows headers still come from the cross toolchain.
+  vulkan = dependency('', required: false)
   vulkan_header_args = ['-idirafter', '/usr/include']
   if cc.has_header('vulkan/vulkan.h', args: vulkan_header_args)
     vulkan = declare_dependency(compile_args: vulkan_header_args)
@@ -327,8 +331,16 @@ endif
 if get_option('vulkan').enabled() and not vulkan.found()
   error('Vulkan support was enabled, but Vulkan headers were not found')
 endif
+# The shaders are compiled to SPIR-V at build time, so Vulkan also needs
+# glslc (from shaderc). With vulkan=auto, a missing glslc leaves Vulkan out
+# instead of failing the build.
 if vulkan.found()
   glslc = find_program('glslc', required: get_option('vulkan'))
+  if not glslc.found()
+    vulkan = dependency('', required: false)
+  endif
+endif
+if vulkan.found()
   vk_shader_headers = []
   foreach shader : ['vk_rect.vert', 'vk_rect.frag', 'vk_vignette.vert',
                     'vk_tex.vert', 'vk_tex.frag',

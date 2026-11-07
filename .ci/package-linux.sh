@@ -24,6 +24,7 @@ trap 'rm -rf "$tmp"' EXIT
 PKG_CONFIG_PATH="$tmp/ffmpeg-prefix/lib/pkgconfig" \
 meson setup "$tmp/build" --buildtype=release --wrap-mode=nofallback \
     --force-fallback-for=libjpeg -Dlibjpeg-turbo:c_std=gnu11 -Dcurl-dlopen=true \
+    -Dvulkan=enabled \
     -Davcodec=enabled -Dsystem-wide=false -Dconfig-file=q2config.cfg \
     -Danticheat-server=true \
     -Dwindows-crash-dumps=disabled -Dwerror=true
