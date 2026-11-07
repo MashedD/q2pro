@@ -8,10 +8,15 @@ the Free Software Foundation; either version 2 of the License, or
 */
 
 #include "shared/shared.h"
+#include "common/bsp.h"
 #include "common/common.h"
+#include "common/math.h"
+#include "common/utils.h"
 #include "common/zone.h"
 #include "client/client.h"
 #include "client/video.h"
+#include "format/md2.h"
+#include "format/sp2.h"
 #include "images.h"
 #include "refresh/refresh.h"
 #include "system/system.h"
@@ -37,6 +42,26 @@ static const uint32_t vk_tex_frag_spv[] =
 #include "vk_tex_frag_spv.h"
 ;
 
+static const uint32_t vk_color3d_vert_spv[] =
+#include "vk_color3d_vert_spv.h"
+;
+
+static const uint32_t vk_color3d_frag_spv[] =
+#include "vk_color3d_frag_spv.h"
+;
+
+static const uint32_t vk_world_vert_spv[] =
+#include "vk_world_vert_spv.h"
+;
+
+static const uint32_t vk_world_frag_spv[] =
+#include "vk_world_frag_spv.h"
+;
+
+static const uint32_t vk_alias_vert_spv[] =
+#include "vk_alias_vert_spv.h"
+;
+
 typedef struct {
     float rect[4];
     float color[4];
@@ -55,10 +80,96 @@ typedef struct {
 } vk_texture_t;
 
 typedef struct {
+    VkBuffer buffer;
+    VkDeviceMemory memory;
+    VkDeviceSize size;
+} vk_buffer_t;
+
+typedef struct {
+    float position[3];
+    float color[4];
+    float uv[2];
+} vk_vertex_t;
+
+typedef struct {
+    vk_buffer_t vertices;
+    vk_buffer_t indices;
+    uint32_t index_count;
+} vk_mesh_t;
+
+typedef struct {
+    uint32_t first_index;
+    uint32_t index_count;
+    uint32_t texture_index;
+    uint32_t first_face;
+    uint32_t face_count;
+} vk_world_batch_t;
+
+typedef struct {
+    uint32_t first_vertex;
+    uint32_t edge_count;
+    uint32_t texture_index;
+    mface_t *face;
+} vk_world_build_face_t;
+
+typedef struct {
+    mface_t *face;
+    uint32_t first_index;
+    uint32_t index_count;
+} vk_world_face_t;
+
+typedef struct {
+    int width;
+    int height;
+    int origin_x;
+    int origin_y;
+    image_t *image;
+} vk_sprite_frame_t;
+
+typedef struct {
+    enum {
+        VK_MODEL_FREE,
+        VK_MODEL_ALIAS,
+        VK_MODEL_SPRITE,
+    } type;
+    char name[MAX_QPATH];
+    unsigned registration_sequence;
+    vk_sprite_frame_t *frames;
+    int frame_count;
+    vk_mesh_t mesh;
+    image_t **skins;
+    int skin_count;
+    uint32_t vertex_count;
+} vk_model_t;
+
+typedef struct {
+    bsp_t *cache;
+    vk_mesh_t mesh;
+    vk_world_batch_t *batches;
+    vk_world_face_t *faces;
+    uint32_t batch_count;
+    uint32_t face_count;
+    cplane_t frustum[4];
+    unsigned drawframe;
+    unsigned visframe;
+} vk_world_t;
+
+typedef struct {
     float rect[4];
     float color[4];
     float screen[2];
 } vk_rect_push_t;
+
+typedef struct {
+    mat4_t mvp;
+    float color[4];
+} vk_color3d_push_t;
+
+typedef struct {
+    mat4_t mvp;
+    float color[4];
+    float backlerp;
+} vk_alias_push_t;
 
 typedef struct {
     uint32_t graphics_family;
@@ -129,8 +240,11 @@ typedef struct {
     PFN_vkCmdClearAttachments CmdClearAttachments;
     PFN_vkCmdBindPipeline CmdBindPipeline;
     PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets;
+    PFN_vkCmdBindVertexBuffers CmdBindVertexBuffers;
+    PFN_vkCmdBindIndexBuffer CmdBindIndexBuffer;
     PFN_vkCmdPushConstants CmdPushConstants;
     PFN_vkCmdDraw CmdDraw;
+    PFN_vkCmdDrawIndexed CmdDrawIndexed;
     PFN_vkCreateBuffer CreateBuffer;
     PFN_vkDestroyBuffer DestroyBuffer;
     PFN_vkGetBufferMemoryRequirements GetBufferMemoryRequirements;
@@ -143,6 +257,7 @@ typedef struct {
     PFN_vkBindImageMemory BindImageMemory;
     PFN_vkMapMemory MapMemory;
     PFN_vkUnmapMemory UnmapMemory;
+    PFN_vkCmdCopyBuffer CmdCopyBuffer;
     PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage;
     PFN_vkCreateSemaphore CreateSemaphore;
     PFN_vkDestroySemaphore DestroySemaphore;
@@ -168,6 +283,12 @@ typedef struct {
     VkPipelineLayout rect_pipeline_layout;
     VkPipeline rect_pipeline;
     VkPipeline texture_pipeline;
+    VkPipeline color3d_pipeline;
+    VkPipeline world_pipeline;
+    VkPipeline sky_pipeline;
+    VkPipeline sprite_pipeline;
+    VkPipeline alias_pipeline;
+    VkPipeline alias_blend_pipeline;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
     VkFormat swapchain_format;
@@ -195,17 +316,37 @@ typedef struct {
     clipRect_t clip;
     bool clip_set;
     vk_texture_t raw_texture;
+    vk_mesh_t test_triangle;
+    vk_mesh_t skybox;
+    vk_mesh_t sprite_quad;
+    uint32_t sky_images[6];
+    vk_world_t world;
+    vk_model_t models[MAX_MODELS];
+    uint32_t model_count;
     vk_texture_t textures[MAX_RIMAGES];
 } vk_state_t;
 
 static vk_state_t vk;
+static cvar_t *vk_show_test_triangle;
+static cvar_t *vk_drawentities;
+static cvar_t *vk_drawsky;
+static cvar_t *vk_world_textures;
+static cvar_t *vk_world_vis;
+static cvar_t *vk_world_cull;
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static void vk_destroy_texture(image_t *image);
+static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
+                           uint32_t vertex_count, const uint32_t *indices,
+                           uint32_t index_count);
 static bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
                                    uint32_t height, const void *pixels);
 static void vk_destroy_texture_resource(vk_texture_t *texture);
 static bool vk_create_swapchain(int width, int height);
+static bool vk_create_test_triangle(void);
+static void vk_destroy_mesh(vk_mesh_t *mesh);
+static void vk_free_world(void);
+static void vk_load_world(const char *name);
 
 static void vk_upload_image(image_t *image, byte *pic)
 {
@@ -409,6 +550,448 @@ static bool vk_end_immediate(VkCommandBuffer cmd)
 
     vk.FreeCommandBuffers(vk.device, vk.command_pool, 1, &cmd);
     return true;
+}
+
+static void vk_destroy_buffer(vk_buffer_t *buffer)
+{
+    if (!vk.device)
+        return;
+
+    if (buffer->buffer)
+        vk.DestroyBuffer(vk.device, buffer->buffer, NULL);
+    if (buffer->memory)
+        vk.FreeMemory(vk.device, buffer->memory, NULL);
+
+    memset(buffer, 0, sizeof(*buffer));
+}
+
+static bool vk_upload_buffer(vk_buffer_t *dst, const void *data,
+                             VkDeviceSize size, VkBufferUsageFlags usage)
+{
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+    VkBuffer device_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory device_memory = VK_NULL_HANDLE;
+
+    if (!data || !size)
+        return true;
+
+    if (!vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          &staging, &staging_memory))
+        goto fail;
+
+    void *mapped;
+    VkResult result = vk.MapMemory(vk.device, staging_memory, 0, size, 0, &mapped);
+    if (result != VK_SUCCESS) {
+        vk_fail_result("vkMapMemory", result);
+        goto fail;
+    }
+    memcpy(mapped, data, size);
+    vk.UnmapMemory(vk.device, staging_memory);
+
+    if (!vk_create_buffer(size, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                          &device_buffer, &device_memory))
+        goto fail;
+
+    VkCommandBuffer cmd;
+    if (!vk_begin_immediate(&cmd))
+        goto fail;
+
+    VkBufferCopy copy = {
+        .size = size,
+    };
+    vk.CmdCopyBuffer(cmd, staging, device_buffer, 1, &copy);
+
+    if (!vk_end_immediate(cmd))
+        goto fail;
+
+    vk_destroy_buffer(dst);
+    dst->buffer = device_buffer;
+    dst->memory = device_memory;
+    dst->size = size;
+
+    vk.DestroyBuffer(vk.device, staging, NULL);
+    vk.FreeMemory(vk.device, staging_memory, NULL);
+    return true;
+
+fail:
+    if (staging)
+        vk.DestroyBuffer(vk.device, staging, NULL);
+    if (staging_memory)
+        vk.FreeMemory(vk.device, staging_memory, NULL);
+    if (device_buffer)
+        vk.DestroyBuffer(vk.device, device_buffer, NULL);
+    if (device_memory)
+        vk.FreeMemory(vk.device, device_memory, NULL);
+    return false;
+}
+
+static void vk_destroy_mesh(vk_mesh_t *mesh)
+{
+    vk_destroy_buffer(&mesh->vertices);
+    vk_destroy_buffer(&mesh->indices);
+    mesh->index_count = 0;
+}
+
+static void vk_free_world(void)
+{
+    vk_destroy_mesh(&vk.world.mesh);
+    if (vk.world.batches) {
+        Z_Free(vk.world.batches);
+        vk.world.batches = NULL;
+    }
+    if (vk.world.faces) {
+        Z_Free(vk.world.faces);
+        vk.world.faces = NULL;
+    }
+    vk.world.batch_count = 0;
+    vk.world.face_count = 0;
+    vk.world.drawframe = 0;
+    vk.world.visframe = 0;
+
+    if (vk.world.cache) {
+        BSP_Free(vk.world.cache);
+        vk.world.cache = NULL;
+    }
+}
+
+static void vk_free_model(vk_model_t *model)
+{
+    if (model->frames) {
+        Z_Free(model->frames);
+        model->frames = NULL;
+    }
+    if (model->skins) {
+        Z_Free(model->skins);
+        model->skins = NULL;
+    }
+    vk_destroy_mesh(&model->mesh);
+
+    memset(model, 0, sizeof(*model));
+}
+
+static void vk_free_models(bool all)
+{
+    for (uint32_t i = 0; i < vk.model_count; i++) {
+        vk_model_t *model = &vk.models[i];
+
+        if (model->type == VK_MODEL_FREE)
+            continue;
+        if (!all && model->registration_sequence == r_registration_sequence)
+            continue;
+
+        vk_free_model(model);
+    }
+
+    if (all)
+        vk.model_count = 0;
+}
+
+static vk_model_t *vk_find_model(const char *name)
+{
+    for (uint32_t i = 0; i < vk.model_count; i++) {
+        vk_model_t *model = &vk.models[i];
+
+        if (model->type != VK_MODEL_FREE && !FS_pathcmp(model->name, name))
+            return model;
+    }
+
+    return NULL;
+}
+
+static vk_model_t *vk_alloc_model(void)
+{
+    for (uint32_t i = 0; i < vk.model_count; i++) {
+        if (vk.models[i].type == VK_MODEL_FREE)
+            return &vk.models[i];
+    }
+
+    if (vk.model_count == q_countof(vk.models))
+        return NULL;
+
+    return &vk.models[vk.model_count++];
+}
+
+static qhandle_t vk_load_sprite_model(const char *name, const byte *rawdata, size_t length)
+{
+    dsp2header_t header;
+    vk_model_t *model;
+    const dsp2frame_t *src_frame;
+
+    if (length < sizeof(header))
+        return 0;
+
+    header.ident = LittleLong(((const dsp2header_t *)rawdata)->ident);
+    header.version = LittleLong(((const dsp2header_t *)rawdata)->version);
+    header.numframes = LittleLong(((const dsp2header_t *)rawdata)->numframes);
+
+    if (header.ident != SP2_IDENT || header.version != SP2_VERSION)
+        return 0;
+    if (header.numframes < 1 || header.numframes > SP2_MAX_FRAMES)
+        return 0;
+    if (sizeof(dsp2header_t) + sizeof(dsp2frame_t) * header.numframes > length)
+        return 0;
+
+    model = vk_alloc_model();
+    if (!model)
+        return 0;
+
+    Q_strlcpy(model->name, name, sizeof(model->name));
+    model->type = VK_MODEL_SPRITE;
+    model->registration_sequence = r_registration_sequence;
+    model->frame_count = header.numframes;
+    model->frames = Z_Mallocz(sizeof(model->frames[0]) * model->frame_count);
+
+    src_frame = (const dsp2frame_t *)(rawdata + sizeof(dsp2header_t));
+    for (int i = 0; i < model->frame_count; i++) {
+        char image_name[SP2_MAX_FRAMENAME];
+        vk_sprite_frame_t *dst_frame = &model->frames[i];
+
+        dst_frame->width = (int32_t)LittleLong(src_frame[i].width);
+        dst_frame->height = (int32_t)LittleLong(src_frame[i].height);
+        dst_frame->origin_x = (int32_t)LittleLong(src_frame[i].origin_x);
+        dst_frame->origin_y = (int32_t)LittleLong(src_frame[i].origin_y);
+
+        if (!Q_memccpy(image_name, src_frame[i].name, 0, sizeof(image_name)))
+            dst_frame->image = R_NOTEXTURE;
+        else
+            dst_frame->image = IMG_Find(image_name, IT_SPRITE, IF_NONE);
+    }
+
+    return (model - vk.models) + 1;
+}
+
+static bool vk_check_md2_bounds(const dmd2header_t *header, size_t length)
+{
+    if (header->skinwidth < 1 || header->skinheight < 1 ||
+        header->skinwidth > MD2_MAX_SKINWIDTH ||
+        header->skinheight > MD2_MAX_SKINHEIGHT)
+        return false;
+    if (header->framesize < sizeof(dmd2frame_t) ||
+        header->framesize > MD2_MAX_FRAMESIZE)
+        return false;
+    if (header->num_skins > MD2_MAX_SKINS ||
+        header->num_xyz < 3 || header->num_xyz > MD2_MAX_VERTS ||
+        header->num_st < 3 || header->num_tris < 1 ||
+        header->num_tris > MD2_MAX_TRIANGLES ||
+        header->num_frames < 1 || header->num_frames > MD2_MAX_FRAMES)
+        return false;
+    if ((uint64_t)header->ofs_skins + header->num_skins * MD2_MAX_SKINNAME > length ||
+        (uint64_t)header->ofs_st + header->num_st * sizeof(dmd2stvert_t) > length ||
+        (uint64_t)header->ofs_tris + header->num_tris * sizeof(dmd2triangle_t) > length ||
+        (uint64_t)header->ofs_frames + header->num_frames * header->framesize > length ||
+        header->ofs_end > length)
+        return false;
+
+    return true;
+}
+
+static qhandle_t vk_load_md2_model(const char *name, const byte *rawdata, size_t length)
+{
+    dmd2header_t header;
+    const dmd2triangle_t *src_tri;
+    const dmd2stvert_t *src_tc;
+    vk_model_t *model = NULL;
+    uint16_t *vert_indices = NULL;
+    uint16_t *tc_indices = NULL;
+    uint32_t *final_indices = NULL;
+    uint16_t *remap = NULL;
+    vk_vertex_t *vertices = NULL;
+    uint32_t *indices = NULL;
+    uint32_t numindices = 0;
+    uint32_t numverts = 0;
+    qhandle_t handle = 0;
+
+    if (length < sizeof(header))
+        return 0;
+
+    const dmd2header_t *src_header = (const dmd2header_t *)rawdata;
+    header.ident = LittleLong(src_header->ident);
+    header.version = LittleLong(src_header->version);
+    header.skinwidth = LittleLong(src_header->skinwidth);
+    header.skinheight = LittleLong(src_header->skinheight);
+    header.framesize = LittleLong(src_header->framesize);
+    header.num_skins = LittleLong(src_header->num_skins);
+    header.num_xyz = LittleLong(src_header->num_xyz);
+    header.num_st = LittleLong(src_header->num_st);
+    header.num_tris = LittleLong(src_header->num_tris);
+    header.num_glcmds = LittleLong(src_header->num_glcmds);
+    header.num_frames = LittleLong(src_header->num_frames);
+    header.ofs_skins = LittleLong(src_header->ofs_skins);
+    header.ofs_st = LittleLong(src_header->ofs_st);
+    header.ofs_tris = LittleLong(src_header->ofs_tris);
+    header.ofs_frames = LittleLong(src_header->ofs_frames);
+    header.ofs_glcmds = LittleLong(src_header->ofs_glcmds);
+    header.ofs_end = LittleLong(src_header->ofs_end);
+
+    if (header.ident != MD2_IDENT || header.version != MD2_VERSION ||
+        !vk_check_md2_bounds(&header, length))
+        return 0;
+
+    uint32_t max_indices = header.num_tris * 3;
+    vert_indices = Z_Malloc(sizeof(*vert_indices) * max_indices);
+    tc_indices = Z_Malloc(sizeof(*tc_indices) * max_indices);
+    final_indices = Z_Malloc(sizeof(*final_indices) * max_indices);
+    remap = Z_Malloc(sizeof(*remap) * max_indices);
+
+    src_tri = (const dmd2triangle_t *)(rawdata + header.ofs_tris);
+    for (uint32_t i = 0; i < header.num_tris; i++) {
+        uint32_t base = numindices;
+        uint32_t j;
+
+        for (j = 0; j < 3; j++) {
+            uint16_t idx_xyz = LittleShort(src_tri[i].index_xyz[j]);
+            uint16_t idx_st = LittleShort(src_tri[i].index_st[j]);
+
+            if (idx_xyz >= header.num_xyz || idx_st >= header.num_st)
+                break;
+
+            vert_indices[base + j] = idx_xyz;
+            tc_indices[base + j] = idx_st;
+        }
+        if (j == 3)
+            numindices += 3;
+    }
+
+    if (numindices < 3)
+        goto out;
+
+    for (uint32_t i = 0; i < numindices; i++)
+        remap[i] = UINT16_MAX;
+
+    src_tc = (const dmd2stvert_t *)(rawdata + header.ofs_st);
+    for (uint32_t i = 0; i < numindices; i++) {
+        if (remap[i] != UINT16_MAX)
+            continue;
+
+        for (uint32_t j = i + 1; j < numindices; j++) {
+            if (vert_indices[i] == vert_indices[j] &&
+                src_tc[tc_indices[i]].s == src_tc[tc_indices[j]].s &&
+                src_tc[tc_indices[i]].t == src_tc[tc_indices[j]].t) {
+                remap[j] = i;
+                final_indices[j] = numverts;
+            }
+        }
+
+        remap[i] = i;
+        final_indices[i] = numverts++;
+    }
+
+    if (!numverts || (uint64_t)numverts * header.num_frames > UINT32_MAX)
+        goto out;
+
+    vertices = Z_Malloc(sizeof(*vertices) * numverts * header.num_frames);
+    indices = Z_Malloc(sizeof(*indices) * numindices);
+
+    for (uint32_t i = 0; i < numindices; i++)
+        indices[i] = final_indices[i];
+
+    float scale_s = 1.0f / header.skinwidth;
+    float scale_t = 1.0f / header.skinheight;
+    for (uint32_t frame = 0; frame < header.num_frames; frame++) {
+        const dmd2frame_t *src_frame =
+            (const dmd2frame_t *)(rawdata + header.ofs_frames + frame * header.framesize);
+        vec3_t scale, translate;
+
+        LittleVector(src_frame->scale, scale);
+        LittleVector(src_frame->translate, translate);
+
+        for (uint32_t i = 0; i < numindices; i++) {
+            if (remap[i] != i)
+                continue;
+
+            const dmd2trivertx_t *src_vert = &src_frame->verts[vert_indices[i]];
+            vk_vertex_t *dst = &vertices[frame * numverts + final_indices[i]];
+
+            dst->position[0] = src_vert->v[0] * scale[0] + translate[0];
+            dst->position[1] = src_vert->v[1] * scale[1] + translate[1];
+            dst->position[2] = src_vert->v[2] * scale[2] + translate[2];
+            dst->color[0] = 1.0f;
+            dst->color[1] = 1.0f;
+            dst->color[2] = 1.0f;
+            dst->color[3] = 1.0f;
+            dst->uv[0] = (int16_t)LittleShort(src_tc[tc_indices[i]].s) * scale_s;
+            dst->uv[1] = (int16_t)LittleShort(src_tc[tc_indices[i]].t) * scale_t;
+        }
+    }
+
+    model = vk_alloc_model();
+    if (!model)
+        goto out;
+
+    Q_strlcpy(model->name, name, sizeof(model->name));
+    model->type = VK_MODEL_ALIAS;
+    model->registration_sequence = r_registration_sequence;
+    model->frame_count = header.num_frames;
+    model->vertex_count = numverts;
+    model->skin_count = header.num_skins;
+    if (model->skin_count)
+        model->skins = Z_Mallocz(sizeof(model->skins[0]) * model->skin_count);
+
+    const char *src_skin = (const char *)rawdata + header.ofs_skins;
+    for (int i = 0; i < model->skin_count; i++) {
+        char skin_name[MD2_MAX_SKINNAME];
+
+        if (!Q_memccpy(skin_name, src_skin, 0, sizeof(skin_name)))
+            model->skins[i] = R_NOTEXTURE;
+        else
+            model->skins[i] = IMG_Find(skin_name, IT_SKIN, IF_NONE);
+        src_skin += MD2_MAX_SKINNAME;
+    }
+
+    if (!vk_upload_mesh(&model->mesh, vertices, numverts * header.num_frames,
+                        indices, numindices)) {
+        vk_free_model(model);
+        goto out;
+    }
+
+    handle = (model - vk.models) + 1;
+
+out:
+    if (vert_indices)
+        Z_Free(vert_indices);
+    if (tc_indices)
+        Z_Free(tc_indices);
+    if (final_indices)
+        Z_Free(final_indices);
+    if (remap)
+        Z_Free(remap);
+    if (vertices)
+        Z_Free(vertices);
+    if (indices)
+        Z_Free(indices);
+    return handle;
+}
+
+static bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
+                           uint32_t vertex_count, const uint32_t *indices,
+                           uint32_t index_count)
+{
+    vk_mesh_t uploaded = { 0 };
+
+    if (!vertex_count || !index_count)
+        return true;
+
+    if (!vk_upload_buffer(&uploaded.vertices, vertices,
+                          sizeof(*vertices) * vertex_count,
+                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
+        goto fail;
+    if (!vk_upload_buffer(&uploaded.indices, indices,
+                          sizeof(*indices) * index_count,
+                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT))
+        goto fail;
+
+    uploaded.index_count = index_count;
+    vk_destroy_mesh(mesh);
+    *mesh = uploaded;
+    return true;
+
+fail:
+    vk_destroy_mesh(&uploaded);
+    return false;
 }
 
 static void vk_texture_barrier(VkCommandBuffer cmd, VkImage image,
@@ -748,8 +1331,11 @@ static bool vk_load_device(void)
     LOAD(CmdClearAttachments);
     LOAD(CmdBindPipeline);
     LOAD(CmdBindDescriptorSets);
+    LOAD(CmdBindVertexBuffers);
+    LOAD(CmdBindIndexBuffer);
     LOAD(CmdPushConstants);
     LOAD(CmdDraw);
+    LOAD(CmdDrawIndexed);
     LOAD(CreateBuffer);
     LOAD(DestroyBuffer);
     LOAD(GetBufferMemoryRequirements);
@@ -762,6 +1348,7 @@ static bool vk_load_device(void)
     LOAD(BindImageMemory);
     LOAD(MapMemory);
     LOAD(UnmapMemory);
+    LOAD(CmdCopyBuffer);
     LOAD(CmdCopyBufferToImage);
     LOAD(CreateSemaphore);
     LOAD(DestroySemaphore);
@@ -1022,7 +1609,8 @@ static bool vk_create_frame_resources(void)
     VkPushConstantRange push_range = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
-        .size = sizeof(vk_draw_push_t),
+        .size = max(max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
+                    sizeof(vk_alias_push_t)),
     };
     VkPipelineLayoutCreateInfo layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1127,6 +1715,36 @@ static void vk_destroy_swapchain(void)
     if (vk.texture_pipeline) {
         vk.DestroyPipeline(vk.device, vk.texture_pipeline, NULL);
         vk.texture_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.color3d_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.color3d_pipeline, NULL);
+        vk.color3d_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.world_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.world_pipeline, NULL);
+        vk.world_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.sky_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.sky_pipeline, NULL);
+        vk.sky_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.sprite_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.sprite_pipeline, NULL);
+        vk.sprite_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.alias_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_pipeline, NULL);
+        vk.alias_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.alias_blend_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_blend_pipeline, NULL);
+        vk.alias_blend_pipeline = VK_NULL_HANDLE;
     }
 
     if (vk.framebuffers) {
@@ -1617,6 +2235,441 @@ static bool vk_create_texture_pipeline(void)
     return true;
 }
 
+static bool vk_create_color3d_pipeline(void)
+{
+    VkShaderModule vert = vk_create_shader_module(vk_color3d_vert_spv,
+                                                  sizeof(vk_color3d_vert_spv));
+    if (!vert)
+        return false;
+
+    VkShaderModule frag = vk_create_shader_module(vk_color3d_frag_spv,
+                                                  sizeof(vk_color3d_frag_spv));
+    if (!frag) {
+        vk.DestroyShaderModule(vk.device, vert, NULL);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vert,
+            .pName = "main",
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = frag,
+            .pName = "main",
+        },
+    };
+    VkVertexInputBindingDescription binding = {
+        .binding = 0,
+        .stride = sizeof(vk_vertex_t),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+    VkVertexInputAttributeDescription attributes[] = {
+        {
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, position),
+        },
+        {
+            .location = 1,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, color),
+        },
+    };
+    VkPipelineVertexInputStateCreateInfo vertex_input = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding,
+        .vertexAttributeDescriptionCount = q_countof(attributes),
+        .pVertexAttributeDescriptions = attributes,
+    };
+    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = vk.swapchain_extent.width,
+        .height = vk.swapchain_extent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    VkRect2D scissor = {
+        .offset = { 0, 0 },
+        .extent = vk.swapchain_extent,
+    };
+    VkPipelineViewportStateCreateInfo viewport_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = &viewport,
+        .scissorCount = 1,
+        .pScissors = &scissor,
+    };
+    VkPipelineRasterizationStateCreateInfo raster = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth = 1.0f,
+    };
+    VkPipelineMultisampleStateCreateInfo multisample = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    VkPipelineColorBlendAttachmentState color_blend_attachment = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    VkPipelineColorBlendStateCreateInfo color_blend = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &color_blend_attachment,
+    };
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+    };
+
+    VkGraphicsPipelineCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = q_countof(stages),
+        .pStages = stages,
+        .pVertexInputState = &vertex_input,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &raster,
+        .pMultisampleState = &multisample,
+        .pDepthStencilState = &depth_stencil,
+        .pColorBlendState = &color_blend,
+        .layout = vk.rect_pipeline_layout,
+        .renderPass = vk.render_pass,
+        .subpass = 0,
+    };
+
+    VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
+                                                 &create_info, NULL,
+                                                 &vk.color3d_pipeline);
+    vk.DestroyShaderModule(vk.device, frag, NULL);
+    vk.DestroyShaderModule(vk.device, vert, NULL);
+
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateGraphicsPipelines", result);
+
+    return true;
+}
+
+static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
+                                     bool depth_write, bool blend)
+{
+    VkShaderModule vert = vk_create_shader_module(vk_world_vert_spv,
+                                                  sizeof(vk_world_vert_spv));
+    if (!vert)
+        return false;
+
+    VkShaderModule frag = vk_create_shader_module(vk_world_frag_spv,
+                                                  sizeof(vk_world_frag_spv));
+    if (!frag) {
+        vk.DestroyShaderModule(vk.device, vert, NULL);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vert,
+            .pName = "main",
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = frag,
+            .pName = "main",
+        },
+    };
+    VkVertexInputBindingDescription binding = {
+        .binding = 0,
+        .stride = sizeof(vk_vertex_t),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+    VkVertexInputAttributeDescription attributes[] = {
+        {
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, position),
+        },
+        {
+            .location = 1,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, color),
+        },
+        {
+            .location = 2,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, uv),
+        },
+    };
+    VkPipelineVertexInputStateCreateInfo vertex_input = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding,
+        .vertexAttributeDescriptionCount = q_countof(attributes),
+        .pVertexAttributeDescriptions = attributes,
+    };
+    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = vk.swapchain_extent.width,
+        .height = vk.swapchain_extent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    VkRect2D scissor = {
+        .offset = { 0, 0 },
+        .extent = vk.swapchain_extent,
+    };
+    VkPipelineViewportStateCreateInfo viewport_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = &viewport,
+        .scissorCount = 1,
+        .pScissors = &scissor,
+    };
+    VkPipelineRasterizationStateCreateInfo raster = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth = 1.0f,
+    };
+    VkPipelineMultisampleStateCreateInfo multisample = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    VkPipelineColorBlendAttachmentState color_blend_attachment = {
+        .blendEnable = blend,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    VkPipelineColorBlendStateCreateInfo color_blend = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &color_blend_attachment,
+    };
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = depth_test,
+        .depthWriteEnable = depth_write,
+        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+    };
+
+    VkGraphicsPipelineCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = q_countof(stages),
+        .pStages = stages,
+        .pVertexInputState = &vertex_input,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &raster,
+        .pMultisampleState = &multisample,
+        .pDepthStencilState = &depth_stencil,
+        .pColorBlendState = &color_blend,
+        .layout = vk.rect_pipeline_layout,
+        .renderPass = vk.render_pass,
+        .subpass = 0,
+    };
+
+    VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
+                                                 &create_info, NULL,
+                                                 pipeline);
+    vk.DestroyShaderModule(vk.device, frag, NULL);
+    vk.DestroyShaderModule(vk.device, vert, NULL);
+
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateGraphicsPipelines", result);
+
+    return true;
+}
+
+static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write, bool blend)
+{
+    VkShaderModule vert = vk_create_shader_module(vk_alias_vert_spv,
+                                                  sizeof(vk_alias_vert_spv));
+    if (!vert)
+        return false;
+
+    VkShaderModule frag = vk_create_shader_module(vk_world_frag_spv,
+                                                  sizeof(vk_world_frag_spv));
+    if (!frag) {
+        vk.DestroyShaderModule(vk.device, vert, NULL);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vert,
+            .pName = "main",
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = frag,
+            .pName = "main",
+        },
+    };
+    VkVertexInputBindingDescription bindings[] = {
+        {
+            .binding = 0,
+            .stride = sizeof(vk_vertex_t),
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        },
+        {
+            .binding = 1,
+            .stride = sizeof(vk_vertex_t),
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        },
+    };
+    VkVertexInputAttributeDescription attributes[] = {
+        {
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, position),
+        },
+        {
+            .location = 1,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, color),
+        },
+        {
+            .location = 2,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, uv),
+        },
+        {
+            .location = 3,
+            .binding = 1,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, position),
+        },
+    };
+    VkPipelineVertexInputStateCreateInfo vertex_input = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = q_countof(bindings),
+        .pVertexBindingDescriptions = bindings,
+        .vertexAttributeDescriptionCount = q_countof(attributes),
+        .pVertexAttributeDescriptions = attributes,
+    };
+    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = vk.swapchain_extent.width,
+        .height = vk.swapchain_extent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    VkRect2D scissor = {
+        .offset = { 0, 0 },
+        .extent = vk.swapchain_extent,
+    };
+    VkPipelineViewportStateCreateInfo viewport_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = &viewport,
+        .scissorCount = 1,
+        .pScissors = &scissor,
+    };
+    VkPipelineRasterizationStateCreateInfo raster = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth = 1.0f,
+    };
+    VkPipelineMultisampleStateCreateInfo multisample = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    VkPipelineColorBlendAttachmentState color_blend_attachment = {
+        .blendEnable = blend,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    VkPipelineColorBlendStateCreateInfo color_blend = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &color_blend_attachment,
+    };
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = depth_write,
+        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+    };
+    VkGraphicsPipelineCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = q_countof(stages),
+        .pStages = stages,
+        .pVertexInputState = &vertex_input,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &raster,
+        .pMultisampleState = &multisample,
+        .pDepthStencilState = &depth_stencil,
+        .pColorBlendState = &color_blend,
+        .layout = vk.rect_pipeline_layout,
+        .renderPass = vk.render_pass,
+        .subpass = 0,
+    };
+
+    VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
+                                                 &create_info, NULL,
+                                                 pipeline);
+    vk.DestroyShaderModule(vk.device, frag, NULL);
+    vk.DestroyShaderModule(vk.device, vert, NULL);
+
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateGraphicsPipelines", result);
+
+    return true;
+}
+
 static bool vk_create_swapchain(int width, int height)
 {
     VkSurfaceCapabilitiesKHR caps;
@@ -1744,6 +2797,12 @@ static bool vk_create_swapchain(int width, int height)
     if (!vk_create_render_pass() ||
         !vk_create_rect_pipeline() ||
         !vk_create_texture_pipeline() ||
+        !vk_create_color3d_pipeline() ||
+        !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE) ||
+        !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE) ||
+        !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE) ||
+        !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE) ||
         !vk_create_depth_resources() ||
         !vk_create_framebuffers())
         return false;
@@ -1975,6 +3034,964 @@ static void vk_draw_texture_rect(int x, int y, int w, int h,
                              &vk.textures[index]);
 }
 
+static void vk_projection_matrix(mat4_t m, float fov_x, float fov_y)
+{
+    const float znear = 4.0f;
+    const float zfar = 4096.0f;
+    float xmax = tanf(fov_x * (M_PIf / 360.0f));
+    float ymax = tanf(fov_y * (M_PIf / 360.0f));
+
+    memset(m, 0, sizeof(mat4_t));
+    m[0] = xmax ? 1.0f / xmax : 1.0f;
+    m[5] = ymax ? -1.0f / ymax : -1.0f;
+    m[10] = zfar / (znear - zfar);
+    m[11] = -1.0f;
+    m[14] = (znear * zfar) / (znear - zfar);
+}
+
+static void vk_view_matrix(mat4_t matrix, const refdef_t *fd)
+{
+    vec3_t axis[3];
+
+    AnglesToAxis(fd->viewangles, axis);
+
+    memset(matrix, 0, sizeof(mat4_t));
+    matrix[0] = -axis[1][0];
+    matrix[4] = -axis[1][1];
+    matrix[8] = -axis[1][2];
+    matrix[12] = DotProduct(axis[1], fd->vieworg);
+
+    matrix[1] = axis[2][0];
+    matrix[5] = axis[2][1];
+    matrix[9] = axis[2][2];
+    matrix[13] = -DotProduct(axis[2], fd->vieworg);
+
+    matrix[2] = -axis[0][0];
+    matrix[6] = -axis[0][1];
+    matrix[10] = -axis[0][2];
+    matrix[14] = DotProduct(axis[0], fd->vieworg);
+
+    matrix[15] = 1.0f;
+}
+
+static void vk_matrix_multiply(mat4_t out, const mat4_t a, const mat4_t b)
+{
+    mat4_t tmp;
+
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            tmp[i + j * 4] =
+                a[i + 0 * 4] * b[0 + j * 4] +
+                a[i + 1 * 4] * b[1 + j * 4] +
+                a[i + 2 * 4] * b[2 + j * 4] +
+                a[i + 3 * 4] * b[3 + j * 4];
+        }
+    }
+
+    memcpy(out, tmp, sizeof(tmp));
+}
+
+static void vk_world_mvp(mat4_t out, const refdef_t *fd)
+{
+    mat4_t proj, view;
+
+    vk_projection_matrix(proj, fd->fov_x, fd->fov_y);
+    vk_view_matrix(view, fd);
+    vk_matrix_multiply(out, proj, view);
+}
+
+static void vk_entity_axis(const entity_t *ent, vec3_t axis[3])
+{
+    if (VectorEmpty(ent->angles)) {
+        VectorSet(axis[0], 1.0f, 0.0f, 0.0f);
+        VectorSet(axis[1], 0.0f, 1.0f, 0.0f);
+        VectorSet(axis[2], 0.0f, 0.0f, 1.0f);
+    } else {
+        AnglesToAxis(ent->angles, axis);
+    }
+
+    if (ent->scale && ent->scale != 1.0f) {
+        VectorScale(axis[0], ent->scale, axis[0]);
+        VectorScale(axis[1], ent->scale, axis[1]);
+        VectorScale(axis[2], ent->scale, axis[2]);
+    }
+}
+
+static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
+                          const entity_t *ent, const vec3_t axis[3])
+{
+    mat4_t proj, view, model, view_model;
+
+    memset(model, 0, sizeof(model));
+    model[0] = axis[0][0];
+    model[1] = axis[0][1];
+    model[2] = axis[0][2];
+    model[4] = axis[1][0];
+    model[5] = axis[1][1];
+    model[6] = axis[1][2];
+    model[8] = axis[2][0];
+    model[9] = axis[2][1];
+    model[10] = axis[2][2];
+    model[12] = ent->origin[0];
+    model[13] = ent->origin[1];
+    model[14] = ent->origin[2];
+    model[15] = 1.0f;
+
+    vk_projection_matrix(proj, fd->fov_x, fd->fov_y);
+    vk_view_matrix(view, fd);
+    vk_matrix_multiply(view_model, view, model);
+    vk_matrix_multiply(out, proj, view_model);
+}
+
+static void vk_model_mvp(mat4_t out, const refdef_t *fd, const mat4_t model)
+{
+    mat4_t proj, view, view_model;
+
+    vk_projection_matrix(proj, fd->fov_x, fd->fov_y);
+    vk_view_matrix(view, fd);
+    vk_matrix_multiply(view_model, view, model);
+    vk_matrix_multiply(out, proj, view_model);
+}
+
+static bool vk_create_test_triangle(void)
+{
+    static const vk_vertex_t vertices[] = {
+        { { -24.0f, -16.0f, -96.0f }, { 1.0f, 0.15f, 0.10f, 1.0f }, { 0.0f, 0.0f } },
+        { {  24.0f, -16.0f, -96.0f }, { 0.1f, 0.85f, 0.25f, 1.0f }, { 1.0f, 0.0f } },
+        { {   0.0f,  24.0f, -96.0f }, { 0.1f, 0.35f, 1.00f, 1.0f }, { 0.5f, 1.0f } },
+    };
+    static const uint32_t indices[] = { 0, 1, 2 };
+
+    if (!vk_upload_mesh(&vk.test_triangle, vertices, q_countof(vertices),
+                        indices, q_countof(indices)))
+        return false;
+
+    return true;
+}
+
+static bool vk_create_skybox_mesh(void)
+{
+    const float s = 2048.0f;
+    const float white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    vk_vertex_t vertices[24];
+    uint32_t indices[36];
+    static const float positions[6][4][3] = {
+        { { s, -s, -s }, { s, -s,  s }, { s,  s,  s }, { s,  s, -s } },
+        { {-s,  s, -s }, {-s,  s,  s }, {-s, -s,  s }, {-s, -s, -s } },
+        { {-s, -s, -s }, {-s, -s,  s }, { s, -s,  s }, { s, -s, -s } },
+        { { s,  s, -s }, { s,  s,  s }, {-s,  s,  s }, {-s,  s, -s } },
+        { {-s, -s,  s }, {-s,  s,  s }, { s,  s,  s }, { s, -s,  s } },
+        { {-s,  s, -s }, {-s, -s, -s }, { s, -s, -s }, { s,  s, -s } },
+    };
+    static const float uvs[4][2] = {
+        { 0.0f, 1.0f },
+        { 0.0f, 0.0f },
+        { 1.0f, 0.0f },
+        { 1.0f, 1.0f },
+    };
+
+    for (uint32_t face = 0; face < 6; face++) {
+        for (uint32_t vert = 0; vert < 4; vert++) {
+            vk_vertex_t *dst = &vertices[face * 4 + vert];
+
+            memcpy(dst->position, positions[face][vert], sizeof(dst->position));
+            memcpy(dst->color, white, sizeof(dst->color));
+            memcpy(dst->uv, uvs[vert], sizeof(dst->uv));
+        }
+
+        indices[face * 6 + 0] = face * 4 + 0;
+        indices[face * 6 + 1] = face * 4 + 1;
+        indices[face * 6 + 2] = face * 4 + 2;
+        indices[face * 6 + 3] = face * 4 + 0;
+        indices[face * 6 + 4] = face * 4 + 2;
+        indices[face * 6 + 5] = face * 4 + 3;
+    }
+
+    return vk_upload_mesh(&vk.skybox, vertices, q_countof(vertices),
+                          indices, q_countof(indices));
+}
+
+static bool vk_create_sprite_quad(void)
+{
+    static const vk_vertex_t vertices[] = {
+        { { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
+        { { 0.0f, 1.0f, 0.0f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } },
+        { { 1.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
+        { { 1.0f, 1.0f, 0.0f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
+    };
+    static const uint32_t indices[] = { 0, 1, 2, 2, 1, 3 };
+
+    return vk_upload_mesh(&vk.sprite_quad, vertices, q_countof(vertices),
+                          indices, q_countof(indices));
+}
+
+static void vk_draw_mesh(const vk_mesh_t *mesh, const mat4_t mvp, const float color[4])
+{
+    if (!vk.render_pass_active || !vk.color3d_pipeline ||
+        !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count)
+        return;
+
+    vk_color3d_push_t push;
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    memcpy(push.color, color, sizeof(push.color));
+
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.color3d_pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, mesh->index_count, 1, 0, 0, 0);
+}
+
+static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only)
+{
+    const vk_mesh_t *mesh = &vk.world.mesh;
+    bool use_marked = marked_only ||
+        (vk_world_vis && vk_world_vis->integer && vk.world.face_count);
+
+    if (!vk.render_pass_active || !vk.world_pipeline ||
+        !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count ||
+        !vk.world.batch_count)
+        return;
+
+    vk_color3d_push_t push;
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    push.color[0] = 1.0f;
+    push.color[1] = 1.0f;
+    push.color[2] = 1.0f;
+    push.color[3] = 1.0f;
+
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.world_pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+
+    for (uint32_t i = 0; i < vk.world.batch_count; i++) {
+        const vk_world_batch_t *batch = &vk.world.batches[i];
+        if (batch->texture_index >= MAX_RIMAGES)
+            continue;
+
+        const vk_texture_t *texture = &vk.textures[batch->texture_index];
+        if (!texture->descriptor_set)
+            continue;
+
+        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 vk.rect_pipeline_layout, 0, 1,
+                                 &texture->descriptor_set, 0, NULL);
+
+        if (!use_marked) {
+            vk.CmdDrawIndexed(cmd, batch->index_count, 1, batch->first_index, 0, 0);
+            continue;
+        }
+
+        for (uint32_t j = 0; j < batch->face_count; j++) {
+            const vk_world_face_t *face = &vk.world.faces[batch->first_face + j];
+
+            if (face->face->drawframe != vk.world.drawframe)
+                continue;
+
+            vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
+        }
+    }
+}
+
+static void vk_sky_mvp(mat4_t out, const refdef_t *fd)
+{
+    refdef_t sky_fd = *fd;
+    mat4_t proj, view;
+
+    VectorClear(sky_fd.vieworg);
+    vk_projection_matrix(proj, sky_fd.fov_x, sky_fd.fov_y);
+    vk_view_matrix(view, &sky_fd);
+    vk_matrix_multiply(out, proj, view);
+}
+
+static void vk_draw_skybox(const refdef_t *fd)
+{
+    if (!vk_drawsky || !vk_drawsky->integer)
+        return;
+    if (!vk.render_pass_active || !vk.sky_pipeline ||
+        !vk.skybox.vertices.buffer || !vk.skybox.indices.buffer)
+        return;
+
+    mat4_t mvp;
+    vk_color3d_push_t push;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    vk_sky_mvp(mvp, fd);
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    push.color[0] = 1.0f;
+    push.color[1] = 1.0f;
+    push.color[2] = 1.0f;
+    push.color[3] = 1.0f;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sky_pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.skybox.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.skybox.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+
+    for (uint32_t face = 0; face < 6; face++) {
+        uint32_t texture_index = vk.sky_images[face];
+
+        if (!texture_index || texture_index >= MAX_RIMAGES)
+            continue;
+
+        const vk_texture_t *texture = &vk.textures[texture_index];
+        if (!texture->descriptor_set)
+            continue;
+
+        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 vk.rect_pipeline_layout, 0, 1,
+                                 &texture->descriptor_set, 0, NULL);
+        vk.CmdDrawIndexed(cmd, 6, 1, face * 6, 0, 0);
+    }
+}
+
+static void vk_setup_world_frustum(const refdef_t *fd)
+{
+    vec3_t axis[3], forward, left, up;
+    vec_t angle, sf, cf;
+
+    AnglesToAxis(fd->viewangles, axis);
+
+    angle = DEG2RAD(fd->fov_x / 2);
+    sf = sinf(angle);
+    cf = cosf(angle);
+
+    VectorScale(axis[0], sf, forward);
+    VectorScale(axis[1], cf, left);
+    VectorAdd(forward, left, vk.world.frustum[0].normal);
+    VectorSubtract(forward, left, vk.world.frustum[1].normal);
+
+    angle = DEG2RAD(fd->fov_y / 2);
+    sf = sinf(angle);
+    cf = cosf(angle);
+
+    VectorScale(axis[0], sf, forward);
+    VectorScale(axis[2], cf, up);
+    VectorAdd(forward, up, vk.world.frustum[2].normal);
+    VectorSubtract(forward, up, vk.world.frustum[3].normal);
+
+    for (int i = 0; i < 4; i++) {
+        cplane_t *plane = &vk.world.frustum[i];
+        plane->dist = DotProduct(fd->vieworg, plane->normal);
+        plane->type = PLANE_NON_AXIAL;
+        SetPlaneSignbits(plane);
+    }
+}
+
+#define VK_NODE_CLIPPED     0
+#define VK_NODE_UNCLIPPED   MASK(4)
+
+static bool vk_clip_world_node(const mnode_t *node, int *clipflags)
+{
+    int flags = *clipflags;
+
+    if (flags == VK_NODE_UNCLIPPED)
+        return true;
+
+    for (int i = 0, mask = 1; i < 4; i++, mask <<= 1) {
+        box_plane_t bits;
+
+        if (flags & mask)
+            continue;
+
+        bits = BoxOnPlaneSide(node->mins, node->maxs, &vk.world.frustum[i]);
+        if (bits == BOX_BEHIND)
+            return false;
+        if (bits == BOX_INFRONT)
+            flags |= mask;
+    }
+
+    *clipflags = flags;
+    return true;
+}
+
+static void vk_mark_world_leaf(const mleaf_t *leaf, const refdef_t *fd)
+{
+    if (leaf->contents[0] == CONTENTS_SOLID)
+        return;
+
+    if (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area))
+        return;
+
+    for (int i = 0; i < leaf->numleaffaces; i++)
+        leaf->firstleafface[i]->drawframe = vk.world.drawframe;
+}
+
+static void vk_mark_world_visible_nodes(const refdef_t *fd)
+{
+    bsp_t *bsp = vk.world.cache;
+    const mleaf_t *leaf;
+    visrow_t vis1, vis2;
+    int cluster1, cluster2;
+    vec3_t tmp;
+
+    if (!bsp)
+        return;
+
+    vk.world.visframe++;
+
+    leaf = BSP_PointLeaf(bsp->nodes, fd->vieworg);
+    cluster1 = cluster2 = leaf->cluster;
+    VectorCopy(fd->vieworg, tmp);
+    if (!leaf->contents[0])
+        tmp[2] -= 16;
+    else
+        tmp[2] += 16;
+    leaf = BSP_PointLeaf(bsp->nodes, tmp);
+    if (!(leaf->contents[0] & CONTENTS_SOLID))
+        cluster2 = leaf->cluster;
+
+    if (!bsp->vis || cluster1 == -1) {
+        for (int i = 0; i < bsp->numleafs; i++)
+            bsp->leafs[i].visframe = vk.world.visframe;
+        for (int i = 0; i < bsp->numnodes; i++)
+            bsp->nodes[i].visframe = vk.world.visframe;
+        return;
+    }
+
+    BSP_ClusterVis(bsp, &vis1, cluster1, DVIS_PVS);
+    if (cluster2 != -1 && cluster1 != cluster2) {
+        BSP_ClusterVis(bsp, &vis2, cluster2, DVIS_PVS);
+        int longs = VIS_FAST_LONGS(bsp->visrowsize);
+        for (int i = 0; i < longs; i++)
+            vis1.l[i] |= vis2.l[i];
+    }
+
+    for (int i = 0; i < bsp->numleafs; i++) {
+        leaf = &bsp->leafs[i];
+        int cluster = leaf->cluster;
+
+        if (cluster == -1)
+            continue;
+        if (!Q_IsBitSet(vis1.b, cluster))
+            continue;
+
+        for (mnode_t *node = (mnode_t *)leaf;
+             node && node->visframe != vk.world.visframe;
+             node = node->parent) {
+            node->visframe = vk.world.visframe;
+        }
+    }
+}
+
+static void vk_mark_world_node_faces(const mnode_t *node, const refdef_t *fd, int clipflags)
+{
+    while (node->visframe == vk.world.visframe) {
+        int side;
+        vec_t dot;
+
+        if (!vk_clip_world_node(node, &clipflags))
+            break;
+
+        if (!node->plane) {
+            vk_mark_world_leaf((const mleaf_t *)node, fd);
+            break;
+        }
+
+        dot = PlaneDiffFast(fd->vieworg, node->plane);
+        side = dot < 0;
+
+        vk_mark_world_node_faces(node->children[side], fd, clipflags);
+
+        node = node->children[side ^ 1];
+    }
+}
+
+static void vk_mark_world_faces(const refdef_t *fd)
+{
+    const bsp_t *bsp = vk.world.cache;
+    int clipflags;
+
+    if (!bsp)
+        return;
+
+    vk.world.drawframe++;
+    vk_mark_world_visible_nodes(fd);
+    vk_setup_world_frustum(fd);
+
+    clipflags = (vk_world_cull && vk_world_cull->integer) ?
+        VK_NODE_CLIPPED : VK_NODE_UNCLIPPED;
+    vk_mark_world_node_faces(bsp->nodes, fd, clipflags);
+}
+
+#define VK_BACKFACE_EPSILON 0.01f
+
+static void vk_mark_bmodel_faces(mmodel_t *model, const entity_t *ent,
+                                 const refdef_t *fd, const vec3_t axis[3])
+{
+    vec3_t transformed;
+
+    VectorSubtract(fd->vieworg, ent->origin, transformed);
+    if (!VectorEmpty(ent->angles) || (ent->scale && ent->scale != 1.0f)) {
+        vec3_t temp;
+        VectorCopy(transformed, temp);
+        VectorRotate(temp, axis, transformed);
+    }
+
+    for (int i = 0; i < model->numfaces; i++) {
+        mface_t *face = model->firstface + i;
+        vec_t dot;
+
+        if (face->drawflags & (SURF_SKY | SURF_NODRAW | SURF_TRANS_MASK))
+            continue;
+        if (!face->texinfo->image || !face->texinfo->image->texnum ||
+            face->texinfo->image->texnum >= MAX_RIMAGES)
+            continue;
+
+        dot = PlaneDiffFast(transformed, face->plane);
+        if ((face->drawflags & DSURF_PLANEBACK) ?
+            (dot > VK_BACKFACE_EPSILON) : (dot < -VK_BACKFACE_EPSILON)) {
+            continue;
+        }
+
+        face->drawframe = vk.world.drawframe;
+    }
+}
+
+static void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd)
+{
+    bsp_t *bsp = vk.world.cache;
+    int index = ~ent->model;
+    mmodel_t *model;
+    vec3_t axis[3];
+    mat4_t mvp;
+
+    if (!bsp || index < 1 || index >= bsp->nummodels)
+        return;
+    if (!vk_world_textures || !vk_world_textures->integer)
+        return;
+    if (ent->flags & RF_TRANSLUCENT)
+        return;
+
+    model = &bsp->models[index];
+    if (!model->numfaces)
+        return;
+
+    vk_entity_axis(ent, axis);
+    vk_entity_mvp(mvp, fd, ent, axis);
+
+    vk.world.drawframe++;
+    vk_mark_bmodel_faces(model, ent, fd, axis);
+    vk_draw_world_mesh(mvp, true);
+}
+
+static vk_model_t *vk_model_for_handle(qhandle_t handle)
+{
+    if (handle <= 0 || handle > vk.model_count)
+        return NULL;
+
+    vk_model_t *model = &vk.models[handle - 1];
+    if (model->type == VK_MODEL_FREE)
+        return NULL;
+
+    return model;
+}
+
+static const image_t *vk_skin_for_model(const vk_model_t *model, const entity_t *ent)
+{
+    if (ent->skin)
+        return IMG_ForHandle(ent->skin);
+    if (!model->skin_count)
+        return R_NOTEXTURE;
+    if (ent->skinnum < 0 || ent->skinnum >= model->skin_count)
+        return model->skins[0];
+    if (model->skins[ent->skinnum] == R_NOTEXTURE)
+        return model->skins[0];
+    return model->skins[ent->skinnum];
+}
+
+static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
+{
+    vk_model_t *model = vk_model_for_handle(ent->model);
+
+    bool translucent = ent->flags & RF_TRANSLUCENT;
+    VkPipeline pipeline = translucent ? vk.alias_blend_pipeline : vk.alias_pipeline;
+
+    if (!model || model->type != VK_MODEL_ALIAS || !pipeline ||
+        !model->mesh.vertices.buffer || !model->mesh.indices.buffer ||
+        !model->vertex_count)
+        return;
+
+    const image_t *skin = vk_skin_for_model(model, ent);
+    if (!skin || !skin->texnum || skin->texnum >= MAX_RIMAGES)
+        return;
+
+    const vk_texture_t *texture = &vk.textures[skin->texnum];
+    if (!texture->descriptor_set)
+        return;
+
+    vec3_t axis[3];
+    mat4_t mvp;
+    vk_alias_push_t push;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    uint32_t frame = ent->frame % model->frame_count;
+    uint32_t oldframe = ent->oldframe % model->frame_count;
+    VkDeviceSize offsets[] = {
+        (VkDeviceSize)frame * model->vertex_count * sizeof(vk_vertex_t),
+        (VkDeviceSize)oldframe * model->vertex_count * sizeof(vk_vertex_t),
+    };
+    VkBuffer buffers[] = {
+        model->mesh.vertices.buffer,
+        model->mesh.vertices.buffer,
+    };
+
+    vk_entity_axis(ent, axis);
+    vk_entity_mvp(mvp, fd, ent, axis);
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    push.color[0] = 1.0f;
+    push.color[1] = 1.0f;
+    push.color[2] = 1.0f;
+    push.color[3] = translucent ? ent->alpha : 1.0f;
+    push.backlerp = Q_clip(ent->backlerp, 0.0f, 1.0f);
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, q_countof(buffers), buffers, offsets);
+    vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.rect_pipeline_layout, 0, 1,
+                             &texture->descriptor_set, 0, NULL);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0, 0, 0);
+}
+
+static void vk_draw_sprite(const entity_t *ent, const refdef_t *fd)
+{
+    vk_model_t *model = vk_model_for_handle(ent->model);
+
+    if (!model || model->type != VK_MODEL_SPRITE || !vk.sprite_pipeline ||
+        !vk.sprite_quad.vertices.buffer || !vk.sprite_quad.indices.buffer)
+        return;
+
+    const vk_sprite_frame_t *frame = &model->frames[ent->frame % model->frame_count];
+    if (!frame->image || !frame->image->texnum || frame->image->texnum >= MAX_RIMAGES)
+        return;
+
+    const vk_texture_t *texture = &vk.textures[frame->image->texnum];
+    if (!texture->descriptor_set)
+        return;
+
+    vec3_t viewaxis[3], left, right, down, up, xaxis, yaxis, origin;
+    float scale = ent->scale ? ent->scale : 1.0f;
+    mat4_t model_matrix, mvp;
+    vk_color3d_push_t push;
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    VkDeviceSize offset = 0;
+
+    AnglesToAxis(fd->viewangles, viewaxis);
+    VectorScale(viewaxis[1], frame->origin_x * scale, left);
+    VectorScale(viewaxis[1], (frame->origin_x - frame->width) * scale, right);
+    VectorScale(viewaxis[2], -frame->origin_y * scale, down);
+    VectorScale(viewaxis[2], (frame->height - frame->origin_y) * scale, up);
+    VectorSubtract(right, left, xaxis);
+    VectorSubtract(up, down, yaxis);
+    VectorAdd3(ent->origin, left, down, origin);
+
+    memset(model_matrix, 0, sizeof(model_matrix));
+    model_matrix[0] = xaxis[0];
+    model_matrix[1] = xaxis[1];
+    model_matrix[2] = xaxis[2];
+    model_matrix[4] = yaxis[0];
+    model_matrix[5] = yaxis[1];
+    model_matrix[6] = yaxis[2];
+    model_matrix[10] = 1.0f;
+    model_matrix[12] = origin[0];
+    model_matrix[13] = origin[1];
+    model_matrix[14] = origin[2];
+    model_matrix[15] = 1.0f;
+
+    vk_model_mvp(mvp, fd, model_matrix);
+    memcpy(push.mvp, mvp, sizeof(push.mvp));
+    push.color[0] = 1.0f;
+    push.color[1] = 1.0f;
+    push.color[2] = 1.0f;
+    push.color[3] = (ent->flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f;
+
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.sprite_pipeline);
+    vk.CmdBindVertexBuffers(cmd, 0, 1, &vk.sprite_quad.vertices.buffer, &offset);
+    vk.CmdBindIndexBuffer(cmd, vk.sprite_quad.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.rect_pipeline_layout, 0, 1,
+                             &texture->descriptor_set, 0, NULL);
+    vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(push), &push);
+    vk.CmdDrawIndexed(cmd, vk.sprite_quad.index_count, 1, 0, 0, 0);
+}
+
+static void vk_draw_entities(const refdef_t *fd)
+{
+    if (!vk_drawentities || !vk_drawentities->integer)
+        return;
+
+    for (int i = 0; i < fd->num_entities; i++) {
+        const entity_t *ent = &fd->entities[i];
+
+        if (ent->flags & RF_BEAM)
+            continue;
+        if (ent->model & BIT(31))
+            vk_draw_bmodel(ent, fd);
+        else {
+            vk_model_t *model = vk_model_for_handle(ent->model);
+
+            if (!model)
+                continue;
+            if (model->type == VK_MODEL_SPRITE)
+                vk_draw_sprite(ent, fd);
+            else if (model->type == VK_MODEL_ALIAS)
+                vk_draw_alias_model(ent, fd);
+        }
+    }
+}
+
+static void vk_surface_color(const mface_t *face, float color[4])
+{
+    uint32_t hash = FS_HashPath(face->texinfo->name, UINT32_MAX);
+    float shade = 0.35f + fabsf(face->plane->normal[2]) * 0.35f;
+
+    color[0] = (0.35f + ((hash >> 0) & 255) / 255.0f * 0.55f) * shade;
+    color[1] = (0.35f + ((hash >> 8) & 255) / 255.0f * 0.55f) * shade;
+    color[2] = (0.35f + ((hash >> 16) & 255) / 255.0f * 0.55f) * shade;
+    color[3] = 1.0f;
+}
+
+static bool vk_face_is_drawable(mface_t *face)
+{
+    face->drawflags |= face->texinfo->c.flags & ~DSURF_PLANEBACK;
+
+    if (face->numsurfedges < 3)
+        return false;
+    if (face->drawflags & SURF_SKY)
+        return false;
+    if (face->drawflags & SURF_NODRAW)
+        return false;
+
+    return true;
+}
+
+static bool vk_build_world_mesh(bsp_t *bsp)
+{
+    uint64_t vertex_count = 0;
+    uint64_t index_count = 0;
+    uint32_t face_count = 0;
+
+    for (int i = 0; i < bsp->numfaces; i++) {
+        mface_t *face = &bsp->faces[i];
+        if (!vk_face_is_drawable(face))
+            continue;
+        if (!face->texinfo->image || !face->texinfo->image->texnum ||
+            face->texinfo->image->texnum >= MAX_RIMAGES)
+            continue;
+
+        vertex_count += face->numsurfedges;
+        index_count += (face->numsurfedges - 2) * 3;
+        face_count++;
+    }
+
+    if (!vertex_count || !index_count)
+        return true;
+    if (vertex_count > UINT32_MAX || index_count > UINT32_MAX) {
+        Com_SetLastError("Vulkan world mesh is too large");
+        return false;
+    }
+
+    vk_vertex_t *vertices = Z_Malloc(sizeof(*vertices) * vertex_count);
+    uint32_t *indices = Z_Malloc(sizeof(*indices) * index_count);
+    vk_world_build_face_t *build_faces = Z_Malloc(sizeof(*build_faces) * face_count);
+    vk_world_face_t *draw_faces = Z_Malloc(sizeof(*draw_faces) * face_count);
+    uint32_t *texture_index_counts = Z_Mallocz(sizeof(*texture_index_counts) * MAX_RIMAGES);
+    uint32_t v = 0;
+    uint32_t face_index = 0;
+
+    for (int i = 0; i < bsp->numfaces; i++) {
+        mface_t *face = &bsp->faces[i];
+        if (!vk_face_is_drawable(face))
+            continue;
+        image_t *image = face->texinfo->image;
+        if (!image || !image->texnum || image->texnum >= MAX_RIMAGES)
+            continue;
+
+        uint32_t first = v;
+        float color[4];
+        vk_surface_color(face, color);
+        float scale_s = image->width ? 1.0f / image->width : 1.0f;
+        float scale_t = image->height ? 1.0f / image->height : 1.0f;
+
+        for (int j = 0; j < face->numsurfedges; j++) {
+            const msurfedge_t *surfedge = face->firstsurfedge + j;
+            const medge_t *edge = bsp->edges + surfedge->edge;
+            const mvertex_t *src = bsp->vertices + edge->v[surfedge->vert];
+
+            VectorCopy(src->point, vertices[v].position);
+            memcpy(vertices[v].color, color, sizeof(vertices[v].color));
+            vertices[v].uv[0] = (DotProduct(src->point, face->texinfo->axis[0]) +
+                                 face->texinfo->offset[0]) * scale_s;
+            vertices[v].uv[1] = (DotProduct(src->point, face->texinfo->axis[1]) +
+                                 face->texinfo->offset[1]) * scale_t;
+            v++;
+        }
+
+        build_faces[face_index++] = (vk_world_build_face_t) {
+            .first_vertex = first,
+            .edge_count = face->numsurfedges,
+            .texture_index = image->texnum,
+            .face = face,
+        };
+        texture_index_counts[image->texnum] += (face->numsurfedges - 2) * 3;
+    }
+
+    uint32_t batch_count = 0;
+    for (uint32_t i = 0; i < MAX_RIMAGES; i++) {
+        if (texture_index_counts[i])
+            batch_count++;
+    }
+
+    vk_world_batch_t *batches = Z_Malloc(sizeof(*batches) * batch_count);
+    uint32_t idx = 0;
+    uint32_t batch = 0;
+    uint32_t draw_face_count = 0;
+
+    for (uint32_t texture_index = 0; texture_index < MAX_RIMAGES; texture_index++) {
+        uint32_t texture_index_count = texture_index_counts[texture_index];
+        if (!texture_index_count)
+            continue;
+
+        vk_world_batch_t *world_batch = &batches[batch++];
+        *world_batch = (vk_world_batch_t) {
+            .first_index = idx,
+            .index_count = texture_index_count,
+            .texture_index = texture_index,
+            .first_face = draw_face_count,
+        };
+
+        for (uint32_t i = 0; i < face_index; i++) {
+            const vk_world_build_face_t *face = &build_faces[i];
+            if (face->texture_index != texture_index)
+                continue;
+
+            uint32_t first_index = idx;
+            uint32_t face_index_count = (face->edge_count - 2) * 3;
+
+            for (uint32_t j = 0; j < face->edge_count - 2; j++) {
+                indices[idx++] = face->first_vertex;
+                indices[idx++] = face->first_vertex + j + 1;
+                indices[idx++] = face->first_vertex + j + 2;
+            }
+
+            draw_faces[draw_face_count++] = (vk_world_face_t) {
+                .face = face->face,
+                .first_index = first_index,
+                .index_count = face_index_count,
+            };
+            world_batch->face_count++;
+        }
+    }
+
+    bool ok = vk_upload_mesh(&vk.world.mesh, vertices, v, indices, idx);
+    if (ok) {
+        if (vk.world.batches)
+            Z_Free(vk.world.batches);
+        if (vk.world.faces)
+            Z_Free(vk.world.faces);
+        vk.world.batches = batches;
+        vk.world.faces = draw_faces;
+        vk.world.batch_count = batch;
+        vk.world.face_count = draw_face_count;
+        batches = NULL;
+        draw_faces = NULL;
+    }
+
+    Z_Free(vertices);
+    Z_Free(indices);
+    Z_Free(build_faces);
+    Z_Free(texture_index_counts);
+    if (batches)
+        Z_Free(batches);
+    if (draw_faces)
+        Z_Free(draw_faces);
+    return ok;
+}
+
+static void vk_register_world_images(bsp_t *bsp)
+{
+    char buffer[MAX_QPATH];
+
+    for (int i = 0; i < bsp->numtexinfo; i++) {
+        mtexinfo_t *info = &bsp->texinfo[i];
+
+        if (info->c.flags & (SURF_SKY | SURF_NODRAW)) {
+            info->image = R_NOTEXTURE;
+            continue;
+        }
+
+        imageflags_t flags = (info->c.flags & SURF_WARP) ? IF_TURBULENT : IF_NONE;
+        Q_concat(buffer, sizeof(buffer), "textures/", info->name, ".wal");
+        info->image = IMG_Find(buffer, IT_WALL, flags);
+    }
+}
+
+static void vk_load_world(const char *name)
+{
+    char buffer[MAX_QPATH];
+    bsp_t *bsp;
+    int ret;
+
+    if (!name || !*name)
+        return;
+
+    Q_concat(buffer, sizeof(buffer), "maps/", name, ".bsp");
+    ret = BSP_Load(buffer, &bsp);
+    if (!bsp)
+        Com_Error(ERR_DROP, "%s: couldn't load %s: %s",
+                  __func__, buffer, BSP_ErrorString(ret));
+
+    if (vk.world.cache == bsp) {
+        bsp->refcount--;
+        return;
+    }
+
+    vk_free_world();
+    vk.world.cache = bsp;
+
+    vk_register_world_images(bsp);
+
+    if (!vk_build_world_mesh(bsp))
+        Com_WPrintf("Couldn't build Vulkan world mesh: %s\n", Com_GetLastError());
+    else
+        Com_DPrintf("Vulkan world mesh: %u indices, %u faces, %u batches\n",
+                    vk.world.mesh.index_count, vk.world.face_count, vk.world.batch_count);
+}
+
+static void vk_draw_test_triangle(const refdef_t *fd)
+{
+    if (!vk.render_pass_active || !vk.color3d_pipeline ||
+        !vk_show_test_triangle || !vk_show_test_triangle->integer)
+        return;
+    if (fd->rdflags & RDF_NOWORLDMODEL)
+        return;
+
+    mat4_t mvp;
+    const float color[4] = { 0.1f, 0.9f, 0.55f, 1.0f };
+
+    vk_projection_matrix(mvp, fd->fov_x, fd->fov_y);
+    vk_draw_mesh(&vk.test_triangle, mvp, color);
+}
+
 bool VKR_Init(bool total)
 {
     if (!total)
@@ -1982,6 +3999,13 @@ bool VKR_Init(bool total)
 
     Com_Printf("------- VKR_Init -------\n");
     Com_Printf("Using video driver: %s\n", vid->name);
+
+    vk_show_test_triangle = Cvar_Get("vk_show_test_triangle", "0", 0);
+    vk_drawentities = Cvar_Get("vk_drawentities", "1", CVAR_CHEAT);
+    vk_drawsky = Cvar_Get("vk_drawsky", "1", 0);
+    vk_world_textures = Cvar_Get("vk_world_textures", "1", 0);
+    vk_world_vis = Cvar_Get("vk_world_vis", "1", 0);
+    vk_world_cull = Cvar_Get("vk_world_cull", "1", 0);
 
     if (!vid->init())
         return false;
@@ -1995,6 +4019,13 @@ bool VKR_Init(bool total)
         VKR_Shutdown(true);
         return false;
     }
+
+    if (!vk_create_test_triangle())
+        Com_WPrintf("Couldn't create Vulkan test triangle: %s\n", Com_GetLastError());
+    if (!vk_create_skybox_mesh())
+        Com_WPrintf("Couldn't create Vulkan skybox mesh: %s\n", Com_GetLastError());
+    if (!vk_create_sprite_quad())
+        Com_WPrintf("Couldn't create Vulkan sprite quad: %s\n", Com_GetLastError());
 
     r_registration_sequence = 1;
     IMG_Init();
@@ -2041,6 +4072,12 @@ void VKR_Shutdown(bool total)
         vk.DestroyCommandPool(vk.device, vk.command_pool, NULL);
         vk.command_pool = VK_NULL_HANDLE;
     }
+
+    vk_free_world();
+    vk_free_models(true);
+    vk_destroy_mesh(&vk.test_triangle);
+    vk_destroy_mesh(&vk.skybox);
+    vk_destroy_mesh(&vk.sprite_quad);
 
     if (vk.sampler) {
         vk.DestroySampler(vk.device, vk.sampler, NULL);
@@ -2091,16 +4128,55 @@ void VKR_Shutdown(bool total)
 void VKR_BeginRegistration(const char *map)
 {
     r_registration_sequence++;
-    (void)map;
+    vk_load_world(map);
 }
 
 qhandle_t VKR_RegisterModel(const char *name)
 {
+    char normalized[MAX_QPATH];
+    size_t namelen;
+    byte *rawdata;
+    int ret;
+    vk_model_t *model;
+    qhandle_t handle;
+
     if (!name || !*name)
         return 0;
     if (*name == '*')
         return ~Q_atoi(name + 1);
-    return 0;
+
+    namelen = FS_NormalizePathBuffer(normalized, name, sizeof(normalized));
+    if (!namelen || namelen >= sizeof(normalized))
+        return 0;
+
+    model = vk_find_model(normalized);
+    if (model) {
+        model->registration_sequence = r_registration_sequence;
+        for (int i = 0; i < model->frame_count; i++) {
+            if (model->type == VK_MODEL_SPRITE && model->frames[i].image)
+                model->frames[i].image->registration_sequence = r_registration_sequence;
+        }
+        for (int i = 0; i < model->skin_count; i++) {
+            if (model->skins[i])
+                model->skins[i]->registration_sequence = r_registration_sequence;
+        }
+        return (model - vk.models) + 1;
+    }
+
+    ret = FS_LoadFile(normalized, (void **)&rawdata);
+    if (!rawdata)
+        return 0;
+
+    handle = 0;
+    if (ret >= 4 && LittleLong(*(uint32_t *)rawdata) == SP2_IDENT)
+        handle = vk_load_sprite_model(normalized, rawdata, ret);
+    else if (ret >= 4 && LittleLong(*(uint32_t *)rawdata) == MD2_IDENT)
+        handle = vk_load_md2_model(normalized, rawdata, ret);
+
+    FS_FreeFile(rawdata);
+    if (!handle)
+        Com_DPrintf("Vulkan renderer skipped unsupported model %s\n", normalized);
+    return handle;
 }
 
 qhandle_t VKR_RegisterImage(const char *name, imagetype_t type, imageflags_t flags)
@@ -2110,15 +4186,67 @@ qhandle_t VKR_RegisterImage(const char *name, imagetype_t type, imageflags_t fla
 
 void VKR_SetSky(const char *name, float rotate, bool autorotate, const vec3_t axis)
 {
+    char pathname[MAX_QPATH];
+
+    (void)rotate;
+    (void)autorotate;
+    (void)axis;
+
+    memset(vk.sky_images, 0, sizeof(vk.sky_images));
+
+    if (!name || !*name || (vk_drawsky && !vk_drawsky->integer))
+        return;
+
+    for (uint32_t i = 0; i < 6; i++) {
+        const image_t *image;
+
+        if (Q_concat(pathname, sizeof(pathname), "env/", name,
+                     com_env_suf[i], ".tga") >= sizeof(pathname)) {
+            memset(vk.sky_images, 0, sizeof(vk.sky_images));
+            return;
+        }
+
+        image = IMG_Find(pathname, IT_SKY, IF_NONE);
+        if (!image || image == R_SKYTEXTURE || !image->texnum ||
+            image->texnum >= MAX_RIMAGES) {
+            memset(vk.sky_images, 0, sizeof(vk.sky_images));
+            return;
+        }
+
+        vk.sky_images[i] = image->texnum;
+    }
 }
 
 void VKR_EndRegistration(void)
 {
+    vk_free_models(false);
     IMG_FreeUnused();
 }
 
 void VKR_RenderFrame(const refdef_t *fd)
 {
+    if (!fd)
+        return;
+
+    if (!(fd->rdflags & RDF_NOWORLDMODEL))
+        vk_draw_skybox(fd);
+
+    if (!(fd->rdflags & RDF_NOWORLDMODEL) && vk.world.mesh.index_count) {
+        mat4_t mvp;
+
+        vk_world_mvp(mvp, fd);
+        if (vk_world_textures && vk_world_textures->integer) {
+            if (vk_world_vis && vk_world_vis->integer)
+                vk_mark_world_faces(fd);
+            vk_draw_world_mesh(mvp, false);
+        } else {
+            const float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+            vk_draw_mesh(&vk.world.mesh, mvp, color);
+        }
+    }
+
+    vk_draw_entities(fd);
+    vk_draw_test_triangle(fd);
 }
 
 void VKR_LightPoint(const vec3_t origin, vec3_t light)
