@@ -6,6 +6,11 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The game module no longer crashes when the `give` cheat command hands out an
+  item that the deathmatch flags forbid, such as armor with "no armor" set.
+
 ## [1.1.0] - 2026-11-07
 
 ### Added
