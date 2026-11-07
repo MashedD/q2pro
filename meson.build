@@ -332,10 +332,12 @@ if get_option('vulkan').enabled() and not vulkan.found()
   error('Vulkan support was enabled, but Vulkan headers were not found')
 endif
 # The shaders are compiled to SPIR-V at build time, so Vulkan also needs
-# glslc (from shaderc). With vulkan=auto, a missing glslc leaves Vulkan out
-# instead of failing the build.
+# glslc (from shaderc) or glslangValidator (from glslang). With vulkan=auto,
+# a missing compiler leaves Vulkan out instead of failing the build.
 if vulkan.found()
-  glslc = find_program('glslc', required: get_option('vulkan'))
+  # Ubuntu 22.04 and some other distributions package glslangValidator but
+  # not glslc; vk_shader.py drives either one.
+  glslc = find_program('glslc', 'glslangValidator', required: get_option('vulkan'))
   if not glslc.found()
     vulkan = dependency('', required: false)
   endif
@@ -360,7 +362,8 @@ if vulkan.found()
     vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
       input: 'src/refresh' / shader,
       output: shader.underscorify() + '_spv.h',
-      command: [glslc, '-mfmt=c', '@INPUT@', '-o', '@OUTPUT@'],
+      command: [find_program('python3'), files('src/refresh/vk_shader.py'),
+                glslc, '@INPUT@', '@OUTPUT@'],
     )
   endforeach
   common_deps += vulkan.partial_dependency(compile_args: true, includes: true)

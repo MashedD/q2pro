@@ -27,10 +27,12 @@ instead, configure with `-Dqal-hard-linked=true`. On Windows this also needs a
 static OpenAL Soft build, which `.ci/build-openal-windows.sh` creates (it requires
 CMake), passed as `-Dqal-static-prefix=<prefix>`.
 
-The optional Vulkan renderer needs the Vulkan headers and the `glslc` shader
-compiler from shaderc, which turns its GLSL shaders into SPIR-V at build time.
+The optional Vulkan renderer needs the Vulkan headers and a shader compiler,
+`glslc` from shaderc or `glslangValidator` from glslang, which turns its GLSL
+shaders into SPIR-V at build time.
 The Vulkan library itself is loaded at runtime. With the default
-`-Dvulkan=auto`, Vulkan is left out when either is missing; `-Dvulkan=enabled`
+`-Dvulkan=auto`, Vulkan is left out when the headers or both compilers are
+missing; `-Dvulkan=enabled`
 makes them required. It is used on Linux through the SDL2 video backend, and
 on Windows; macOS isn't supported.
 

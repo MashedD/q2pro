@@ -52,7 +52,7 @@ jobs:
         timeout-minutes: 20
         run: |
           .ci/apt-install.sh ninja-build nasm zip fakeroot python3-pip \
-            libsdl2-dev libopenal-dev libpng-dev zlib1g-dev libcurl4-gnutls-dev glslc libvulkan-dev \
+            libsdl2-dev libopenal-dev libpng-dev zlib1g-dev libcurl4-gnutls-dev glslang-tools libvulkan-dev \
             mesa-common-dev libx11-dev libxi-dev \
             libwayland-dev wayland-protocols libdecor-0-dev
           # Ubuntu 22.04 has Meson 0.61; the libjpeg-turbo wrap needs 0.64.
