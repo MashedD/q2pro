@@ -6,6 +6,10 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Vulkan particles were about twice as large as in the OpenGL renderer.
+
 ## [1.1.0] - 2026-11-07
 
 ### Added

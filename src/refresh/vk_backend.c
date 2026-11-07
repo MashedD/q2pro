@@ -10021,10 +10021,14 @@ static void vk_draw_particles(const refdef_t *fd)
         scale *= (vk_partscale ? vk_partscale->value : 2.0f) * particle->scale;
         scale2 = scale * VK_PARTICLE_SCALE;
 
+        // The OpenGL renderer draws a triangle whose texture coordinates run
+        // to VK_PARTICLE_SIZE, so the round particle texture fills a circle
+        // of radius scale2 around the origin and the rest is clamped to
+        // transparent. Draw a quad that holds exactly that circle.
         VectorScale(viewaxis[1], scale2, left);
-        VectorScale(viewaxis[1], -scale, right);
+        VectorScale(viewaxis[1], -scale2, right);
         VectorScale(viewaxis[2], -scale2, down);
-        VectorScale(viewaxis[2], scale, up);
+        VectorScale(viewaxis[2], scale2, up);
 
         if (particle->color == -1)
             color.u32 = particle->rgba.u32;
