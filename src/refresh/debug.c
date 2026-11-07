@@ -100,6 +100,25 @@ void R_AddDebugLine(const vec3_t start, const vec3_t end, uint32_t color, uint32
         l->bits |= GLS_DEPTHTEST_DISABLE;
 }
 
+void R_EmitDebugLines(debug_line_cb_t cb, void *userdata)
+{
+    debug_line_t *l, *next;
+
+    if (!cb || LIST_EMPTY(&debug_lines_active))
+        return;
+
+    LIST_FOR_EACH_SAFE(debug_line_t, l, next, &debug_lines_active, entry) {
+        if (l->time < com_localTime2) {
+            List_Remove(&l->entry);
+            List_Insert(&debug_lines_free, &l->entry);
+            continue;
+        }
+
+        cb(l->start, l->end, l->color,
+           !(l->bits & GLS_DEPTHTEST_DISABLE), userdata);
+    }
+}
+
 #define GL_DRAWLINE(sx, sy, sz, ex, ey, ez) \
     R_AddDebugLine((const vec3_t) { (sx), (sy), (sz) }, (const vec3_t) { (ex), (ey), (ez) }, color, time, depth_test)
 
@@ -403,6 +422,26 @@ void R_AddDebugText(const vec3_t origin, const vec3_t angles, const char *text,
         R_AddDebugTextInternal(pos, angles, s, p - s, size, color, time, depth_test);
         VectorAdd(pos, down, pos);
         s = p + 1;
+    }
+}
+
+void R_EmitDebugTexts(debug_text_cb_t cb, void *userdata)
+{
+    debug_text_t *text, *next;
+
+    if (!cb || LIST_EMPTY(&debug_texts_active))
+        return;
+
+    LIST_FOR_EACH_SAFE(debug_text_t, text, next, &debug_texts_active, entry) {
+        if (text->time < com_localTime2) {
+            List_Remove(&text->entry);
+            List_Insert(&debug_texts_free, &text->entry);
+            continue;
+        }
+
+        cb(text->origin, text->angles, text->text, text->size, text->color,
+           !(text->bits & GLS_DEPTHTEST_DISABLE),
+           !!(text->bits & GLS_CULL_DISABLE), userdata);
     }
 }
 

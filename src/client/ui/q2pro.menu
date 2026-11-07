@@ -67,6 +67,10 @@ color disabled #7f7f7f
 begin video
     //title "Video Setup"
     banner m_banner_video
+    pairs --status "Vulkan is optional and needs a Vulkan driver. OpenGL is the default" \
+        "renderer" vid_ref "OpenGL" gl "Vulkan" vk
+    pairs --status "GPU for the Vulkan renderer. Automatic prefers the GPU that drives the display" \
+        "Vulkan device" vk_device $$vk_devicelist
     values --status "Windowed, or a fullscreen mode from the list of video modes" \
         "video mode" vid_fullscreen windowed $$vid_modelist
     field --status "Horizontal field of view in degrees. The default is 90" \

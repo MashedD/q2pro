@@ -18,6 +18,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #pragma once
 
+#if USE_VULKAN
+#include <vulkan/vulkan.h>
+#endif
+
 typedef struct {
     const char *name;
 
@@ -35,6 +39,12 @@ typedef struct {
     void *(*get_proc_addr)(const char *sym);
     void (*swap_buffers)(void);
     void (*swap_interval)(int val);
+
+#if USE_VULKAN
+    bool (*get_vk_instance_extensions)(uint32_t *count, const char **names,
+                                       uint32_t max_names);
+    bool (*create_vk_surface)(VkInstance instance, VkSurfaceKHR *surface);
+#endif
 
     char *(*get_selection_data)(void);
     char *(*get_clipboard_data)(void);

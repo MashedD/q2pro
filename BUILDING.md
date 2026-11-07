@@ -27,6 +27,15 @@ instead, configure with `-Dqal-hard-linked=true`. On Windows this also needs a
 static OpenAL Soft build, which `.ci/build-openal-windows.sh` creates (it requires
 CMake), passed as `-Dqal-static-prefix=<prefix>`.
 
+The optional Vulkan renderer needs the Vulkan headers and a shader compiler,
+`glslc` from shaderc or `glslangValidator` from glslang, which turns its GLSL
+shaders into SPIR-V at build time.
+The Vulkan library itself is loaded at runtime. With the default
+`-Dvulkan=auto`, Vulkan is left out when the headers or both compilers are
+missing; `-Dvulkan=enabled`
+makes them required. It is used on Linux through the SDL2 video backend, and
+on Windows; macOS isn't supported.
+
 To install the *full* set of dependencies for building Q2PRO on Debian or
 Ubuntu use the following command:
 
@@ -35,7 +44,8 @@ Ubuntu use the following command:
                     libcurl4-gnutls-dev libx11-dev libxi-dev \
                     libwayland-dev wayland-protocols libdecor-0-dev \
                     libavcodec-dev libavformat-dev libavutil-dev \
-                    libswresample-dev libswscale-dev
+                    libswresample-dev libswscale-dev \
+                    libvulkan-dev glslc
 
 If you intend to build just dedicated server, smaller set of dependencies can
 be installed:

@@ -79,6 +79,7 @@ ui_src = [
 ]
 
 refresh_src = [
+  'src/refresh/backend.c',
   'src/refresh/draw.c',
   'src/refresh/hq2x.c',
   'src/refresh/images.c',
@@ -310,6 +311,65 @@ common_deps = [zlib]
 client_deps = [png, curl, sdl2]
 server_deps = []
 game_deps = [zlib]
+
+vulkan = dependency('vulkan', required: false)
+if host_machine.system() == 'windows' and not (vulkan.found() and
+    cc.has_header('vulkan/vulkan.h', dependencies: vulkan))
+  # The Windows backend loads vulkan-1.dll dynamically, so cross builds only
+  # need the platform-independent Vulkan headers.  Linux distributions
+  # commonly install those in /usr/include without providing a MinGW pkg-config
+  # file, and a cross build that uses the host's pkg-config finds the Linux
+  # package, whose include path /usr/include pkg-config omits.  Search that
+  # directory after the MinGW compiler's native headers so standard C and
+  # Windows headers still come from the cross toolchain.
+  vulkan = dependency('', required: false)
+  vulkan_header_args = ['-idirafter', '/usr/include']
+  if cc.has_header('vulkan/vulkan.h', args: vulkan_header_args)
+    vulkan = declare_dependency(compile_args: vulkan_header_args)
+  endif
+endif
+if get_option('vulkan').enabled() and not vulkan.found()
+  error('Vulkan support was enabled, but Vulkan headers were not found')
+endif
+# The shaders are compiled to SPIR-V at build time, so Vulkan also needs
+# glslc (from shaderc) or glslangValidator (from glslang). With vulkan=auto,
+# a missing compiler leaves Vulkan out instead of failing the build.
+if vulkan.found()
+  # Ubuntu 22.04 and some other distributions package glslangValidator but
+  # not glslc; vk_shader.py drives either one.
+  glslc = find_program('glslc', 'glslangValidator', required: get_option('vulkan'))
+  if not glslc.found()
+    vulkan = dependency('', required: false)
+  endif
+endif
+if vulkan.found()
+  vk_shader_headers = []
+  foreach shader : ['vk_rect.vert', 'vk_rect.frag', 'vk_vignette.vert',
+                    'vk_tex.vert', 'vk_tex.frag',
+                    'vk_waterwarp.frag',
+                    'vk_bloom_downscale.frag', 'vk_bloom_blur.frag',
+                    'vk_color3d.vert', 'vk_color3d.frag',
+                    'vk_world.vert', 'vk_world.frag', 'vk_world_alpha.frag',
+                    'vk_world_lit.vert', 'vk_world_lit.frag',
+                    'vk_world_lit_alpha.frag',
+                    'vk_world_pixel.vert', 'vk_world_pixel.frag',
+                    'vk_world_pixel_alpha.frag',
+                    'vk_world_pixel_glow.frag',
+                    'vk_world_pixel_glow_alpha.frag',
+                    'vk_world_glow.frag',
+                    'vk_alias.vert', 'vk_alias_shadow.vert',
+                    'vk_alias_shadow.frag']
+    vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
+      input: 'src/refresh' / shader,
+      output: shader.underscorify() + '_spv.h',
+      command: [find_program('python3'), files('src/refresh/vk_shader.py'),
+                glslc, '@INPUT@', '@OUTPUT@'],
+    )
+  endforeach
+  common_deps += vulkan.partial_dependency(compile_args: true, includes: true)
+  refresh_src += ['src/refresh/vk_backend.c', vk_shader_headers]
+  config.set10('USE_VULKAN', true)
+endif
 
 jpeg = dependency('libjpeg',
   required:        get_option('libjpeg'),
@@ -592,6 +652,7 @@ summary({
   'tests'              : config.get('USE_TESTS', 0) != 0,
   'tga'                : config.get('USE_TGA', 0) != 0,
   'variable-fps'       : config.get('USE_FPS', 0) != 0,
+  'vulkan'             : config.get('USE_VULKAN', 0) != 0,
   'wayland'            : config.get('USE_WAYLAND', 0) != 0,
   'windows-crash-dumps': config.get('USE_DBGHELP', 0) != 0,
   'windows-egl'        : config.get('USE_WIN32EGL', 0) != 0,
