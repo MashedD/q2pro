@@ -3172,8 +3172,10 @@ static const char *const sync_names[] = {
 };
 #endif
 
-static int ref_msec, phys_msec, main_msec;
-static int ref_extra, phys_extra, main_extra;
+static int phys_msec, main_msec;
+static int phys_extra, main_extra;
+static int ref_rate;            // r_maxfps in frames per second
+static unsigned ref_accum;      // thousandths of a frame owed
 static sync_mode_t sync_mode;
 
 #define MIN_PHYS_HZ 10
@@ -3227,6 +3229,19 @@ static int fps_to_clamped_msec(cvar_t *cvar, int min, int max)
     return msec;
 }
 
+static int fps_to_clamped_rate(cvar_t *cvar, int min, int max)
+{
+    // Refresh frames are scheduled with a fractional accumulator, so unlike
+    // fps_to_clamped_msec() the rate never needs rounding and there is
+    // nothing to warn about.
+    cvar->modified = false;
+
+    if (cvar->integer == 0)
+        return max;
+
+    return Cvar_ClampInteger(cvar, min, max);
+}
+
 /*
 ==================
 CL_UpdateFrameTimes
@@ -3240,8 +3255,10 @@ void CL_UpdateFrameTimes(void)
         return; // not yet fully initialized
     }
 
-    phys_msec = ref_msec = main_msec = 0;
-    ref_extra = phys_extra = main_extra = 0;
+    phys_msec = main_msec = 0;
+    phys_extra = main_extra = 0;
+    ref_rate = 0;
+    ref_accum = 0;
     cls.frametime = 0.0f;
 
     if (com_timedemo->integer) {
@@ -3261,7 +3278,7 @@ void CL_UpdateFrameTimes(void)
         if (cl_async->integer > 1 && r_config.flags & QVF_VIDEOSYNC) {
             sync_mode = ASYNC_VIDEO;
         } else {
-            ref_msec = fps_to_clamped_msec(r_maxfps, MIN_REF_HZ, MAX_REF_HZ);
+            ref_rate = fps_to_clamped_rate(r_maxfps, MIN_REF_HZ, MAX_REF_HZ);
             sync_mode = ASYNC_FULL;
         }
     } else {
@@ -3270,8 +3287,8 @@ void CL_UpdateFrameTimes(void)
         sync_mode = SYNC_MAXFPS;
     }
 
-    Com_DDPrintf("%s: mode=%s main_msec=%d ref_msec=%d, phys_msec=%d\n",
-                 __func__, sync_names[sync_mode], main_msec, ref_msec, phys_msec);
+    Com_DDPrintf("%s: mode=%s main_msec=%d ref_rate=%d, phys_msec=%d\n",
+                 __func__, sync_names[sync_mode], main_msec, ref_rate, phys_msec);
 }
 
 /*
@@ -3323,11 +3340,15 @@ unsigned CL_Frame(unsigned msec)
         if (sync_mode == ASYNC_VIDEO) {
             ref_frame = R_VideoSync();
         } else {
-            ref_extra += main_extra;
-            if (ref_extra < ref_msec) {
+            // Count elapsed time in thousandths of a frame, so that rates
+            // which don't divide 1000 come out exact on average: 288 fps
+            // alternates 3 and 4 ms frames instead of rounding to 3 ms
+            // (333 fps).
+            ref_accum += main_extra * ref_rate;
+            if (ref_accum < 1000) {
                 ref_frame = false;
-            } else if (ref_extra > ref_msec * 4) {
-                ref_extra = ref_msec;
+            } else if (ref_accum > 4000) {
+                ref_accum = 1000;
             }
         }
         break;
@@ -3342,9 +3363,9 @@ unsigned CL_Frame(unsigned msec)
         break;
     }
 
-    Com_DDDDPrintf("main_extra=%d ref_frame=%d ref_extra=%d "
+    Com_DDDDPrintf("main_extra=%d ref_frame=%d ref_accum=%u "
                    "phys_frame=%d phys_extra=%d\n",
-                   main_extra, ref_frame, ref_extra,
+                   main_extra, ref_frame, ref_accum,
                    phys_frame, phys_extra);
 
     // decide the simulation time
@@ -3415,7 +3436,8 @@ unsigned CL_Frame(unsigned msec)
 
         cls.frametime = 0.0f;
 
-        ref_extra -= ref_msec;
+        if (sync_mode == ASYNC_FULL)
+            ref_accum -= 1000;
         R_FRAMES++;
 
         // update audio after the 3D view was drawn
