@@ -11,6 +11,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include "common/common.h"
 #include "refresh/refresh.h"
 #include "gl_backend.h"
+#include "vk_backend.h"
 
 typedef struct refresh_backend_s {
     const char *name;
@@ -94,8 +95,50 @@ static const refresh_backend_t gl_backend = {
     .get_gl_config = GLR_GetGLConfig,
 };
 
+#if USE_VULKAN
+static const refresh_backend_t vk_backend = {
+    .name = "vk",
+    .video_api = REF_VIDEO_VULKAN,
+
+    .init = VKR_Init,
+    .shutdown = VKR_Shutdown,
+    .begin_registration = VKR_BeginRegistration,
+    .register_model = VKR_RegisterModel,
+    .register_image = VKR_RegisterImage,
+    .set_sky = VKR_SetSky,
+    .end_registration = VKR_EndRegistration,
+    .render_frame = VKR_RenderFrame,
+    .light_point = VKR_LightPoint,
+    .clear_color = VKR_ClearColor,
+    .set_alpha = VKR_SetAlpha,
+    .set_color = VKR_SetColor,
+    .set_clip_rect = VKR_SetClipRect,
+    .clamp_scale = VKR_ClampScale,
+    .set_scale = VKR_SetScale,
+    .draw_char = VKR_DrawChar,
+    .draw_string = VKR_DrawString,
+    .get_pic_size = VKR_GetPicSize,
+    .draw_pic = VKR_DrawPic,
+    .draw_stretch_pic = VKR_DrawStretchPic,
+    .draw_keep_aspect_pic = VKR_DrawKeepAspectPic,
+    .draw_stretch_raw = VKR_DrawStretchRaw,
+    .update_raw_pic = VKR_UpdateRawPic,
+    .tile_clear = VKR_TileClear,
+    .draw_fill8 = VKR_DrawFill8,
+    .draw_fill32 = VKR_DrawFill32,
+    .begin_frame = VKR_BeginFrame,
+    .end_frame = VKR_EndFrame,
+    .mode_changed = VKR_ModeChanged,
+    .video_sync = VKR_VideoSync,
+    .get_gl_config = GLR_GetGLConfig,
+};
+#endif
+
 static const refresh_backend_t *const backends[] = {
     &gl_backend,
+#if USE_VULKAN
+    &vk_backend,
+#endif
     NULL
 };
 
@@ -121,7 +164,7 @@ static const refresh_backend_t *find_backend(const char *name)
 
 bool R_Init(bool total)
 {
-    cvar_t *vid_ref = Cvar_Get("vid_ref", "gl", CVAR_ROM);
+    cvar_t *vid_ref = Cvar_Get("vid_ref", "gl", CVAR_ARCHIVE | CVAR_REFRESH);
 
     backend = find_backend(vid_ref->string);
     if (!backend) {
