@@ -35,6 +35,7 @@ the Free Software Foundation; either version 2 of the License, or
 #define VK_MAX_DEBUG_TEXT_CHARS    (TESS_MAX_VERTICES / 4)
 #define VK_MAX_DEBUG_TEXT_VERTICES (VK_MAX_DEBUG_TEXT_CHARS * 4)
 #define VK_MAX_DEBUG_TEXT_INDICES  (VK_MAX_DEBUG_TEXT_CHARS * 6)
+#define VK_MAX_LIGHTMAP_EXTENTS    513
 
 static const uint32_t vk_rect_vert_spv[] =
 #include "vk_rect_vert_spv.h"
@@ -88,12 +89,28 @@ static const uint32_t vk_world_alpha_frag_spv[] =
 #include "vk_world_alpha_frag_spv.h"
 ;
 
+static const uint32_t vk_world_pixel_vert_spv[] =
+#include "vk_world_pixel_vert_spv.h"
+;
+
+static const uint32_t vk_world_pixel_frag_spv[] =
+#include "vk_world_pixel_frag_spv.h"
+;
+
+static const uint32_t vk_world_pixel_alpha_frag_spv[] =
+#include "vk_world_pixel_alpha_frag_spv.h"
+;
+
 static const uint32_t vk_world_glow_frag_spv[] =
 #include "vk_world_glow_frag_spv.h"
 ;
 
 static const uint32_t vk_alias_vert_spv[] =
 #include "vk_alias_vert_spv.h"
+;
+
+static const uint32_t vk_alias_shadow_frag_spv[] =
+#include "vk_alias_shadow_frag_spv.h"
 ;
 
 typedef struct {
@@ -126,6 +143,7 @@ typedef struct {
     float uv[2];
     float normal[3];
 } vk_vertex_t;
+
 
 typedef struct {
     vk_buffer_t vertices;
@@ -160,6 +178,8 @@ typedef struct {
     uint32_t first_index;
     uint32_t index_count;
     vec3_t center;
+    uint16_t pixel_lm_x, pixel_lm_y;
+    uint16_t pixel_lm_w, pixel_lm_h;
 } vk_world_face_t;
 
 typedef struct {
@@ -206,6 +226,8 @@ typedef struct {
 typedef struct {
     bsp_t *cache;
     vk_mesh_t mesh;
+    vk_buffer_t pixel_lmuv_buffer;
+    vk_texture_t pixel_lightmap_texture;
     vk_buffer_t line_indices;
     vk_world_batch_t *batches;
     vk_world_face_t *faces;
@@ -243,6 +265,23 @@ typedef struct {
     float fog[4];
     float intensity;
 } vk_world_push_t;
+
+typedef struct {
+    mat4_t mvp;
+    float color[4];
+    float scroll[4];
+    float dlight[4];
+    float fog[4];
+    float intensity;
+    float _pad;
+    float lm_scale[2];
+    float lm_offset[2];
+} vk_world_pixel_push_t;
+
+typedef char vk_world_pixel_lm_scale_offset_check[
+    offsetof(vk_world_pixel_push_t, lm_scale) == 136 ? 1 : -1];
+typedef char vk_world_pixel_lm_offset_offset_check[
+    offsetof(vk_world_pixel_push_t, lm_offset) == 144 ? 1 : -1];
 
 typedef struct {
     mat4_t mvp;
@@ -336,6 +375,7 @@ typedef struct {
     PFN_vkCmdBindIndexBuffer CmdBindIndexBuffer;
     PFN_vkCmdSetViewport CmdSetViewport;
     PFN_vkCmdSetScissor CmdSetScissor;
+    PFN_vkCmdSetLineWidth CmdSetLineWidth;
     PFN_vkCmdPushConstants CmdPushConstants;
     PFN_vkCmdDraw CmdDraw;
     PFN_vkCmdDrawIndexed CmdDrawIndexed;
@@ -382,6 +422,7 @@ typedef struct {
     VkSampler nearest_sampler;
     VkSampler sky_nearest_sampler;
     VkPipelineLayout rect_pipeline_layout;
+    VkPipelineLayout pixel_world_pipeline_layout;
     VkPipeline rect_pipeline;
     VkPipeline vignette_pipeline;
     VkPipeline texture_pipeline;
@@ -397,6 +438,8 @@ typedef struct {
     VkPipeline world_pipeline;
     VkPipeline world_alpha_pipeline;
     VkPipeline world_glow_pipeline;
+    VkPipeline pixel_world_pipeline;
+    VkPipeline pixel_world_alpha_pipeline;
     VkPipeline sky_pipeline;
     VkPipeline sprite_pipeline;
     VkPipeline sprite_alpha_pipeline;
@@ -406,7 +449,7 @@ typedef struct {
     VkPipeline alias_alpha_pipeline;
     VkPipeline alias_depth_pipeline;
     VkPipeline alias_blend_pipeline;
-    VkPipeline alias_cel_pipeline;
+    VkPipeline alias_shadow_pipeline;
     VkPipeline alias_line_pipeline;
     VkSwapchainKHR swapchain;
     VkRenderPass render_pass;
@@ -512,7 +555,6 @@ static cvar_t *vk_gl_lightgrid;
 static cvar_t *vk_fullbright;
 static cvar_t *vk_cull_models;
 static cvar_t *vk_shadows;
-static cvar_t *vk_celshading;
 static cvar_t *vk_dotshading;
 static cvar_t *vk_draworder;
 static cvar_t *vk_showorigins;
@@ -560,6 +602,7 @@ static cvar_t *vk_drawworld;
 static cvar_t *vk_novis;
 static cvar_t *vk_lockpvs;
 static cvar_t *vk_lightmap;
+static cvar_t *vk_pixel_lightmaps;
 static cvar_t *vk_vertexlight;
 static cvar_t *vk_nobind;
 static cvar_t *vk_clear;
@@ -574,6 +617,11 @@ static cvar_t *vk_world_cull;
 static cvar_t *vk_debug_distfrac;
 #endif
 static byte vk_gammatable[256];
+static bool vk_pixel_lightmaps_warned;
+static bool vk_pixel_lightmaps_draw_logged;
+static bool vk_pixel_lightmaps_scope_logged;
+static bool vk_pixel_lightmaps_atlas_logged;
+static bool vk_pixel_lightmaps_lmuv_logged;
 
 static bool vk_upload_texture(image_t *image, byte *pic);
 static void vk_destroy_texture(image_t *image);
@@ -601,68 +649,6 @@ static bool vk_recreate_swapchain(void);
 static bool vk_create_test_triangle(void);
 static void vk_destroy_mesh(vk_mesh_t *mesh);
 static void vk_free_world(void);
-// Computes each face's lightmap extents, which only the OpenGL renderer
-// computes otherwise. The same arithmetic as build_surface_light in surf.c.
-static void vk_prepare_face_lightmaps(bsp_t *bsp)
-{
-    for (int i = 0; i < bsp->numfaces; i++) {
-        mface_t *face = &bsp->faces[i];
-
-        if (!face->texinfo)
-            continue;
-
-        if (bsp->lm_decoupled) {
-            float len0 = VectorLength(face->lm_axis[0]);
-            float len1 = VectorLength(face->lm_axis[1]);
-            face->lm_scale[0] = len0 ? 1.0f / len0 : 0.0f;
-            face->lm_scale[1] = len1 ? 1.0f / len1 : 0.0f;
-            continue;
-        }
-
-        vec2_t mins = { 99999.0f, 99999.0f };
-        vec2_t maxs = { -99999.0f, -99999.0f };
-        bool valid = face->numsurfedges > 0;
-
-        for (int j = 0; j < face->numsurfedges && valid; j++) {
-            const msurfedge_t *surfedge = face->firstsurfedge + j;
-            if (surfedge->edge >= (uint32_t)bsp->numedges) {
-                valid = false;
-                break;
-            }
-            const medge_t *edge = &bsp->edges[surfedge->edge];
-            if (edge->v[surfedge->vert] >= (uint32_t)bsp->numvertices) {
-                valid = false;
-                break;
-            }
-            const mvertex_t *vert = &bsp->vertices[edge->v[surfedge->vert]];
-
-            for (int axis = 0; axis < 2; axis++) {
-                float tc = DotProduct(vert->point, face->texinfo->axis[axis]) +
-                           face->texinfo->offset[axis];
-                mins[axis] = min(mins[axis], tc);
-                maxs[axis] = max(maxs[axis], tc);
-            }
-        }
-        if (!valid)
-            continue;
-
-        int bmins[2], bmaxs[2];
-        bmins[0] = floorf(mins[0] / 16.0f);
-        bmins[1] = floorf(mins[1] / 16.0f);
-        bmaxs[0] = ceilf(maxs[0] / 16.0f);
-        bmaxs[1] = ceilf(maxs[1] / 16.0f);
-
-        VectorScale(face->texinfo->axis[0], 1.0f / 16.0f, face->lm_axis[0]);
-        VectorScale(face->texinfo->axis[1], 1.0f / 16.0f, face->lm_axis[1]);
-        face->lm_offset[0] = face->texinfo->offset[0] / 16.0f - bmins[0];
-        face->lm_offset[1] = face->texinfo->offset[1] / 16.0f - bmins[1];
-        face->lm_width = bmaxs[0] - bmins[0] + 1;
-        face->lm_height = bmaxs[1] - bmins[1] + 1;
-        face->lm_scale[0] = 16.0f;
-        face->lm_scale[1] = 16.0f;
-    }
-}
-
 static void vk_load_world(const char *name);
 static bool vk_static_light_point(const vec3_t origin, const refdef_t *fd,
                                   vec3_t light);
@@ -1095,6 +1081,10 @@ static void vk_free_world(void)
 {
     vk_glare_sources.count = 0;
     vk_destroy_mesh(&vk.world.mesh);
+    vk_destroy_buffer(&vk.world.pixel_lmuv_buffer);
+    vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
+    vk_pixel_lightmaps_atlas_logged = false;
+    vk_pixel_lightmaps_lmuv_logged = false;
     vk_destroy_buffer(&vk.world.line_indices);
     if (vk.world.batches) {
         Z_Free(vk.world.batches);
@@ -1140,7 +1130,6 @@ static void vk_free_model(vk_model_t *model)
     vk_destroy_mesh(&model->mesh);
     vk_destroy_buffer(&model->alias_line_indices);
     model->alias_line_index_count = 0;
-
     memset(model, 0, sizeof(*model));
 }
 
@@ -2116,6 +2105,7 @@ static void vk_update_texture_descriptors(void)
         vk_sampler_for_pic_flags((vk_partshape && vk_partshape->integer == 1) ?
                                  IF_NEAREST : IF_NONE));
     vk_update_texture_descriptor(&vk.beam_texture);
+    vk_update_texture_descriptor(&vk.world.pixel_lightmap_texture);
 }
 
 static uint32_t vk_mip_level_count(uint32_t width, uint32_t height)
@@ -2575,6 +2565,7 @@ static bool vk_load_device(void)
     LOAD(CmdBindIndexBuffer);
     LOAD(CmdSetViewport);
     LOAD(CmdSetScissor);
+    LOAD(CmdSetLineWidth);
     LOAD(CmdPushConstants);
     LOAD(CmdDraw);
     LOAD(CmdDrawIndexed);
@@ -2832,7 +2823,10 @@ static bool vk_create_device(void)
 
     if (vk.physical_device_features.samplerAnisotropy)
         features.samplerAnisotropy = VK_TRUE;
-
+    if (vk.physical_device_features.fillModeNonSolid)
+        features.fillModeNonSolid = VK_TRUE;
+    if (vk.physical_device_features.wideLines)
+        features.wideLines = VK_TRUE;
     VkDeviceCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = queue_info_count,
@@ -3107,7 +3101,7 @@ static bool vk_create_frame_resources(void)
     if (result != VK_SUCCESS)
         return vk_fail_result("vkCreateDescriptorSetLayout", result);
 
-    const uint32_t texture_descriptor_count = MAX_RIMAGES * 2 + 8;
+    const uint32_t texture_descriptor_count = MAX_RIMAGES * 2 + 9;
     VkDescriptorPoolSize pool_size = {
         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount = texture_descriptor_count,
@@ -3321,6 +3315,21 @@ static void vk_destroy_swapchain(void)
         vk.world_glow_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.pixel_world_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.pixel_world_pipeline, NULL);
+        vk.pixel_world_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.pixel_world_alpha_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.pixel_world_alpha_pipeline, NULL);
+        vk.pixel_world_alpha_pipeline = VK_NULL_HANDLE;
+    }
+
+    if (vk.pixel_world_pipeline_layout) {
+        vk.DestroyPipelineLayout(vk.device, vk.pixel_world_pipeline_layout, NULL);
+        vk.pixel_world_pipeline_layout = VK_NULL_HANDLE;
+    }
+
     if (vk.sky_pipeline) {
         vk.DestroyPipeline(vk.device, vk.sky_pipeline, NULL);
         vk.sky_pipeline = VK_NULL_HANDLE;
@@ -3366,9 +3375,9 @@ static void vk_destroy_swapchain(void)
         vk.alias_blend_pipeline = VK_NULL_HANDLE;
     }
 
-    if (vk.alias_cel_pipeline) {
-        vk.DestroyPipeline(vk.device, vk.alias_cel_pipeline, NULL);
-        vk.alias_cel_pipeline = VK_NULL_HANDLE;
+    if (vk.alias_shadow_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_shadow_pipeline, NULL);
+        vk.alias_shadow_pipeline = VK_NULL_HANDLE;
     }
 
     if (vk.alias_line_pipeline) {
@@ -3734,9 +3743,91 @@ static VkShaderModule vk_create_shader_module(const uint32_t *code, size_t code_
     return module;
 }
 
+static int vk_pixel_lightmap_mode(void)
+{
+    if (!vk_pixel_lightmaps)
+        return 0;
+    return Cvar_ClampInteger(vk_pixel_lightmaps, 0, 2);
+}
+
+static bool vk_validate_pixel_lightmap_shaders(void)
+{
+    if (vk_pixel_lightmap_mode() < 1)
+        return true;
+
+    VkShaderModule vert = vk_create_shader_module(vk_world_pixel_vert_spv,
+                                                  sizeof(vk_world_pixel_vert_spv));
+    VkShaderModule frag = vk_create_shader_module(vk_world_pixel_frag_spv,
+                                                  sizeof(vk_world_pixel_frag_spv));
+    VkShaderModule alpha = vk_create_shader_module(vk_world_pixel_alpha_frag_spv,
+                                                   sizeof(vk_world_pixel_alpha_frag_spv));
+    bool ok = vert && frag && alpha;
+
+    if (vert)
+        vk.DestroyShaderModule(vk.device, vert, NULL);
+    if (frag)
+        vk.DestroyShaderModule(vk.device, frag, NULL);
+    if (alpha)
+        vk.DestroyShaderModule(vk.device, alpha, NULL);
+
+    if (ok)
+        Com_Printf("Vulkan pixel lightmap shader modules validated\n");
+    return ok;
+}
+
+static bool vk_create_pixel_world_pipeline_layout(void)
+{
+    if (vk_pixel_lightmap_mode() < 2)
+        return true;
+    if (sizeof(vk_world_pixel_push_t) >
+        vk.physical_device_properties.limits.maxPushConstantsSize) {
+        Com_WPrintf("Vulkan pixel lightmaps mode 2 exceeds push constant limit; using mode 1\n");
+        Cvar_Set("vk_pixel_lightmaps", "1");
+        return true;
+    }
+
+    VkDescriptorSetLayout set_layouts[] = {
+        vk.texture_set_layout,
+        vk.texture_set_layout,
+    };
+    VkPushConstantRange push_range = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset = 0,
+        .size = sizeof(vk_world_pixel_push_t),
+    };
+    VkPipelineLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = q_countof(set_layouts),
+        .pSetLayouts = set_layouts,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &push_range,
+    };
+    VkResult result = vk.CreatePipelineLayout(vk.device, &layout_info, NULL,
+                                              &vk.pixel_world_pipeline_layout);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreatePipelineLayout(pixel_world)", result);
+
+    Com_Printf("Vulkan pixel lightmap pipeline layout created\n");
+    return true;
+}
+
+static void vk_print_pixel_lightmap_mode(void)
+{
+    int mode = vk_pixel_lightmap_mode();
+
+    if (mode <= 0) {
+        Com_Printf("Vulkan pixel lightmaps: disabled\n");
+    } else if (mode == 1) {
+        Com_Printf("Vulkan pixel lightmaps: upload-only validation mode\n");
+    } else {
+        Com_Printf("Vulkan pixel lightmaps: draw mode requested\n");
+    }
+}
+
 static const VkDynamicState vk_3d_dynamic_states[] = {
     VK_DYNAMIC_STATE_VIEWPORT,
     VK_DYNAMIC_STATE_SCISSOR,
+    VK_DYNAMIC_STATE_LINE_WIDTH,
 };
 
 static const VkPipelineDynamicStateCreateInfo vk_3d_dynamic_state = {
@@ -4291,18 +4382,184 @@ static bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
     return true;
 }
 
+static bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test)
+{
+    if (vk_pixel_lightmap_mode() < 2)
+        return true;
+    if (!vk.pixel_world_pipeline_layout) {
+        Com_SetLastError("No Vulkan pixel world pipeline layout");
+        return false;
+    }
+
+    VkShaderModule vert = vk_create_shader_module(vk_world_pixel_vert_spv,
+                                                  sizeof(vk_world_pixel_vert_spv));
+    if (!vert)
+        return false;
+
+    VkShaderModule frag = alpha_test ?
+        vk_create_shader_module(vk_world_pixel_alpha_frag_spv,
+                                sizeof(vk_world_pixel_alpha_frag_spv)) :
+        vk_create_shader_module(vk_world_pixel_frag_spv,
+                                sizeof(vk_world_pixel_frag_spv));
+    if (!frag) {
+        vk.DestroyShaderModule(vk.device, vert, NULL);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vert,
+            .pName = "main",
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = frag,
+            .pName = "main",
+        },
+    };
+    VkVertexInputBindingDescription bindings[] = {
+        {
+            .binding = 0,
+            .stride = sizeof(vk_vertex_t),
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        },
+        {
+            .binding = 1,
+            .stride = sizeof(float) * 2,
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        },
+    };
+    VkVertexInputAttributeDescription attributes[] = {
+        {
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, position),
+        },
+        {
+            .location = 1,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, color),
+        },
+        {
+            .location = 2,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, uv),
+        },
+        {
+            .location = 3,
+            .binding = 1,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .offset = 0,
+        },
+    };
+    VkPipelineVertexInputStateCreateInfo vertex_input = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = q_countof(bindings),
+        .pVertexBindingDescriptions = bindings,
+        .vertexAttributeDescriptionCount = q_countof(attributes),
+        .pVertexAttributeDescriptions = attributes,
+    };
+    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    VkViewport viewport = {
+        .width = vk.swapchain_extent.width,
+        .height = vk.swapchain_extent.height,
+        .maxDepth = 1.0f,
+    };
+    VkRect2D scissor = {
+        .extent = vk.swapchain_extent,
+    };
+    VkPipelineViewportStateCreateInfo viewport_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = &viewport,
+        .scissorCount = 1,
+        .pScissors = &scissor,
+    };
+    VkPipelineRasterizationStateCreateInfo raster = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth = 1.0f,
+    };
+    VkPipelineMultisampleStateCreateInfo multisample = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    VkPipelineColorBlendAttachmentState color_blend_attachment = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    VkPipelineColorBlendStateCreateInfo color_blend = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &color_blend_attachment,
+    };
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+    };
+    VkGraphicsPipelineCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = q_countof(stages),
+        .pStages = stages,
+        .pVertexInputState = &vertex_input,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &raster,
+        .pMultisampleState = &multisample,
+        .pDepthStencilState = &depth_stencil,
+        .pColorBlendState = &color_blend,
+        .pDynamicState = &vk_3d_dynamic_state,
+        .layout = vk.pixel_world_pipeline_layout,
+        .renderPass = vk.render_pass,
+        .subpass = 0,
+    };
+    VkResult result = vk.CreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1,
+                                                 &create_info, NULL, pipeline);
+    vk.DestroyShaderModule(vk.device, frag, NULL);
+    vk.DestroyShaderModule(vk.device, vert, NULL);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkCreateGraphicsPipelines(pixel_world)", result);
+
+    Com_Printf("Vulkan pixel lightmap %s pipeline created\n",
+               alpha_test ? "alpha" : "opaque");
+    return true;
+}
+
 static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
                                      bool blend, bool color_write,
                                      bool alpha_test,
+                                     bool color_only,
                                      VkCullModeFlags cull_mode,
-                                     VkPrimitiveTopology topology)
+                                     VkPolygonMode polygon_mode,
+                                     VkPrimitiveTopology topology,
+                                     VkCompareOp depth_compare,
+                                     bool depth_bias_enable,
+                                     float depth_bias_constant,
+                                     float depth_bias_slope,
+                                     VkPipelineDepthStencilStateCreateInfo *stencil_state)
 {
     VkShaderModule vert = vk_create_shader_module(vk_alias_vert_spv,
                                                   sizeof(vk_alias_vert_spv));
     if (!vert)
         return false;
 
-    VkShaderModule frag = alpha_test ?
+    VkShaderModule frag = color_only ?
+        vk_create_shader_module(vk_alias_shadow_frag_spv,
+                                sizeof(vk_alias_shadow_frag_spv)) :
+        alpha_test ?
         vk_create_shader_module(vk_world_alpha_frag_spv,
                                 sizeof(vk_world_alpha_frag_spv)) :
         vk_create_shader_module(vk_world_frag_spv,
@@ -4408,10 +4665,13 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
     };
     VkPipelineRasterizationStateCreateInfo raster = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .polygonMode = VK_POLYGON_MODE_FILL,
+        .polygonMode = polygon_mode,
         .cullMode = cull_mode,
         .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .lineWidth = 1.0f,
+        .depthBiasEnable = depth_bias_enable,
+        .depthBiasConstantFactor = depth_bias_constant,
+        .depthBiasSlopeFactor = depth_bias_slope,
     };
     VkPipelineMultisampleStateCreateInfo multisample = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
@@ -4434,12 +4694,17 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
         .attachmentCount = 1,
         .pAttachments = &color_blend_attachment,
     };
-    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable = VK_TRUE,
-        .depthWriteEnable = depth_write,
-        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
-    };
+    VkPipelineDepthStencilStateCreateInfo depth_stencil;
+    if (stencil_state) {
+        depth_stencil = *stencil_state;
+    } else {
+        depth_stencil = (VkPipelineDepthStencilStateCreateInfo){
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            .depthTestEnable = VK_TRUE,
+            .depthWriteEnable = depth_write,
+            .depthCompareOp = depth_compare,
+        };
+    }
     VkGraphicsPipelineCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .stageCount = q_countof(stages),
@@ -4614,7 +4879,11 @@ static bool vk_create_swapchain(int width, int height)
         max(vk.swapchain_extent.height / 4, 1),
     };
 
-    if (!vk_create_render_pass() ||
+    vk_print_pixel_lightmap_mode();
+
+    if (!vk_validate_pixel_lightmap_shaders() ||
+        !vk_create_pixel_world_pipeline_layout() ||
+        !vk_create_render_pass() ||
         !vk_create_rect_pipeline() ||
         !vk_create_rect_pipeline_ex(&vk.vignette_pipeline,
                                     vk_vignette_vert_spv,
@@ -4651,24 +4920,26 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_world_pipeline(&vk.world_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.world_alpha_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.world_glow_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE) ||
+        !vk_create_pixel_world_pipeline(&vk.pixel_world_pipeline, VK_FALSE) ||
+        !vk_create_pixel_world_pipeline(&vk.pixel_world_alpha_pipeline, VK_TRUE) ||
         !vk_create_world_pipeline(&vk.sky_pipeline, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.sprite_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.sprite_alpha_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.particle_add_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.glare_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE) ||
         !vk_create_world_pipeline(&vk.debug_text_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE) ||
-        !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_CULL_MODE_NONE,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
-        !vk_create_alias_pipeline(&vk.alias_alpha_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE, VK_CULL_MODE_NONE,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
-        !vk_create_alias_pipeline(&vk.alias_depth_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
-        !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_CULL_MODE_NONE,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
-        !vk_create_alias_pipeline(&vk.alias_cel_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_CULL_MODE_FRONT_BIT,
-                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
-        !vk_create_alias_pipeline(&vk.alias_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_CULL_MODE_NONE,
-                                  VK_PRIMITIVE_TOPOLOGY_LINE_LIST) ||
+        !vk_create_alias_pipeline(&vk.alias_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
+        !vk_create_alias_pipeline(&vk.alias_alpha_pipeline, VK_TRUE, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
+        !vk_create_alias_pipeline(&vk.alias_depth_pipeline, VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
+        !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
+        !vk_create_alias_pipeline(&vk.alias_shadow_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_TRUE, -1.0f, -2.0f, NULL) ||
+        !vk_create_alias_pipeline(&vk.alias_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
+                                  VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_depth_resources() ||
         !vk_create_framebuffers() ||
         !vk_create_scene_target())
@@ -4808,10 +5079,29 @@ static void vk_bind_texture_descriptor(VkCommandBuffer cmd, VkDescriptorSet set)
     c.texSwitches++;
 }
 
+static void vk_bind_pixel_world_descriptor(VkCommandBuffer cmd,
+                                           uint32_t set_index,
+                                           VkDescriptorSet set)
+{
+    vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             vk.pixel_world_pipeline_layout, set_index, 1,
+                             &set, 0, NULL);
+    c.texSwitches++;
+}
+
 static void vk_push_constants(VkCommandBuffer cmd, uint32_t size,
                               const void *data)
 {
     vk.CmdPushConstants(cmd, vk.rect_pipeline_layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, size, data);
+    c.uniformUploads++;
+}
+
+static void vk_push_pixel_world_constants(VkCommandBuffer cmd, uint32_t size,
+                                          const void *data)
+{
+    vk.CmdPushConstants(cmd, vk.pixel_world_pipeline_layout,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, size, data);
     c.uniformUploads++;
@@ -4873,6 +5163,8 @@ static void vk_set_3d_viewport(const refdef_t *fd)
 
     vk.CmdSetViewport(cmd, 0, 1, &viewport);
     vk.CmdSetScissor(cmd, 0, 1, &scissor);
+    if (vk.CmdSetLineWidth)
+        vk.CmdSetLineWidth(cmd, 1.0f);
 }
 
 static void vk_clear_rect(int x, int y, int w, int h, uint32_t color)
@@ -6531,13 +6823,41 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     const vk_mesh_t *mesh = &vk.world.mesh;
     bool use_marked = marked_only ||
         (vk_world_vis && vk_world_vis->integer && vk.world.face_count);
+    bool special_light_mode = (vk_lightmap && vk_lightmap->integer) ||
+        (vk_fullbright && vk_fullbright->integer) ||
+        (vk_vertexlight && vk_vertexlight->integer);
+    bool pixel_mode = vk_pixel_lightmap_mode() >= 2;
+    bool pixel_requested = vk_pixel_lightmap_mode() >= 2 &&
+        pass == VK_WORLD_OPAQUE && !vk.drawing_bloom && !ent &&
+        !special_light_mode;
+    bool pixel_ready = vk.pixel_world_pipeline && vk.pixel_world_alpha_pipeline &&
+        vk.pixel_world_pipeline_layout && vk.world.pixel_lmuv_buffer.buffer &&
+        vk.world.pixel_lightmap_texture.descriptor_set;
+    bool pixel_world = pixel_requested && pixel_ready;
 
     if (!vk.render_pass_active || !pipeline ||
         !mesh->vertices.buffer || !mesh->indices.buffer || !mesh->index_count ||
         !vk.world.batch_count || !vk.world.batches || !vk.world.faces)
         return;
 
-    vk_world_push_t push;
+    if (pixel_mode && !pixel_requested && !vk_pixel_lightmaps_scope_logged) {
+        Com_Printf("Vulkan pixel lightmaps mode 2 applies only to opaque world surfaces\n");
+        vk_pixel_lightmaps_scope_logged = true;
+    }
+
+    if (pixel_requested && !pixel_ready) {
+        if (!vk_pixel_lightmaps_warned) {
+            Com_WPrintf("Vulkan pixel lightmaps mode 2 needs vk_pixel_lightmaps 2 before video init; using mode 1\n");
+            vk_pixel_lightmaps_warned = true;
+        }
+        Cvar_Set("vk_pixel_lightmaps", "1");
+    }
+    if (pixel_world && !vk_pixel_lightmaps_draw_logged) {
+        Com_Printf("Vulkan pixel lightmaps: drawing opaque world with pixel pipeline\n");
+        vk_pixel_lightmaps_draw_logged = true;
+    }
+
+    vk_world_pixel_push_t push;
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     push.color[0] = 1.0f;
     push.color[1] = 1.0f;
@@ -6547,14 +6867,34 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
     Vector4Clear(push.dlight);
     vk_fog_params(fd, push.fog);
     push.intensity = vk_texture_intensity();
+    push._pad = 0.0f;
+    push.lm_scale[0] = -1.0f;
+    push.lm_scale[1] = -1.0f;
+    push.lm_offset[0] = 0.0f;
+    push.lm_offset[1] = 0.0f;
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     VkDeviceSize offset = 0;
+    VkBuffer pixel_buffers[] = {
+        mesh->vertices.buffer,
+        vk.world.pixel_lmuv_buffer.buffer,
+    };
+    VkDeviceSize pixel_offsets[] = { 0, 0 };
 
-    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vk_bind_vertex_buffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                       pixel_world ? vk.pixel_world_pipeline : pipeline);
+    if (pixel_world)
+        vk_bind_vertex_buffers(cmd, 0, 2, pixel_buffers, pixel_offsets);
+    else
+        vk_bind_vertex_buffers(cmd, 0, 1, &mesh->vertices.buffer, &offset);
     vk.CmdBindIndexBuffer(cmd, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk_push_constants(cmd, sizeof(push), &push);
+    if (pixel_world) {
+        vk_bind_pixel_world_descriptor(cmd, 1,
+                                       vk.world.pixel_lightmap_texture.descriptor_set);
+        vk_push_pixel_world_constants(cmd, sizeof(push), &push);
+    } else {
+        vk_push_constants(cmd, sizeof(vk_world_push_t), &push);
+    }
 
     for (uint32_t i = 0; i < vk.world.batch_count; i++) {
         const vk_world_batch_t *batch = &vk.world.batches[i];
@@ -6565,7 +6905,10 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         if (!texture)
             continue;
 
-        vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+        if (pixel_world)
+            vk_bind_pixel_world_descriptor(cmd, 0, texture->descriptor_set);
+        else
+            vk_bind_texture_descriptor(cmd, texture->descriptor_set);
         uint32_t bound_texture_index = batch->texture_index;
 
         if (batch->first_face > vk.world.face_count ||
@@ -6605,7 +6948,7 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
                 Vector4Clear(push.dlight);
                 vk_world_face_scroll(face->face, fd ? fd->time : 0.0f, push.scroll);
-                vk_push_constants(cmd, sizeof(push), &push);
+                vk_push_constants(cmd, sizeof(vk_world_push_t), &push);
                 vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
                 c.trisDrawn += face->index_count / 3;
                 c.batchesDrawn++;
@@ -6616,12 +6959,22 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 texture = vk_texture_for_index(image->texnum, true);
                 if (!texture)
                     continue;
-                vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+                if (pixel_world)
+                    vk_bind_pixel_world_descriptor(cmd, 0, texture->descriptor_set);
+                else
+                    vk_bind_texture_descriptor(cmd, texture->descriptor_set);
                 bound_texture_index = image->texnum;
             }
 
-            face_pipeline = vk_world_face_pipeline(face->face, pipeline, pass);
-            if (face_pipeline != pipeline)
+            if (pixel_world) {
+                face_pipeline = (face->face->drawflags & SURF_ALPHATEST) ?
+                    vk.pixel_world_alpha_pipeline : vk.pixel_world_pipeline;
+                vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                   face_pipeline);
+            } else {
+                face_pipeline = vk_world_face_pipeline(face->face, pipeline, pass);
+            }
+            if (!pixel_world && face_pipeline != pipeline)
                 vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, face_pipeline);
 
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
@@ -6631,7 +6984,25 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             push.dlight[3] = fd ? fd->time : 0.0f;
             push.intensity = vk_texture_intensity();
             push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
-            vk_push_constants(cmd, sizeof(push), &push);
+            if (pixel_world && face->pixel_lm_w && face->pixel_lm_h) {
+                float aw = vk.world.pixel_lightmap_texture.width ?
+                    (float)vk.world.pixel_lightmap_texture.width : 1.0f;
+                float ah = vk.world.pixel_lightmap_texture.height ?
+                    (float)vk.world.pixel_lightmap_texture.height : 1.0f;
+                push.lm_scale[0] = max(face->pixel_lm_w - 1, 0) / aw;
+                push.lm_scale[1] = max(face->pixel_lm_h - 1, 0) / ah;
+                push.lm_offset[0] = (face->pixel_lm_x + 0.5f) / aw;
+                push.lm_offset[1] = (face->pixel_lm_y + 0.5f) / ah;
+            } else {
+                push.lm_scale[0] = -1.0f;
+                push.lm_scale[1] = -1.0f;
+                push.lm_offset[0] = 0.0f;
+                push.lm_offset[1] = 0.0f;
+            }
+            if (pixel_world)
+                vk_push_pixel_world_constants(cmd, sizeof(push), &push);
+            else
+                vk_push_constants(cmd, sizeof(vk_world_push_t), &push);
             vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
             c.facesDrawn++;
             c.facesTris += face->index_count / 3;
@@ -6653,16 +7024,22 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     push.color[1] = 1.0f;
                     push.color[2] = 1.0f;
                     push.color[3] = entity_alpha * vk_world_face_alpha(face->face);
-                    vk_push_constants(cmd, sizeof(push), &push);
+                    vk_push_constants(cmd, sizeof(vk_world_push_t), &push);
                     vk.CmdDrawIndexed(cmd, face->index_count, 1, face->first_index, 0, 0);
                     c.trisDrawn += face->index_count / 3;
                     c.batchesDrawn++;
                     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                        face_pipeline);
+                    if (pixel_world) {
+                        vk_bind_pixel_world_descriptor(cmd, 0, texture->descriptor_set);
+                        vk_bind_pixel_world_descriptor(cmd, 1,
+                                                       vk.world.pixel_lightmap_texture.descriptor_set);
+                        bound_texture_index = image->texnum;
+                    }
                 }
             }
 
-            if (face_pipeline != pipeline)
+            if (!pixel_world && face_pipeline != pipeline)
                 vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         }
     }
@@ -7333,54 +7710,35 @@ static void vk_draw_alias_pass(VkCommandBuffer cmd, VkPipeline pipeline,
     c.batchesDrawn++;
 }
 
+static void vk_draw_alias_color_pass(VkCommandBuffer cmd, VkPipeline pipeline,
+                                     const VkBuffer buffers[2],
+                                     const VkDeviceSize offsets[2],
+                                     const vk_model_t *model,
+                                     const vk_alias_push_t *push)
+{
+    vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
+    vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vk_push_constants(cmd, sizeof(*push), push);
+    vk.CmdDrawIndexed(cmd, model->mesh.index_count, 1, 0, 0, 0);
+    c.trisDrawn += model->mesh.index_count / 3;
+    c.batchesDrawn++;
+}
+
 static void vk_draw_alias_outlines(VkCommandBuffer cmd,
                                     const VkBuffer buffers[2],
                                     const VkDeviceSize offsets[2],
-                                    const vk_model_t *model,
+                                    vk_model_t *model,
                                     const vk_alias_batch_t *batch,
                                     const vk_texture_t *texture,
                                     const vk_alias_push_t *push,
                                     const entity_t *ent,
                                     const refdef_t *fd)
 {
-    bool showtris = gl_showtris && (gl_showtris->integer & SHOWTRIS_MESH);
-    bool celshading = false;
-    float celalpha = 1.0f;
-
-    if (vk_celshading && vk_celshading->value > 0.0f &&
-        !(ent->flags & (RF_TRANSLUCENT | RF_SHELL_MASK | RF_TRACKER))) {
-        celalpha = 1.0f - Distance(ent->origin, fd->vieworg) / 700.0f;
-        celshading = celalpha >= 0.01f;
-    }
-
-    if (!showtris && !celshading)
+    if (!gl_showtris || !(gl_showtris->integer & SHOWTRIS_MESH))
         return;
 
-    if (celshading && vk.alias_cel_pipeline) {
-        uint32_t first_index = batch ? batch->first_index : 0;
-        uint32_t index_count = batch ? batch->index_count : model->mesh.index_count;
-
-        if (index_count) {
-            vk_alias_push_t cel = *push;
-
-            Vector4Set(cel.color, 0.0f, 0.0f, 0.0f, celalpha);
-            Vector4Clear(cel.shadedir);
-            cel.shellscale = Cvar_ClampValue(vk_celshading, 0.0f, 10.0f) * celalpha;
-            cel.depthscale = 1.0f;
-
-            vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                               vk.alias_cel_pipeline);
-            vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
-            vk.CmdBindIndexBuffer(cmd, model->mesh.indices.buffer, 0,
-                                  VK_INDEX_TYPE_UINT32);
-            vk_bind_texture_descriptor(cmd, texture->descriptor_set);
-            vk_push_constants(cmd, sizeof(cel), &cel);
-            vk.CmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
-            c.batchesDrawn++;
-        }
-    }
-
-    if (!showtris || !vk.alias_line_pipeline || !model->alias_line_indices.buffer ||
+    if (!vk.alias_line_pipeline || !model->alias_line_indices.buffer ||
         !model->alias_line_index_count)
         return;
 
@@ -7507,7 +7865,7 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     mat4_t proj, view, model_matrix, shadow_proj, shadow_model, view_model;
     vk_alias_push_t push;
 
-    if (!vk_shadows || !vk_shadows->integer || !vk.alias_blend_pipeline)
+    if (!vk_shadows || !vk_shadows->integer || !vk.alias_shadow_pipeline)
         return;
     if (ent->flags & (RF_WEAPONMODEL | RF_NOSHADOW))
         return;
@@ -7555,7 +7913,8 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     vk_matrix_multiply(view_model, view, shadow_model);
     vk_matrix_multiply(push.mvp, proj, view_model);
 
-    Vector4Set(push.color, 0.0f, 0.0f, 0.0f, alpha);
+    Vector4Set(push.color, 0.0f, 0.0f, 0.0f,
+               ((ent->flags & RF_TRANSLUCENT) ? ent->alpha : 1.0f) * alpha);
     Vector4Clear(push.shadedir);
     push.backlerp = lerp->backlerp;
     push.shellscale = 0.0f;
@@ -7564,21 +7923,9 @@ static void vk_draw_alias_shadow(const entity_t *ent, const refdef_t *fd,
     vk_fog_params(fd, push.fog);
     push.intensity = 1.0f;
 
-    for (int i = 0; i < model->alias_batch_count; i++) {
-        const vk_alias_batch_t *batch = &model->alias_batches[i];
-        const image_t *skin = vk_skin_for_alias_batch(model, batch, ent);
-
-        if (!skin || skin->texnum >= MAX_RIMAGES)
-            continue;
-
-        const vk_texture_t *texture = vk_texture_for_index(skin->texnum, true);
-        if (!texture)
-            continue;
-
-        vk_draw_alias_pass(vk.command_buffers[vk.current_image],
-                           vk.alias_blend_pipeline, buffers, offsets, model,
-                           batch, texture, &push);
-    }
+    vk_draw_alias_color_pass(vk.command_buffers[vk.current_image],
+                             vk.alias_shadow_pipeline, buffers, offsets,
+                             model, &push);
 }
 
 static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
@@ -8782,6 +9129,205 @@ static bool vk_sample_surface_light(const bsp_t *bsp, const mface_t *face,
     return true;
 }
 
+static bool vk_face_has_valid_lightmap(const bsp_t *bsp, const mface_t *face)
+{
+    if (!bsp || !bsp->lightmap || !face || !face->lightmap || !face->numstyles)
+        return false;
+    if (face->drawflags & vk.world.nolm_mask)
+        return false;
+    if (face->lm_width < 1 || face->lm_height < 1 ||
+        face->lm_width > VK_MAX_LIGHTMAP_EXTENTS ||
+        face->lm_height > VK_MAX_LIGHTMAP_EXTENTS)
+        return false;
+    if (face->lightmap < bsp->lightmap)
+        return false;
+
+    uint64_t size = (uint64_t)face->lm_width * face->lm_height * 3;
+    ptrdiff_t offset = face->lightmap - bsp->lightmap;
+    if (offset < 0 ||
+        (uint64_t)offset + (uint64_t)face->numstyles * size >
+        (uint64_t)bsp->numlightmapbytes)
+        return false;
+
+    return true;
+}
+
+static uint32_t vk_pixel_lightmap_texel(const mface_t *face, const refdef_t *fd,
+                                        int s, int t)
+{
+    int size = face->lm_width * face->lm_height * 3;
+    const byte *lightmap = face->lightmap;
+    float rgb[3] = { 0.0f, 0.0f, 0.0f };
+
+    for (int i = 0; i < face->numstyles; i++) {
+        const byte *src = &lightmap[3 * (t * face->lm_width + s)];
+        float style = vk_lightstyle_value(fd, face->styles[i]);
+        rgb[0] += style * src[0];
+        rgb[1] += style * src[1];
+        rgb[2] += style * src[2];
+        lightmap += size;
+    }
+
+    if (vk_coloredlightmaps && !vk_coloredlightmaps->integer) {
+        float y = LUMINANCE(rgb[0], rgb[1], rgb[2]);
+        rgb[0] = rgb[1] = rgb[2] = y;
+    }
+
+    return MakeColor(Q_clipf(rgb[0], 0.0f, 255.0f),
+                     Q_clipf(rgb[1], 0.0f, 255.0f),
+                     Q_clipf(rgb[2], 0.0f, 255.0f), 255);
+}
+
+static uint32_t vk_pixel_lightmap_checksum(const uint32_t *pixels, size_t count)
+{
+    uint32_t hash = 2166136261u;
+
+    for (size_t i = 0; i < count; i++) {
+        hash ^= pixels[i];
+        hash *= 16777619u;
+    }
+
+    return hash;
+}
+
+static uint32_t vk_pixel_lightmap_hash_u32(uint32_t hash, uint32_t value)
+{
+    hash ^= value;
+    return hash * 16777619u;
+}
+
+static uint32_t vk_pixel_lightmap_hash_float(uint32_t hash, float value)
+{
+    uint32_t bits;
+
+    memcpy(&bits, &value, sizeof(bits));
+    return vk_pixel_lightmap_hash_u32(hash, bits);
+}
+
+static void vk_pixel_lightmap_plan(const bsp_t *bsp,
+                                   vk_world_face_t *faces,
+                                   uint32_t face_count,
+                                   const refdef_t *fd)
+{
+    if (vk_pixel_lightmap_mode() < 1)
+        return;
+
+    typedef struct {
+        const mface_t *face;
+        int x, y;
+    } vk_lm_plan_t;
+
+    uint32_t valid = 0;
+    uint32_t invalid = 0;
+    uint64_t total_area = 1;
+    int max_w = 1;
+
+    for (uint32_t i = 0; i < face_count; i++) {
+        faces[i].pixel_lm_x = faces[i].pixel_lm_y = 0;
+        faces[i].pixel_lm_w = faces[i].pixel_lm_h = 0;
+        const mface_t *face = faces[i].face;
+        if (!vk_face_has_valid_lightmap(bsp, face)) {
+            invalid++;
+            continue;
+        }
+        valid++;
+        max_w = max(max_w, face->lm_width + 2);
+        total_area += (uint64_t)(face->lm_width + 2) * (face->lm_height + 2);
+    }
+
+    int atlas_w = 1;
+    while (atlas_w < max_w || (uint64_t)atlas_w * atlas_w < total_area)
+        atlas_w <<= 1;
+    atlas_w = min(atlas_w, 4096);
+
+    if (!valid) {
+        Com_Printf("Vulkan pixel lightmap CPU atlas: no valid lightmaps\n");
+        vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
+        return;
+    }
+
+    vk_lm_plan_t *plan = Z_Mallocz(sizeof(*plan) * face_count);
+    int cx = 0, cy = 0, row_h = 0;
+    for (uint32_t i = 0; i < face_count; i++) {
+        const mface_t *face = faces[i].face;
+        if (!vk_face_has_valid_lightmap(bsp, face))
+            continue;
+        int pack_w = face->lm_width + 2;
+        int pack_h = face->lm_height + 2;
+        if (cx + pack_w > atlas_w) {
+            cx = 0;
+            cy += row_h;
+            row_h = 0;
+        }
+        plan[i].face = face;
+        plan[i].x = cx + 1;
+        plan[i].y = cy + 1;
+        faces[i].pixel_lm_x = cx + 1;
+        faces[i].pixel_lm_y = cy + 1;
+        faces[i].pixel_lm_w = face->lm_width;
+        faces[i].pixel_lm_h = face->lm_height;
+        cx += pack_w;
+        row_h = max(row_h, pack_h);
+    }
+
+    int atlas_h = 1;
+    while (atlas_h < cy + row_h)
+        atlas_h <<= 1;
+
+    if (atlas_w > 4096 || atlas_h > 4096) {
+        Com_WPrintf("Vulkan pixel lightmap plan too large: %dx%d\n",
+                    atlas_w, atlas_h);
+        for (uint32_t i = 0; i < face_count; i++) {
+            faces[i].pixel_lm_x = faces[i].pixel_lm_y = 0;
+            faces[i].pixel_lm_w = faces[i].pixel_lm_h = 0;
+        }
+        vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
+        Z_Free(plan);
+        return;
+    }
+
+    size_t pixel_count = (size_t)atlas_w * atlas_h;
+    uint32_t *pixels = Z_Malloc(sizeof(*pixels) * pixel_count);
+    for (size_t i = 0; i < pixel_count; i++)
+        pixels[i] = MakeColor(255, 255, 255, 255);
+
+    for (uint32_t i = 0; i < face_count; i++) {
+        const mface_t *face = plan[i].face;
+        if (!face)
+            continue;
+        for (int t = -1; t <= face->lm_height; t++) {
+            int src_t = Q_clipf(t, 0, face->lm_height - 1);
+            for (int s = -1; s <= face->lm_width; s++) {
+                int src_s = Q_clipf(s, 0, face->lm_width - 1);
+                pixels[(plan[i].y + t) * atlas_w + plan[i].x + s] =
+                    vk_pixel_lightmap_texel(face, fd, src_s, src_t);
+            }
+        }
+    }
+
+    uint32_t checksum = vk_pixel_lightmap_checksum(pixels, pixel_count);
+
+    bool log_atlas = !vk_pixel_lightmaps_atlas_logged;
+    if (log_atlas) {
+        Com_Printf("Vulkan pixel lightmap CPU atlas (mode %d): %u valid, %u skipped, %dx%d, checksum %08x\n",
+                   vk_pixel_lightmap_mode(), valid, invalid, atlas_w, atlas_h, checksum);
+        vk_pixel_lightmaps_atlas_logged = true;
+    }
+    vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
+    if (vk_upload_texture_data(&vk.world.pixel_lightmap_texture,
+                               atlas_w, atlas_h, pixels, false)) {
+        if (log_atlas) {
+            Com_Printf("Vulkan pixel lightmap atlas texture uploaded: %dx%d\n",
+                       atlas_w, atlas_h);
+        }
+    } else {
+        Com_WPrintf("Couldn't upload Vulkan pixel lightmap atlas texture: %s\n",
+                    Com_GetLastError());
+    }
+    Z_Free(pixels);
+    Z_Free(plan);
+}
+
 static void vk_surface_vertex_color(const bsp_t *bsp, const mface_t *face,
                                     const refdef_t *fd,
                                     const vec3_t point, const float fallback[4],
@@ -8892,6 +9438,15 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
     uint32_t line_index_count = 0;
     uint32_t v = 0;
     uint32_t face_index = 0;
+    uint32_t lmuv_hash = 2166136261u;
+    uint32_t lmuv_count = 0;
+    bool pixel_lm_debug = vk_pixel_lightmap_mode() > 0;
+    float *lmuv_data = pixel_lm_debug ?
+        Z_Malloc(sizeof(*lmuv_data) * 2 * vertex_count) : NULL;
+    if (!pixel_lm_debug) {
+        vk_destroy_buffer(&vk.world.pixel_lmuv_buffer);
+        vk_destroy_texture_resource(&vk.world.pixel_lightmap_texture);
+    }
 
     for (int i = 0; i < bsp->numfaces; i++) {
         mface_t *face = &bsp->faces[i];
@@ -8930,6 +9485,21 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                                  face->texinfo->offset[0]) * scale_s;
             vertices[v].uv[1] = (DotProduct(src->point, face->texinfo->axis[1]) +
                                  face->texinfo->offset[1]) * scale_t;
+            if (pixel_lm_debug) {
+                float lms = 0.0f;
+                float lmt = 0.0f;
+                if (vk_face_has_valid_lightmap(bsp, face)) {
+                    lms = (DotProduct(src->point, face->lm_axis[0]) +
+                           face->lm_offset[0]) / max(face->lm_width, 1);
+                    lmt = (DotProduct(src->point, face->lm_axis[1]) +
+                           face->lm_offset[1]) / max(face->lm_height, 1);
+                }
+                lmuv_hash = vk_pixel_lightmap_hash_float(lmuv_hash, lms);
+                lmuv_hash = vk_pixel_lightmap_hash_float(lmuv_hash, lmt);
+                lmuv_data[v * 2 + 0] = lms;
+                lmuv_data[v * 2 + 1] = lmt;
+                lmuv_count++;
+            }
             v++;
         }
 
@@ -8993,10 +9563,29 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
         }
     }
 
+    vk_pixel_lightmap_plan(bsp, draw_faces, draw_face_count, fd);
+    if (pixel_lm_debug && !vk_pixel_lightmaps_lmuv_logged)
+        Com_Printf("Vulkan pixel lightmap CPU lmuv (mode %d): %u verts, checksum %08x\n",
+                   vk_pixel_lightmap_mode(), lmuv_count, lmuv_hash);
+
     line_indices = vk_build_line_indices(indices, idx, &line_index_count);
 
     bool ok = vk_upload_mesh(&vk.world.mesh, vertices, v, indices, idx);
     if (ok) {
+        vk_destroy_buffer(&vk.world.pixel_lmuv_buffer);
+        if (lmuv_data) {
+            size_t lmuv_size = sizeof(*lmuv_data) * 2 * v;
+            if (vk_upload_buffer(&vk.world.pixel_lmuv_buffer, lmuv_data, lmuv_size,
+                                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
+                if (!vk_pixel_lightmaps_lmuv_logged) {
+                    Com_Printf("Vulkan pixel lightmap lmuv buffer uploaded: %zu bytes\n",
+                               lmuv_size);
+                    vk_pixel_lightmaps_lmuv_logged = true;
+                }
+            } else {
+                Com_WPrintf("Couldn't upload Vulkan pixel lightmap lmuv buffer\n");
+            }
+        }
         vk_destroy_buffer(&vk.world.line_indices);
         vk.world.line_index_count = 0;
         if (line_indices && line_index_count) {
@@ -9024,6 +9613,8 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
 
     Z_Free(vertices);
     Z_Free(indices);
+    if (lmuv_data)
+        Z_Free(lmuv_data);
     if (line_indices)
         Z_Free(line_indices);
     Z_Free(build_faces);
@@ -9063,6 +9654,7 @@ static bool vk_world_lighting_modified(void)
            (vk_dynamic && vk_dynamic->modified) ||
            (vk_fullbright && vk_fullbright->modified) ||
            (vk_lightmap && vk_lightmap->modified) ||
+           (vk_pixel_lightmaps && vk_pixel_lightmaps->modified) ||
            (vk_coloredlightmaps && vk_coloredlightmaps->modified) ||
            (vk_vertexlight && vk_vertexlight->modified);
 }
@@ -9113,6 +9705,14 @@ static void vk_clear_world_lighting_modified(void)
         vk_fullbright->modified = false;
     if (vk_lightmap)
         vk_lightmap->modified = false;
+    if (vk_pixel_lightmaps) {
+        if (vk_pixel_lightmap_mode() < 2) {
+            vk_pixel_lightmaps_warned = false;
+            vk_pixel_lightmaps_draw_logged = false;
+            vk_pixel_lightmaps_scope_logged = false;
+        }
+        vk_pixel_lightmaps->modified = false;
+    }
     if (vk_coloredlightmaps)
         vk_coloredlightmaps->modified = false;
     if (vk_vertexlight)
@@ -9156,6 +9756,52 @@ static void vk_register_world_images(bsp_t *bsp)
     }
 }
 
+static void vk_prepare_face_lightmap(const bsp_t *bsp, mface_t *face)
+{
+    if (!bsp || !face || !face->texinfo)
+        return;
+    if (bsp->lm_decoupled) {
+        float len0 = VectorLength(face->lm_axis[0]);
+        float len1 = VectorLength(face->lm_axis[1]);
+        face->lm_scale[0] = len0 ? 1.0f / len0 : 0.0f;
+        face->lm_scale[1] = len1 ? 1.0f / len1 : 0.0f;
+        return;
+    }
+    if (!vk_face_edges_are_valid(bsp, face))
+        return;
+
+    vec2_t mins = { 99999.0f, 99999.0f };
+    vec2_t maxs = { -99999.0f, -99999.0f };
+
+    for (int i = 0; i < face->numsurfedges; i++) {
+        const msurfedge_t *surfedge = face->firstsurfedge + i;
+        const medge_t *edge = bsp->edges + surfedge->edge;
+        const mvertex_t *vert = bsp->vertices + edge->v[surfedge->vert];
+
+        for (int axis = 0; axis < 2; axis++) {
+            float tc = DotProduct(vert->point, face->texinfo->axis[axis]) +
+                       face->texinfo->offset[axis];
+            mins[axis] = min(mins[axis], tc);
+            maxs[axis] = max(maxs[axis], tc);
+        }
+    }
+
+    int bmins[2], bmaxs[2];
+    bmins[0] = floorf(mins[0] / 16.0f);
+    bmins[1] = floorf(mins[1] / 16.0f);
+    bmaxs[0] = ceilf(maxs[0] / 16.0f);
+    bmaxs[1] = ceilf(maxs[1] / 16.0f);
+
+    VectorScale(face->texinfo->axis[0], 1.0f / 16.0f, face->lm_axis[0]);
+    VectorScale(face->texinfo->axis[1], 1.0f / 16.0f, face->lm_axis[1]);
+    face->lm_offset[0] = face->texinfo->offset[0] / 16.0f - bmins[0];
+    face->lm_offset[1] = face->texinfo->offset[1] / 16.0f - bmins[1];
+    face->lm_width = bmaxs[0] - bmins[0] + 1;
+    face->lm_height = bmaxs[1] - bmins[1] + 1;
+    face->lm_scale[0] = 16.0f;
+    face->lm_scale[1] = 16.0f;
+}
+
 static void vk_prepare_world_surfaces(bsp_t *bsp)
 {
     if (!bsp || !bsp->faces)
@@ -9176,6 +9822,8 @@ static void vk_prepare_world_surfaces(bsp_t *bsp)
 
         if (face->drawflags & (SURF_N64_UV | SURF_N64_SCROLL_X | SURF_N64_SCROLL_Y))
             n64surfs++;
+
+        vk_prepare_face_lightmap(bsp, face);
     }
 
     vk.world.nolm_mask = SURF_NOLM_MASK_DEFAULT;
@@ -9288,7 +9936,6 @@ static void vk_load_world(const char *name)
 
     vk_free_world();
     vk.world.cache = bsp;
-    vk_prepare_face_lightmaps(bsp);
     vk.world.size = vk_world_size_for_bsp(bsp);
 
     vk_register_world_images(bsp);
@@ -9467,7 +10114,6 @@ bool VKR_Init(bool total)
     vk_fullbright = Cvar_Get("r_fullbright", "0", CVAR_CHEAT);
     vk_cull_models = Cvar_Get("gl_cull_models", "1", 0);
     vk_shadows = Cvar_Get("gl_shadows", "0", CVAR_ARCHIVE);
-    vk_celshading = Cvar_Get("gl_celshading", "0", 0);
     vk_dotshading = Cvar_Get("gl_dotshading", "1", 0);
     vk_draworder = Cvar_Get("gl_draworder", "1", 0);
     vk_showorigins = Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
@@ -9508,6 +10154,7 @@ bool VKR_Init(bool total)
     vk_novis = Cvar_Get("gl_novis", "0", 0);
     vk_lockpvs = Cvar_Get("gl_lockpvs", "0", CVAR_CHEAT);
     vk_lightmap = Cvar_Get("gl_lightmap", "0", CVAR_CHEAT);
+    vk_pixel_lightmaps = Cvar_Get("vk_pixel_lightmaps", "0", 0);
     vk_vertexlight = Cvar_Get("gl_vertexlight", "0", 0);
     vk_nobind = Cvar_Get("gl_nobind", "0", CVAR_CHEAT);
     vk_clear = Cvar_Get("gl_clear", "0", 0);
@@ -9705,6 +10352,10 @@ void VKR_Shutdown(bool total)
     if (vk.rect_pipeline_layout) {
         vk.DestroyPipelineLayout(vk.device, vk.rect_pipeline_layout, NULL);
         vk.rect_pipeline_layout = VK_NULL_HANDLE;
+    }
+    if (vk.pixel_world_pipeline_layout) {
+        vk.DestroyPipelineLayout(vk.device, vk.pixel_world_pipeline_layout, NULL);
+        vk.pixel_world_pipeline_layout = VK_NULL_HANDLE;
     }
 
     if (vk.device && vk.DestroyDevice) {
