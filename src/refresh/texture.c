@@ -19,6 +19,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "gl.h"
 #include "common/prompt.h"
+#include "vk_backend.h"
 
 static int gl_filter_min;
 static int gl_filter_max;
@@ -916,6 +917,11 @@ static const image_upload_t gl_image_upload = {
 // for screenshots
 int IMG_ReadPixels(screenshot_t *s)
 {
+#if USE_VULKAN
+    if (R_GetVideoAPI() == REF_VIDEO_VULKAN)
+        return VKR_ReadPixels(s);
+#endif
+
     int format = gl_config.ver_es ? GL_RGBA : GL_RGB;
     int align = 4, bpp = format == GL_RGBA ? 4 : 3;
 
