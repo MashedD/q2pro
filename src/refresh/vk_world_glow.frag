@@ -5,6 +5,8 @@ layout(push_constant) uniform Push {
     vec4 color;
     vec4 scroll;
     vec4 dlight;
+    vec4 dlight_origins[3];
+    vec4 dlight_colors[3];
     vec4 fog;
     float intensity;
 } pc;

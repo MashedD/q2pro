@@ -322,10 +322,13 @@ if vulkan.found()
                     'vk_bloom_downscale.frag', 'vk_bloom_blur.frag',
                     'vk_color3d.vert', 'vk_color3d.frag',
                     'vk_world.vert', 'vk_world.frag', 'vk_world_alpha.frag',
+                    'vk_world_lit.vert', 'vk_world_lit.frag',
+                    'vk_world_lit_alpha.frag',
                     'vk_world_pixel.vert', 'vk_world_pixel.frag',
                     'vk_world_pixel_alpha.frag',
                     'vk_world_glow.frag',
-                    'vk_alias.vert', 'vk_alias_shadow.frag']
+                    'vk_alias.vert', 'vk_alias_shadow.vert',
+                    'vk_alias_shadow.frag']
     vk_shader_headers += custom_target(shader.underscorify() + '_spv_h',
       input: 'src/refresh' / shader,
       output: shader.underscorify() + '_spv.h',
