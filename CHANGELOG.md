@@ -18,6 +18,7 @@ All notable changes to this fork are documented here. The format follows
   item that the deathmatch flags forbid, such as armor with "no armor" set.
 - Skin tints (`cl_itemtint`, `cl_weapontint`, `cl_ammotint`, `cl_playertint`)
   work in the Vulkan renderer.
+- Vulkan particles were about twice as large as in the OpenGL renderer.
 
 ## [1.1.0] - 2026-11-07
 
