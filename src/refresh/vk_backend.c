@@ -8,6 +8,9 @@ the Free Software Foundation; either version 2 of the License, or
 */
 
 #include "shared/shared.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include "common/bsp.h"
 #include "common/cmd.h"
 #include "common/common.h"
@@ -6325,12 +6328,26 @@ static void vk_reset_bind_cache(void)
     vk.bound_index_type = VK_INDEX_TYPE_UINT32;
 }
 
+// Microsecond clock for the performance statistics. 32-bit MinGW doesn't
+// provide clock_gettime, so Windows uses the performance counter.
 static uint64_t vk_time_usec(void)
 {
+#ifdef _WIN32
+    static LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+
+    if (!frequency.QuadPart)
+        QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    return (uint64_t)(counter.QuadPart / frequency.QuadPart) * 1000000 +
+           (uint64_t)(counter.QuadPart % frequency.QuadPart) * 1000000 /
+           frequency.QuadPart;
+#else
     struct timespec ts;
 
     (void)clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+#endif
 }
 
 static void vk_push_constants(VkCommandBuffer cmd, uint32_t size,
