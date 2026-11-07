@@ -32,6 +32,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "format/pcx.h"
 #include "format/wal.h"
 #include "images.h"
+#include "gl_backend.h"
 
 #if USE_PNG
 #define PNG_SKIP_SETJMP_CHECK
@@ -2069,7 +2070,7 @@ image_t *IMG_ForHandle(qhandle_t h)
 R_RegisterImage
 ===============
 */
-qhandle_t R_RegisterImage(const char *name, imagetype_t type, imageflags_t flags)
+qhandle_t GLR_RegisterImage(const char *name, imagetype_t type, imageflags_t flags)
 {
     image_t     *image;
     char        fullname[MAX_QPATH];
@@ -2113,7 +2114,7 @@ qhandle_t R_RegisterImage(const char *name, imagetype_t type, imageflags_t flags
 R_GetPicSize
 =============
 */
-bool R_GetPicSize(int *w, int *h, qhandle_t pic)
+bool GLR_GetPicSize(int *w, int *h, qhandle_t pic)
 {
     const image_t *image = IMG_ForHandle(pic);
 
