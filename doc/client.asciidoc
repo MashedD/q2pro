@@ -822,6 +822,26 @@ vk_perf_stats::
     When set, prints a line per second with the present mode, frames in flight
     and the number of draws, batches and binds per category. Default value is 0.
 
+vk_raytracing::
+    Enables ray-traced lighting effects on top of the normal Vulkan renderer,
+    using ray queries. The lightmaps, glow maps and bloom stay as they are;
+    ray tracing adds shadows from dynamic lights and ambient occlusion on the
+    world. To keep the cost down, lighting further than 384 units away is
+    computed once per 2x2 pixels, and ambient occlusion fades out between 384
+    and 640 units. Needs a GPU and driver with Vulkan 1.2, acceleration
+    structures and ray queries; without them a warning names what is missing
+    and the renderer carries on without ray tracing. Changing it restarts the
+    renderer. Default value is 0 (disabled).
+
+vk_rt_emissive::
+    With ‘vk_raytracing’, strength of the extra light cast by glowing world
+    surfaces (those with the ‘SURF_LIGHT’ flag), with ray-traced shadows. The
+    scale is perceptual, so low values are still visible. 0 disables it.
+    Changing it restarts the renderer. Default value is 0.35.
+
+Only opaque world surfaces cast and receive ray-traced shadows so far, not
+models or translucent surfaces.
+
 OpenGL Renderer
 ~~~~~~~~~~~~~~~
 

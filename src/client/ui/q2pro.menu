@@ -71,6 +71,10 @@ begin video
         "renderer" vid_ref "OpenGL" gl "Vulkan" vk
     pairs --status "GPU for the Vulkan renderer. Automatic prefers the GPU that drives the display" \
         "Vulkan device" vk_device $$vk_devicelist
+    toggle --status "Vulkan only: ray-traced shadows and ambient occlusion. Needs ray query support" \
+        "ray tracing" vk_raytracing
+    range --status "Vulkan ray tracing: strength of light from glowing surfaces" \
+        "RT surface lights" vk_rt_emissive 0 2 0.05
     values --status "Windowed, or a fullscreen mode from the list of video modes" \
         "video mode" vid_fullscreen windowed $$vid_modelist
     field --status "Horizontal field of view in degrees. The default is 90" \
