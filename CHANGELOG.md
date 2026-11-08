@@ -6,6 +6,12 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- With the Vulkan renderer and `cl_async 2`, a frame starts only once a
+  swapchain image is free, instead of reading input first and then waiting
+  in the driver for an image.
+
 ## [1.1.1] - 2026-11-07
 
 ### Changed

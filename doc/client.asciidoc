@@ -82,6 +82,11 @@ cl_async::
 TIP: When using non-zero ‘gl_swapinterval’, ‘cl_async’ can be set to 2 to avoid
 blocking on buffer swaps, reducing input lag.
 
+With the Vulkan renderer, mode 2 also waits for a free swapchain image before
+starting a frame, so the frame doesn't block in the driver after its input was
+read. This helps most with ‘gl_swapinterval 0’ when the driver uses mailbox
+presentation.
+
 r_maxfps::
     Specifies maximum rendering frame rate if ‘cl_async’ is set to 1, otherwise
     ignored. Rates that don't divide 1000 evenly, such as 288, are exact on
