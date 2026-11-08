@@ -10,7 +10,7 @@ layout(push_constant) uniform Push {
     float _pad;
     vec4 fog;
     float intensity;
-    vec3 _pad2;
+    float _pad2[3];     // not vec3, which std430 would align to 16 bytes
     vec4 height_x;
     vec4 height_y;
     vec4 height_z;
