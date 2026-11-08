@@ -16,7 +16,7 @@ layout(push_constant) uniform Push {
     float intensity;
     float desaturation;
     vec2 lm_scale;
-    vec2 rt_params;
+    vec4 rt_params;
 } pc;
 
 layout(set = 0, binding = 0) uniform sampler2D tex_sampler;
@@ -59,9 +59,112 @@ float trace_hit_distance(vec3 origin, vec3 direction, float max_distance)
     return rayQueryGetIntersectionTEXT(query, true);
 }
 
-vec3 dynamic_light(vec3 normal)
+float dynamic_shadow_visibility(float hit_distance, float ray_distance)
+{
+    if (hit_distance < 0.0)
+        return 1.0;
+    float blocker_ratio = hit_distance / max(ray_distance, 0.001);
+    float shadow_opacity = mix(0.96, 0.72,
+        smoothstep(0.15, 0.85, blocker_ratio));
+    return 1.0 - shadow_opacity;
+}
+
+float dynamic_light_visibility(vec3 origin, vec3 delta, float range,
+                               float contribution, int light_index)
+{
+    float center_distance = length(delta);
+    vec3 center_direction = delta / max(center_distance, 0.001);
+    if (light_index != 0 || contribution < 0.06 || center_distance > 320.0) {
+        float hit = trace_hit_distance(origin, center_direction,
+                                       center_distance);
+        return dynamic_shadow_visibility(hit, center_distance);
+    }
+
+    vec3 reference = abs(center_direction.z) < 0.90 ?
+        vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+    vec3 tangent = normalize(cross(reference, center_direction));
+    float source_radius = clamp(range * 0.018, 1.5, 6.0);
+    vec3 first_delta = delta + tangent * source_radius;
+    vec3 second_delta = delta - tangent * source_radius;
+    float first_distance = length(first_delta);
+    float second_distance = length(second_delta);
+    float first_hit = trace_hit_distance(origin,
+        first_delta / max(first_distance, 0.001), first_distance);
+    float second_hit = trace_hit_distance(origin,
+        second_delta / max(second_distance, 0.001), second_distance);
+    return 0.5 * (dynamic_shadow_visibility(first_hit, first_distance) +
+                  dynamic_shadow_visibility(second_hit, second_distance));
+}
+
+vec2 material_params(float packed)
+{
+    float bits = floor(clamp(packed, 0.0, 1.0) * 255.0 + 0.5);
+    return vec2(floor(bits / 16.0), mod(bits, 16.0)) / 15.0;
+}
+
+float material_specular_lobe(float ndoth, float ndotv, float gloss,
+                             float exponent)
+{
+    float primary = pow(ndoth, exponent);
+    float clearcoat = primary * primary * mix(0.12, 0.38, gloss);
+    float edge = 1.0 - clamp(ndotv, 0.0, 1.0);
+    float edge2 = edge * edge;
+    float fresnel = edge2 * edge2 * edge;
+    return (primary + clearcoat) * mix(0.65, 1.35, fresnel);
+}
+
+float material_detail_factor(vec3 albedo, float roughness)
+{
+    float luma = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
+    float detail = mix(0.82, 1.18, smoothstep(0.10, 0.70, luma));
+    return mix(1.0, detail, 0.55 * (1.0 - roughness));
+}
+
+vec3 material_specular_tint(vec3 albedo, float reflectivity, float roughness)
+{
+    float luma = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
+    vec3 chroma = clamp(albedo / max(luma, 0.08), vec3(0.45), vec3(1.65));
+    chroma = mix(vec3(1.0), chroma, smoothstep(0.04, 0.20, luma));
+    float gloss = 1.0 - roughness;
+    float metallic = 0.55 * reflectivity * gloss * (0.70 + 0.30 * gloss);
+    return mix(vec3(1.0), chroma, metallic);
+}
+
+vec3 material_bump_normal(vec3 position, vec3 normal, vec3 albedo,
+                          float reflectivity, float roughness, float mask)
+{
+    vec3 dpdx = dFdx(position);
+    vec3 dpdy = dFdy(position);
+    float height = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
+    float dhdx = dFdx(height);
+    float dhdy = dFdy(height);
+    vec3 first = cross(dpdy, normal);
+    vec3 second = cross(normal, dpdx);
+    float determinant = dot(dpdx, first);
+    float valid = step(0.000001, abs(determinant));
+    float safe_determinant = determinant < 0.0 ?
+        min(determinant, -0.000001) : max(determinant, 0.000001);
+    vec3 gradient = (first * dhdx + second * dhdy) / safe_determinant;
+    float gloss = 1.0 - roughness;
+    float strength = 3.0 * pc.rt_params.w * mask *
+        mix(0.35, 1.0, reflectivity) * mix(0.30, 1.0, gloss);
+    gradient *= strength * valid;
+    float slope = length(gradient);
+    gradient *= min(1.0, 0.45 / max(slope, 0.000001));
+    return normalize(normal - gradient);
+}
+
+vec3 dynamic_light(vec3 normal, float reflectivity, float roughness,
+                   out vec3 specular)
 {
     vec3 light = vec3(0.0);
+    specular = vec3(0.0);
+    vec3 view_dir = normalize(pc.dlight.xyz - v_position);
+    float gloss = 1.0 - roughness;
+    float exponent = mix(10.0, 96.0, pow(gloss, 0.9));
+    float lobe_normalization = mix(0.80, 1.85, gloss);
+    float specular_scale = reflectivity * pc.rt_params.w *
+        mix(1.30, 0.68, roughness) * lobe_normalization;
     for (int i = 0; i < 3; i++) {
         float range = pc.dlight_origins[i].w;
         if (range <= 0.0)
@@ -77,17 +180,23 @@ vec3 dynamic_light(vec3 normal)
                 max(pc.dlight_colors[i].g, pc.dlight_colors[i].b)) *
             energy < 0.01)
             continue;
-        float hit_distance = trace_hit_distance(
-            v_position + oriented_normal * 0.05,
-            delta / max(distance_to_light, 0.001), distance_to_light);
-        float visibility = 1.0;
-        if (hit_distance >= 0.0) {
-            float blocker_ratio = hit_distance / max(distance_to_light, 0.001);
-            float shadow_opacity = mix(0.96, 0.72,
-                smoothstep(0.15, 0.85, blocker_ratio));
-            visibility -= shadow_opacity;
+        vec3 light_dir = delta / max(distance_to_light, 0.001);
+        float contribution = max(pc.dlight_colors[i].r,
+            max(pc.dlight_colors[i].g, pc.dlight_colors[i].b)) * energy;
+        float visibility = dynamic_light_visibility(
+            v_position + oriented_normal * 0.05, delta, range,
+            contribution, i);
+        vec3 radiance = pc.dlight_colors[i].rgb * energy * visibility;
+        light += radiance;
+        if (specular_scale > 0.001) {
+            vec3 half_dir = normalize(light_dir + view_dir);
+            float ndoth = max(dot(normal, half_dir), 0.0);
+            float ndotl = max(dot(normal, light_dir), 0.0);
+            float lobe = material_specular_lobe(ndoth,
+                max(dot(normal, view_dir), 0.0), gloss, exponent);
+            specular += radiance * lobe *
+                smoothstep(0.0, 0.20, ndotl) * specular_scale;
         }
-        light += pc.dlight_colors[i].rgb * energy * visibility;
     }
     return light;
 }
@@ -197,6 +306,45 @@ vec3 surface_light(vec3 normal, vec3 baked_light)
     return light;
 }
 
+vec3 surface_specular(vec3 normal, float reflectivity, float roughness)
+{
+    if (surface_info.z == 0u || reflectivity <= 0.001 ||
+        pc.rt_params.w <= 0.001)
+        return vec3(0.0);
+
+    uint candidate_count = min(v_rt_data.y & 0xffu, 4u);
+    vec3 view_dir = normalize(pc.dlight.xyz - v_position);
+    float gloss = 1.0 - roughness;
+    float exponent = mix(10.0, 96.0, pow(gloss, 0.9));
+    float lobe_normalization = mix(0.80, 1.85, gloss);
+    float scale = reflectivity * pc.rt_params.w *
+        mix(1.20, 0.62, roughness) * lobe_normalization;
+    float emissive = clamp(pc.rt_params.x, 0.0, 2.0);
+    float strength_scale = pow(emissive, 0.75) * 1.5;
+    vec3 specular = vec3(0.0);
+    for (uint i = 0u; i < candidate_count; ++i) {
+        uint index_offset = v_rt_data.x + i;
+        if (index_offset >= surface_info.y)
+            break;
+        uint light_index = light_indices[index_offset];
+        if (light_index >= surface_info.x || light_index >= 64u)
+            continue;
+        vec3 color, direction, oriented_normal;
+        float distance_to_light;
+        float contribution = surface_light_sample(light_index, normal,
+            color, direction, oriented_normal, distance_to_light,
+            strength_scale);
+        float ndotl = max(dot(normal, direction), 0.0);
+        vec3 half_dir = normalize(direction + view_dir);
+        float ndoth = max(dot(normal, half_dir), 0.0);
+        float lobe = material_specular_lobe(ndoth,
+            max(dot(normal, view_dir), 0.0), gloss, exponent);
+        specular += color * contribution * lobe *
+            smoothstep(0.0, 0.20, ndotl) * scale;
+    }
+    return specular;
+}
+
 float ambient_visibility(vec3 normal, float lightmap_weight,
                          float baked_occlusion)
 {
@@ -245,14 +393,18 @@ float quad_anchor_distance()
     return subgroupQuadBroadcast(distance(v_position, pc.dlight.xyz), 0);
 }
 
-vec3 adaptive_dynamic_light(vec3 normal, bool full_resolution)
+vec3 adaptive_dynamic_light(vec3 normal, bool full_resolution,
+                            float reflectivity, float roughness,
+                            out vec3 specular)
 {
     if (full_resolution)
-        return dynamic_light(normal);
+        return dynamic_light(normal, reflectivity, roughness, specular);
 
     vec3 light = vec3(0.0);
+    specular = vec3(0.0);
     if ((gl_SubgroupInvocationID & 3u) == 0u)
-        light = dynamic_light(normal);
+        light = dynamic_light(normal, reflectivity, roughness, specular);
+    specular = subgroupQuadBroadcast(specular, 0);
     return subgroupQuadBroadcast(light, 0);
 }
 
@@ -295,6 +447,12 @@ void main()
         uv += vec2(0.0625) * sin(uv.ts * vec2(4.0) + vec2(pc.dlight.a));
 
     vec3 normal = normalize(cross(dFdx(v_position), dFdy(v_position)));
+    if (dot(normal, pc.dlight.xyz - v_position) < 0.0)
+        normal = -normal;
+    vec2 material = material_params(pc.rt_params.z);
+    float material_reflect = material.x;
+    float material_roughness = material.y;
+    vec4 material_texel = texture(tex_sampler, uv);
     vec3 lm = pc.lm_scale.x < 0.0 ? vec3(1.0) :
         texture(lm_sampler, v_lmuv).rgb;
     vec4 static_lighting = surface_info.z != 0u ?
@@ -305,6 +463,15 @@ void main()
 #ifdef RT_GLOWMAP
     vec4 glow = texture(glow_sampler, uv);
 #endif
+    float bump_mask = 1.0 - step(1.5, mode);
+#ifdef RT_ALPHA_TEST
+    bump_mask = 0.0;
+#endif
+#ifdef RT_GLOWMAP
+    bump_mask *= 1.0 - smoothstep(0.15, 0.80, glow.a);
+#endif
+    vec3 shading_normal = material_bump_normal(v_position, normal,
+        material_texel.rgb, material_reflect, material_roughness, bump_mask);
     float lm_luma = dot(lm, vec3(0.2126, 0.7152, 0.0722));
     float ao_weight = mix(0.75, 1.0,
                           smoothstep(0.05, 0.35, lm_luma));
@@ -320,16 +487,19 @@ void main()
     float quad_ao = adaptive_ambient_visibility(normal, full_resolution,
                                                 ao_weight,
                                                 baked_occlusion);
-    vec3 quad_surface_light = adaptive_surface_light(normal, full_resolution,
-                                                     static_lighting.rgb);
+    vec3 quad_surface_light = adaptive_surface_light(shading_normal,
+        full_resolution, static_lighting.rgb);
+    vec3 quad_dynamic_specular;
     vec3 quad_dynamic_light = adaptive_dynamic_light(
-        normal, full_dynamic_resolution);
+        shading_normal, full_dynamic_resolution, material_reflect,
+        material_roughness, quad_dynamic_specular);
 #endif
 
     vec3 bloom = vec3(0.0);
     int rt_debug = pc.rt_params.x < 0.0 ?
-        int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) : 0;
-    if (rt_debug != 0) {
+        int(clamp(floor(-pc.rt_params.x + 0.5), 1.0, 3.0)) :
+        (pc.rt_params.y < -7.5 ? 8 : 0);
+    if (rt_debug >= 1 && rt_debug <= 3) {
         if (rt_debug == 1)
             out_color = vec4(vec3(static_coverage), 1.0);
         else if (rt_debug == 2)
@@ -344,7 +514,7 @@ void main()
     if (mode > 1.5) {
         out_color = v_color;
     } else {
-        vec4 texel = texture(tex_sampler, uv);
+        vec4 texel = material_texel;
 #ifdef RT_ALPHA_TEST
         if (texel.a <= 0.666)
             discard;
@@ -355,17 +525,30 @@ void main()
         }
         float ao = 1.0;
         vec3 dynamic_lighting;
+        vec3 dynamic_specular;
         vec3 surface_lighting;
 #ifdef RT_QUAD_SHARING
         ao = quad_ao;
         dynamic_lighting = quad_dynamic_light;
+        dynamic_specular = quad_dynamic_specular;
         surface_lighting = quad_surface_light;
 #else
         if (pc.lm_scale.x >= 0.0)
             ao = ambient_visibility(normal, ao_weight, baked_occlusion);
-        dynamic_lighting = dynamic_light(normal);
-        surface_lighting = surface_light(normal, static_lighting.rgb);
+        dynamic_lighting = dynamic_light(shading_normal, material_reflect,
+                                         material_roughness,
+                                         dynamic_specular);
+        surface_lighting = surface_light(shading_normal, static_lighting.rgb);
 #endif
+        vec3 static_specular = surface_specular(shading_normal,
+            material_reflect, material_roughness);
+        if (rt_debug == 8) {
+            vec3 diagnostic = dynamic_specular * vec3(0.0, 8.0, 8.0) +
+                              static_specular * vec3(8.0, 4.5, 0.0);
+            out_color = vec4(clamp(diagnostic, 0.0, 1.0), 1.0);
+            out_bloom = vec4(0.0);
+            return;
+        }
         surface_lighting *= mix(1.0, ao, 0.75);
 #ifdef RT_GLOWMAP
         lm = mix(lm, vec3(1.0), glow.a);
@@ -382,6 +565,27 @@ void main()
         const vec3 luma_weights = vec3(0.2126, 0.7152, 0.0722);
         vec3 raster_rgb = texel.rgb *
             max(base_lighting + dynamic_lighting, vec3(0.0));
+        float reflection_surface_mask = 1.0;
+#ifdef RT_GLOWMAP
+        float glow_luma = dot(glow.rgb, vec3(0.2126, 0.7152, 0.0722));
+        reflection_surface_mask = 1.0 - smoothstep(0.08, 0.35, glow_luma);
+#endif
+        if (material_reflect > 0.001 && pc.rt_params.w > 0.001) {
+            float surface_luma = dot(raster_rgb, luma_weights);
+            vec3 highlight = (dynamic_specular + static_specular) *
+                             reflection_surface_mask;
+            highlight *= material_detail_factor(texel.rgb,
+                                                material_roughness);
+            highlight *= material_specular_tint(texel.rgb, material_reflect,
+                                                material_roughness);
+            float highlight_luma = dot(highlight, luma_weights);
+            float cap = min(max(surface_luma * 0.22, 0.035), 0.14);
+            highlight *= min(1.0, cap / max(highlight_luma, 0.000001));
+            highlight_luma = dot(highlight, luma_weights);
+            raster_rgb += highlight;
+            float bloom_weight = smoothstep(0.01, 0.04, highlight_luma);
+            bloom += highlight * bloom_weight * 0.35;
+        }
         float raster_luma = dot(raster_rgb, luma_weights);
         vec3 emissive_pool = max(texel.rgb * surface_lighting, vec3(0.0));
         float pool_luma = dot(emissive_pool, luma_weights);
@@ -398,8 +602,8 @@ void main()
                 max(vec3(1.0) - raster_rgb, vec3(0.0));
         }
         out_color = texel;
-        out_color.rgb = max(raster_rgb + emissive_add, vec3(0.0));
         out_color.a *= v_color.a;
+        out_color.rgb = max(raster_rgb + emissive_add, vec3(0.0));
         if (pc.intensity < 0.0) {
             out_color.rgb *= (out_color.r + out_color.g + out_color.b) / 3.0;
             out_color.rgb *= v_color.a;
@@ -436,5 +640,6 @@ void main()
         out_color.rgb = mix(out_color.rgb, pc.fog.rgb, fog);
         bloom *= 1.0 - fog;
     }
-    out_bloom = vec4(bloom, out_color.a);
+    out_bloom = vec4(bloom,
+        v_mode < 4.0 ? pc.rt_params.z : 0.0);
 }

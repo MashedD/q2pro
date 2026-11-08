@@ -831,7 +831,8 @@ vk_raytracing::
     2048x2048 texels, so they cost nothing per frame; a summary is printed
     after the bake. If the bake fails, they are traced every frame instead,
     nearby only. Dynamic light shadows are traced per pixel within 512 units
-    and once per 2x2 pixels further away. Needs a GPU and driver with Vulkan
+    and once per 2x2 pixels further away; the strongest light gets two samples
+    within 320 units, for softer edges. Needs a GPU and driver with Vulkan
     1.2, acceleration structures and ray queries; without them a warning names
     what is missing and the renderer carries on without ray tracing. Changing
     it restarts the renderer. Default value is 0 (disabled).
@@ -851,10 +852,46 @@ vk_rt_emissive::
     so low values are still visible. Takes effect immediately. Default value
     is 0.35; 0 disables it.
 
+vk_rt_reflections::
+    With ‘vk_raytracing’, strength of screen-space reflections on floors and
+    on walls seen at a grazing angle, from 0 to 1. How reflective and how
+    rough each texture is comes from ‘materials/rt_reflections.mat’. Only
+    what is on screen can be reflected. Needs ‘gl_multisamples’ 0 (no MSAA).
+    Default value is 0.35; 0 disables it.
+
+vk_rt_specular::
+    With ‘vk_raytracing’, strength of highlights from dynamic lights and
+    nearby glowing surfaces on the world, from 0 to 1, shaped by the same
+    material file: smooth surfaces get small, sharp highlights and rough ones
+    broad, faint ones. Adds no rays. Default value is 0.45; 0 disables the
+    highlights but not the reflections.
+
+vk_rt_liquids::
+    With ‘vk_raytracing’, strength of the extra shading on water, slime and
+    lava, from 0 to 1: animated ripples, a colored sheen at grazing angles and
+    highlights from dynamic lights, which also feed bloom. Adds no rays.
+    Default value is 0.65; 0 disables it.
+
+materials/rt_reflections.mat::
+    Reflection and roughness of textures for ‘vk_rt_reflections’ and
+    ‘vk_rt_specular’, read when a map loads. Each entry names a texture and
+    gives values from 0 to 1:
+
+    textures/base_floor:
+        reflect 0.85
+        roughness 0.35
+
+    Textures that aren't listed get a conservative default. Liquids and
+    translucent surfaces never reflect. The release packages include a file
+    for the original game's textures.
+
 vk_rt_debug::
-    Shows the baked ray tracing atlas on the world instead of the normal
-    picture: 1 shows its coverage, 2 the ambient occlusion and 3 the surface
-    light. Default value is 0 (normal picture).
+    Shows ray tracing data instead of the normal picture, for debugging: 1
+    shows the baked atlas coverage, 2 the ambient occlusion, 3 the surface
+    light, 4 the reflection strength, 5 which surfaces reflect (green), 6
+    reflection rays that hit (blue) or missed (brown), 7 only the reflections
+    and 8 only the specular highlights (cyan from dynamic lights, amber from
+    glowing surfaces). Default value is 0 (normal picture).
 
 Only opaque world surfaces cast ray-traced shadows so far, not models or
 translucent surfaces.
