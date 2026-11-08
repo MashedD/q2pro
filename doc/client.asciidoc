@@ -823,24 +823,41 @@ vk_perf_stats::
     and the number of draws, batches and binds per category. Default value is 0.
 
 vk_raytracing::
-    Enables ray-traced lighting effects on top of the normal Vulkan renderer,
-    using ray queries. The lightmaps, glow maps and bloom stay as they are;
-    ray tracing adds shadows from dynamic lights and ambient occlusion on the
-    world. To keep the cost down, lighting further than 384 units away is
-    computed once per 2x2 pixels, and ambient occlusion fades out between 384
-    and 640 units. Needs a GPU and driver with Vulkan 1.2, acceleration
-    structures and ray queries; without them a warning names what is missing
-    and the renderer carries on without ray tracing. Changing it restarts the
-    renderer. Default value is 0 (disabled).
+    Enables ray-traced lighting on top of the normal Vulkan renderer, using
+    ray queries. Lightmaps, glow maps and bloom stay as they are; ray tracing
+    adds shadows from dynamic lights, ambient occlusion and colored light
+    from glowing surfaces on the world. Ambient occlusion and
+    surface light are computed once when a map loads, into an atlas of up to
+    2048x2048 texels, so they cost nothing per frame; a summary is printed
+    after the bake. If the bake fails, they are traced every frame instead,
+    nearby only. Dynamic light shadows are traced per pixel within 512 units
+    and once per 2x2 pixels further away. Needs a GPU and driver with Vulkan
+    1.2, acceleration structures and ray queries; without them a warning names
+    what is missing and the renderer carries on without ray tracing. Changing
+    it restarts the renderer. Default value is 0 (disabled).
+
+vk_rt_ao::
+    With ‘vk_raytracing’, strength of the ambient occlusion in corners, where
+    walls meet floors and under ledges, from 0 to 0.5. Glow-mapped pixels are
+    not darkened. Takes effect immediately. Default value is 0.24; 0 disables
+    it.
 
 vk_rt_emissive::
-    With ‘vk_raytracing’, strength of the extra light cast by glowing world
-    surfaces (those with the ‘SURF_LIGHT’ flag), with ray-traced shadows. The
-    scale is perceptual, so low values are still visible. 0 disables it.
-    Changing it restarts the renderer. Default value is 0.35.
+    With ‘vk_raytracing’, strength of the colored light cast by glowing world
+    surfaces (those with the ‘SURF_LIGHT’ flag), with soft ray-traced shadows.
+    The color comes from the surface's glow map, or its brightest texels. The
+    added light is capped relative to the lightmap so maps keep their look,
+    and with ‘gl_bloom’ it also adds a little bloom. The scale is perceptual,
+    so low values are still visible. Takes effect immediately. Default value
+    is 0.35; 0 disables it.
 
-Only opaque world surfaces cast and receive ray-traced shadows so far, not
-models or translucent surfaces.
+vk_rt_debug::
+    Shows the baked ray tracing atlas on the world instead of the normal
+    picture: 1 shows its coverage, 2 the ambient occlusion and 3 the surface
+    light. Default value is 0 (normal picture).
+
+Only opaque world surfaces cast ray-traced shadows so far, not models or
+translucent surfaces.
 
 OpenGL Renderer
 ~~~~~~~~~~~~~~~

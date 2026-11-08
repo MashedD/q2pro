@@ -11,7 +11,7 @@ layout(push_constant) uniform Push {
     float intensity;
     float desaturation;
     vec2 lm_scale;
-    vec2 lm_offset;
+    vec2 rt_params;
 } pc;
 
 layout(set = 0, binding = 0) uniform sampler2D tex_sampler;

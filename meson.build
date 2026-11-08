@@ -381,6 +381,8 @@ if vulkan.found()
     # Ray queries need SPIR-V for Vulkan 1.2. Several variants are built from
     # one source: [output, source, defines].
     foreach rt_shader : [
+      ['vk_rt_ao_bake_vert_spv.h', 'vk_rt_ao_bake.vert', []],
+      ['vk_rt_ao_bake_frag_spv.h', 'vk_rt_ao_bake.frag', []],
       ['vk_world_pixel_rt_vert_spv.h', 'vk_world_pixel_rt.vert', []],
       ['vk_world_lit_rt_frag_spv.h', 'vk_world_lit_rt.frag', []],
       ['vk_world_pixel_rt_frag_spv.h', 'vk_world_pixel_rt.frag', []],
