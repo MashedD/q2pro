@@ -6,6 +6,12 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `vk_present_mode` picks the Vulkan present mode (FIFO, mailbox or
+  immediate) instead of deriving it from `gl_swapinterval`. The default,
+  automatic, works as before.
+
 ### Changed
 
 - With the Vulkan renderer and `cl_async 2`, a frame starts only once a

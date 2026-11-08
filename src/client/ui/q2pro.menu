@@ -79,6 +79,8 @@ begin video
         "fov scaling" cl_adjustfov vert- hor+
     toggle --status "Match frames to the monitor refresh rate to stop tearing. Can add input lag" \
         "vertical sync" gl_swapinterval
+    pairs --status "Vulkan only. Automatic follows vertical sync; mailbox avoids tearing with less lag than FIFO" \
+        "Vulkan present mode" vk_present_mode automatic 0 FIFO 1 mailbox 2 immediate 3
     pairs --status "Smooth jagged edges with multisampling, at a cost in speed" \
         "anti-aliasing" gl_multisamples no 0 "2x MSAA" 2 "4x MSAA" 4 "8x MSAA" 8
     range --status "Brightness of the picture. Applies to textures only, unless hardware gamma is on" \

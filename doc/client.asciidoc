@@ -785,6 +785,17 @@ vk_devicelist::
     Read-only list of the usable GPUs as label and value pairs, filled when the
     Vulkan renderer starts. The video menu uses it.
 
+vk_present_mode::
+    How the Vulkan renderer hands finished frames to the display. Changing it
+    recreates the swapchain. If the driver lacks the mode asked for, FIFO is
+    used and a warning is printed. Default value is 0.
+      - 0 — automatic: FIFO with ‘gl_swapinterval’, otherwise immediate,
+        or mailbox when immediate is missing
+      - 1 — FIFO: waits for vertical refresh, never tears
+      - 2 — mailbox: shows the newest frame at each refresh, no tearing and
+        less latency than FIFO
+      - 3 — immediate: shows frames at once, may tear
+
 vk_frames_in_flight::
     Number of frames the CPU may prepare while the GPU is still drawing earlier
     ones, from 1 to 3. Higher values can raise the frame rate, lower values
