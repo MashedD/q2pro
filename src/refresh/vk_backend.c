@@ -278,7 +278,17 @@ typedef enum {
 } vk_world_pass_t;
 
 #define VK_WORLD_MAX_DLIGHTS 3
+#define VK_RT_AFTERGLOW_LIGHTS 8
 #define VK_RT_MATERIAL_RULES 256
+
+typedef struct {
+    dlight_t light;
+    vec3_t trail_origin;
+    float last_seen;
+    uint32_t seen_frame;
+    bool trail_valid;
+    bool valid;
+} vk_rt_afterglow_light_t;
 
 typedef struct {
     char name[MAX_TEXNAME];
@@ -557,6 +567,10 @@ typedef struct {
     float _pad2[2];         // skin_tint starts on a 16-byte boundary
     float skin_tint[4];     // rgb multiplier, alpha 1 when tinted
 } vk_alias_push_t;
+
+// Must match the push block of vk_alias.vert and vk_alias*.frag.
+typedef char vk_alias_push_size_check[
+    sizeof(vk_alias_push_t) == 160 ? 1 : -1];
 
 typedef struct {
     mat4_t mvp;
@@ -885,6 +899,10 @@ typedef struct {
     vec3_t sky_axis;
     refdef_t fd;
     bool fd_valid;
+    int view_liquid_kind;
+    vk_rt_afterglow_light_t afterglow_lights[VK_RT_AFTERGLOW_LIGHTS];
+    uint32_t afterglow_frame;
+    float afterglow_time;
     vk_world_t world;
     vk_model_t models[MAX_MODELS];
     uint32_t model_count;
@@ -963,9 +981,20 @@ static cvar_t *vk_devicelist;
 static cvar_t *vk_raytracing;
 static cvar_t *vk_rt_emissive;
 static cvar_t *vk_rt_ao;
+static cvar_t *vk_rt_skylight;
+static cvar_t *vk_rt_environment;
+static cvar_t *vk_rt_afterglow;
+static cvar_t *vk_rt_sunlight;
+static cvar_t *vk_rt_emissive_halo;
 static cvar_t *vk_rt_reflections;
+static cvar_t *vk_rt_reflection_glints;
 static cvar_t *vk_rt_specular;
 static cvar_t *vk_rt_liquids;
+static cvar_t *vk_rt_bounce;
+static cvar_t *vk_rt_caustics;
+static cvar_t *vk_rt_shadow_fringe;
+static cvar_t *vk_rt_light_ripples;
+static cvar_t *vk_rt_light_trails;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -8923,7 +8952,8 @@ static bool vk_ssr_enabled_for_frame(void)
     return vk.ssr_ready && vk.raytracing_active && vk_raytracing &&
         vk_raytracing->integer && vk_rt_reflections &&
         vk_rt_reflections->value > 0.001f && vk.fd_valid &&
-        (!vk_rt_debug || vk_rt_debug->integer != 8) &&
+        (!vk_rt_debug || vk_rt_debug->integer < 8 ||
+         vk_rt_debug->integer == 18) &&
         !(vk.fd.rdflags & RDF_NOWORLDMODEL);
 #else
     return false;
@@ -10275,6 +10305,171 @@ static float vk_world_dynamic_light_fraction(const dlight_t *light,
     return rad - dist * scale;
 }
 
+static bool vk_afterglow_rt_active(void)
+{
+#if USE_VULKAN_RAYTRACING
+    return vk.raytracing_active;
+#else
+    return false;
+#endif
+}
+
+static void vk_update_afterglow(const refdef_t *fd)
+{
+    float duration = vk_rt_afterglow ?
+        Cvar_ClampValue(vk_rt_afterglow, 0.0f, 1.0f) : 0.0f;
+    float trail_strength = vk_rt_light_trails ?
+        Cvar_ClampValue(vk_rt_light_trails, 0.0f, 1.0f) : 0.0f;
+    float history_window = max(duration, trail_strength > 0.0f ? 0.25f : 0.0f);
+    if (!fd || !vk_afterglow_rt_active() || history_window <= 0.0f ||
+        !vk_dynamic_lights_enabled()) {
+        memset(vk.afterglow_lights, 0, sizeof(vk.afterglow_lights));
+        vk.afterglow_time = fd ? fd->time : 0.0f;
+        return;
+    }
+
+    if (fd->time < vk.afterglow_time) {
+        memset(vk.afterglow_lights, 0, sizeof(vk.afterglow_lights));
+        vk.afterglow_frame = 0;
+    }
+    vk.afterglow_time = fd->time;
+    uint32_t frame = ++vk.afterglow_frame;
+    if (!frame) {
+        memset(vk.afterglow_lights, 0, sizeof(vk.afterglow_lights));
+        frame = ++vk.afterglow_frame;
+    }
+
+    for (int i = 0; i < fd->num_dlights && fd->dlights; i++) {
+        const dlight_t *light = &fd->dlights[i];
+        float peak = max(light->color[0],
+                         max(light->color[1], light->color[2]));
+        if (light->intensity < 160.0f || peak <= 0.10f)
+            continue;
+
+        int best = -1;
+        bool matched = false;
+        float best_distance = 128.0f;
+        float light_color_length = sqrtf(DotProduct(light->color,
+                                                     light->color));
+        for (int j = 0; j < VK_RT_AFTERGLOW_LIGHTS; j++) {
+            vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[j];
+            if (!cached->valid || cached->seen_frame == frame)
+                continue;
+            float age = fd->time - cached->last_seen;
+            if (age < 0.0f || age > history_window)
+                continue;
+            float cached_color_length = sqrtf(DotProduct(cached->light.color,
+                                                          cached->light.color));
+            float similarity = DotProduct(light->color, cached->light.color) /
+                max(light_color_length * cached_color_length, 0.0001f);
+            float distance = Distance(light->origin, cached->light.origin);
+            if (similarity >= 0.75f && distance <= best_distance) {
+                best = j;
+                matched = true;
+                best_distance = distance;
+            }
+        }
+
+        if (best < 0) {
+            float oldest = 1e30f;
+            for (int j = 0; j < VK_RT_AFTERGLOW_LIGHTS; j++) {
+                vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[j];
+                if (!cached->valid ||
+                    fd->time - cached->last_seen > history_window) {
+                    best = j;
+                    break;
+                }
+                if (cached->seen_frame != frame && cached->last_seen < oldest) {
+                    oldest = cached->last_seen;
+                    best = j;
+                }
+            }
+        }
+        if (best < 0)
+            continue;
+
+        vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[best];
+        if (matched && trail_strength > 0.0f) {
+            float dt = fd->time - cached->last_seen;
+            float movement = Distance(light->origin, cached->light.origin);
+            if (dt > 0.0f && dt <= 0.10f && movement <= 128.0f) {
+                if (!cached->trail_valid)
+                    VectorCopy(cached->light.origin, cached->trail_origin);
+                vec3_t follow_delta;
+                VectorSubtract(cached->light.origin, cached->trail_origin,
+                               follow_delta);
+                float follow = 1.0f - expf(-dt / 0.12f);
+                VectorMA(cached->trail_origin, follow, follow_delta,
+                         cached->trail_origin);
+                cached->trail_valid =
+                    Distance(light->origin, cached->trail_origin) >= 6.0f;
+            } else {
+                VectorCopy(light->origin, cached->trail_origin);
+                cached->trail_valid = false;
+            }
+        } else {
+            VectorCopy(light->origin, cached->trail_origin);
+            cached->trail_valid = false;
+        }
+        cached->light = *light;
+        cached->last_seen = fd->time;
+        cached->seen_frame = frame;
+        cached->valid = true;
+    }
+
+    for (int i = 0; i < VK_RT_AFTERGLOW_LIGHTS; i++) {
+        vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[i];
+        if (cached->valid &&
+            fd->time - cached->last_seen > history_window)
+            cached->valid = false;
+    }
+}
+
+static int vk_world_insert_dynamic_light(const vk_world_face_t *face,
+                                         const dlight_t *light,
+                                         bool afterglow,
+                                         const entity_t *ent,
+                                         const vec3_t axis[3], int count,
+                                         float scores[VK_WORLD_MAX_DLIGHTS],
+                                         float origins[VK_WORLD_MAX_DLIGHTS][4],
+                                         float colors[VK_WORLD_MAX_DLIGHTS][4])
+{
+    vec3_t light_origin;
+    float plane_dist = vk_world_face_light_plane_dist(face->face, light,
+                                                       ent, axis);
+    vk_world_face_light_origin(light, ent, axis, light_origin);
+    float f = vk_world_dynamic_light_fraction(light, face->face, light_origin,
+                                               plane_dist);
+    if (f <= 0.0f)
+        return count;
+
+    int slot = min(count, VK_WORLD_MAX_DLIGHTS - 1);
+    while (slot > 0 && f > scores[slot - 1]) {
+        if (origins)
+            memcpy(origins[slot], origins[slot - 1], sizeof(origins[slot]));
+        if (colors)
+            memcpy(colors[slot], colors[slot - 1], sizeof(colors[slot]));
+        scores[slot] = scores[slot - 1];
+        slot--;
+    }
+    if (slot >= VK_WORLD_MAX_DLIGHTS ||
+        (count >= VK_WORLD_MAX_DLIGHTS && f <= scores[slot]))
+        return count;
+
+    scores[slot] = f;
+    if (origins) {
+        VectorCopy(light_origin, origins[slot]);
+        origins[slot][3] = max(light->intensity - DLIGHT_CUTOFF *
+            ((vk_dlight_falloff && vk_dlight_falloff->integer) ? 0.8f : 1.0f),
+            0.0f);
+    }
+    if (colors) {
+        VectorCopy(light->color, colors[slot]);
+        colors[slot][3] = afterglow ? -light->intensity : light->intensity;
+    }
+    return count < VK_WORLD_MAX_DLIGHTS ? count + 1 : count;
+}
+
 static int vk_world_dynamic_lights(const vk_world_face_t *face,
                                    const refdef_t *fd, const entity_t *ent,
                                    const vec3_t axis[3],
@@ -10290,49 +10485,32 @@ static int vk_world_dynamic_lights(const vk_world_face_t *face,
         memset(colors, 0, sizeof(float) * VK_WORLD_MAX_DLIGHTS * 4);
 
     if (!face || !face->face || !face->face->plane ||
-        !fd || fd->num_dlights <= 0 || !fd->dlights ||
-        !vk_dynamic_lights_enabled() ||
+        !fd || !vk_dynamic_lights_enabled() ||
         (face->face->drawflags & vk.world.nolm_mask))
         return 0;
 
-    for (int i = 0; i < fd->num_dlights; i++) {
-        const dlight_t *light = &fd->dlights[i];
-        vec3_t light_origin;
-        float plane_dist = vk_world_face_light_plane_dist(face->face, light,
-                                                         ent, axis);
-        float f;
+    for (int i = 0; i < fd->num_dlights && fd->dlights; i++)
+        count = vk_world_insert_dynamic_light(face, &fd->dlights[i], false,
+            ent, axis, count, scores, origins, colors);
 
-        vk_world_face_light_origin(light, ent, axis, light_origin);
-        f = vk_world_dynamic_light_fraction(light, face->face, light_origin, plane_dist);
-        if (f <= 0.0f)
-            continue;
-
-        int slot = min(count, VK_WORLD_MAX_DLIGHTS - 1);
-        while (slot > 0 && f > scores[slot - 1]) {
-            if (origins)
-                memcpy(origins[slot], origins[slot - 1], sizeof(origins[slot]));
-            if (colors)
-                memcpy(colors[slot], colors[slot - 1], sizeof(colors[slot]));
-            scores[slot] = scores[slot - 1];
-            slot--;
+    float duration = vk_rt_afterglow ?
+        Cvar_ClampValue(vk_rt_afterglow, 0.0f, 1.0f) : 0.0f;
+    if (vk_afterglow_rt_active() && duration > 0.0f) {
+        for (int i = 0; i < VK_RT_AFTERGLOW_LIGHTS; i++) {
+            const vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[i];
+            if (!cached->valid || cached->seen_frame == vk.afterglow_frame)
+                continue;
+            float age = fd->time - cached->last_seen;
+            if (age < 0.0f || age >= duration)
+                continue;
+            float fade = 1.0f - age / duration;
+            fade *= fade;
+            dlight_t light = cached->light;
+            light.intensity = DLIGHT_CUTOFF +
+                max(light.intensity - DLIGHT_CUTOFF, 0.0f) * fade;
+            count = vk_world_insert_dynamic_light(face, &light, true, ent,
+                axis, count, scores, origins, colors);
         }
-        if (slot >= VK_WORLD_MAX_DLIGHTS ||
-            (count >= VK_WORLD_MAX_DLIGHTS && f <= scores[slot]))
-            continue;
-
-        scores[slot] = f;
-        if (origins) {
-            VectorCopy(light_origin, origins[slot]);
-            origins[slot][3] = max(light->intensity - DLIGHT_CUTOFF *
-                ((vk_dlight_falloff && vk_dlight_falloff->integer) ? 0.8f : 1.0f),
-                0.0f);
-        }
-        if (colors) {
-            VectorCopy(light->color, colors[slot]);
-            colors[slot][3] = light->intensity;
-        }
-        if (count < VK_WORLD_MAX_DLIGHTS)
-            count++;
     }
 
     return count;
@@ -10460,14 +10638,48 @@ static void vk_world_material(const mface_t *face, float *reflect,
     }
 }
 
-static float vk_world_pack_material(float reflect, float roughness)
+static float vk_world_pack_material(float reflect, float roughness,
+                                    float skylight, float environment,
+                                    float sunlight, float emissive_halo)
 {
     // The secondary MRT alpha remains available alongside bloom RGB. Four
     // bits per property are sufficient for broad Quake II material classes
     // and keep reflection eligibility and roughness independent.
     unsigned reflect_q = (unsigned)(min(max(reflect, 0.0f), 1.0f) * 15.0f + 0.5f);
     unsigned roughness_q = (unsigned)(min(max(roughness, 0.0f), 1.0f) * 15.0f + 0.5f);
-    return (float)((reflect_q << 4) | roughness_q) / 255.0f;
+    unsigned skylight_q = (unsigned)(min(max(skylight, 0.0f), 1.0f) *
+                                     15.0f + 0.5f);
+    unsigned environment_q = (unsigned)(min(max(environment, 0.0f), 1.0f) *
+                                        15.0f + 0.5f);
+    unsigned sunlight_q = (unsigned)(min(max(sunlight, 0.0f), 1.0f) *
+                                     15.0f + 0.5f);
+    unsigned halo_q = (unsigned)(min(max(emissive_halo, 0.0f), 1.0f) *
+                                 15.0f + 0.5f);
+    return (float)((halo_q << 20) | (sunlight_q << 16) |
+                   (environment_q << 12) |
+                   (skylight_q << 8) |
+                   (reflect_q << 4) | roughness_q);
+}
+
+static float vk_world_pack_rt_controls(float specular, float bounce,
+                                       float caustics, float shadow_fringe,
+                                       float light_ripples)
+{
+    // A float represents every 24-bit integer exactly. Six-bit general
+    // controls and four-bit effect controls retain useful menu precision
+    // while leaving the 256-byte world push constants unchanged.
+    unsigned specular_q = (unsigned)(min(max(specular, 0.0f), 1.0f) *
+                                     63.0f + 0.5f);
+    unsigned bounce_q = (unsigned)(min(max(bounce, 0.0f), 1.0f) *
+                                   63.0f + 0.5f);
+    unsigned caustics_q = (unsigned)(min(max(caustics, 0.0f), 1.0f) *
+                                     15.0f + 0.5f);
+    unsigned fringe_q = (unsigned)(min(max(shadow_fringe, 0.0f), 1.0f) *
+                                   15.0f + 0.5f);
+    unsigned ripple_q = (unsigned)(min(max(light_ripples, 0.0f), 1.0f) *
+                                   15.0f + 0.5f);
+    return (float)(specular_q | (bounce_q << 6) | (caustics_q << 12) |
+                   (fringe_q << 16) | (ripple_q << 20));
 }
 
 static int vk_world_liquid_kind(const mface_t *face)
@@ -10484,22 +10696,63 @@ static int vk_world_liquid_kind(const mface_t *face)
 }
 #endif
 
+#if USE_VULKAN_RAYTRACING
+static int vk_view_liquid_kind(const refdef_t *fd)
+{
+    if (!fd || !(fd->rdflags & RDF_UNDERWATER) ||
+        !vk.world.cache || !vk.world.cache->nodes)
+        return 0;
+
+    const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, fd->vieworg);
+    int contents = leaf ? leaf->contents[0] : 0;
+    if (contents & (CONTENTS_LAVA | CONTENTS_SLIME))
+        return 0;
+    return contents & CONTENTS_WATER ? 1 : 0;
+}
+#endif
+
 static void vk_world_rt_params(float *params, bool pixel_world,
                                bool world_entity, const mface_t *face)
 {
     params[0] = 0.0f;
     params[1] = 0.0f;
     params[2] = 0.0f;
-    params[3] = vk_rt_specular ?
-        Cvar_ClampValue(vk_rt_specular, 0.0f, 1.0f) : 0.0f;
+    params[3] = 0.0f;
 #if USE_VULKAN_RAYTRACING
+    float specular = vk_rt_specular ?
+        Cvar_ClampValue(vk_rt_specular, 0.0f, 1.0f) : 0.0f;
+    float bounce = vk_rt_bounce ?
+        Cvar_ClampValue(vk_rt_bounce, 0.0f, 1.0f) : 0.0f;
+    float caustics = world_entity && vk.view_liquid_kind && vk_rt_caustics ?
+        Cvar_ClampValue(vk_rt_caustics, 0.0f, 1.0f) : 0.0f;
+    float shadow_fringe = world_entity && vk_rt_shadow_fringe ?
+        Cvar_ClampValue(vk_rt_shadow_fringe, 0.0f, 1.0f) : 0.0f;
+    float light_ripples = world_entity && vk_rt_light_ripples ?
+        Cvar_ClampValue(vk_rt_light_ripples, 0.0f, 1.0f) : 0.0f;
+    float skylight = world_entity && vk_rt_skylight ?
+        Cvar_ClampValue(vk_rt_skylight, 0.0f, 1.0f) : 0.0f;
+    float environment = world_entity && vk_rt_environment ?
+        Cvar_ClampValue(vk_rt_environment, 0.0f, 1.0f) : 0.0f;
+    float sunlight = world_entity && vk_rt_sunlight ?
+        Cvar_ClampValue(vk_rt_sunlight, 0.0f, 1.0f) : 0.0f;
+    bool emissive_face = world_entity && face && face->texinfo &&
+        (face->texinfo->c.flags & SURF_LIGHT) &&
+        !(face->drawflags & (SURF_TRANS_MASK | SURF_WARP));
+    float emissive_halo = emissive_face && vk_rt_emissive_halo ?
+        Cvar_ClampValue(vk_rt_emissive_halo, 0.0f, 1.0f) : 0.0f;
+    params[3] = vk_world_pack_rt_controls(specular, bounce, caustics,
+                                          shadow_fringe, light_ripples);
     int requested_debug = vk_rt_debug ? vk_rt_debug->integer : 0;
     float material_reflect, material_roughness;
     vk_world_material(face, &material_reflect, &material_roughness);
-    if (face && (face->drawflags & (SURF_TRANS_MASK | SURF_WARP)))
+    if (face && (face->drawflags & (SURF_TRANS_MASK | SURF_WARP))) {
         material_reflect = 0.0f;
+        sunlight = 0.0f;
+    }
     float packed_material = vk_world_pack_material(material_reflect,
-                                                   material_roughness);
+                                                   material_roughness,
+                                                   skylight, environment,
+                                                   sunlight, emissive_halo);
     if (pixel_world) {
         if (requested_debug >= 1 && requested_debug <= 3) {
             params[0] = -(float)requested_debug;
@@ -10508,16 +10761,16 @@ static void vk_world_rt_params(float *params, bool pixel_world,
                 Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f) : 0.0f;
             params[1] = vk_rt_ao ?
                 Cvar_ClampValue(vk_rt_ao, 0.0f, 0.5f) : 0.0f;
-            if (requested_debug == 8)
-                params[1] = -8.0f;
+            if (requested_debug >= 8 && requested_debug <= 17)
+                params[1] = -(float)requested_debug;
             params[2] = packed_material;
         }
     } else if (vk.raytracing_active && world_entity) {
         // This position aliases rt_enabled in vk_world_lit_push_t.
         params[0] = requested_debug >= 1 && requested_debug <= 3 ?
             -(float)requested_debug : 1.0f;
-        if (requested_debug == 8)
-            params[1] = -8.0f;
+        if (requested_debug >= 8 && requested_debug <= 17)
+            params[1] = -(float)requested_debug;
         params[2] = packed_material;
     }
 
@@ -10527,8 +10780,6 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         // Warp faces never enter SSR. Reuse their material channel for the
         // liquid class and retain the ordinary specular control in its
         // fractional part so strength zero reproduces the previous shader.
-        float specular = vk_rt_specular ?
-            Cvar_ClampValue(vk_rt_specular, 0.0f, 1.0f) : 0.0f;
         params[2] = -((float)liquid_kind + specular * 0.99f);
         params[3] = vk_rt_liquids ?
             Cvar_ClampValue(vk_rt_liquids, 0.0f, 1.0f) : 0.65f;
@@ -12079,6 +12330,7 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
                                    texture, &push, ent, fd);
     }
 
+
     if (!vk.drawing_bloom)
         vk_draw_alias_shadow(ent, fd, axis, model, buffers, offsets, &lerp, false);
 }
@@ -12668,6 +12920,68 @@ static void vk_draw_beam(const entity_t *ent, const refdef_t *fd)
 // A light style index is a byte, so it is always below MAX_LIGHTSTYLES.
 _Static_assert(MAX_LIGHTSTYLES >= 256, "light style indices are bytes");
 
+static void vk_draw_rt_light_trails(const refdef_t *fd)
+{
+    float strength = vk_rt_light_trails ?
+        Cvar_ClampValue(vk_rt_light_trails, 0.0f, 1.0f) : 0.0f;
+    if (!fd || strength <= 0.0f || !vk_afterglow_rt_active() ||
+        !vk.render_pass_active || !vk.sprite_pipeline ||
+        !vk.beam_texture.descriptor_set ||
+        !vk.sprite_quad.vertices.buffer || !vk.sprite_quad.indices.buffer)
+        return;
+
+    VkPipeline pipeline = vk.drawing_bloom ?
+        vk.sprite_bloom_pipeline : vk.sprite_pipeline;
+    if (!pipeline)
+        return;
+
+    VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vk_bind_texture_descriptor(cmd, vk.beam_texture.descriptor_set);
+
+    vk_draw_scope_t old_scope = vk.draw_scope;
+    vk.draw_scope = VK_DRAW_ENTITY;
+    for (int i = 0; i < VK_RT_AFTERGLOW_LIGHTS; i++) {
+        const vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[i];
+        if (!cached->valid || !cached->trail_valid)
+            continue;
+
+        float age = fd->time - cached->last_seen;
+        if (age < 0.0f || age >= 0.10f)
+            continue;
+        float fade = cached->seen_frame == vk.afterglow_frame ?
+            1.0f : 1.0f - age / 0.10f;
+
+        vec3_t start, end, direction;
+        VectorCopy(cached->trail_origin, start);
+        VectorCopy(cached->light.origin, end);
+        VectorSubtract(end, start, direction);
+        float length = VectorNormalize(direction);
+        if (length < 6.0f)
+            continue;
+        if (length > 96.0f)
+            VectorMA(end, -96.0f, direction, start);
+
+        float peak = max(cached->light.color[0],
+                         max(cached->light.color[1], cached->light.color[2]));
+        if (peak <= 0.10f)
+            continue;
+        float color[4] = {
+            min(cached->light.color[0] / peak, 1.0f),
+            min(cached->light.color[1] / peak, 1.0f),
+            min(cached->light.color[2] / peak, 1.0f),
+            (0.18f + 0.34f * strength) * fade,
+        };
+        if (vk.drawing_bloom)
+            color[3] *= 0.55f;
+        float intensity_weight = Q_clipf(
+            (cached->light.intensity - 160.0f) / 400.0f, 0.0f, 1.0f);
+        float width = 1.4f + strength * 1.8f + intensity_weight * 1.2f;
+        vk_draw_beam_segment(start, end, fd, color, width);
+    }
+    vk.draw_scope = old_scope;
+}
+
 static float vk_lightstyle_value(const refdef_t *fd, byte style)
 {
     if (!fd || !fd->lightstyles)
@@ -12960,6 +13274,7 @@ static void vk_draw_bloom_beams(const refdef_t *fd)
     vk.drawing_bloom = true;
     vk_set_3d_viewport(fd);
     vk_draw_entities(fd, VK_ENTITY_BEAM);
+    vk_draw_rt_light_trails(fd);
     vk.drawing_bloom = old;
 }
 
@@ -14966,9 +15281,22 @@ bool VKR_Init(bool total)
     vk_raytracing = Cvar_Get("vk_raytracing", "0", CVAR_ARCHIVE | CVAR_REFRESH);
     vk_rt_emissive = Cvar_Get("vk_rt_emissive", "0.35", CVAR_ARCHIVE);
     vk_rt_ao = Cvar_Get("vk_rt_ao", "0.24", CVAR_ARCHIVE);
+    vk_rt_skylight = Cvar_Get("vk_rt_skylight", "0.6", CVAR_ARCHIVE);
+    vk_rt_environment = Cvar_Get("vk_rt_environment", "0.65", CVAR_ARCHIVE);
+    vk_rt_afterglow = Cvar_Get("vk_rt_afterglow", "0.35", CVAR_ARCHIVE);
+    vk_rt_sunlight = Cvar_Get("vk_rt_sunlight", "0.65", CVAR_ARCHIVE);
+    vk_rt_emissive_halo = Cvar_Get("vk_rt_emissive_halo", "0.65",
+                                   CVAR_ARCHIVE);
     vk_rt_reflections = Cvar_Get("vk_rt_reflections", "0.35", CVAR_ARCHIVE);
+    vk_rt_reflection_glints = Cvar_Get("vk_rt_reflection_glints", "0.55",
+                                       CVAR_ARCHIVE);
     vk_rt_specular = Cvar_Get("vk_rt_specular", "0.45", CVAR_ARCHIVE);
     vk_rt_liquids = Cvar_Get("vk_rt_liquids", "0.65", CVAR_ARCHIVE);
+    vk_rt_bounce = Cvar_Get("vk_rt_bounce", "0.65", CVAR_ARCHIVE);
+    vk_rt_caustics = Cvar_Get("vk_rt_caustics", "0.65", CVAR_ARCHIVE);
+    vk_rt_shadow_fringe = Cvar_Get("vk_rt_shadow_fringe", "0.6", CVAR_ARCHIVE);
+    vk_rt_light_ripples = Cvar_Get("vk_rt_light_ripples", "0.6", CVAR_ARCHIVE);
+    vk_rt_light_trails = Cvar_Get("vk_rt_light_trails", "0.55", CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
@@ -15281,6 +15609,9 @@ void VKR_BeginRegistration(const char *map)
     r_registration_sequence++;
     memset(vk.flare_fracs, 0, sizeof(vk.flare_fracs));
     memset(vk.flare_times, 0, sizeof(vk.flare_times));
+    memset(vk.afterglow_lights, 0, sizeof(vk.afterglow_lights));
+    vk.afterglow_frame = 0;
+    vk.afterglow_time = 0.0f;
     vk_load_world(map);
 }
 
@@ -15416,13 +15747,20 @@ void VKR_EndRegistration(void)
 
 void VKR_RenderFrame(const refdef_t *fd)
 {
-    if (!fd)
+    if (!fd || !vk.frame_active || !vk.render_pass_active ||
+        !vk.command_buffers || vk.current_image >= vk.swapchain_image_count)
         return;
 
     vk.fd = *fd;
     vk.fd_valid = true;
+#if USE_VULKAN_RAYTRACING
+    vk.view_liquid_kind = vk.raytracing_active ? vk_view_liquid_kind(&vk.fd) : 0;
+#else
+    vk.view_liquid_kind = 0;
+#endif
     if (!vk_dynamic_lights_enabled())
         vk.fd.num_dlights = 0;
+    vk_update_afterglow(&vk.fd);
     glr.fd = vk.fd;
     fd = &vk.fd;
 
@@ -15464,6 +15802,7 @@ void VKR_RenderFrame(const refdef_t *fd)
         vk_draw_world_outlines(mvp, false, VK_WORLD_ALPHA, fd, NULL);
     }
     vk_draw_entities(fd, VK_ENTITY_BEAM);
+    vk_draw_rt_light_trails(fd);
     vk_draw_particles(fd);
     vk_draw_entities(fd, VK_ENTITY_ALPHA_FRONT);
 #if USE_DEBUG
@@ -15992,13 +16331,18 @@ static void vk_render_ssr(void)
         .projection = { proj[0], proj[5], proj[10], proj[14] },
         .control = {
             vk_rt_reflections ? Cvar_ClampValue(vk_rt_reflections, 0.0f, 1.0f) : 0.0f,
-            vk_rt_debug && vk_rt_debug->integer >= 4 &&
-                vk_rt_debug->integer <= 7 ?
+            vk_rt_debug && ((vk_rt_debug->integer >= 4 &&
+                vk_rt_debug->integer <= 7) ||
+                vk_rt_debug->integer == 18) ?
                 (float)vk_rt_debug->integer : 0.0f,
             1.0f / max((float)vk.scene_texture.width, 1.0f),
             1.0f / max((float)vk.scene_texture.height, 1.0f),
         },
-        .view_up = { view[8], view[9], view[10], 0.0f },
+        .view_up = {
+            view[8], view[9], view[10],
+            vk_rt_reflection_glints ?
+                Cvar_ClampValue(vk_rt_reflection_glints, 0.0f, 1.0f) : 0.55f,
+        },
     };
     vk.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.ssr_pipeline);
     vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -16246,9 +16590,7 @@ void VKR_BeginFrame(void)
             return;
     }
     if (vk_rt_reflections && vk_rt_reflections->modified) {
-        bool enable_mrt = (gl_bloom && gl_bloom->integer > 0) ||
-            (vk_raytracing && vk_raytracing->integer &&
-             vk_rt_reflections->value > 0.001f);
+        bool enable_mrt = vk_mrt_requested() && vk_bloom_supported();
         vk_rt_reflections->modified = false;
         if (enable_mrt != vk.mrt_bloom &&
             !vk_recreate_swapchain("ray-traced reflection change"))

@@ -87,8 +87,27 @@ void main()
     }
     vec3 resolved_color = color_sum / weight_sum;
     float resolved_alpha = alpha_sum / weight_sum;
+    float glint_strength = clamp(pc.view_up.w, 0.0, 1.0);
+    float resolved_luma = dot(resolved_color,
+                              vec3(0.2126, 0.7152, 0.0722));
+    float resolved_brightness = max(resolved_color.r,
+        max(resolved_color.g, resolved_color.b));
+    float luminance_detail = fwidth(resolved_luma);
+    float bright_mask = smoothstep(0.28, 0.85, resolved_brightness);
+    float compact_mask = smoothstep(0.004, 0.06, luminance_detail);
+    float smoothness = 1.0 - material.y;
+    float smooth_mask = smoothstep(0.25, 0.90, smoothness);
+    smooth_mask *= smooth_mask;
+    float glint_mask = bright_mask * mix(0.12, 1.0, compact_mask) *
+                       smooth_mask * resolved_alpha * glint_strength;
+    vec3 glint_color = mix(vec3(resolved_luma), resolved_color, 0.80);
+    vec3 glint = glint_color * glint_mask * 0.35;
+    float glint_luma = dot(glint, vec3(0.2126, 0.7152, 0.0722));
+    glint *= min(1.0, 0.12 / max(glint_luma, 0.000001));
     if (debug_mode == 7)
         out_color = vec4(resolved_color * resolved_alpha, 1.0);
+    else if (debug_mode == 18)
+        out_color = vec4(clamp(glint * 8.0, 0.0, 1.0), 1.0);
     else
-        out_color = vec4(resolved_color, resolved_alpha);
+        out_color = vec4(resolved_color + glint, resolved_alpha);
 }

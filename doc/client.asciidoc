@@ -832,7 +832,9 @@ vk_raytracing::
     after the bake. If the bake fails, they are traced every frame instead,
     nearby only. Dynamic light shadows are traced per pixel within 512 units
     and once per 2x2 pixels further away; the strongest light gets two samples
-    within 320 units, for softer edges. Needs a GPU and driver with Vulkan
+    within 320 units, for softer edges. The same shadow results tint nearby
+    surfaces with the color of explosions and projectiles (‘vk_rt_bounce’).
+    Needs a GPU and driver with Vulkan
     1.2, acceleration structures and ray queries; without them a warning names
     what is missing and the renderer carries on without ray tracing. Changing
     it restarts the renderer. Default value is 0 (disabled).
@@ -859,6 +861,28 @@ vk_rt_reflections::
     what is on screen can be reflected. Needs ‘gl_multisamples’ 0 (no MSAA).
     Default value is 0.35; 0 disables it.
 
+vk_rt_reflection_glints::
+    Controls compact colored highlights around bright details in resolved
+    screen-space reflections, clamped between 0 and 1. Brightness and
+    screen-space luminance variation isolate reflected lamps, explosions, and
+    projectiles after the depth- and material-aware bilateral resolve. Smooth
+    materials respond most strongly while rough surfaces suppress the effect.
+    Added luminance is capped at 0.12. The effect adds no ray queries, texture
+    samples, passes, descriptors, or draws and requires `vk_rt_reflections`.
+    Changes apply immediately. Default value is 0.55; value 0 disables it.
+
+vk_rt_emissive_halo::
+    Controls stable colored edge halos on opaque static BSP `SURF_LIGHT`
+    textures while Vulkan ray tracing is active, clamped between 0 and 1. The
+    effect derives boundaries from bright base-texture details and screen-space
+    derivatives, using a glowmap as an optional refinement when one exists. It
+    preserves bright cores and rejects weak internal noise. Its
+    local contribution is capped at 0.045 luminance; a separate contribution
+    capped at 0.035 feeds the existing bloom path when enabled. It adds no
+    texture samples, ray queries, passes, descriptors, or draws and remains
+    independent of `vk_rt_emissive`. Changes apply immediately. Default value
+    is 0.65; value 0 disables both local and bloom contributions.
+
 vk_rt_specular::
     With ‘vk_raytracing’, strength of highlights from dynamic lights and
     nearby glowing surfaces on the world, from 0 to 1, shaped by the same
@@ -871,6 +895,110 @@ vk_rt_liquids::
     lava, from 0 to 1: animated ripples, a colored sheen at grazing angles and
     highlights from dynamic lights, which also feed bloom. Adds no rays.
     Default value is 0.65; 0 disables it.
+
+vk_rt_environment::
+    Controls a material-aware cool blue-gray environment sheen on opaque BSP
+    world surfaces while Vulkan ray tracing is active, clamped between 0 and
+    1. Reflectivity and roughness come from the existing reflection material
+    system. A broad Fresnel response keeps the effect visible away from
+    extreme grazing angles, while smooth upward-facing surfaces receive the
+    strongest response and walls and rough surfaces remain softer. The
+    contribution uses stabilized aperture openness, preserves bright texture
+    detail, is capped at 0.08 luminance, and does not feed bloom. It adds no
+    ray queries, texture samples, render passes, descriptors, or draw calls.
+    Changes apply immediately. Default value is 0.65; value 0 disables it.
+
+vk_rt_skylight::
+    Controls a cool blue-gray ambient fill on open static BSP world surfaces
+    while Vulkan ray tracing is active, clamped between 0 and 1. Baked ambient
+    visibility identifies apertures and open areas; upward-facing surfaces
+    receive the strongest fill and walls receive a softer amount. The result
+    is luminance-capped, preserves bright texture detail, does not feed bloom,
+    and adds no ray queries, samples, passes, descriptors, or draw calls.
+    Changes apply immediately. Default value is 0.6; value 0 disables it.
+
+vk_rt_caustics::
+    Controls animated underwater caustic lighting on nearby BSP surfaces while
+    Vulkan ray tracing is active, clamped between 0 and 1. Only water receives
+    the cool-blue pattern; slime and lava are deliberately excluded. Floors
+    receive the strongest pattern while walls retain a softer contribution;
+    the effect fades between 512 and 1152 world units from the camera. It is
+    procedural and adds no ray queries, texture samples, render passes,
+    descriptors, or draw calls. Bright crests provide a restrained bloom
+    contribution when ‘gl_bloom’ is enabled. Changes apply immediately.
+    Default value is 0.65; value 0 disables the effect.
+
+vk_rt_sunlight::
+    Controls warm directional light on exposed static BSP world surfaces while
+    Vulkan ray tracing is active, clamped between 0 and 1. The fixed elevated
+    direction is normalized from `(0.45, 0.35, 0.82)`. Existing stabilized
+    aperture openness limits the effect in enclosed areas, with baked
+    visibility restricted to mild modulation so coarse AO cannot create dark
+    islands. The contribution preserves texture detail, is capped at 0.12
+    luminance, and does not feed bloom. It adds no ray queries, texture
+    samples, passes, descriptors, or draws. Changes apply immediately. Default
+    value is 0.65; value 0 disables the effect.
+
+vk_rt_shadow_fringe::
+    Controls colored penumbra fringes from the strongest nearby dynamic light,
+    clamped between 0 and 1. The effect uses disagreement between the two
+    existing area-light visibility samples, so fully lit, fully blocked, and
+    single-ray regions remain unchanged. Fringe color follows the light, is
+    capped at 0.06 luminance, and does not contribute to bloom, specular, or
+    color bounce. It adds no additional ray queries or visibility samples and
+    no passes, descriptors, or draws. Runtime transport quantizes specular and
+    bounce controls to 7 bits
+    and caustic and fringe controls to 5 bits, which remains finer than their
+    menu increments. Changes apply immediately. Default value is 0.6.
+
+vk_rt_bounce::
+    Controls a performance-friendly approximation of colored indirect light
+    from explosions, projectiles, muzzle flashes, and other dynamic lights,
+    clamped between 0 and 1. It reuses the existing dynamic-light candidates
+    and ray-shadow visibility to add localized color spill across nearby BSP
+    world surfaces. Occluded lights do not leak through walls. The contribution
+    preserves texture detail, has separate luminance and bloom limits, and adds
+    no ray queries, render passes, draws, descriptors, or texture samples.
+    Changes apply immediately. Default value is 0.65; value 0 disables the
+    indirect contribution while retaining ordinary dynamic lighting.
+
+vk_rt_afterglow::
+    Controls how long bright transient dynamic lights remain after their live
+    source disappears, in seconds, clamped between 0 and 1. Sources with at
+    least 160 intensity are retained in an eight-entry renderer cache and fade
+    quadratically. Live and fading sources compete for the same three
+    per-surface light slots, so the effect does not increase shader loops or
+    ray queries. The fading source retains the existing diffuse, shadow,
+    bounce, specular, fringe, and bloom response. History is cleared on map or
+    renderer changes, time reversal, and RT or dynamic-light disablement.
+    Changes apply immediately. Default value is 0.35 seconds; value 0 disables
+    the effect.
+
+vk_rt_light_ripples::
+    Controls animated colored illumination rings from strong live dynamic
+    lights on opaque BSP world surfaces, clamped between 0 and 1. Explosions,
+    projectiles, and muzzle flashes with at least 160 intensity produce rings
+    that follow existing distance falloff and ray-traced visibility, so walls
+    block them. Cached afterglow sources are excluded. Local luminance is
+    capped at 0.07 and remains visible without bloom; a separate contribution
+    capped at 0.02 feeds bloom when enabled. The effect reuses the existing
+    three dynamic-light slots and adds no rays, samples, passes, descriptors,
+    or draws. Runtime transport uses 6-bit specular and bounce controls plus
+    4-bit caustic, fringe, and ripple controls. Changes apply immediately.
+    Default value is 0.6; value 0 disables the effect.
+
+vk_rt_light_trails::
+    Controls short colored trails behind strong moving dynamic lights while
+    Vulkan ray tracing is active, clamped between 0 and 1. Lights with at
+    least 160 intensity reuse the existing eight-entry transient-light tracker
+    and retain one smoothly lagged segment. Movement below 6 units is rejected,
+    teleport-like changes are reset, visible length is capped at 96 units, and
+    the segment fades for 0.10 seconds after its source disappears. Trails use
+    the existing depth-tested beam geometry and add at most eight normal draws;
+    bloom adds at most eight matching lower-energy draws when enabled. No new
+    shaders, ray queries, texture samples, or render passes are required.
+    Changes apply immediately and remain independent of `vk_rt_afterglow`.
+    Default value is 0.55; value 0 disables the effect.
 
 materials/rt_reflections.mat::
     Reflection and roughness of textures for ‘vk_rt_reflections’ and
@@ -891,7 +1019,10 @@ vk_rt_debug::
     light, 4 the reflection strength, 5 which surfaces reflect (green), 6
     reflection rays that hit (blue) or missed (brown), 7 only the reflections
     and 8 only the specular highlights (cyan from dynamic lights, amber from
-    glowing surfaces). Default value is 0 (normal picture).
+    glowing surfaces). 9 to 18 show single effects, amplified eight times:
+    color bounce, caustics, shadow fringes, sky light, environment sheen,
+    afterglow, sunlight, emissive halos, light ripples and reflection glints.
+    Default value is 0 (normal picture).
 
 Only opaque world surfaces cast ray-traced shadows so far, not models or
 translucent surfaces.

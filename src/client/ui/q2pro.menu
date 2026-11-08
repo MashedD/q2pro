@@ -71,10 +71,8 @@ begin video
         "renderer" vid_ref "OpenGL" gl "Vulkan" vk
     pairs --status "GPU for the Vulkan renderer. Automatic prefers the GPU that drives the display" \
         "Vulkan device" vk_device $$vk_devicelist
-    toggle --status "Vulkan only: ray-traced shadows and ambient occlusion. Needs ray query support" \
-        "ray tracing" vk_raytracing
-    range --status "Vulkan ray tracing: strength of light from glowing surfaces" \
-        "RT surface lights" vk_rt_emissive 0 2 0.05
+    action --align --status "Ray-traced lighting, reflections and effects. Vulkan only, needs ray query support" \
+        "Vulkan ray tracing..." pushmenu raytracing
     values --status "Windowed, or a fullscreen mode from the list of video modes" \
         "video mode" vid_fullscreen windowed $$vid_modelist
     field --status "Horizontal field of view in degrees. The default is 90" \
@@ -125,6 +123,47 @@ begin video
         "modulate world" gl_modulate_world 1 5
     range --status "Brightens the lighting of models only, such as players and items" \
         "modulate entities" gl_modulate_entities 1 5
+end
+
+begin raytracing
+    title "Ray Tracing Setup"
+    toggle --status "Enable Vulkan ray tracing; changing this refreshes the renderer" \
+        "ray tracing" vk_raytracing
+    range --status "Contact shadowing in corners and at surface junctions" \
+        "ambient occlusion" vk_rt_ao 0 0.5 0.01
+    range --status "Cool ambient fill on open world surfaces" \
+        "aperture skylight" vk_rt_skylight 0 1 0.05
+    range --status "Warm directional light on exposed world surfaces" \
+        "sunlit apertures" vk_rt_sunlight 0 1 0.05
+    range --status "Colored lighting from emissive world surfaces" \
+        "emissive lighting" vk_rt_emissive 0 2 0.05
+    range --status "Colored edge glow on emissive world textures" \
+        "emissive edge halos" vk_rt_emissive_halo 0 1 0.05
+    range --status "Screen-space reflections on configured materials" \
+        "reflections" vk_rt_reflections 0 1 0.05
+    range --status "Compact colored highlights around bright reflections" \
+        "reflection glints" vk_rt_reflection_glints 0 1 0.05
+    range --status "Material highlights from dynamic and emissive lights" \
+        "specular highlights" vk_rt_specular 0 1 0.05
+    range --status "Ambient sheen on reflective world materials" \
+        "environment sheen" vk_rt_environment 0 1 0.05
+    range --status "Ripples, sheen, highlights, and glow on liquids" \
+        "liquid effects" vk_rt_liquids 0 1 0.05
+    range --status "Animated lighting on nearby surfaces while underwater" \
+        "underwater caustics" vk_rt_caustics 0 1 0.05
+    range --status "Colored penumbrae from nearby dynamic lights" \
+        "shadow fringes" vk_rt_shadow_fringe 0 1 0.05
+    range --status "Localized color spill from explosions and projectiles" \
+        "dynamic color bounce" vk_rt_bounce 0 1 0.05
+    range --status "Animated shadow-aware rings from strong dynamic lights" \
+        "dynamic light ripples" vk_rt_light_ripples 0 1 0.05
+    range --status "Depth-tested colored trails behind strong moving lights" \
+        "projectile light trails" vk_rt_light_trails 0 1 0.05
+    range --status "Fade time for bright transient ray-traced lights" \
+        "dynamic light afterglow" vk_rt_afterglow 0 1 0.05
+    blank
+    toggle --status "Allow bright ray-traced effects to contribute bloom" \
+        "bloom" gl_bloom
 end
 
 begin options
