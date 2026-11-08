@@ -45,11 +45,25 @@ static inline bool entity_is_optimized(const centity_state_t *state)
         && cl.frame.ps.pmove.pm_type < PM_DEAD;
 }
 
+static inline void entity_reset_water_wake(centity_t *ent,
+                                           const vec_t *origin)
+{
+    VectorCopy(origin, ent->rt_water_wake_sample_origin);
+    VectorCopy(origin, ent->rt_water_wake_origin);
+    VectorClear(ent->rt_water_wake_normal);
+    VectorClear(ent->rt_water_wake_direction);
+    ent->rt_water_wake_sample_time = cl.time;
+    ent->rt_water_wake_seen_time = 0;
+    ent->rt_water_wake_scale = 0.0f;
+    ent->rt_water_wake_valid = false;
+}
+
 static inline void
 entity_update_new(centity_t *ent, const centity_state_t *state, const vec_t *origin)
 {
     ent->trailcount = 1024;     // for diminishing rocket / grenade trails
     ent->flashlightfrac = 1.0f;
+    entity_reset_water_wake(ent, origin);
 
     // duplicate the current state so lerping doesn't hurt anything
     ent->prev = *state;
@@ -100,6 +114,7 @@ entity_update_old(centity_t *ent, const centity_state_t *state, const vec_t *ori
         // some data changes will force no lerping
         ent->trailcount = 1024;     // for diminishing rocket / grenade trails
         ent->flashlightfrac = 1.0f;
+        entity_reset_water_wake(ent, origin);
 
         // duplicate the current state so lerping doesn't hurt anything
         ent->prev = *state;
@@ -219,10 +234,12 @@ static void parse_entity_event(int number)
     case EV_ITEM_RESPAWN:
         S_StartSound(NULL, number, CHAN_WEAPON, S_RegisterSound("items/respawn1.wav"), 1, ATTN_IDLE, 0);
         CL_ItemRespawnParticles(cent->current.origin);
+        CL_RTItemRespawn(cent->current.origin);
         break;
     case EV_PLAYER_TELEPORT:
         S_StartSound(NULL, number, CHAN_WEAPON, S_RegisterSound("misc/tele1.wav"), 1, ATTN_IDLE, 0);
         CL_TeleportParticles(cent->current.origin);
+        CL_RTTeleportVortex(cent->current.origin, RT_TELEPORT_STANDARD);
         break;
     case EV_FOOTSTEP:
         if (cl_footsteps->integer)
@@ -238,12 +255,15 @@ static void parse_entity_event(int number)
         break;
     case EV_FALLSHORT:
         S_StartSound(NULL, number, CHAN_AUTO, S_RegisterSound("player/land1.wav"), 1, ATTN_NORM, 0);
+        CL_RTLandingDust(number, RT_LANDING_SHORT);
         break;
     case EV_FALL:
         S_StartSound(NULL, number, CHAN_AUTO, S_RegisterSound("*fall2.wav"), 1, ATTN_NORM, 0);
+        CL_RTLandingDust(number, RT_LANDING_NORMAL);
         break;
     case EV_FALLFAR:
         S_StartSound(NULL, number, CHAN_AUTO, S_RegisterSound("*fall1.wav"), 1, ATTN_NORM, 0);
+        CL_RTLandingDust(number, RT_LANDING_FAR);
         break;
     }
 }
@@ -966,6 +986,106 @@ static bool CL_GetWeaponHighlight(int weapon, item_highlight_t *highlight)
     }
 }
 
+#define RT_WATER_WAKE_SAMPLE_MSEC 100
+#define RT_WATER_WAKE_HOLD_MSEC   150
+
+// The renderer sets QVF_RAYTRACING while Vulkan ray tracing is active; the
+// strength cvar is the renderer's, so it only exists once Vulkan has started.
+static bool CL_RTWaterWakesEnabled(void)
+{
+    static cvar_t *water_wakes;
+
+    if (!(r_config.flags & QVF_RAYTRACING))
+        return false;
+    if (!water_wakes)
+        water_wakes = Cvar_FindVar("vk_rt_water_wakes");
+
+    return water_wakes && water_wakes->value > 0.0f;
+}
+
+static void CL_AddRTWaterWake(centity_t *cent, const vec3_t origin,
+                              int entity_number)
+{
+    if (!cl.bsp || !CL_RTWaterWakesEnabled()) {
+        entity_reset_water_wake(cent, origin);
+        return;
+    }
+
+    int elapsed = cl.time - cent->rt_water_wake_sample_time;
+    if (elapsed < 0) {
+        entity_reset_water_wake(cent, origin);
+        return;
+    }
+
+    if (elapsed >= RT_WATER_WAKE_SAMPLE_MSEC) {
+        vec3_t movement;
+        VectorSubtract(origin, cent->rt_water_wake_sample_origin, movement);
+        movement[2] = 0.0f;
+        float distance = VectorLength(movement);
+
+        VectorCopy(origin, cent->rt_water_wake_sample_origin);
+        cent->rt_water_wake_sample_time = cl.time;
+
+        if (distance > 96.0f) {
+            cent->rt_water_wake_valid = false;
+        } else if (distance >= 4.0f) {
+            vec3_t start, end;
+            trace_t trace;
+            VectorCopy(origin, start);
+            VectorCopy(origin, end);
+            start[2] += max(cent->maxs[2], 32.0f) + 12.0f;
+            end[2] += min(cent->mins[2], -24.0f) - 12.0f;
+
+            CL_Trace(&trace, start, end, vec3_origin, vec3_origin,
+                     CONTENTS_WATER);
+            if (!trace.startsolid && !trace.allsolid &&
+                trace.fraction > 0.0f && trace.fraction < 1.0f &&
+                trace.plane.normal[2] >= 0.7f) {
+                vec3_t above, below;
+                VectorMA(trace.endpos, 3.0f, trace.plane.normal, above);
+                VectorMA(trace.endpos, -3.0f, trace.plane.normal, below);
+                int above_contents = CM_PointContents(above, cl.bsp->nodes,
+                                                       cl.csr.extended);
+                int below_contents = CM_PointContents(below, cl.bsp->nodes,
+                                                       cl.csr.extended);
+
+                if (!(above_contents & MASK_WATER) &&
+                    (below_contents & CONTENTS_WATER)) {
+                    VectorMA(trace.endpos, 0.75f, trace.plane.normal,
+                             cent->rt_water_wake_origin);
+                    VectorCopy(trace.plane.normal,
+                               cent->rt_water_wake_normal);
+                    VectorNormalize(movement);
+                    VectorCopy(movement, cent->rt_water_wake_direction);
+                    cent->rt_water_wake_scale =
+                        Q_clipf(distance / 12.0f, 0.8f, 1.25f);
+                    cent->rt_water_wake_seen_time = cl.time;
+                    cent->rt_water_wake_valid = true;
+                } else {
+                    cent->rt_water_wake_valid = false;
+                }
+            } else {
+                cent->rt_water_wake_valid = false;
+            }
+        }
+    }
+
+    if (!cent->rt_water_wake_valid ||
+        cl.time - cent->rt_water_wake_seen_time > RT_WATER_WAKE_HOLD_MSEC)
+        return;
+
+    entity_t wake = { 0 };
+    VectorCopy(cent->rt_water_wake_origin, wake.origin);
+    VectorCopy(cent->rt_water_wake_direction, wake.oldorigin);
+    VectorCopy(cent->rt_water_wake_normal, wake.angles);
+    wake.frame = entity_number;
+    wake.rgba.u32 = MakeColor(112, 196, 238, 255);
+    wake.flags = RF_EFFECT_ONLY | RF_RT_WATER_WAKE | RF_TRANSLUCENT;
+    wake.alpha = 1.0f;
+    wake.scale = cent->rt_water_wake_scale;
+    V_AddEntity(&wake);
+}
+
 /*
 ===============
 CL_AddPacketEntities
@@ -1119,6 +1239,9 @@ static void CL_AddPacketEntities(void)
             }
 #endif
         }
+
+        if (s1->modelindex == MODELINDEX_PLAYER && !(renderfx & RF_BEAM))
+            CL_AddRTWaterWake(cent, ent.origin, s1->number);
 
         if (effects & EF_BOB && !cl_nobob->integer) {
             ent.origin[2] += autobob;

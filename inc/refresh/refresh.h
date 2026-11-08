@@ -36,6 +36,37 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define RF_SKINTINT         BIT_ULL(36)
 #define SKINTINT_BRIGHTNESS 1.25f
 #define RF_BEAM_ADDITIVE    BIT_ULL(37)
+#define RF_EXPLOSION          BIT_ULL(38)
+#define RF_EFFECT_ONLY        BIT_ULL(39)
+#define RF_RT_IMPACT          BIT_ULL(40)
+#define RF_RT_SPLASH_RIPPLE   BIT_ULL(41)
+#define RF_RT_TELEPORT        BIT_ULL(42)
+#define RF_RT_ITEM_RESPAWN    BIT_ULL(43)
+#define RF_RT_ELECTRIC        BIT_ULL(44)
+#define RF_RT_LANDING_DUST    BIT_ULL(45)
+#define RF_RT_WATER_WAKE      BIT_ULL(46)
+#define RF_RT_ENERGY_COLLAPSE BIT_ULL(47)
+#define RF_RT_RAIL_IONIZATION BIT_ULL(48)
+
+typedef enum {
+    RT_TELEPORT_STANDARD,
+    RT_TELEPORT_DBALL,
+    RT_TELEPORT_BOSS,
+} rt_teleport_type_t;
+
+typedef enum {
+    RT_LANDING_SHORT,
+    RT_LANDING_NORMAL,
+    RT_LANDING_FAR,
+    RT_LANDING_SEVERITY_MASK = 3,
+    RT_LANDING_LOCAL = 4,
+} rt_landing_type_t;
+
+typedef enum {
+    RT_ENERGY_BFG_CORE,
+    RT_ENERGY_BFG_SECONDARY,
+    RT_ENERGY_TRACKER,
+} rt_energy_collapse_type_t;
 
 #define RF_SHELL_MASK       (RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE | \
                              RF_SHELL_DOUBLE | RF_SHELL_HALF_DAM | RF_SHELL_LITE_GREEN)
@@ -145,6 +176,7 @@ typedef enum {
     QVF_FULLSCREEN      = BIT(0),
     QVF_GAMMARAMP       = BIT(1),
     QVF_VIDEOSYNC       = BIT(2),
+    QVF_RAYTRACING      = BIT(3),   // Vulkan ray tracing is active
 } vidFlags_t;
 
 typedef struct {

@@ -531,6 +531,11 @@ static void GL_ClassifyEntities(void)
         return;
 
     for (i = 0, ent = glr.fd.entities; i < glr.fd.num_entities; i++, ent++) {
+        // Ray-traced effects only the Vulkan renderer draws; some can still
+        // be alive for a moment after switching to OpenGL.
+        if (ent->flags & RF_EFFECT_ONLY)
+            continue;
+
         if (ent->flags & RF_BEAM) {
             if (ent->frame) {
                 ent->next = glr.ents.beams;

@@ -1110,18 +1110,162 @@ vk_rt_light_ripples::
     4-bit caustic, fringe, and ripple controls. Changes apply immediately.
     Default value is 0.6; value 0 disables the effect.
 
-vk_rt_light_trails::
-    Controls short colored trails behind strong moving dynamic lights while
-    Vulkan ray tracing is active, clamped between 0 and 1. Lights with at
-    least 160 intensity reuse the existing eight-entry transient-light tracker
-    and retain one smoothly lagged segment. Movement below 6 units is rejected,
-    teleport-like changes are reset, visible length is capped at 96 units, and
-    the segment fades for 0.10 seconds after its source disappears. Trails use
-    the existing depth-tested beam geometry and add at most eight normal draws;
-    bloom adds at most eight matching lower-energy draws when enabled. No new
-    shaders, ray queries, texture samples, or render passes are required.
-    Changes apply immediately and remain independent of `vk_rt_afterglow`.
-    Default value is 0.55; value 0 disables the effect.
+vk_rt_shockwaves::
+    Controls expanding colored energy rings around polygon explosions while
+    Vulkan ray tracing is active, clamped between 0 and 1. Rocket, grenade,
+    BFG, and custom-model explosions are tagged by the client rather than
+    inferred from dynamic-light intensity. During the opening animation
+    frames, one camera-facing ring expands from 16 to roughly 112 world units
+    and fades smoothly. Its color follows the colocated explosion light, with
+    warm orange used as a fallback. Rings are depth tested, restricted to the
+    current BSP visibility and liquid medium, and capped to the nearest eight
+    explosions. A procedural ring texture and the existing additive particle
+    pipeline limit the effect to 16 triangles and at most one additional draw,
+    with no ray queries, new shaders, render passes, or per-frame allocations.
+    Bright rings use the existing bloom output when ‘gl_bloom’ is enabled but
+    remain visible without bloom. Changes apply immediately. Default value is
+    0.7; value 0 disables the effect.
+
+vk_rt_impact_marks::
+    Controls brief surface-aligned hot cores and expanding energy rings at
+    weapon impacts while Vulkan ray tracing is active, clamped between 0 and
+    1. Conventional gun and shotgun impacts use restrained amber marks;
+    blaster, hyperblaster, flechette, screen, shield, and laser-spark impacts
+    retain their event color. Marks use temporary effect-only client entities,
+    so the underlying OpenGL and Vulkan raster impact visuals remain
+    unchanged. They are depth tested, offset along the supplied surface normal
+    to avoid z-fighting, restricted to the current BSP visibility and liquid
+    medium, and rejected from the back side. The nearest 16 marks are rendered
+    with a procedural texture through one additive batch, capped at 32
+    triangles and one draw with no ray queries, fullscreen passes, or
+    per-frame allocations. Bright cores use existing bloom when enabled but
+    remain visible without it. Changes apply immediately. Default value is
+    0.75; value 0 disables the effect.
+
+vk_rt_splash_ripples::
+    Controls two staggered expanding rings on liquid surfaces struck by
+    weapon splash events while Vulkan ray tracing is active, clamped between
+    0 and 1. Blue water uses pale cyan, brown water a muted warm neutral,
+    slime acid green, and lava orange-gold. Spark, blood, electric, and
+    unknown splash categories remain unchanged. Ripple size responds modestly
+    to the event's splash count. Rings remain visible for roughly 0.9 seconds,
+    face the viewer from either side of the liquid boundary, and are restricted
+    to the current BSP visibility, area, distance, and liquid medium. The
+    nearest 12 events reuse the procedural shockwave texture and shared
+    additive ring batch, capped at 48 triangles with no new texture, shader,
+    ray query, render pass, draw, or per-frame allocation. This effect is
+    independent of liquid caustics and does not enable slime or lava caustics.
+    Changes apply immediately. Default value is 0.75; value 0 disables the
+    effect.
+
+vk_rt_water_wakes::
+    Controls paired V-shaped surface wakes behind moving players while Vulkan
+    ray tracing is active, clamped between 0 and 1. The local player and other
+    players produce three progressively wider pairs of pale-blue elliptical
+    crests only while moving at the air/water boundary; dry ground, deep water,
+    slime, lava, stationary players, and teleport-sized movement do not create
+    wakes. Surface traces are cached for 100 milliseconds and expire after 150
+    milliseconds. The renderer validates both sides of the liquid boundary and
+    restricts wakes to the current BSP visibility, area, distance, and viewing
+    medium. The nearest six wakes reuse the procedural shockwave texture and
+    shared additive batch, capped at 72 triangles with no new texture, shader,
+    ray query, render pass, persistent effect allocation, or extra draw when
+    the shockwave batch is already active. Changes apply immediately. Default
+    value is 0.75; value 0 disables the effect.
+
+vk_rt_teleport_vortex::
+    Controls layered energy vortices at discrete teleport events while Vulkan
+    ray tracing is active, clamped between 0 and 1. Player and scripted
+    teleports use cyan-blue energy, disc-ball goals violet-magenta, and boss
+    teleports a larger orange-violet variant. Each vortex combines two
+    oppositely rotating tilted rings, four smaller rings rising through a
+    vertical column, and four orbiting camera-facing nodes. Existing teleport
+    particles and sounds remain unchanged, while continuous teleporter-pad
+    particles do not create vortices. The effect fades near the camera and at
+    distance, follows BSP visibility, area, and liquid-medium restrictions,
+    and is capped to the nearest four active events. It reuses the procedural
+    shockwave texture and shared additive ring batch, adding at most 80
+    triangles with no new texture, shader, render pass, ray query, draw, or
+    per-frame allocation. Bright elements use existing bloom when enabled.
+    Changes apply immediately. Default value is 0.8; value 0 disables the
+    effect.
+
+vk_rt_item_respawn::
+    Controls an emerald-mint materialization effect when map items respawn
+    while Vulkan ray tracing is active, clamped between 0 and 1. Each event
+    combines an expanding base ring, a scanning ring that rises through the
+    item, and a delayed contracting upper ring. Existing respawn particles
+    and sounds remain unchanged. Rings are depth tested, restricted to the
+    current BSP visibility, area, distance, and liquid medium, and fade near
+    the camera. The nearest eight active events reuse the procedural
+    shockwave texture and shared additive ring batch, adding at most 48
+    triangles with no new texture, shader, render pass, ray query, draw, or
+    per-frame allocation. Bright rings use existing bloom when enabled but
+    remain visible without it. Changes apply immediately. Default value is
+    0.8; value 0 disables the effect.
+
+vk_rt_electric_filaments::
+    Controls short branching filaments at electrical impact events while
+    Vulkan ray tracing is active, clamped between 0 and 1. Electric sparks use
+    blue-white energy, shield sparks blue-violet, screen sparks orange-red,
+    and heat-beam sparks a slightly larger orange-white variant. Each impact
+    produces three stable surface-crawling branches with two tapered segments;
+    their brightness pulses and fades over roughly 0.4 seconds. Existing
+    particles, sounds, impact marks, and continuous lightning beams remain
+    unchanged. Filaments are depth tested and restricted by surface facing,
+    BSP visibility, area, distance, and liquid medium. The nearest eight
+    events reuse the beam texture, additive pipeline, particle vertex buffer,
+    fog, and bloom output, adding at most 96 triangles and one draw while
+    active with no new texture, shader, descriptor, render pass, ray query, or
+    per-frame allocation. Changes apply immediately. Default value is 0.75;
+    value 0 disables the effect.
+
+vk_rt_landing_dust::
+    Controls brief surface-aware dust puffs when players land while Vulkan ray
+    tracing is active, clamped between 0 and 1. Short, normal, and hard landing
+    events emit four, six, or eight deterministic motes respectively. Motes
+    spread outward from a single client-side floor trace, rise slightly, expand,
+    and fade over roughly 0.6 seconds; local-player puffs are restrained near
+    the camera. Existing landing sounds and particles remain unchanged. Dust is
+    rejected on unsupported or steep surfaces and in water, slime, and lava,
+    while BSP visibility, area, and distance restrictions prevent it appearing
+    through the world. The nearest six active events reuse the particle texture,
+    mapped particle buffer, and depth-tested sprite batch, adding at most 96
+    triangles and one draw while active with no new shader, texture, descriptor,
+    render pass, ray query, dynamic light, or per-frame allocation. Changes apply
+    immediately. Default value is 0.7; value 0 disables the effect.
+
+vk_rt_energy_collapse::
+    Controls inward-collapse effects at BFG and tracker detonations while
+    Vulkan ray tracing is active, clamped between 0 and 1. Main BFG impacts use
+    a large green-mint collapse, BFG damage events use restrained half-size
+    green collapses, and tracker explosions use a medium violet-magenta
+    variant. Three mutually perpendicular rings contract around four spiraling
+    nodes before a compact final core pulse. The main BFG effect lasts roughly
+    0.8 seconds; secondary and tracker effects last roughly 0.6 seconds.
+    Existing explosion models, particles, lights, sounds, damage, and outward
+    shockwaves remain unchanged. Effects are restricted by BSP visibility,
+    area, distance, near-camera fading, and liquid medium. The nearest five
+    active events reuse the procedural shockwave texture, additive pipeline,
+    mapped particle buffer, fog, and shared shockwave batch, adding at most 80
+    triangles and one draw while active with no new shader, texture, descriptor,
+    render pass, ray query, or per-frame allocation. Changes apply immediately.
+    Default value is 0.8; value 0 disables the effect.
+
+vk_rt_rail_impact::
+    Controls compact ionization effects where railgun shots land while Vulkan
+    ray tracing is active, clamped between 0 and 1. A short client-side trace
+    recovers the impact normal; trace misses fall back to the reversed shot
+    direction. Each impact combines one small surface-aligned
+    pulse with three short filaments and inherits the configured rail core and
+    spiral colors. Effects last roughly 0.3 seconds and are restricted by BSP
+    visibility, area, distance, facing, near-camera fading, and the viewing
+    liquid medium. The nearest six impacts reuse the impact and beam textures,
+    additive pipelines, mapped particle buffer, fog, and shared batches, adding
+    at most 48 triangles and two draws when both batches are otherwise empty.
+    No new shader, texture, descriptor, render pass, ray query, protocol field,
+    or per-frame allocation is required. Changes apply immediately. Default
+    value is 0.65; value 0 disables the effect.
 
 vk_rt_light_coronas::
     Controls compact colored halos around strong live combat lights while
