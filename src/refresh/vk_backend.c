@@ -3554,6 +3554,9 @@ static bool vk_create_device(void)
         features.wideLines = VK_TRUE;
     if (vk.physical_device_features.occlusionQueryPrecise)
         features.occlusionQueryPrecise = VK_TRUE;
+    // Bloom writes a second color attachment with its own blend state.
+    if (vk.physical_device_features.independentBlend)
+        features.independentBlend = VK_TRUE;
     VkDeviceCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = queue_info_count,
@@ -5943,6 +5946,27 @@ static VkPipelineDepthStencilStateCreateInfo vk_shadow_depth_stencil_state(void)
     };
 }
 
+static bool vk_bloom_requested(void)
+{
+    return gl_bloom && gl_bloom->integer > 0;
+}
+
+// Bloom draws into two color attachments with different blend states, which
+// needs the independentBlend feature.
+static bool vk_bloom_supported(void)
+{
+    static bool warned;
+
+    if (vk.physical_device_features.independentBlend)
+        return true;
+    if (!warned) {
+        Com_WPrintf("Vulkan bloom needs the independentBlend feature, which "
+                    "this GPU lacks; gl_bloom is ignored\n");
+        warned = true;
+    }
+    return false;
+}
+
 static bool vk_create_swapchain(int width, int height)
 {
     VkSurfaceCapabilitiesKHR caps;
@@ -6108,7 +6132,7 @@ static bool vk_create_swapchain(int width, int height)
         max(vk.swapchain_extent.width / vk_bloom_downsample_value(), 1),
         max(vk.swapchain_extent.height / vk_bloom_downsample_value(), 1),
     };
-    vk.mrt_bloom = gl_bloom && gl_bloom->integer > 0;
+    vk.mrt_bloom = vk_bloom_requested() && vk_bloom_supported();
 
     VkPipelineDepthStencilStateCreateInfo shadow_depth_stencil =
         vk_shadow_depth_stencil_state();
@@ -13035,7 +13059,7 @@ void VKR_BeginFrame(void)
     vk.frame_start_usec = 0;
 
     if (gl_bloom && gl_bloom->modified) {
-        bool enable_mrt = gl_bloom->integer > 0;
+        bool enable_mrt = vk_bloom_requested() && vk_bloom_supported();
         gl_bloom->modified = false;
         if (enable_mrt != vk.mrt_bloom && !vk_recreate_swapchain())
             return;
@@ -13150,13 +13174,16 @@ void VKR_BeginFrame(void)
                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        if (vk.frame_bloom) {
-            vk_transition_color_target(cmd, &vk.bloom_source_texture,
-                                       &vk.bloom_source_layout,
-                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        }
+    }
+    // The render pass has the bloom source as its second color attachment
+    // whenever bloom is set up, on frames without bloom too (menus, loading),
+    // and expects it in attachment layout.
+    if (vk.mrt_bloom) {
+        vk_transition_color_target(cmd, &vk.bloom_source_texture,
+                                   &vk.bloom_source_layout,
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
     }
 
     VkClearValue clear[3] = {

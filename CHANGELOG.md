@@ -19,6 +19,10 @@ All notable changes to this fork are documented here. The format follows
   while the presentation engine still waited on it, which can cause stutter
   or hangs on some drivers, and screenshots mapped their buffer with size 0,
   which some drivers reject.
+- Vulkan bloom used two blend states without enabling the `independentBlend`
+  feature, and started frames without bloom (menus, loading) with its second
+  color target in the wrong layout. GPUs without the feature now get a
+  warning and no bloom instead of undefined results.
 
 ## [1.1.1] - 2026-11-07
 
