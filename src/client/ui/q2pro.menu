@@ -171,6 +171,8 @@ begin railtrail
         "rail trail duration" cl_railtrail_time 0.1 3.0 0.1
     range --status "Width of the solid core" \
         "core width" cl_railcore_width 1 6 1
+    range --status "Soft glow around the core, with a paler center. 0 is a plain core" \
+        "core glow" cl_railcore_glow 0 1 0.05
     range --status "Radius of the spiral" \
         "spiral radius" cl_railspiral_radius 1 6 1
     strings --status "Color of the solid core" \
