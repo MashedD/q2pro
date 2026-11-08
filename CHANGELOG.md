@@ -6,6 +6,14 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Vulkan API misuse found with the Khronos validation layer: model shadows
+  read height fog from the wrong place, a present semaphore could be reused
+  while the presentation engine still waited on it, which can cause stutter
+  or hangs on some drivers, and screenshots mapped their buffer with size 0,
+  which some drivers reject.
+
 ## [1.1.1] - 2026-11-07
 
 ### Changed

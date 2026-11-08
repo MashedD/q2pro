@@ -7355,12 +7355,18 @@ static bool vk_create_null_model(void)
 #if USE_DEBUG
 static bool vk_create_debug_line_buffer(void)
 {
+    VkDeviceSize size = sizeof(vk_vertex_t) * VK_MAX_DEBUG_LINE_VERTICES;
+
     vk_destroy_buffer(&vk.debug_lines);
-    return vk_create_buffer(sizeof(vk_vertex_t) * VK_MAX_DEBUG_LINE_VERTICES,
-                            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                            &vk.debug_lines.buffer, &vk.debug_lines.memory);
+    if (!vk_create_buffer(size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          &vk.debug_lines.buffer, &vk.debug_lines.memory))
+        return false;
+
+    // vk_draw_debug_lines() maps the buffer by this size.
+    vk.debug_lines.size = size;
+    return true;
 }
 
 static bool vk_create_debug_text_buffers(void)
@@ -7375,6 +7381,7 @@ static bool vk_create_debug_text_buffers(void)
                           &vk.debug_text_vertices.buffer,
                           &vk.debug_text_vertices.memory))
         return false;
+    vk.debug_text_vertices.size = sizeof(vk_vertex_t) * VK_MAX_DEBUG_TEXT_VERTICES;
 
     if (!vk_create_buffer(sizeof(uint32_t) * VK_MAX_DEBUG_TEXT_INDICES,
                           VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
@@ -7385,6 +7392,7 @@ static bool vk_create_debug_text_buffers(void)
         vk_destroy_buffer(&vk.debug_text_vertices);
         return false;
     }
+    vk.debug_text_indices.size = sizeof(uint32_t) * VK_MAX_DEBUG_TEXT_INDICES;
 
     return true;
 }
@@ -12708,6 +12716,7 @@ int VKR_ReadPixels(screenshot_t *s)
                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                           &readback.buffer, &readback.memory))
         return Q_ERR_FAILURE;
+    readback.size = src_size;
 
     if (vk.DeviceWaitIdle(vk.device) != VK_SUCCESS)
         goto out;
