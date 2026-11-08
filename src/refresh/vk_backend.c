@@ -634,7 +634,7 @@ typedef struct {
     bool swapchain_transfer_src;
     vk_queue_families_t queues;
     VkSemaphore image_available[VK_MAX_FRAMES_IN_FLIGHT];
-    VkSemaphore render_finished[VK_MAX_FRAMES_IN_FLIGHT];
+    VkSemaphore *render_finished;   // one per swapchain image
     VkFence frame_fence[VK_MAX_FRAMES_IN_FLIGHT];
     uint32_t frame_index;
     uint32_t current_image;
@@ -3918,10 +3918,6 @@ static bool vk_create_frame_resources(void)
                                     &vk.image_available[i]);
         if (result != VK_SUCCESS)
             return vk_fail_result("vkCreateSemaphore", result);
-        result = vk.CreateSemaphore(vk.device, &semaphore_info, NULL,
-                                    &vk.render_finished[i]);
-        if (result != VK_SUCCESS)
-            return vk_fail_result("vkCreateSemaphore", result);
         result = vk.CreateFence(vk.device, &fence_info, NULL,
                                 &vk.frame_fence[i]);
         if (result != VK_SUCCESS)
@@ -4301,6 +4297,14 @@ static void vk_destroy_swapchain(void)
     if (vk.image_fences) {
         Z_Free(vk.image_fences);
         vk.image_fences = NULL;
+    }
+
+    if (vk.render_finished) {
+        for (uint32_t i = 0; i < vk.swapchain_image_count; i++)
+            if (vk.render_finished[i])
+                vk.DestroySemaphore(vk.device, vk.render_finished[i], NULL);
+        Z_Free(vk.render_finished);
+        vk.render_finished = NULL;
     }
 
     if (vk.swapchain) {
@@ -6037,6 +6041,20 @@ static bool vk_create_swapchain(int width, int height)
     vk.image_fences = Z_Mallocz(sizeof(*vk.image_fences) * vk.swapchain_image_count);
     for (uint32_t i = 0; i < vk.swapchain_image_count; i++)
         vk.swapchain_layouts[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // The semaphore a present waits on can only be reused once that present
+    // has finished, which is known for certain only when the same image is
+    // acquired again. So there is one per image, not one per frame in flight.
+    VkSemaphoreCreateInfo semaphore_info = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+    };
+    vk.render_finished = Z_Mallocz(sizeof(*vk.render_finished) * vk.swapchain_image_count);
+    for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
+        result = vk.CreateSemaphore(vk.device, &semaphore_info, NULL,
+                                    &vk.render_finished[i]);
+        if (result != VK_SUCCESS)
+            return vk_fail_result("vkCreateSemaphore", result);
+    }
 
     for (uint32_t i = 0; i < vk.swapchain_image_count; i++) {
         VkImageViewCreateInfo view_info = {
@@ -12051,10 +12069,6 @@ void VKR_Shutdown(bool total)
             vk.DestroyFence(vk.device, vk.frame_fence[i], NULL);
             vk.frame_fence[i] = VK_NULL_HANDLE;
         }
-        if (vk.render_finished[i]) {
-            vk.DestroySemaphore(vk.device, vk.render_finished[i], NULL);
-            vk.render_finished[i] = VK_NULL_HANDLE;
-        }
         if (vk.image_available[i]) {
             vk.DestroySemaphore(vk.device, vk.image_available[i], NULL);
             vk.image_available[i] = VK_NULL_HANDLE;
@@ -13343,7 +13357,7 @@ void VKR_EndFrame(void)
     }
 
     VkSemaphore image_available = vk.image_available[vk.frame_index];
-    VkSemaphore render_finished = vk.render_finished[vk.frame_index];
+    VkSemaphore render_finished = vk.render_finished[vk.current_image];
     VkFence frame_fence = vk.frame_fence[vk.frame_index];
 
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
