@@ -46,10 +46,16 @@ void main()
     vec2 fraction = fract(raw_pixel);
     float current_z = view_z(depth);
     float footprint = mix(1.30, 0.78, 1.0 - material.y);
+    vec2 radial = v_uv - vec2(0.5);
+    float radial_length = length(radial);
+    vec2 dispersion_axis = radial_length > 0.0001 ?
+        radial / radial_length : vec2(1.0, 0.0);
 
     vec3 color_sum = vec3(0.0);
+    vec3 dispersion_sum = vec3(0.0);
     float alpha_sum = 0.0;
     float weight_sum = 0.0;
+    float dispersion_weight_sum = 0.0;
     for (int y = 0; y < 2; ++y) {
         for (int x = 0; x < 2; ++x) {
             vec2 corner = vec2(x, y);
@@ -76,6 +82,10 @@ void main()
             float weight = depth_weight * material_weight *
                 max(bilinear_weight, 0.04);
             color_sum += reflection.rgb * weight;
+            float dispersion_offset = dot(corner - vec2(0.5),
+                                           dispersion_axis);
+            dispersion_sum += reflection.rgb * weight * dispersion_offset;
+            dispersion_weight_sum += weight * dispersion_offset;
             alpha_sum += reflection.a * weight;
             weight_sum += weight;
         }
@@ -98,6 +108,31 @@ void main()
     float smoothness = 1.0 - material.y;
     float smooth_mask = smoothstep(0.25, 0.90, smoothness);
     smooth_mask *= smooth_mask;
+    float dispersion_strength = clamp(pc.control.z, 0.0, 1.0);
+    vec3 dispersion_gradient =
+        (dispersion_sum - resolved_color * dispersion_weight_sum) /
+        weight_sum;
+    vec2 screen_position = abs(v_uv * 2.0 - 1.0);
+    float center_fade = smoothstep(0.08, 0.42, radial_length);
+    float edge_fade = 1.0 - smoothstep(0.88, 0.99,
+                                      max(screen_position.x,
+                                          screen_position.y));
+    float dispersion_mask = dispersion_strength * bright_mask *
+        mix(0.25, 1.0, compact_mask) * smooth_mask * resolved_alpha *
+        center_fade * edge_fade;
+    vec3 dispersion_delta = vec3(dispersion_gradient.r, 0.0,
+                                 -dispersion_gradient.b) *
+        (1.35 * dispersion_mask);
+    float dispersion_cap = 0.06 * dispersion_strength;
+    dispersion_delta = clamp(dispersion_delta, vec3(-dispersion_cap),
+                              vec3(dispersion_cap));
+    vec3 dispersed_color = max(resolved_color + dispersion_delta, vec3(0.0));
+    float dispersed_luma = dot(dispersed_color,
+                               vec3(0.2126, 0.7152, 0.0722));
+    float luma_correction = clamp(resolved_luma - dispersed_luma,
+                                  -0.01, 0.01);
+    dispersed_color = max(dispersed_color + vec3(luma_correction), vec3(0.0));
+    vec3 dispersion_contribution = dispersed_color - resolved_color;
     float glint_mask = bright_mask * mix(0.12, 1.0, compact_mask) *
                        smooth_mask * resolved_alpha * glint_strength;
     vec3 glint_color = mix(vec3(resolved_luma), resolved_color, 0.80);
@@ -108,6 +143,9 @@ void main()
         out_color = vec4(resolved_color * resolved_alpha, 1.0);
     else if (debug_mode == 18)
         out_color = vec4(clamp(glint * 8.0, 0.0, 1.0), 1.0);
+    else if (debug_mode == 20)
+        out_color = vec4(clamp(abs(dispersion_contribution) * 12.0,
+                               0.0, 1.0), 1.0);
     else
-        out_color = vec4(resolved_color + glint, resolved_alpha);
+        out_color = vec4(dispersed_color + glint, resolved_alpha);
 }

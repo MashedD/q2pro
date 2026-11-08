@@ -871,6 +871,18 @@ vk_rt_reflection_glints::
     samples, passes, descriptors, or draws and requires `vk_rt_reflections`.
     Changes apply immediately. Default value is 0.55; value 0 disables it.
 
+vk_rt_reflection_dispersion::
+    Controls red-blue spectral separation around bright details in smooth
+    resolved screen-space reflections, clamped between 0 and 1. The effect
+    derives a radial color gradient from the four samples already used by the
+    bilateral resolve. Brightness, local detail, material smoothness,
+    reflection coverage, and screen-position masks reject broad or unstable
+    color shifts. Channel deviation and luminance change are capped to avoid
+    patches or overall scene-brightness changes. It adds no texture samples,
+    ray queries, passes, descriptors, push-constant storage, or draw calls and
+    requires `vk_rt_reflections`. Changes apply immediately. Default value is
+    0.6; value 0 restores the previous reflection resolve.
+
 vk_rt_emissive_halo::
     Controls stable colored edge halos on opaque static BSP `SURF_LIGHT`
     textures while Vulkan ray tracing is active, clamped between 0 and 1. The
@@ -882,6 +894,33 @@ vk_rt_emissive_halo::
     texture samples, ray queries, passes, descriptors, or draws and remains
     independent of `vk_rt_emissive`. Changes apply immediately. Default value
     is 0.65; value 0 disables both local and bloom contributions.
+
+vk_rt_emissive_flicker::
+    Controls irregular texture-seeded variation of opaque `SURF_LIGHT` lamp
+    cores, edge halos, and glowmap bloom while Vulkan ray tracing is active,
+    clamped between 0 and 1. Two smooth waves provide ordinary variation and
+    a slower waveform adds occasional shallow dips; lamps never switch fully
+    off. Faces sharing a lamp texture remain synchronized, while liquids,
+    translucent surfaces, sky, baked emissive illumination, and dynamic
+    lights remain unchanged. The factor is calculated on the CPU and reuses
+    existing RT controls, adding no shader trigonometry, texture samples, ray
+    queries, passes, descriptors, or draws. Changes apply immediately.
+    Default value is 0.55; value 0 restores stable emission.
+
+vk_rt_emissive_motes::
+    Controls restrained additive energy motes around opaque `SURF_LIGHT`
+    emitters while Vulkan ray tracing is active, clamped between 0 and 1. Up
+    to eight nearby visible surface lights supply color and orientation for
+    deterministic paths that orbit across each emitter and drift smoothly
+    outward. Values below 0.35 emit one mote per source, values from 0.35 emit
+    two, and values from 0.75 emit three, capped globally at 24 motes (48
+    triangles). Motes fade between 320 and 512 units and near the camera;
+    solid, liquid, underwater, and non-visible locations are excluded. The
+    effect reuses the existing particle buffer and additive pipeline, adding
+    at most one draw and no ray queries, texture samples, render passes,
+    descriptors, or per-frame allocations. It remains independent of ambient
+    dust, bloom, and `vk_rt_emissive`. Changes apply immediately. Default
+    value is 0.45; value 0 disables the effect.
 
 vk_rt_specular::
     With ‘vk_raytracing’, strength of highlights from dynamic lights and
@@ -908,6 +947,76 @@ vk_rt_environment::
     ray queries, texture samples, render passes, descriptors, or draw calls.
     Changes apply immediately. Default value is 0.65; value 0 disables it.
 
+vk_rt_atmosphere::
+    Controls neutral blue-gray distance haze while Vulkan ray tracing is
+    active, clamped between 0 and 1. It reuses the existing exponential fog
+    calculations for world surfaces, models, sprites, particles, and sky, so
+    it adds no ray queries, texture samples, render passes, descriptors, or
+    draw calls. Existing custom or map-authored distance and sky fog provide
+    the base color and density; atmospheric haze is combined with them instead
+    of replacing them. Authored height fog remains unchanged and can coexist
+    with the distance haze. The atmospheric contribution is suppressed
+    underwater and when no world model is rendered. Changes apply immediately.
+    Default value is 0.45; value 0 removes only the atmospheric contribution.
+
+vk_rt_underwater_absorption::
+    Controls blue-green distance attenuation while the camera is underwater
+    in ordinary water with Vulkan ray tracing active, clamped between 0 and 1.
+    The contribution is combined with map-authored distance fog instead of
+    replacing it and applies consistently to world surfaces, models, weapon
+    models, sprites, and particles. Lava, slime, height fog, sky visibility,
+    and above-water rendering remain unchanged. It reuses the existing
+    exponential fog path and adds no ray queries, texture samples, render
+    passes, descriptors, or draw calls. `gl_fog` remains the master switch.
+    Changes apply immediately. Default value is 0.65; value 0 removes only the
+    underwater absorption contribution.
+
+vk_rt_dust::
+    Controls depth-tested ambient dust motes while Vulkan ray tracing is
+    active, clamped between 0 and 1. Motes are anchored to deterministic
+    world-space cells, drift slowly, and fade near the edge of their bounded
+    400-unit range. Solid, liquid, underwater, and non-visible areas are
+    excluded. At full strength the effect draws at most 48 motes (96
+    triangles) in one additional alpha-blended particle draw and performs no
+    ray queries or per-frame allocations. Gameplay particles retain their
+    original capacity and blend mode. Changes apply immediately. Default
+    value is 0.35; value 0 disables the effect.
+
+vk_rt_dust_lighting::
+    Controls colored dynamic lighting on ambient dust while Vulkan ray tracing
+    is active, clamped between 0 and 1. At most three visible live or cached
+    afterglow lights are selected once per frame, then evaluated across the
+    existing maximum of 48 motes. Smooth distance falloff tints and moderately
+    brightens nearby dust without changing its density, size, movement, or
+    standard-alpha draw. Light selection rejects solid, liquid, out-of-range,
+    and non-visible BSP locations. The effect adds no particles, draws,
+    triangles, descriptors, texture samples, render passes, ray queries, or
+    per-frame allocations. Changes apply immediately and require `vk_rt_dust`.
+    Default value is 0.65; value 0 restores neutral dust.
+
+vk_rt_light_scattering::
+    Controls colored light scattering inside active distance fog while Vulkan
+    ray tracing is active, clamped between 0 and 1. Strong explosions,
+    projectiles, muzzle flashes, and cached afterglow sources reuse the three
+    existing shadow-tested dynamic-light candidates. The pixel-lightmap RT
+    path also reuses available static emissive illumination. View alignment
+    concentrates the broad glow toward visible light sources. Local and bloom
+    contributions are capped independently, and the effect is suppressed
+    underwater or without active fog. It adds no ray queries, texture samples,
+    render passes, descriptors, or draw calls. Changes apply immediately.
+    Default value is 0.5; value 0 disables the effect.
+
+vk_rt_fog_turbulence::
+    Controls slow world-space density movement in active Vulkan RT distance
+    fog, clamped between 0 and 1. Two broad procedural waves move in different
+    directions and remain continuous across BSP face boundaries. At value 1,
+    local fog density varies by at most 35 percent; sky fog, models, and HUD
+    elements remain stable. Fog light scattering and bloom attenuation reuse
+    the animated fog amount. The effect is suppressed underwater or without
+    active fog and adds no texture samples, particles, render passes,
+    descriptors, or draw calls. Changes apply immediately. Default value is
+    0.4; value 0 restores uniform fog density.
+
 vk_rt_skylight::
     Controls a cool blue-gray ambient fill on open static BSP world surfaces
     while Vulkan ray tracing is active, clamped between 0 and 1. Baked ambient
@@ -927,6 +1036,20 @@ vk_rt_caustics::
     descriptors, or draw calls. Bright crests provide a restrained bloom
     contribution when ‘gl_bloom’ is enabled. Changes apply immediately.
     Default value is 0.65; value 0 disables the effect.
+
+vk_rt_lava_embers::
+    Controls warm additive embers rising from visible lava surfaces while
+    Vulkan ray tracing is active, clamped between 0 and 1. Deterministic
+    anchors are distributed across upward-facing lava polygons when the map
+    loads. Embers drift upward, fade smoothly over their lifetime and between
+    512 and 768 world units, and are rejected in solid or liquid space. At
+    full strength the effect draws at most 48 embers (96 triangles) through
+    the existing auxiliary particle batch, adding no ray queries, shaders,
+    textures, descriptors, render passes, or per-frame allocations. Bright
+    cores use the existing bloom output when ‘gl_bloom’ is enabled. The effect
+    remains independent of lava glowmaps, liquid shading, caustics, and
+    reflection materials. Changes apply immediately. Default value is 0.65;
+    value 0 disables the effect.
 
 vk_rt_sunlight::
     Controls warm directional light on exposed static BSP world surfaces while
@@ -1000,6 +1123,20 @@ vk_rt_light_trails::
     Changes apply immediately and remain independent of `vk_rt_afterglow`.
     Default value is 0.55; value 0 disables the effect.
 
+vk_rt_light_coronas::
+    Controls compact colored halos around strong live combat lights while
+    Vulkan ray tracing is active, clamped between 0 and 1. At most six nearby
+    visible lights with at least 160 intensity receive a soft outer corona and
+    a smaller pale core. Coronas are depth tested, respect the current PVS and
+    liquid medium, fade near the camera and between 768 and 1024 units, and do
+    not include cached afterglow sources. They reuse the existing radial
+    particle texture, fog, bloom output, vertex buffer, and additive auxiliary
+    batch. The effect adds at most 12 quads (24 triangles), no new draw when
+    that additive batch is already present and otherwise at most one draw. It
+    adds no shaders, textures, descriptors, ray queries, render passes,
+    allocations, or history tracking. Changes apply immediately. Default
+    value is 0.6; value 0 disables the effect.
+
 materials/rt_reflections.mat::
     Reflection and roughness of textures for ‘vk_rt_reflections’ and
     ‘vk_rt_specular’, read when a map loads. Each entry names a texture and
@@ -1022,7 +1159,8 @@ vk_rt_debug::
     glowing surfaces). 9 to 18 show single effects, amplified eight times:
     color bounce, caustics, shadow fringes, sky light, environment sheen,
     afterglow, sunlight, emissive halos, light ripples and reflection glints.
-    Default value is 0 (normal picture).
+    19 shows which lamps flicker and how strongly, and 20 the reflection
+    dispersion, amplified twelve times. Default value is 0 (normal picture).
 
 Only opaque world surfaces cast ray-traced shadows so far, not models or
 translucent surfaces.

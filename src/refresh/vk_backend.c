@@ -39,6 +39,9 @@ the Free Software Foundation; either version 2 of the License, or
 #define VK_MAX_DEBUG_TEXT_VERTICES (VK_MAX_DEBUG_TEXT_CHARS * 4)
 #define VK_MAX_DEBUG_TEXT_INDICES  (VK_MAX_DEBUG_TEXT_CHARS * 6)
 #define VK_MAX_PARTICLE_VERTICES   (MAX_PARTICLES * 6)
+#define VK_MAX_DUST_MOTES          48
+#define VK_MAX_LAVA_EMBER_ANCHORS  96
+#define VK_MAX_LAVA_EMBERS         48
 #define VK_MAX_LIGHTMAP_EXTENTS    513
 #define VK_MAX_FRAMES_IN_FLIGHT    3
 #define VK_MAX_CUBEMAPS            16
@@ -312,6 +315,13 @@ typedef struct {
 } vk_world_face_t;
 
 typedef struct {
+    mface_t *face;
+    vec3_t origin;
+    vec3_t normal;
+    uint32_t hash;
+} vk_lava_ember_anchor_t;
+
+typedef struct {
     int width;
     int height;
     int origin_x;
@@ -466,6 +476,8 @@ typedef struct {
     bool lightstyles_valid;
     bool has_sky;
     bool sky_visible;
+    vk_lava_ember_anchor_t lava_ember_anchors[VK_MAX_LAVA_EMBER_ANCHORS];
+    uint32_t lava_ember_anchor_count;
 } vk_world_t;
 
 typedef struct {
@@ -726,9 +738,9 @@ typedef struct {
     VkPhysicalDeviceProperties physical_device_properties;
     VkPhysicalDeviceFeatures physical_device_features;
     uint32_t instance_api_version;
+    bool raytracing_active;     // always false without ray tracing support
 #if USE_VULKAN_RAYTRACING
     bool raytracing_supported;
-    bool raytracing_active;
     bool raytracing_pixel_ready;
     bool raytracing_quad_sharing;
     char raytracing_reason[160];
@@ -983,11 +995,20 @@ static cvar_t *vk_rt_emissive;
 static cvar_t *vk_rt_ao;
 static cvar_t *vk_rt_skylight;
 static cvar_t *vk_rt_environment;
+static cvar_t *vk_rt_atmosphere;
+static cvar_t *vk_rt_underwater_absorption;
+static cvar_t *vk_rt_light_scattering;
+static cvar_t *vk_rt_fog_turbulence;
+static cvar_t *vk_rt_dust;
+static cvar_t *vk_rt_dust_lighting;
+static cvar_t *vk_rt_emissive_motes;
 static cvar_t *vk_rt_afterglow;
 static cvar_t *vk_rt_sunlight;
 static cvar_t *vk_rt_emissive_halo;
+static cvar_t *vk_rt_emissive_flicker;
 static cvar_t *vk_rt_reflections;
 static cvar_t *vk_rt_reflection_glints;
+static cvar_t *vk_rt_reflection_dispersion;
 static cvar_t *vk_rt_specular;
 static cvar_t *vk_rt_liquids;
 static cvar_t *vk_rt_bounce;
@@ -995,6 +1016,8 @@ static cvar_t *vk_rt_caustics;
 static cvar_t *vk_rt_shadow_fringe;
 static cvar_t *vk_rt_light_ripples;
 static cvar_t *vk_rt_light_trails;
+static cvar_t *vk_rt_light_coronas;
+static cvar_t *vk_rt_lava_embers;
 static cvar_t *vk_rt_debug;
 #if USE_DEBUG
 static cvar_t *vk_showstats;
@@ -1072,6 +1095,7 @@ static bool vk_build_mesh_blas(vk_acceleration_structure_t *as,
                                const vk_buffer_t *indices,
                                uint32_t index_count);
 static bool vk_build_world_tlas(void);
+static float vk_lava_ember_random(uint32_t value);
 static bool vk_bake_world_rt_ao(const bsp_t *bsp,
                                 const vk_world_face_t *faces,
                                 uint32_t face_count,
@@ -1665,6 +1689,7 @@ static void vk_free_world(void)
     vk.world.batch_count = 0;
     vk.world.face_count = 0;
     vk.world.line_index_count = 0;
+    vk.world.lava_ember_anchor_count = 0;
     vk.world.size = 0.0f;
     vk.world.viewcluster = -1;
     vk.world.drawframe = 0;
@@ -10156,15 +10181,53 @@ static bool vk_dynamic_lights_enabled(void)
            (!vk_vertexlight || !vk_vertexlight->integer);
 }
 
+static float vk_rt_atmosphere_strength(const refdef_t *fd)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_atmosphere ||
+        (vk_fog && !vk_fog->integer) ||
+        (fd->rdflags & (RDF_UNDERWATER | RDF_NOWORLDMODEL)) ||
+        !vk.world.cache)
+        return 0.0f;
+
+    return Cvar_ClampValue(vk_rt_atmosphere, 0.0f, 1.0f);
+}
+
+static float vk_rt_underwater_absorption_strength(const refdef_t *fd)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_underwater_absorption ||
+        (vk_fog && !vk_fog->integer) ||
+        !(fd->rdflags & RDF_UNDERWATER) ||
+        (fd->rdflags & RDF_NOWORLDMODEL) || vk.view_liquid_kind != 1 ||
+        !vk.world.cache)
+        return 0.0f;
+
+    return Cvar_ClampValue(vk_rt_underwater_absorption, 0.0f, 1.0f);
+}
+
 static void vk_fog_params(const refdef_t *fd, float fog[4])
 {
     Vector4Clear(fog);
 
-    if (!fd || (vk_fog && !vk_fog->integer) || fd->fog.density <= 0.0f)
+    if (!fd || (vk_fog && !vk_fog->integer))
         return;
 
-    VectorCopy(fd->fog.color, fog);
-    fog[3] = fd->fog.density / 64.0f;
+    const vec3_t atmosphere_color = { 0.28f, 0.32f, 0.38f };
+    const vec3_t water_color = { 0.06f, 0.18f, 0.22f };
+    float base_density = max(fd->fog.density, 0.0f) / 64.0f;
+    float atmosphere_density = 0.00065f * vk_rt_atmosphere_strength(fd);
+    float water_density = 0.0023f *
+        vk_rt_underwater_absorption_strength(fd);
+    float density_sum = base_density + atmosphere_density + water_density;
+    if (density_sum <= 0.0f)
+        return;
+
+    for (int i = 0; i < 3; i++)
+        fog[i] = (fd->fog.color[i] * base_density +
+                  atmosphere_color[i] * atmosphere_density +
+                  water_color[i] * water_density) / density_sum;
+    fog[3] = sqrtf(base_density * base_density +
+                   atmosphere_density * atmosphere_density +
+                   water_density * water_density);
 }
 
 static void vk_height_fog_params(const refdef_t *fd, float start[4],
@@ -10194,11 +10257,28 @@ static void vk_sky_fog_params(const refdef_t *fd, float fog[4])
 {
     Vector4Clear(fog);
 
-    if (!fd || (vk_fog && !vk_fog->integer) || fd->fog.sky_factor <= 0.0f)
+    if (!fd || (vk_fog && !vk_fog->integer))
         return;
 
-    VectorCopy(fd->fog.color, fog);
-    fog[3] = -fd->fog.sky_factor;
+    const vec3_t atmosphere_color = { 0.28f, 0.32f, 0.38f };
+    float base_factor = Q_clipf(fd->fog.sky_factor, 0.0f, 1.0f);
+    float atmosphere_factor = 0.30f * vk_rt_atmosphere_strength(fd);
+    if (base_factor <= 0.0f && atmosphere_factor <= 0.0f)
+        return;
+
+    if (base_factor > 0.0f && atmosphere_factor > 0.0f) {
+        float atmosphere_mix = atmosphere_factor /
+            (base_factor + atmosphere_factor);
+        for (int i = 0; i < 3; i++)
+            fog[i] = fd->fog.color[i] +
+                (atmosphere_color[i] - fd->fog.color[i]) * atmosphere_mix;
+    } else if (base_factor > 0.0f) {
+        VectorCopy(fd->fog.color, fog);
+    } else {
+        VectorCopy(atmosphere_color, fog);
+    }
+    fog[3] = -(1.0f - (1.0f - base_factor) *
+                         (1.0f - atmosphere_factor));
 }
 
 static float vk_texture_intensity(void)
@@ -10616,6 +10696,38 @@ static bool vk_world_face_glowmap_enabled(const mface_t *face,
     return true;
 }
 
+// Lamp flicker for vk_rt_emissive_flicker. Only applied while ray tracing
+// is active, but needs no ray tracing support itself.
+static bool vk_world_emissive_flicker_eligible(const mface_t *face)
+{
+    return face && face->texinfo &&
+        (face->texinfo->c.flags & SURF_LIGHT) &&
+        !(face->drawflags & (SURF_TRANS_MASK | SURF_WARP | SURF_SKY));
+}
+
+static float vk_world_emissive_flicker_factor(const mface_t *face,
+                                              float time)
+{
+    if (!vk_world_emissive_flicker_eligible(face))
+        return 0.0f;
+
+    float strength = vk_rt_emissive_flicker ?
+        Cvar_ClampValue(vk_rt_emissive_flicker, 0.0f, 1.0f) : 0.0f;
+    uint32_t hash = FS_HashPath(face->texinfo->name, UINT32_MAX);
+    float seed0 = (hash & 0xffffu) * (1.0f / 65535.0f);
+    float seed1 = ((hash >> 16) & 0xffffu) * (1.0f / 65535.0f);
+    float phase0 = seed0 * (2.0f * M_PIf);
+    float phase1 = seed1 * (2.0f * M_PIf);
+    float wave = 1.0f + 0.10f * sinf(time * (1.35f + seed0 * 0.55f) + phase0) +
+        0.05f * sinf(time * (3.70f + seed1 * 1.10f) + phase1);
+    float dip_wave = 0.5f + 0.5f * sinf(time * (0.38f + seed1 * 0.14f) +
+                                        phase0 * 0.37f + phase1);
+    float dip = Q_clipf((dip_wave - 0.84f) / 0.16f, 0.0f, 1.0f);
+    dip = dip * dip * (3.0f - 2.0f * dip);
+    float target = Q_clipf(wave - dip * 0.12f, 0.72f, 1.16f);
+    return 1.0f + (target - 1.0f) * strength;
+}
+
 #if USE_VULKAN_RAYTRACING
 static void vk_world_material(const mface_t *face, float *reflect,
                               float *roughness)
@@ -10682,6 +10794,25 @@ static float vk_world_pack_rt_controls(float specular, float bounce,
                    (fringe_q << 16) | (ripple_q << 20));
 }
 
+static float vk_world_pack_atmosphere_controls(float emissive,
+                                               float scattering,
+                                               float turbulence,
+                                               float flicker_factor)
+{
+    unsigned scattering_q = (unsigned)(min(max(scattering, 0.0f), 1.0f) *
+                                       15.0f + 0.5f);
+    unsigned turbulence_q = (unsigned)(min(max(turbulence, 0.0f), 1.0f) *
+                                       15.0f + 0.5f);
+    // Zero marks an ineligible surface. Eligible factors use fixed-point
+    // 1/128 units, making a disabled factor of exactly 1.0 lossless.
+    unsigned flicker_q = flicker_factor > 0.0f ?
+        (unsigned)(min(max(flicker_factor, 0.0f), 1.9921875f) *
+                   128.0f + 0.5f) : 0;
+    return min(max(emissive, 0.0f), 2.0f) +
+        (float)((scattering_q << 2) | (turbulence_q << 6) |
+                (flicker_q << 10));
+}
+
 static int vk_world_liquid_kind(const mface_t *face)
 {
     if (!face || !(face->drawflags & SURF_WARP) || !face->texinfo)
@@ -10735,11 +10866,18 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         Cvar_ClampValue(vk_rt_environment, 0.0f, 1.0f) : 0.0f;
     float sunlight = world_entity && vk_rt_sunlight ?
         Cvar_ClampValue(vk_rt_sunlight, 0.0f, 1.0f) : 0.0f;
-    bool emissive_face = world_entity && face && face->texinfo &&
-        (face->texinfo->c.flags & SURF_LIGHT) &&
-        !(face->drawflags & (SURF_TRANS_MASK | SURF_WARP));
+    float scattering = world_entity && vk.fd_valid &&
+        !(vk.fd.rdflags & RDF_UNDERWATER) && vk_rt_light_scattering ?
+        Cvar_ClampValue(vk_rt_light_scattering, 0.0f, 1.0f) : 0.0f;
+    float turbulence = world_entity && vk.fd_valid &&
+        !(vk.fd.rdflags & RDF_UNDERWATER) && vk_rt_fog_turbulence ?
+        Cvar_ClampValue(vk_rt_fog_turbulence, 0.0f, 1.0f) : 0.0f;
+    bool emissive_face = world_entity &&
+        vk_world_emissive_flicker_eligible(face);
     float emissive_halo = emissive_face && vk_rt_emissive_halo ?
         Cvar_ClampValue(vk_rt_emissive_halo, 0.0f, 1.0f) : 0.0f;
+    float emissive_flicker = emissive_face && vk.fd_valid ?
+        vk_world_emissive_flicker_factor(face, vk.fd.time) : 0.0f;
     params[3] = vk_world_pack_rt_controls(specular, bounce, caustics,
                                           shadow_fringe, light_ripples);
     int requested_debug = vk_rt_debug ? vk_rt_debug->integer : 0;
@@ -10757,19 +10895,26 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         if (requested_debug >= 1 && requested_debug <= 3) {
             params[0] = -(float)requested_debug;
         } else {
-            params[0] = vk_rt_emissive ?
+            float emissive = vk_rt_emissive ?
                 Cvar_ClampValue(vk_rt_emissive, 0.0f, 2.0f) : 0.0f;
+            params[0] = vk_world_pack_atmosphere_controls(emissive,
+                                                          scattering,
+                                                          turbulence,
+                                                          emissive_flicker);
             params[1] = vk_rt_ao ?
                 Cvar_ClampValue(vk_rt_ao, 0.0f, 0.5f) : 0.0f;
-            if (requested_debug >= 8 && requested_debug <= 17)
+            if (requested_debug >= 8 && requested_debug <= 19)
                 params[1] = -(float)requested_debug;
             params[2] = packed_material;
         }
     } else if (vk.raytracing_active && world_entity) {
         // This position aliases rt_enabled in vk_world_lit_push_t.
         params[0] = requested_debug >= 1 && requested_debug <= 3 ?
-            -(float)requested_debug : 1.0f;
-        if (requested_debug >= 8 && requested_debug <= 17)
+            -(float)requested_debug :
+            vk_world_pack_atmosphere_controls(1.0f, scattering,
+                                              turbulence,
+                                              emissive_flicker);
+        if (requested_debug >= 8 && requested_debug <= 19)
             params[1] = -(float)requested_debug;
         params[2] = packed_material;
     }
@@ -10998,6 +11143,10 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                                    vk.world_glow_pipeline);
                 vk_bind_texture_descriptor(cmd, glow->descriptor_set);
                 push.intensity = vk_glowmap_intensity();
+                if (vk.raytracing_active &&
+                    vk_world_emissive_flicker_eligible(face->face))
+                    push.intensity *= vk_world_emissive_flicker_factor(
+                        face->face, fd ? fd->time : 0.0f);
                 push.color[0] = 1.0f;
                 push.color[1] = 1.0f;
                 push.color[2] = 1.0f;
@@ -11179,6 +11328,10 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     vk_bind_texture_descriptor(cmd, glow->descriptor_set);
                     bound_texture_index = image->texnum2;
                     push.intensity = vk_glowmap_intensity();
+                    if (vk.raytracing_active &&
+                        vk_world_emissive_flicker_eligible(face->face))
+                        push.intensity *= vk_world_emissive_flicker_factor(
+                            face->face, fd ? fd->time : 0.0f);
                     push.color[0] = 1.0f;
                     push.color[1] = 1.0f;
                     push.color[2] = 1.0f;
@@ -12589,10 +12742,632 @@ static void vk_draw_flare(const entity_t *ent, const refdef_t *fd)
 #define VK_PARTICLE_SIZE    (1.0f + M_SQRT1_2f)
 #define VK_PARTICLE_SCALE   (1.0f / (2.0f * VK_PARTICLE_SIZE))
 
+typedef struct {
+    vec3_t origin;
+    uint32_t hash;
+} vk_dust_mote_t;
+
+typedef struct {
+    dlight_t light;
+    float score;
+} vk_dust_light_t;
+
+#define VK_MAX_DUST_LIGHTS 3
+#define VK_MAX_EMISSIVE_MOTE_SOURCES 8
+#define VK_MAX_EMISSIVE_MOTES 24
+#define VK_MAX_LIGHT_CORONAS 6
+
+static uint32_t vk_dust_hash(int x, int y, int z)
+{
+    uint32_t hash = (uint32_t)x * 0x8da6b343u;
+    hash ^= (uint32_t)y * 0xd8163841u;
+    hash ^= (uint32_t)z * 0xcb1ab31fu;
+    hash ^= hash >> 16;
+    hash *= 0x7feb352du;
+    hash ^= hash >> 15;
+    hash *= 0x846ca68bu;
+    return hash ^ (hash >> 16);
+}
+
+static float vk_dust_random(uint32_t hash)
+{
+    return (hash & 0xffffu) * (1.0f / 65535.0f);
+}
+
+static int vk_insert_dust_light(const refdef_t *fd, const dlight_t *light,
+                                vk_dust_light_t lights[VK_MAX_DUST_LIGHTS],
+                                int count)
+{
+    if (!fd || !light || !vk.world.cache || !vk.world.cache->nodes)
+        return count;
+
+    float peak = max(light->color[0],
+                     max(light->color[1], light->color[2]));
+    float reach = light->intensity - DLIGHT_CUTOFF;
+    float camera_distance = Distance(light->origin, fd->vieworg);
+    if (peak <= 0.10f || reach <= 0.0f || camera_distance >= reach + 400.0f)
+        return count;
+
+    const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, light->origin);
+    if (!leaf || leaf->visframe != vk.world.visframe ||
+        (leaf->contents[0] & (CONTENTS_SOLID | MASK_WATER)) ||
+        (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+        return count;
+
+    // This is the strongest contribution the light can make anywhere inside
+    // the camera's bounded dust volume.
+    float score = reach - max(camera_distance - 400.0f, 0.0f);
+    if (score <= 0.0f)
+        return count;
+
+    int slot = min(count, VK_MAX_DUST_LIGHTS - 1);
+    while (slot > 0 && score > lights[slot - 1].score) {
+        lights[slot] = lights[slot - 1];
+        slot--;
+    }
+    if (count >= VK_MAX_DUST_LIGHTS && score <= lights[slot].score)
+        return count;
+
+    lights[slot].light = *light;
+    lights[slot].score = score;
+    return count < VK_MAX_DUST_LIGHTS ? count + 1 : count;
+}
+
+static int vk_select_dust_lights(const refdef_t *fd,
+                                 vk_dust_light_t lights[VK_MAX_DUST_LIGHTS])
+{
+    memset(lights, 0, sizeof(*lights) * VK_MAX_DUST_LIGHTS);
+    if (!fd || !vk_rt_dust_lighting ||
+        Cvar_ClampValue(vk_rt_dust_lighting, 0.0f, 1.0f) <= 0.0f ||
+        !vk_dynamic_lights_enabled())
+        return 0;
+
+    int count = 0;
+    for (int i = 0; fd->dlights && i < fd->num_dlights; i++)
+        count = vk_insert_dust_light(fd, &fd->dlights[i], lights, count);
+
+    float duration = vk_rt_afterglow ?
+        Cvar_ClampValue(vk_rt_afterglow, 0.0f, 1.0f) : 0.0f;
+    if (duration <= 0.0f)
+        return count;
+
+    for (int i = 0; i < VK_RT_AFTERGLOW_LIGHTS; i++) {
+        const vk_rt_afterglow_light_t *cached = &vk.afterglow_lights[i];
+        if (!cached->valid || cached->seen_frame == vk.afterglow_frame)
+            continue;
+        float age = fd->time - cached->last_seen;
+        if (age < 0.0f || age >= duration)
+            continue;
+        float fade = 1.0f - age / duration;
+        fade *= fade;
+        dlight_t light = cached->light;
+        light.intensity = DLIGHT_CUTOFF +
+            max(light.intensity - DLIGHT_CUTOFF, 0.0f) * fade;
+        count = vk_insert_dust_light(fd, &light, lights, count);
+    }
+    return count;
+}
+
+static void vk_light_dust_mote(const vec3_t origin,
+                               const vk_dust_light_t *lights,
+                               int light_count, float strength,
+                               float color[4])
+{
+    vec3_t response = { 0.0f, 0.0f, 0.0f };
+    for (int i = 0; i < light_count; i++) {
+        const dlight_t *light = &lights[i].light;
+        float reach = max(light->intensity - DLIGHT_CUTOFF, 1.0f);
+        float fraction = Q_clipf((reach - Distance(light->origin, origin)) /
+                                 reach, 0.0f, 1.0f);
+        fraction = fraction * fraction * (3.0f - 2.0f * fraction);
+        fraction *= min(reach / 255.0f, 1.0f);
+        VectorMA(response, fraction, light->color, response);
+    }
+
+    float energy = Q_clipf(max(response[0],
+                         max(response[1], response[2])), 0.0f, 1.0f);
+    float brighten = 1.0f + energy * strength * 0.25f;
+    for (int i = 0; i < 3; i++)
+        color[i] = Q_clipf(color[i] * brighten +
+                           response[i] * strength * 0.55f, 0.0f, 1.0f);
+    color[3] = min(color[3] * (1.0f + energy * strength * 0.45f), 0.34f);
+}
+
+// The ray-traced sprites (dust, coronas, motes, embers) were tuned on quads
+// spanning scale + scale * VK_PARTICLE_SCALE; this keeps that size now that
+// the quad is centered and sized by its half-width.
+#define VK_RT_SPRITE_HALF(scale) ((scale) * (1.0f + VK_PARTICLE_SCALE) * 0.5f)
+
+// Appends a camera-facing quad of half-width half_size around origin, with
+// the round particle texture stretched across it.
+static void vk_append_particle_quad(uint32_t *vertex_count,
+                                    const vec3_t origin, float half_size,
+                                    const float color[4],
+                                    const vec3_t viewaxis[3])
+{
+    vec3_t left, right, down, up, corners[4];
+
+    VectorScale(viewaxis[1], half_size, left);
+    VectorScale(viewaxis[1], -half_size, right);
+    VectorScale(viewaxis[2], -half_size, down);
+    VectorScale(viewaxis[2], half_size, up);
+    VectorAdd3(origin, left, down, corners[0]);
+    VectorAdd3(origin, right, down, corners[1]);
+    VectorAdd3(origin, left, up, corners[2]);
+    VectorAdd3(origin, right, up, corners[3]);
+
+    static const int order[6] = { 0, 2, 1, 1, 2, 3 };
+    static const float uv[4][2] = {
+        { 0.0f, 1.0f }, { 1.0f, 1.0f }, { 0.0f, 0.0f }, { 1.0f, 0.0f },
+    };
+    for (int j = 0; j < 6; j++) {
+        int idx = order[j];
+        vk_vertex_t *v = &vk.particle_batch[(*vertex_count)++];
+        VectorCopy(corners[idx], v->position);
+        v->uv[0] = uv[idx][0];
+        v->uv[1] = uv[idx][1];
+        Vector4Copy(color, v->color);
+    }
+}
+
+static uint32_t vk_append_dust_motes(const refdef_t *fd,
+                                     const vec3_t viewaxis[3],
+                                     uint32_t vertex_count)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_dust ||
+        (fd->rdflags & (RDF_UNDERWATER | RDF_NOWORLDMODEL)) ||
+        vk.view_liquid_kind || !vk.world.cache || !vk.world.cache->nodes)
+        return vertex_count;
+
+    float strength = Cvar_ClampValue(vk_rt_dust, 0.0f, 1.0f);
+    uint32_t available = (VK_MAX_PARTICLE_VERTICES - vertex_count) / 6;
+    uint32_t wanted = min((uint32_t)VK_MAX_DUST_MOTES, available);
+    if (!wanted)
+        return vertex_count;
+
+    enum { CELL_SIZE = 160, CELL_RADIUS = 4, Z_RADIUS = 2 };
+    vk_dust_mote_t motes[VK_MAX_DUST_MOTES];
+    vk_dust_light_t lights[VK_MAX_DUST_LIGHTS];
+    int light_count = vk_select_dust_lights(fd, lights);
+    float light_strength = vk_rt_dust_lighting ?
+        Cvar_ClampValue(vk_rt_dust_lighting, 0.0f, 1.0f) : 0.0f;
+    uint32_t mote_count = 0;
+    int center[3] = {
+        (int)floorf(fd->vieworg[0] / CELL_SIZE),
+        (int)floorf(fd->vieworg[1] / CELL_SIZE),
+        (int)floorf(fd->vieworg[2] / CELL_SIZE),
+    };
+
+    for (int z = -Z_RADIUS; z <= Z_RADIUS; z++) {
+        for (int y = -CELL_RADIUS; y <= CELL_RADIUS; y++) {
+            for (int x = -CELL_RADIUS; x <= CELL_RADIUS; x++) {
+                int cell[3] = { center[0] + x, center[1] + y, center[2] + z };
+                uint32_t hash = vk_dust_hash(cell[0], cell[1], cell[2]);
+                vec3_t origin, delta;
+
+                // Density is decided independently per world cell. New cells
+                // therefore enter at the faded edge instead of replacing a
+                // fully visible mote when the camera crosses a cell boundary.
+                if (vk_dust_random(vk_dust_hash(cell[2], cell[0], cell[1])) >=
+                    strength * 0.60f)
+                    continue;
+
+                origin[0] = (cell[0] + vk_dust_random(hash)) * CELL_SIZE;
+                origin[1] = (cell[1] + vk_dust_random(hash >> 8)) * CELL_SIZE;
+                origin[2] = (cell[2] + vk_dust_random(hash >> 16)) * CELL_SIZE;
+                origin[0] += sinf(fd->time * (0.11f + vk_dust_random(hash) * 0.08f) +
+                                  vk_dust_random(hash >> 4) * (2.0f * M_PIf)) * 10.0f;
+                origin[1] += cosf(fd->time * (0.09f + vk_dust_random(hash >> 7) * 0.07f) +
+                                  vk_dust_random(hash >> 12) * (2.0f * M_PIf)) * 8.0f;
+                origin[2] += sinf(fd->time * (0.08f + vk_dust_random(hash >> 13) * 0.06f) +
+                                  vk_dust_random(hash >> 2) * (2.0f * M_PIf)) * 12.0f;
+
+                VectorSubtract(origin, fd->vieworg, delta);
+                float distance = VectorLength(delta);
+                if (distance < 32.0f || distance >= 400.0f)
+                    continue;
+
+                const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, origin);
+                if (!leaf || leaf->visframe != vk.world.visframe ||
+                    (leaf->contents[0] & (CONTENTS_SOLID | MASK_WATER)) ||
+                    (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+                    continue;
+
+                VectorCopy(origin, motes[mote_count].origin);
+                motes[mote_count++].hash = hash;
+                if (mote_count == wanted)
+                    goto motes_ready;
+            }
+        }
+    }
+
+motes_ready:
+    for (uint32_t i = 0; i < mote_count; i++) {
+        vec3_t delta;
+        VectorSubtract(motes[i].origin, fd->vieworg, delta);
+        float distance = VectorLength(delta);
+        float fade = Q_clipf((400.0f - distance) / 100.0f, 0.0f, 1.0f);
+        float tint = vk_dust_random(motes[i].hash >> 5);
+        float color[4] = {
+            0.72f + tint * 0.12f,
+            0.70f + tint * 0.10f,
+            0.64f + tint * 0.08f,
+            (0.16f + 0.10f * strength) * fade,
+        };
+        if (light_count)
+            vk_light_dust_mote(motes[i].origin, lights, light_count,
+                               light_strength, color);
+        float scale = 1.8f + distance * 0.003f +
+            vk_dust_random(motes[i].hash >> 11) * 0.8f;
+        vk_append_particle_quad(&vertex_count, motes[i].origin, VK_RT_SPRITE_HALF(scale),
+                                color, viewaxis);
+    }
+    return vertex_count;
+}
+
+#if USE_VULKAN_RAYTRACING
+static uint32_t vk_append_lava_embers(const refdef_t *fd,
+                                      const vec3_t viewaxis[3],
+                                      uint32_t vertex_count)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_lava_embers ||
+        (fd->rdflags & (RDF_UNDERWATER | RDF_NOWORLDMODEL)) ||
+        !vk.world.cache || !vk.world.cache->nodes ||
+        !vk.world.lava_ember_anchor_count)
+        return vertex_count;
+
+    float strength = Cvar_ClampValue(vk_rt_lava_embers, 0.0f, 1.0f);
+    uint32_t available = min((VK_MAX_PARTICLE_VERTICES - vertex_count) / 6,
+                             (uint32_t)VK_MAX_LAVA_EMBERS);
+    if (strength <= 0.0f || !available)
+        return vertex_count;
+
+    uint32_t ember_count = 0;
+    for (uint32_t i = 0; i < vk.world.lava_ember_anchor_count &&
+         ember_count < available; i++) {
+        const vk_lava_ember_anchor_t *anchor =
+            &vk.world.lava_ember_anchors[i];
+        if (!anchor->face || anchor->face->drawframe != vk.world.drawframe)
+            continue;
+
+        float density = 0.30f + strength * 0.70f;
+        if (vk_lava_ember_random(anchor->hash ^ 0x51ed270bu) > density)
+            continue;
+
+        vec3_t delta;
+        VectorSubtract(anchor->origin, fd->vieworg, delta);
+        float distance = VectorLength(delta);
+        if (distance < 16.0f || distance >= 768.0f)
+            continue;
+
+        float phase = vk_lava_ember_random(anchor->hash ^ 0xa511e9b3u);
+        float speed = 0.32f +
+            vk_lava_ember_random(anchor->hash ^ 0x63d83595u) * 0.22f;
+        float age = fmodf(fd->time * speed + phase, 1.0f);
+        float angle = vk_lava_ember_random(anchor->hash ^ 0x9e3779b9u) *
+            (2.0f * M_PIf);
+        float curl = sinf(age * M_PIf) *
+            (2.0f + 5.0f * vk_lava_ember_random(anchor->hash >> 7));
+        vec3_t origin;
+        VectorMA(anchor->origin, 5.0f + age * 42.0f,
+                 anchor->normal, origin);
+        origin[0] += cosf(angle + fd->time * 0.65f) * curl;
+        origin[1] += sinf(angle + fd->time * 0.58f) * curl;
+
+        const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, origin);
+        if (!leaf || leaf->visframe != vk.world.visframe ||
+            (leaf->contents[0] & (CONTENTS_SOLID | MASK_WATER)) ||
+            (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+            continue;
+
+        float life = sinf(age * M_PIf);
+        life *= life;
+        float far_fade = Q_clipf((768.0f - distance) / 256.0f,
+                                 0.0f, 1.0f);
+        float near_fade = Q_clipf((distance - 16.0f) / 32.0f,
+                                  0.0f, 1.0f);
+        float variation = vk_lava_ember_random(anchor->hash ^ 0xc2b2ae35u);
+        float color[4] = {
+            1.0f,
+            0.24f + variation * 0.22f + (1.0f - age) * 0.12f,
+            0.025f + variation * 0.04f,
+            min((0.22f + strength * 0.32f) * life * far_fade * near_fade,
+                0.55f),
+        };
+        float scale = 3.5f + strength * 3.0f + variation * 1.5f + age;
+        vk_append_particle_quad(&vertex_count, origin, VK_RT_SPRITE_HALF(scale),
+                                color, viewaxis);
+        ember_count++;
+    }
+    return vertex_count;
+}
+
+typedef struct {
+    uint32_t index;
+    float score;
+    float distance;
+    float fade;
+} vk_corona_light_t;
+
+static uint32_t vk_select_corona_lights(const refdef_t *fd,
+                                        vk_corona_light_t *lights,
+                                        uint32_t limit)
+{
+    if (!fd || !fd->dlights || fd->num_dlights <= 0 || !limit ||
+        !vk.world.cache || !vk.world.cache->nodes)
+        return 0;
+
+    const mleaf_t *view_leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                             fd->vieworg);
+    int view_medium = view_leaf ? view_leaf->contents[0] & MASK_WATER : 0;
+    uint32_t count = 0;
+
+    for (int i = 0; i < fd->num_dlights; i++) {
+        const dlight_t *light = &fd->dlights[i];
+        float peak = max(light->color[0],
+                         max(light->color[1], light->color[2]));
+        if (light->intensity < 160.0f || peak <= 0.10f)
+            continue;
+
+        float distance = Distance(light->origin, fd->vieworg);
+        if (distance >= 1024.0f)
+            continue;
+        float far_fade = Q_clipf((1024.0f - distance) / 256.0f,
+                                 0.0f, 1.0f);
+        float near_fade = Q_clipf((distance - 8.0f) / 16.0f,
+                                  0.0f, 1.0f);
+        float fade = far_fade * near_fade;
+        if (fade <= 0.0f)
+            continue;
+
+        const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes,
+                                            light->origin);
+        if (!leaf || leaf->visframe != vk.world.visframe ||
+            (leaf->contents[0] & CONTENTS_SOLID) ||
+            (leaf->contents[0] & MASK_WATER) != view_medium ||
+            (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+            continue;
+
+        float score = light->intensity * peak * fade;
+        uint32_t slot = min(count, limit - 1);
+        while (slot > 0 && score > lights[slot - 1].score) {
+            lights[slot] = lights[slot - 1];
+            slot--;
+        }
+        if (count >= limit && score <= lights[slot].score)
+            continue;
+        lights[slot].index = i;
+        lights[slot].score = score;
+        lights[slot].distance = distance;
+        lights[slot].fade = fade;
+        if (count < limit)
+            count++;
+    }
+    return count;
+}
+
+static uint32_t vk_append_light_coronas(const refdef_t *fd,
+                                        const vec3_t viewaxis[3],
+                                        uint32_t vertex_count)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_light_coronas ||
+        (fd->rdflags & RDF_NOWORLDMODEL) ||
+        !vk_dynamic_lights_enabled() || !vk.world.cache ||
+        !vk.world.cache->nodes)
+        return vertex_count;
+
+    float strength = Cvar_ClampValue(vk_rt_light_coronas, 0.0f, 1.0f);
+    uint32_t available = (VK_MAX_PARTICLE_VERTICES - vertex_count) / 6;
+    if (strength <= 0.0f || !available)
+        return vertex_count;
+
+    bool draw_core = available >= 2;
+    uint32_t limit = draw_core ? available / 2 : 1;
+    limit = min(limit, (uint32_t)VK_MAX_LIGHT_CORONAS);
+    vk_corona_light_t lights[VK_MAX_LIGHT_CORONAS] = { 0 };
+    uint32_t count = vk_select_corona_lights(fd, lights, limit);
+
+    for (uint32_t i = 0; i < count; i++) {
+        const dlight_t *light = &fd->dlights[lights[i].index];
+        float peak = max(light->color[0],
+                         max(light->color[1], light->color[2]));
+        float energy = 0.35f + 0.65f * Q_clipf(
+            (light->intensity - 160.0f) / 320.0f, 0.0f, 1.0f);
+        float reach = max(light->intensity - DLIGHT_CUTOFF, 1.0f);
+        float scale = Q_clipf(8.0f + reach * 0.06f, 10.0f, 32.0f) *
+            (0.80f + 0.35f * strength);
+        float color[4];
+        for (int channel = 0; channel < 3; channel++)
+            color[channel] = Q_clipf(light->color[channel] /
+                max(peak, 0.001f) * (0.70f + 0.30f * strength),
+                0.0f, 1.0f);
+        color[3] = min((0.08f + 0.14f * strength) * energy *
+                       lights[i].fade, 0.24f);
+        vk_append_particle_quad(&vertex_count, light->origin, VK_RT_SPRITE_HALF(scale),
+                                color, viewaxis);
+
+        if (draw_core) {
+            for (int channel = 0; channel < 3; channel++)
+                color[channel] += (1.0f - color[channel]) * 0.35f;
+            color[3] = min((0.10f + 0.16f * strength) * energy *
+                           lights[i].fade, 0.28f);
+            vk_append_particle_quad(&vertex_count, light->origin,
+                                    VK_RT_SPRITE_HALF(scale * 0.38f), color, viewaxis);
+        }
+    }
+    return vertex_count;
+}
+
+typedef struct {
+    uint32_t index;
+    float score;
+} vk_emissive_mote_source_t;
+
+static uint32_t vk_select_emissive_mote_sources(
+    const refdef_t *fd,
+    vk_emissive_mote_source_t sources[VK_MAX_EMISSIVE_MOTE_SOURCES])
+{
+    uint32_t count = 0;
+
+    if (!fd || !vk.world.cache || !vk.world.cache->nodes ||
+        !vk.world.surface_lights_ready)
+        return 0;
+
+    for (uint32_t i = 0; i < vk.world.surface_light_count; i++) {
+        const vk_surface_light_t *light = &vk.world.surface_lights[i];
+        float distance = Distance(light->origin, fd->vieworg);
+        if (distance >= 512.0f)
+            continue;
+
+        // Surface-light centers lie directly on BSP planes and can classify
+        // into the solid leaf. Test a point safely in front of the emitter.
+        vec3_t leaf_point;
+        VectorMA(light->origin, 8.0f, light->normal, leaf_point);
+        const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, leaf_point);
+        if (!leaf)
+            continue;
+        if (leaf->visframe != vk.world.visframe)
+            continue;
+        if ((leaf->contents[0] & (CONTENTS_SOLID | MASK_WATER)) ||
+            (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+            continue;
+
+        float fade = Q_clipf((512.0f - distance) / 192.0f, 0.0f, 1.0f);
+        float score = light->strength * fade *
+            (0.75f + 0.25f * min(light->radius / 24.0f, 1.0f));
+        uint32_t slot = min(count,
+                            (uint32_t)VK_MAX_EMISSIVE_MOTE_SOURCES - 1);
+        while (slot > 0 && score > sources[slot - 1].score) {
+            sources[slot] = sources[slot - 1];
+            slot--;
+        }
+        if (count >= VK_MAX_EMISSIVE_MOTE_SOURCES &&
+            score <= sources[slot].score)
+            continue;
+        sources[slot].index = i;
+        sources[slot].score = score;
+        if (count < VK_MAX_EMISSIVE_MOTE_SOURCES)
+            count++;
+    }
+    return count;
+}
+
+static uint32_t vk_append_emissive_motes(const refdef_t *fd,
+                                         const vec3_t viewaxis[3],
+                                         uint32_t vertex_count)
+{
+    if (!fd || !vk.raytracing_active || !vk_rt_emissive_motes ||
+        (fd->rdflags & (RDF_UNDERWATER | RDF_NOWORLDMODEL)) ||
+        vk.view_liquid_kind || !vk.world.cache || !vk.world.cache->nodes)
+        return vertex_count;
+
+    float strength = Cvar_ClampValue(vk_rt_emissive_motes, 0.0f, 1.0f);
+    uint32_t available = min((VK_MAX_PARTICLE_VERTICES - vertex_count) / 6,
+                             (uint32_t)VK_MAX_EMISSIVE_MOTES);
+    if (strength <= 0.0f || !available)
+        return vertex_count;
+
+    vk_emissive_mote_source_t sources[VK_MAX_EMISSIVE_MOTE_SOURCES] = { 0 };
+    uint32_t source_count = vk_select_emissive_mote_sources(fd, sources);
+    uint32_t mote_count = 0;
+    int per_source = 1 + (strength >= 0.35f) + (strength >= 0.75f);
+
+    for (uint32_t i = 0; i < source_count && mote_count < available; i++) {
+        const vk_surface_light_t *light =
+            &vk.world.surface_lights[sources[i].index];
+        vec3_t reference = { 0.0f, 0.0f, 1.0f };
+        vec3_t tangent, bitangent;
+        if (fabsf(light->normal[2]) > 0.90f)
+            VectorSet(reference, 0.0f, 1.0f, 0.0f);
+        CrossProduct(reference, light->normal, tangent);
+        if (VectorNormalize(tangent) <= 0.0f)
+            continue;
+        CrossProduct(light->normal, tangent, bitangent);
+        VectorNormalize(bitangent);
+
+        uint32_t source_hash = vk_dust_hash(
+            (int)floorf(light->origin[0] * 0.125f),
+            (int)floorf(light->origin[1] * 0.125f),
+            (int)floorf(light->origin[2] * 0.125f)) ^ sources[i].index;
+        for (int j = 0; j < per_source && mote_count < available; j++) {
+            uint32_t hash = vk_dust_hash((int)source_hash, j,
+                                         (int)sources[i].index);
+            float phase = vk_dust_random(hash) * (2.0f * M_PIf);
+            float speed = 0.32f + vk_dust_random(hash >> 7) * 0.24f;
+            float angle = fd->time * speed + phase;
+            float orbit = Q_clipf(light->radius *
+                                  (0.25f + vk_dust_random(hash >> 11) * 0.25f),
+                                  2.0f, 14.0f);
+            float outward = 6.0f + 16.0f *
+                (0.5f + 0.5f * sinf(angle * 0.73f + phase * 0.41f));
+            vec3_t origin;
+            VectorMA(light->origin, outward, light->normal, origin);
+            VectorMA(origin, sinf(angle) * orbit, tangent, origin);
+            VectorMA(origin, cosf(angle * 0.83f + phase) * orbit,
+                     bitangent, origin);
+
+            float distance = Distance(origin, fd->vieworg);
+            if (distance >= 512.0f)
+                continue;
+            const mleaf_t *leaf = BSP_PointLeaf(vk.world.cache->nodes, origin);
+            if (!leaf || leaf->visframe != vk.world.visframe ||
+                (leaf->contents[0] & (CONTENTS_SOLID | MASK_WATER)) ||
+                (fd->areabits && !Q_IsBitSet(fd->areabits, leaf->area)))
+                continue;
+
+            float far_fade = Q_clipf((512.0f - distance) / 192.0f,
+                                     0.0f, 1.0f);
+            float near_fade = Q_clipf((distance - 16.0f) / 32.0f,
+                                      0.0f, 1.0f);
+            float peak = max(light->color[0],
+                             max(light->color[1], light->color[2]));
+            float color[4];
+            for (int cidx = 0; cidx < 3; cidx++)
+                color[cidx] = Q_clipf(light->color[cidx] /
+                    max(peak, 0.001f) * (0.55f + 0.30f * strength),
+                    0.0f, 1.0f);
+            color[3] = (0.08f + 0.10f * strength) * far_fade * near_fade;
+            float scale = 1.1f + vk_dust_random(hash >> 15) * 0.8f +
+                distance * 0.002f;
+            vk_append_particle_quad(&vertex_count, origin, VK_RT_SPRITE_HALF(scale),
+                                    color, viewaxis);
+            mote_count++;
+        }
+    }
+    return vertex_count;
+}
+#else
+static uint32_t vk_append_lava_embers(const refdef_t *fd,
+                                      const vec3_t viewaxis[3],
+                                      uint32_t vertex_count)
+{
+    (void)fd;
+    (void)viewaxis;
+    return vertex_count;
+}
+
+static uint32_t vk_append_light_coronas(const refdef_t *fd,
+                                        const vec3_t viewaxis[3],
+                                        uint32_t vertex_count)
+{
+    (void)fd;
+    (void)viewaxis;
+    return vertex_count;
+}
+
+static uint32_t vk_append_emissive_motes(const refdef_t *fd,
+                                         const vec3_t viewaxis[3],
+                                         uint32_t vertex_count)
+{
+    (void)fd;
+    (void)viewaxis;
+    return vertex_count;
+}
+#endif
+
 static void vk_draw_particles(const refdef_t *fd)
 {
-    if (!fd->num_particles || !fd->particles ||
-        !vk.sprite_pipeline || !vk.particle_texture.descriptor_set ||
+    if (!fd || !vk.sprite_pipeline || !vk.particle_texture.descriptor_set ||
         !vk.particle_vertices.buffer || !vk.particle_vertices.memory ||
         !vk.particle_vertices_mapped)
         return;
@@ -12618,10 +13393,11 @@ static void vk_draw_particles(const refdef_t *fd)
     vk_fog_params(fd, push.fog);
     push.intensity = 1.0f;
 
-    for (int i = 0; i < fd->num_particles && vertex_count + 6 <= VK_MAX_PARTICLE_VERTICES; i++) {
+    for (int i = 0; fd->particles && i < fd->num_particles &&
+         vertex_count + 6 <= VK_MAX_PARTICLE_VERTICES; i++) {
         const particle_t *particle = &fd->particles[i];
-        vec3_t transformed, left, right, down, up, corners[4];
-        vec_t dist, scale, scale2;
+        vec3_t transformed;
+        vec_t dist, scale;
         color_t color;
 
         VectorSubtract(particle->origin, fd->vieworg, transformed);
@@ -12631,44 +13407,30 @@ static void vk_draw_particles(const refdef_t *fd)
         if (dist > 20.0f)
             scale += dist * 0.004f;
         scale *= (vk_partscale ? vk_partscale->value : 2.0f) * particle->scale;
-        scale2 = scale * VK_PARTICLE_SCALE;
-
-        // The OpenGL renderer draws a triangle whose texture coordinates run
-        // to VK_PARTICLE_SIZE, so the round particle texture fills a circle
-        // of radius scale2 around the origin and the rest is clamped to
-        // transparent. Draw a quad that holds exactly that circle.
-        VectorScale(viewaxis[1], scale2, left);
-        VectorScale(viewaxis[1], -scale2, right);
-        VectorScale(viewaxis[2], -scale2, down);
-        VectorScale(viewaxis[2], scale2, up);
-
         if (particle->color == -1)
             color.u32 = particle->rgba.u32;
         else
             color.u32 = d_8to24table[particle->color & 0xff];
         color.u8[3] *= particle->alpha;
 
-        VectorAdd3(particle->origin, left, down, corners[0]);
-        VectorAdd3(particle->origin, right, down, corners[1]);
-        VectorAdd3(particle->origin, left, up, corners[2]);
-        VectorAdd3(particle->origin, right, up, corners[3]);
-
-        static const int order[6] = { 0, 2, 1, 1, 2, 3 };
-        static const float uv[4][2] = {
-            { 0.0f, 1.0f }, { 1.0f, 1.0f }, { 0.0f, 0.0f }, { 1.0f, 0.0f },
+        float rgba[4] = {
+            color.u8[0] / 255.0f, color.u8[1] / 255.0f,
+            color.u8[2] / 255.0f, color.u8[3] / 255.0f,
         };
-        for (int j = 0; j < 6; j++) {
-            int idx = order[j];
-            vk_vertex_t *v = &vk.particle_batch[vertex_count++];
-            VectorCopy(corners[idx], v->position);
-            v->uv[0] = uv[idx][0];
-            v->uv[1] = uv[idx][1];
-            v->color[0] = color.u8[0] / 255.0f;
-            v->color[1] = color.u8[1] / 255.0f;
-            v->color[2] = color.u8[2] / 255.0f;
-            v->color[3] = color.u8[3] / 255.0f;
-        }
+        // The OpenGL renderer draws a triangle whose texture coordinates run
+        // to VK_PARTICLE_SIZE, so the round particle texture fills a circle
+        // of radius scale * VK_PARTICLE_SCALE around the origin. Draw a quad
+        // that holds exactly that circle.
+        vk_append_particle_quad(&vertex_count, particle->origin,
+                                scale * VK_PARTICLE_SCALE, rgba, viewaxis);
     }
+
+    uint32_t particle_vertex_count = vertex_count;
+    vertex_count = vk_append_dust_motes(fd, viewaxis, vertex_count);
+    uint32_t dust_vertex_count = vertex_count;
+    vertex_count = vk_append_light_coronas(fd, viewaxis, vertex_count);
+    vertex_count = vk_append_emissive_motes(fd, viewaxis, vertex_count);
+    vertex_count = vk_append_lava_embers(fd, viewaxis, vertex_count);
 
     if (!vertex_count) {
         vk.draw_scope = old_scope;
@@ -12686,9 +13448,28 @@ static void vk_draw_particles(const refdef_t *fd)
     vk_bind_vertex_buffers(cmd, 0, 1, &vk.particle_vertices.buffer, &offset);
     vk_bind_texture_descriptor(cmd, vk.particle_texture.descriptor_set);
     vk_push_constants(cmd, sizeof(push), &push);
-    vk.CmdDraw(cmd, vertex_count, 1, 0, 0);
-    c.trisDrawn += vertex_count / 3;
-    vk_count_batch3d();
+    if (particle_vertex_count) {
+        vk.CmdDraw(cmd, particle_vertex_count, 1, 0, 0);
+        c.trisDrawn += particle_vertex_count / 3;
+        vk_count_batch3d();
+    }
+    if (dust_vertex_count > particle_vertex_count) {
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                         vk.sprite_pipeline);
+        vk.CmdDraw(cmd, dust_vertex_count - particle_vertex_count, 1,
+                   particle_vertex_count, 0);
+        c.trisDrawn += (dust_vertex_count - particle_vertex_count) / 3;
+        vk_count_batch3d();
+    }
+    if (vertex_count > dust_vertex_count) {
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                         vk.particle_add_pipeline ?
+                            vk.particle_add_pipeline : vk.sprite_pipeline);
+        vk.CmdDraw(cmd, vertex_count - dust_vertex_count, 1,
+                   dust_vertex_count, 0);
+        c.trisDrawn += (vertex_count - dust_vertex_count) / 3;
+        vk_count_batch3d();
+    }
     vk.draw_scope = old_scope;
 }
 
@@ -13716,6 +14497,138 @@ static float vk_polygon_area(const vk_vertex_t *vertices,
 }
 
 typedef struct {
+    const vk_world_face_t *draw;
+    vec3_t normal;
+    float area;
+    uint32_t index;
+    int anchor_count;
+} vk_lava_face_candidate_t;
+
+static int vk_lava_face_candidate_compare(const void *a, const void *b)
+{
+    const vk_lava_face_candidate_t *ca = a;
+    const vk_lava_face_candidate_t *cb = b;
+
+    if (ca->area < cb->area)
+        return 1;
+    if (ca->area > cb->area)
+        return -1;
+    if (ca->index < cb->index)
+        return -1;
+    return ca->index != cb->index;
+}
+
+static uint32_t vk_lava_ember_hash(uint32_t value)
+{
+    value ^= value >> 16;
+    value *= 0x7feb352du;
+    value ^= value >> 15;
+    value *= 0x846ca68bu;
+    return value ^ (value >> 16);
+}
+
+static float vk_lava_ember_random(uint32_t value)
+{
+    return (vk_lava_ember_hash(value) & 0x00ffffffu) / 16777216.0f;
+}
+
+static bool vk_add_lava_ember_anchor(const vk_lava_face_candidate_t *candidate,
+                                     const vk_vertex_t *vertices,
+                                     uint32_t sequence)
+{
+    if (!candidate || !candidate->draw || candidate->draw->edge_count < 3 ||
+        vk.world.lava_ember_anchor_count >= VK_MAX_LAVA_EMBER_ANCHORS)
+        return false;
+
+    const vk_world_face_t *draw = candidate->draw;
+    const vec_t *base = vertices[draw->first_vertex].position;
+    uint32_t hash = vk_lava_ember_hash(candidate->index * 0x9e3779b9u +
+                                       sequence * 0x85ebca6bu + 1u);
+    float target = vk_lava_ember_random(hash) * candidate->area;
+    uint32_t triangle = 1;
+
+    for (uint32_t i = 1; i + 1 < draw->edge_count; i++) {
+        vec3_t edge1, edge2, cross;
+        VectorSubtract(vertices[draw->first_vertex + i].position, base, edge1);
+        VectorSubtract(vertices[draw->first_vertex + i + 1].position, base, edge2);
+        CrossProduct(edge1, edge2, cross);
+        float area = VectorLength(cross) * 0.5f;
+        triangle = i;
+        if (target <= area)
+            break;
+        target -= area;
+    }
+
+    const vec_t *b = vertices[draw->first_vertex + triangle].position;
+    const vec_t *c = vertices[draw->first_vertex + triangle + 1].position;
+    float root = sqrtf(vk_lava_ember_random(hash ^ 0x68bc21ebu));
+    float split = vk_lava_ember_random(hash ^ 0x02e5be93u);
+    float weights[3] = { 1.0f - root, root * (1.0f - split), root * split };
+    vk_lava_ember_anchor_t *anchor =
+        &vk.world.lava_ember_anchors[vk.world.lava_ember_anchor_count++];
+    for (int axis = 0; axis < 3; axis++) {
+        anchor->origin[axis] = base[axis] * weights[0] + b[axis] * weights[1] +
+            c[axis] * weights[2] + candidate->normal[axis] * 4.0f;
+        anchor->normal[axis] = candidate->normal[axis];
+    }
+    anchor->face = draw->face;
+    anchor->hash = hash;
+    return true;
+}
+
+static void vk_build_lava_ember_anchors(const vk_world_face_t *faces,
+                                        uint32_t face_count,
+                                        const vk_vertex_t *vertices)
+{
+    vk.world.lava_ember_anchor_count = 0;
+    if (!faces || !face_count || !vertices)
+        return;
+
+    vk_lava_face_candidate_t *candidates =
+        Z_Malloc(sizeof(*candidates) * face_count);
+    uint32_t candidate_count = 0;
+
+    for (uint32_t i = 0; i < face_count; i++) {
+        const vk_world_face_t *draw = &faces[i];
+        if (!draw->face || vk_world_liquid_kind(draw->face) < 3)
+            continue;
+
+        vec3_t normal;
+        VectorCopy(draw->face->plane->normal, normal);
+        if (draw->face->drawflags & DSURF_PLANEBACK)
+            VectorNegate(normal, normal);
+        if (VectorNormalize(normal) <= 0.0f || normal[2] < 0.45f)
+            continue;
+
+        float area = vk_polygon_area(vertices, draw);
+        if (area < 16.0f)
+            continue;
+
+        vk_lava_face_candidate_t *candidate = &candidates[candidate_count++];
+        candidate->draw = draw;
+        VectorCopy(normal, candidate->normal);
+        candidate->area = area;
+        candidate->index = i;
+        candidate->anchor_count = Q_clip((int)ceilf(area / 2048.0f), 1, 8);
+    }
+
+    qsort(candidates, candidate_count, sizeof(*candidates),
+          vk_lava_face_candidate_compare);
+    for (int layer = 0; layer < 8 &&
+         vk.world.lava_ember_anchor_count < VK_MAX_LAVA_EMBER_ANCHORS; layer++) {
+        for (uint32_t i = 0; i < candidate_count &&
+             vk.world.lava_ember_anchor_count < VK_MAX_LAVA_EMBER_ANCHORS; i++) {
+            if (candidates[i].anchor_count > layer)
+                vk_add_lava_ember_anchor(&candidates[i], vertices, layer);
+        }
+    }
+
+    Com_DPrintf("Vulkan RT lava embers: %u anchors\n",
+                vk.world.lava_ember_anchor_count);
+    Z_Free(candidates);
+}
+
+typedef struct {
     char name[MAX_QPATH];
     vec3_t color;
 } vk_surface_light_color_t;
@@ -14541,6 +15454,10 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
 
     bool ok = vk_upload_mesh(&vk.world.mesh, vertices, v, indices, idx);
 #if USE_VULKAN_RAYTRACING
+    if (ok)
+        vk_build_lava_ember_anchors(draw_faces, draw_face_count, vertices);
+    else
+        vk.world.lava_ember_anchor_count = 0;
     if (ok && vk.raytracing_active) {
         uint32_t *rt_indices = Z_Malloc(sizeof(*rt_indices) * idx);
         uint32_t rt_index_count = 0;
@@ -15207,6 +16124,14 @@ bool VKR_Init(bool total)
         return true;
     }
 
+    // Reject non-Vulkan window backends before they create native resources.
+    // In particular, the GLX-only X11 backend must not be initialized while
+    // probing video drivers for Vulkan before falling back to SDL.
+    if (!vid->get_vk_instance_extensions || !vid->create_vk_surface) {
+        Com_SetLastError("Video driver doesn't support Vulkan");
+        return false;
+    }
+
     Com_Printf("------- VKR_Init -------\n");
     Com_Printf("Using video driver: %s\n", vid->name);
 
@@ -15283,13 +16208,29 @@ bool VKR_Init(bool total)
     vk_rt_ao = Cvar_Get("vk_rt_ao", "0.24", CVAR_ARCHIVE);
     vk_rt_skylight = Cvar_Get("vk_rt_skylight", "0.6", CVAR_ARCHIVE);
     vk_rt_environment = Cvar_Get("vk_rt_environment", "0.65", CVAR_ARCHIVE);
+    vk_rt_atmosphere = Cvar_Get("vk_rt_atmosphere", "0.45", CVAR_ARCHIVE);
+    vk_rt_underwater_absorption = Cvar_Get("vk_rt_underwater_absorption",
+                                           "0.65", CVAR_ARCHIVE);
+    vk_rt_light_scattering = Cvar_Get("vk_rt_light_scattering", "0.5",
+                                      CVAR_ARCHIVE);
+    vk_rt_fog_turbulence = Cvar_Get("vk_rt_fog_turbulence", "0.4",
+                                    CVAR_ARCHIVE);
+    vk_rt_dust = Cvar_Get("vk_rt_dust", "0.35", CVAR_ARCHIVE);
+    vk_rt_dust_lighting = Cvar_Get("vk_rt_dust_lighting", "0.65",
+                                   CVAR_ARCHIVE);
+    vk_rt_emissive_motes = Cvar_Get("vk_rt_emissive_motes", "0.45",
+                                    CVAR_ARCHIVE);
     vk_rt_afterglow = Cvar_Get("vk_rt_afterglow", "0.35", CVAR_ARCHIVE);
     vk_rt_sunlight = Cvar_Get("vk_rt_sunlight", "0.65", CVAR_ARCHIVE);
     vk_rt_emissive_halo = Cvar_Get("vk_rt_emissive_halo", "0.65",
                                    CVAR_ARCHIVE);
+    vk_rt_emissive_flicker = Cvar_Get("vk_rt_emissive_flicker", "0.55",
+                                      CVAR_ARCHIVE);
     vk_rt_reflections = Cvar_Get("vk_rt_reflections", "0.35", CVAR_ARCHIVE);
     vk_rt_reflection_glints = Cvar_Get("vk_rt_reflection_glints", "0.55",
                                        CVAR_ARCHIVE);
+    vk_rt_reflection_dispersion = Cvar_Get("vk_rt_reflection_dispersion",
+                                           "0.6", CVAR_ARCHIVE);
     vk_rt_specular = Cvar_Get("vk_rt_specular", "0.45", CVAR_ARCHIVE);
     vk_rt_liquids = Cvar_Get("vk_rt_liquids", "0.65", CVAR_ARCHIVE);
     vk_rt_bounce = Cvar_Get("vk_rt_bounce", "0.65", CVAR_ARCHIVE);
@@ -15297,6 +16238,8 @@ bool VKR_Init(bool total)
     vk_rt_shadow_fringe = Cvar_Get("vk_rt_shadow_fringe", "0.6", CVAR_ARCHIVE);
     vk_rt_light_ripples = Cvar_Get("vk_rt_light_ripples", "0.6", CVAR_ARCHIVE);
     vk_rt_light_trails = Cvar_Get("vk_rt_light_trails", "0.55", CVAR_ARCHIVE);
+    vk_rt_light_coronas = Cvar_Get("vk_rt_light_coronas", "0.6", CVAR_ARCHIVE);
+    vk_rt_lava_embers = Cvar_Get("vk_rt_lava_embers", "0.65", CVAR_ARCHIVE);
     vk_rt_debug = Cvar_Get("vk_rt_debug", "0", 0);
 #if USE_DEBUG
     vk_showstats = Cvar_Get("gl_showstats", "0", 0);
@@ -16333,7 +17276,8 @@ static void vk_render_ssr(void)
             vk_rt_reflections ? Cvar_ClampValue(vk_rt_reflections, 0.0f, 1.0f) : 0.0f,
             vk_rt_debug && ((vk_rt_debug->integer >= 4 &&
                 vk_rt_debug->integer <= 7) ||
-                vk_rt_debug->integer == 18) ?
+                vk_rt_debug->integer == 18 ||
+                vk_rt_debug->integer == 20) ?
                 (float)vk_rt_debug->integer : 0.0f,
             1.0f / max((float)vk.scene_texture.width, 1.0f),
             1.0f / max((float)vk.scene_texture.height, 1.0f),
@@ -16374,6 +17318,11 @@ static void vk_render_ssr(void)
     vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                              vk.ssr_pipeline_layout, 0, 1,
                              &vk.ssr_resolve_descriptor_set, 0, NULL);
+    // The march shader needs inverse scene dimensions in control.zw, while
+    // the resolve derives its texel size from the input texture. Reuse the
+    // now-free control.z slot without expanding the push-constant layout.
+    push.control[2] = vk_rt_reflection_dispersion ?
+        Cvar_ClampValue(vk_rt_reflection_dispersion, 0.0f, 1.0f) : 0.6f;
     vk.CmdPushConstants(cmd, vk.ssr_pipeline_layout,
                         VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
     vk.CmdDraw(cmd, 6, 1, 0, 0);
