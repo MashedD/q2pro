@@ -614,6 +614,13 @@ static glStateBits_t statebits_for_surface(const mface_t *surf)
     if (surf->drawflags & SURF_N64_SCROLL_FLIP)
         statebits |= GLS_SCROLL_FLIP;
 
+    // Mark glowing faces without a glow map. With gl_bloom_lamps, their lit
+    // texture feeds bloom like a glow map would (see GL_Flush3D).
+    if (!(surf->drawflags & (SURF_TRANS_MASK | SURF_WARP | SURF_NODRAW)) &&
+        (surf->texinfo->c.flags & SURF_LIGHT) &&
+        !surf->texinfo->image->texnum2)
+        statebits |= GLS_BLOOM_SHELL;
+
     return statebits;
 }
 

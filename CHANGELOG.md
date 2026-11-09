@@ -8,6 +8,9 @@ All notable changes to this fork are documented here. The format follows
 
 ### Added
 
+- `gl_bloom_lamps` lets glowing world surfaces without a glow map feed bloom,
+  in both renderers, so plain lamps glow too. Off by default; the release
+  packages turn it on.
 - `cl_railcore_glow` adds a soft glow and a paler center to the rail core,
   in both renderers. Defaults to 0.
 

@@ -671,6 +671,10 @@ void GL_Flush3D(void)
     }
     if (glr.framebuffer_bound && gl_bloom->integer)
         state |= GLS_BLOOM_GENERATE;
+    // World faces only carry GLS_BLOOM_SHELL as the lamp mark; checking the
+    // cvar here lets it take effect without reloading the map.
+    if (!(state & GLS_BLOOM_GENERATE) || !gl_bloom_lamps->integer)
+        state &= ~GLS_BLOOM_SHELL;
 
     if (!(state & GLS_TEXTURE_REPLACE))
         array |= GLA_COLOR;
