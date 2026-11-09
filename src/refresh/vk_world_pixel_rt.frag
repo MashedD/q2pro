@@ -155,14 +155,14 @@ float material_output(float packed)
     return mod(floor(max(packed, 0.0) + 0.5), 256.0) / 255.0;
 }
 
+// Glowing faces without a glow map are marked with a fraction in the mode.
+// Like the OpenGL renderer and the raster shaders, they feed their lit color
+// to bloom as it is.
 vec3 static_lamp_bloom(vec3 color)
 {
     if (fract(v_mode) < 0.0625)
         return vec3(0.0);
-
-    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    float mask = smoothstep(0.02, 0.18, luma);
-    return color * mask * (3.0 * max(pc.intensity, 0.0));
+    return color;
 }
 
 float rt_emissive_control(float packed)
@@ -1056,7 +1056,6 @@ void main()
 #ifdef RT_GLOWMAP
         bloom += texel.rgb * glow.a * pc.intensity;
 #endif
-        bloom += static_lamp_bloom(texel.rgb);
         float dynamic_luma = dot(dynamic_lighting,
                                  vec3(0.2126, 0.7152, 0.0722));
         float dynamic_bloom = smoothstep(0.22, 0.55, dynamic_luma) * 0.18;
@@ -1075,6 +1074,7 @@ void main()
                  max(pc.intensity, 0.0);
     }
 
+    bloom += static_lamp_bloom(out_color.rgb);
     float fog_amount = 0.0;
     if (pc.fog.a < 0.0) {
         fog_amount = -pc.fog.a;
