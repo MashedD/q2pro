@@ -586,11 +586,12 @@ typedef struct {
     float desaturation;
     float _pad2[2];         // skin_tint starts on a 16-byte boundary
     float skin_tint[4];     // rgb multiplier, alpha 1 when tinted
+    float skin_tint_dark[4]; // rgb, alpha = gamma; 0 tints the lit color
 } vk_alias_push_t;
 
 // Must match the push block of vk_alias.vert and vk_alias*.frag.
 typedef char vk_alias_push_size_check[
-    sizeof(vk_alias_push_t) == 160 ? 1 : -1];
+    sizeof(vk_alias_push_t) == 176 ? 1 : -1];
 
 typedef struct {
     mat4_t mvp;
@@ -12018,6 +12019,9 @@ static void vk_entity_light_color(const entity_t *ent, const refdef_t *fd, vec4_
             color[1] = 1.0f;
         if (flags & RF_SHELL_BLUE)
             color[2] = 1.0f;
+        // highlight shells in the color of the item's skin tint
+        if (flags & RF_SKINTINT)
+            VectorCopy(ent->skin_tint, color);
     } else if (flags & RF_FULLBRIGHT) {
         VectorSet(color, 1.0f, 1.0f, 1.0f);
     } else if ((flags & RF_IR_VISIBLE) && (fd->rdflags & RDF_IRGOGGLES)) {
@@ -12486,8 +12490,15 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
     push.desaturation = 0.0f;
     push._pad2[0] = push._pad2[1] = 0.0f;
     // Skin tints, as in the OpenGL renderer: shells keep their own color.
+    Vector4Clear(push.skin_tint_dark);
     if ((ent->flags & RF_SKINTINT) && !(ent->flags & RF_SHELL_MASK)) {
-        VectorScale(ent->skin_tint, SKINTINT_BRIGHTNESS, push.skin_tint);
+        if (ent->skin_tint_gamma > 0.0f) {
+            VectorCopy(ent->skin_tint, push.skin_tint);
+            VectorCopy(ent->skin_tint_dark, push.skin_tint_dark);
+            push.skin_tint_dark[3] = ent->skin_tint_gamma;
+        } else {
+            VectorScale(ent->skin_tint, SKINTINT_BRIGHTNESS, push.skin_tint);
+        }
         push.skin_tint[3] = 1.0f;
     } else {
         Vector4Clear(push.skin_tint);

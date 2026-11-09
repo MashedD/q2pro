@@ -15,6 +15,7 @@ layout(push_constant) uniform Push {
     float desaturation;
     float _pad2[2];
     vec4 skin_tint;
+    vec4 skin_tint_dark;
 } pc;
 
 layout(set = 0, binding = 0) uniform sampler2D tex_sampler;
@@ -45,6 +46,14 @@ void main()
     }
 
     out_color = texture(tex_sampler, uv);
+    // Skin tints that recolor the texture, like a recolored skin would be:
+    // a gradient from the dark color along luminance^gamma, before lighting.
+    if (pc.skin_tint.a > 0.0 && pc.skin_tint_dark.a > 0.0) {
+        float luma = dot(out_color.rgb, vec3(0.2126, 0.7152, 0.0722));
+        out_color.rgb = clamp(pc.skin_tint_dark.rgb + pc.skin_tint.rgb *
+                              pow(max(luma, 0.0), pc.skin_tint_dark.a),
+                              0.0, 1.0);
+    }
     if (pc.desaturation > 0.0) {
         float luma = dot(out_color.rgb, vec3(0.2126, 0.7152, 0.0722));
         out_color.rgb = mix(out_color.rgb, vec3(luma), pc.desaturation);
@@ -58,7 +67,7 @@ void main()
     out_color *= v_color;
     // Skin tints (cl_itemtint and friends): recolor by luminance, like the
     // OpenGL shader backend.
-    if (pc.skin_tint.a > 0.0) {
+    if (pc.skin_tint.a > 0.0 && pc.skin_tint_dark.a <= 0.0) {
         float luma = dot(out_color.rgb, vec3(0.2126, 0.7152, 0.0722));
         luma = 0.15 + 0.85 * sqrt(max(luma, 0.0));
         out_color.rgb = mix(out_color.rgb, vec3(luma) * pc.skin_tint.rgb,
