@@ -29,6 +29,8 @@ All notable changes to this fork are documented here. The format follows
 - With the Vulkan renderer and `cl_async 2`, a frame starts only once a
   swapchain image is free, instead of reading input first and then waiting
   in the driver for an image.
+- Video setup has a "glowmap intensity" slider (`gl_glowmap_intensity`), and
+  the effects menu lists the highlight toggles after the skin tint toggles.
 
 ### Fixed
 
