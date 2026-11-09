@@ -6,6 +6,17 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `cl_tint_<group>` sets a custom color for one group of tinted and
+  highlighted models, such as `cl_tint_rockets` or `cl_tint_health`.
+
+### Changed
+
+- `cl_itemtint`, `cl_weapontint` and `cl_ammotint` now recolor skins like the
+  q2dl-skins-tinted-items-ammo-weapons skin pack, so the pack is no longer
+  needed, and highlight shells use the same colors in both renderers.
+
 ## [1.2.0] - 2026-11-09
 
 ### Added

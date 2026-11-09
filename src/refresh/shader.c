@@ -114,6 +114,7 @@ static void write_block(sizebuf_t *buf, glStateBits_t bits)
         vec2 pad_4;
         vec4 u_vieworg;
         vec4 u_skin_tint;
+        vec4 u_skin_tint_dark;
     )
     GLSF("};\n");
 }
@@ -561,6 +562,19 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
     if (bits & GLS_ALPHATEST_ENABLE)
         GLSL(if (diffuse.a <= 0.666) discard;)
 
+    // Skin tints that recolor the texture, like a recolored skin would be:
+    // a gradient from the dark color along luminance^gamma, before lighting.
+    if (bits & GLS_SKINTINT) {
+        GLSL(
+            if (u_skin_tint.a > 0.0 && u_skin_tint_dark.a > 0.0) {
+                float luma = dot(diffuse.rgb, vec3(0.2126, 0.7152, 0.0722));
+                diffuse.rgb = clamp(u_skin_tint_dark.rgb + u_skin_tint.rgb *
+                                    pow(max(luma, 0.0), u_skin_tint_dark.a),
+                                    0.0, 1.0);
+            }
+        )
+    }
+
     if (bits & GLS_BLOOM_GENERATE)
         GLSL(vec4 bloom = vec4(0.0);)
 
@@ -595,7 +609,7 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
 
     if (bits & GLS_SKINTINT) {
         GLSL(
-            if (u_skin_tint.a > 0.0) {
+            if (u_skin_tint.a > 0.0 && u_skin_tint_dark.a <= 0.0) {
                 float luma = dot(diffuse.rgb, vec3(0.2126, 0.7152, 0.0722));
                 luma = 0.15 + 0.85 * sqrt(max(luma, 0.0));
                 diffuse.rgb = mix(diffuse.rgb,

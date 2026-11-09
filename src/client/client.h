@@ -779,6 +779,7 @@ bool CL_SeekDemoMessage(void);
 
 void CL_DeltaFrame(void);
 void CL_AddEntities(void);
+void CL_InitSkinTints(void);
 void CL_CalcViewValues(void);
 
 #if USE_DEBUG

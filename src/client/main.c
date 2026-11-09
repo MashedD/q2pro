@@ -2793,6 +2793,7 @@ static void CL_InitLocal(void)
     cl_weaponhighlight = Cvar_Get("cl_weaponhighlight", "0", CVAR_ARCHIVE);
     cl_ammohighlight = Cvar_Get("cl_ammohighlight", "0", CVAR_ARCHIVE);
     cl_itemtint = Cvar_Get("cl_itemtint", "0", CVAR_ARCHIVE);
+    CL_InitSkinTints();
     cl_weapontint = Cvar_Get("cl_weapontint", "0", CVAR_ARCHIVE);
     cl_ammotint = Cvar_Get("cl_ammotint", "0", CVAR_ARCHIVE);
     cl_playertint = Cvar_Get("cl_playertint", "0", CVAR_ARCHIVE);
