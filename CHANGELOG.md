@@ -6,6 +6,11 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `cl_railcore_glow` adds a soft glow and a paler center to the rail core,
+  in both renderers. Defaults to 0.
+
 ### Changed
 
 - With the Vulkan renderer and `cl_async 2`, a frame starts only once a

@@ -229,6 +229,11 @@ cl_railcore_color::
 cl_railcore_width::
     Width of the rail core beam. Default value is 3.
 
+cl_railcore_glow::
+    Adds a soft, wider additive glow around the rail core and turns its
+    center paler, from 0 to 1. Only affects the core of the alternative rail
+    trail (‘cl_railtrail_type’ 1 or 2). Default value is 0 (plain core).
+
 cl_railspiral_color::
     Color of the rail spiral. Default value is "blue".
 
