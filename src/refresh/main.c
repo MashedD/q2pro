@@ -990,12 +990,12 @@ static void GL_Strings_f(void)
 
 #if USE_DEBUG
 
-static size_t GL_ViewCluster_m(char *buffer, size_t size)
+size_t GLR_ViewCluster_m(char *buffer, size_t size)
 {
     return Q_snprintf(buffer, size, "%d", glr.viewcluster1);
 }
 
-static size_t GL_ViewLeaf_m(char *buffer, size_t size)
+size_t GLR_ViewLeaf_m(char *buffer, size_t size)
 {
     const bsp_t *bsp = gl_static.world.cache;
 
@@ -1159,10 +1159,6 @@ static void GL_Register(void)
 
     Cmd_AddCommand("strings", GL_Strings_f);
 
-#if USE_DEBUG
-    Cmd_AddMacro("gl_viewcluster", GL_ViewCluster_m);
-    Cmd_AddMacro("gl_viewleaf", GL_ViewLeaf_m);
-#endif
 }
 
 static void GL_Unregister(void)

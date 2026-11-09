@@ -49,4 +49,8 @@ void VKR_ModeChanged(int width, int height, int flags);
 bool VKR_VideoSync(void);
 int VKR_ReadPixels(struct screenshot_s *s);
 r_opengl_config_t VKR_GetGLConfig(void);
+#if USE_DEBUG
+size_t VKR_ViewCluster_m(char *buffer, size_t size);
+size_t VKR_ViewLeaf_m(char *buffer, size_t size);
+#endif
 #endif
