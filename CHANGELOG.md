@@ -10,6 +10,9 @@ All notable changes to this fork are documented here. The format follows
 
 - `cl_railcore_glow` adds a soft glow and a paler center to the rail core,
   in both renderers. Defaults to 0.
+- `vk_present_mode` picks the Vulkan present mode (FIFO, mailbox or
+  immediate) instead of deriving it from `gl_swapinterval`. The default,
+  automatic, works as before.
 
 ### Changed
 
