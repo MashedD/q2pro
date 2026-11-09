@@ -304,6 +304,7 @@ extern cvar_t *gl_md5_distance;
 extern cvar_t *gl_damageblend_frac;
 extern cvar_t *gl_waterwarp;
 extern cvar_t *gl_bloom;
+extern cvar_t *gl_bloom_lamps;
 extern cvar_t *r_lava_glowmaps;
 
 // development variables

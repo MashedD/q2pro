@@ -896,6 +896,12 @@ gl_bloom::
     Default value is 0 (disabled). Higher values specify number of blurring
     filter iterations (typical value is 1).
 
+gl_bloom_lamps::
+    With ‘gl_bloom’, also lets glowing world surfaces (‘SURF_LIGHT’) that
+    have no glow map feed bloom, so plain lamps glow as well. Applies to both
+    renderers. Default value is 0 (only glow maps feed bloom). The release
+    packages turn it on.
+
 gl_bloom_sigma::
     Specifies strength parameter of gaussian blur filter used for the bloom
     effect. Default value is 4.

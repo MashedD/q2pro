@@ -755,6 +755,7 @@ static cvar_t *vk_showtearing;
 static cvar_t *vk_showbloom;
 static cvar_t *vk_waterwarp;
 static cvar_t *vk_bloom_sigma;
+static cvar_t *vk_bloom_lamps;
 static cvar_t *vk_bloom_downsample;
 static cvar_t *vk_perf_stats;
 static cvar_t *vk_frames_in_flight;
@@ -8065,6 +8066,15 @@ static void vk_world_light_params(const mface_t *face, float color[4], float scr
         (warp ? 4.0f : 0.0f);
     scroll[3] = 0.0f;
 
+    // With gl_bloom_lamps, mark glowing faces without a glow map with a small
+    // fraction in the mode; the world shaders then let their bright texels
+    // feed bloom, as the OpenGL renderer does.
+    if (vk_bloom_lamps && vk_bloom_lamps->integer &&
+        !(face->drawflags & (SURF_TRANS_MASK | SURF_WARP | SURF_NODRAW)) &&
+        (face->texinfo->c.flags & SURF_LIGHT) &&
+        !face->texinfo->image->texnum2)
+        scroll[2] += 0.125f;
+
     if (fullbright || (face->drawflags & vk.world.nolm_mask))
         return;
 
@@ -8584,7 +8594,16 @@ static void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 continue;
             }
 
-            bool can_group = world_batching &&
+            // Lamp bloom (gl_bloom_lamps) is a per-face push constant, and
+            // one texture can be used both with and without SURF_LIGHT, so
+            // such faces are drawn on their own rather than inheriting the
+            // first face's setting in a batch.
+            bool static_lamp = vk_bloom_lamps && vk_bloom_lamps->integer &&
+                (face->face->texinfo->c.flags & SURF_LIGHT) &&
+                !image->texnum2 &&
+                !(face->face->drawflags &
+                  (SURF_TRANS_MASK | SURF_WARP | SURF_NODRAW));
+            bool can_group = world_batching && !static_lamp &&
                 batch_index_mapped && vk.world.batch_indices.buffer &&
                 vk.world.batch_index_data &&
                 image->texnum == batch->texture_index &&
@@ -12012,6 +12031,7 @@ bool VKR_Init(bool total)
     vk_showbloom = Cvar_Get("gl_showbloom", "0", CVAR_CHEAT);
     vk_waterwarp = Cvar_Get("gl_waterwarp", "0", 0);
     vk_bloom_sigma = Cvar_Get("gl_bloom_sigma", "4", 0);
+    vk_bloom_lamps = Cvar_Get("gl_bloom_lamps", "0", CVAR_ARCHIVE);
     vk_bloom_downsample = Cvar_Get("vk_bloom_downsample", "4", 0);
     vk_perf_stats = Cvar_Get("vk_perf_stats", "0", 0);
     vk_frames_in_flight = Cvar_Get("vk_frames_in_flight", "2", CVAR_ARCHIVE);
