@@ -379,6 +379,9 @@ static void setup_color(void)
             color[1] = 1;
         if (flags & RF_SHELL_BLUE)
             color[2] = 1;
+        // highlight shells in the color of the item's skin tint
+        if (flags & RF_SKINTINT)
+            VectorCopy(glr.ent->skin_tint, color);
     } else if (flags & RF_FULLBRIGHT) {
         VectorSet(color, 1, 1, 1);
     } else if ((flags & RF_IR_VISIBLE) && (glr.fd.rdflags & RDF_IRGOGGLES)) {
@@ -1014,7 +1017,14 @@ void GL_DrawAliasModel(const model_t *model)
 
     // only tinted models read this, so leave the uniform block alone otherwise
     if ((ent->flags & RF_SKINTINT) && !(ent->flags & RF_SHELL_MASK)) {
-        VectorScale(ent->skin_tint, SKINTINT_BRIGHTNESS, gls.u_block.skin_tint);
+        if (ent->skin_tint_gamma > 0.0f) {
+            VectorCopy(ent->skin_tint, gls.u_block.skin_tint);
+            VectorCopy(ent->skin_tint_dark, gls.u_block.skin_tint_dark);
+            gls.u_block.skin_tint_dark[3] = ent->skin_tint_gamma;
+        } else {
+            VectorScale(ent->skin_tint, SKINTINT_BRIGHTNESS, gls.u_block.skin_tint);
+            Vector4Clear(gls.u_block.skin_tint_dark);
+        }
         gls.u_block.skin_tint[3] = 1.0f;
         gls.u_block_dirty = true;
     }

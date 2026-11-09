@@ -292,9 +292,9 @@ cl_noglow::
     Default value is 0 (glowing enabled).
 
 cl_itemhighlight::
-    Adds colored tint to pickup items, excluding weapons and ammo. Health is
-    pink, each armor type has its own color, and powerups are magenta.
-    Default value is 0 (disabled).
+    Adds a colored shell to pickup items, excluding weapons and ammo, in the
+    same color as the skin tints (see ‘cl_tint_<group>’). Default value is 0
+    (disabled).
 
 cl_weaponhighlight::
     Adds colored tint to weapon pickups and visible weapons held by players.
@@ -311,23 +311,44 @@ cl_playerhighlight::
     (disabled).
 
 cl_itemtint::
-    Recolors the skins of pickup items instead of adding a shell over them, in
-    the same colors as the highlights. This also covers ammo. Only effective
-    if ‘gl_shaders’ is enabled. Default value is 0 (disabled).
+    Recolors the skins of pickup items, rockets and grenades in flight, like
+    the q2dl-skins-tinted-items-ammo-weapons skin pack does, so the pack is no
+    longer needed. This also covers ammo. Each skin becomes a gradient from a
+    dark color to a bright one following its brightness, fitted to the pack
+    skin by skin; hand-painted details of the pack, such as labels, and the
+    higher resolution of its weapon skins are not reproduced. Highlights use
+    the same colors. Only effective if ‘gl_shaders’ is enabled. Default value
+    is 0 (disabled).
 
 cl_weapontint::
     Recolors the skins of weapon pickups, of weapons held by players and of
-    your own view weapon. Only effective if ‘gl_shaders’ is enabled. Default
-    value is 0 (disabled).
+    your own view weapon, in the colors of the skin pack (see ‘cl_itemtint’).
+    View weapons, which the pack doesn't have, use the color of their pickup
+    with a softer gradient that keeps their shading. Only effective if
+    ‘gl_shaders’ is enabled. Default value is 0 (disabled).
 
 cl_ammotint::
-    Recolors the skins of ammo pickups only. Only effective if ‘gl_shaders’ is
-    enabled. Default value is 0 (disabled).
+    Recolors the skins of ammo pickups only, in the colors of the skin pack
+    (see ‘cl_itemtint’). Only effective if ‘gl_shaders’ is enabled. Default
+    value is 0 (disabled).
 
 cl_playertint::
     Recolors the skins of player models: male models are white, female models
     are green and other models are amber. Only effective if ‘gl_shaders’ is
     enabled. Default value is 0 (disabled).
+
+cl_tint_<group>::
+    Replaces the skin pack colors of one group of models with a single color,
+    for the skin tints and the highlights. The value is a color name, such
+    as ‘red’, or #rrggbb; empty keeps the pack colors. Groups: ‘blaster’ (also the disruptor), ‘shotgun’ (shotguns and
+    shells), ‘machinegun’ (machinegun, chaingun and bullets), ‘grenades’
+    (launcher, grenades, mines and grenades in flight), ‘rockets’ (launcher,
+    rockets and rockets in flight), ‘cells’ (hyperblaster, BFG, cells and
+    nukes), ‘railgun’ (railgun and slugs), ‘weapons’ (other weapons),
+    ‘body_armor’, ‘combat_armor’, ‘jacket_armor’, ‘armor_shard’,
+    ‘power_screen’, ‘power_shield’, ‘health’ (all health and mega health),
+    ‘adrenaline’, ‘quad’, ‘invulnerability’ and ‘items’ (keys and all other
+    items). Example: ‘set cl_tint_rockets "#ff4000"’. Default value is empty.
 
 cl_itemhighlight_glow::
     Controls bloom intensity for highlight tint shells. This

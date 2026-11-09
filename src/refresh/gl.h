@@ -737,6 +737,7 @@ typedef struct {
     vec2_t      pad_4;
     vec4_t      vieworg;
     vec4_t      skin_tint;
+    vec4_t      skin_tint_dark;     // rgb, a = gamma (0 tints the lit color)
 } glUniformBlock_t;
 
 typedef struct {

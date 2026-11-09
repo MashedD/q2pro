@@ -516,96 +516,310 @@ static float lerp_entity_alpha(const centity_t *ent)
     return curr ? curr : 1.0f;
 }
 
+/*
+==========================================================================
+
+SKIN TINTS
+
+The default colors reproduce the q2dl-skins-tinted-items-ammo-weapons skin
+pack: each skin there is a gradient map of the original, from a dark color
+for black texels to dark + gain for white ones along luminance^gamma. The
+values were fitted per skin against the pack, so tinting the original skins
+looks like the pack without having to install it. cl_tint_<group> replaces
+a group's colors with one color of the player's choice.
+
+==========================================================================
+*/
+
+typedef enum {
+    TINT_BLASTER,
+    TINT_SHOTGUN,
+    TINT_MACHINEGUN,
+    TINT_GRENADES,
+    TINT_ROCKETS,
+    TINT_CELLS,
+    TINT_RAILGUN,
+    TINT_WEAPONS,
+    TINT_BODY_ARMOR,
+    TINT_COMBAT_ARMOR,
+    TINT_JACKET_ARMOR,
+    TINT_ARMOR_SHARD,
+    TINT_POWER_SCREEN,
+    TINT_POWER_SHIELD,
+    TINT_HEALTH,
+    TINT_ADRENALINE,
+    TINT_QUAD,
+    TINT_INVULNERABILITY,
+    TINT_ITEMS,
+
+    TINT_NUM_GROUPS
+} tint_group_t;
+
+typedef enum {
+    TINT_KIND_ITEM,     // cl_itemtint
+    TINT_KIND_AMMO,     // cl_ammotint or cl_itemtint
+    TINT_KIND_WEAPON,   // cl_weapontint
+} tint_kind_t;
+
+typedef struct {
+    vec3_t  dark;       // color of black texels
+    vec3_t  gain;       // added at full luminance
+    float   gamma;      // luminance exponent; 0 tints the lit color instead
+} skin_tint_t;
+
+typedef struct {
+    const char      *prefix;
+    tint_group_t    group;
+    tint_kind_t     kind;
+    skin_tint_t     tint;
+} skin_tint_def_t;
+
+static const char *const tint_group_names[TINT_NUM_GROUPS] = {
+    "blaster", "shotgun", "machinegun", "grenades", "rockets", "cells",
+    "railgun", "weapons", "body_armor", "combat_armor", "jacket_armor",
+    "armor_shard", "power_screen", "power_shield", "health", "adrenaline",
+    "quad", "invulnerability", "items"
+};
+
+// View weapons aren't in the pack. They use the colors of their pickup
+// models, with the milder curve of the items so that they keep their shading.
+static const skin_tint_def_t skin_tint_defs[] = {
+    { "models/items/ammo/shells/", TINT_SHOTGUN, TINT_KIND_AMMO, { { 0.325f, 0.244f, 0.007f }, { 0.921f, 0.714f, 0.141f }, 0.700f } },
+    { "models/items/ammo/bullets/", TINT_MACHINEGUN, TINT_KIND_AMMO, { { -0.008f, 0.257f, 0.429f }, { 0.327f, 0.543f, 0.785f }, 0.750f } },
+    { "models/items/ammo/grenades/", TINT_GRENADES, TINT_KIND_AMMO, { { -0.002f, 0.358f, 0.089f }, { 0.022f, 0.735f, 0.265f }, 0.600f } },
+    { "models/items/ammo/mines/", TINT_GRENADES, TINT_KIND_AMMO, { { 0.342f, 0.138f, -0.018f }, { 0.727f, 0.616f, 0.383f }, 0.700f } },
+    { "models/items/ammo/rockets/", TINT_ROCKETS, TINT_KIND_AMMO, { { 0.485f, -0.014f, -0.014f }, { 0.715f, 0.170f, 0.146f }, 0.600f } },
+    { "models/items/ammo/cells/", TINT_CELLS, TINT_KIND_AMMO, { { 0.093f, 0.327f, -0.009f }, { 0.438f, 0.683f, 0.259f }, 0.600f } },
+    { "models/items/ammo/nuke/", TINT_CELLS, TINT_KIND_AMMO, { { 0.144f, 0.328f, 0.041f }, { 0.527f, 0.762f, 0.332f }, 0.650f } },
+    { "models/items/ammo/slugs/", TINT_RAILGUN, TINT_KIND_AMMO, { { 0.242f, -0.004f, 0.333f }, { 0.894f, 0.269f, 0.710f }, 0.700f } },
+    { "models/weapons/g_shotg/", TINT_SHOTGUN, TINT_KIND_WEAPON, { { 0.138f, 0.104f, 0.000f }, { 0.844f, 0.630f, 0.000f }, 0.300f } },
+    { "models/weapons/v_shotg/", TINT_SHOTGUN, TINT_KIND_WEAPON, { { 0.138f, 0.104f, 0.000f }, { 0.844f, 0.630f, 0.000f }, 0.700f } },
+    { "models/weapons/g_shotg2/", TINT_SHOTGUN, TINT_KIND_WEAPON, { { 0.136f, 0.103f, 0.000f }, { 0.769f, 0.574f, 0.000f }, 0.250f } },
+    { "models/weapons/v_shotg2/", TINT_SHOTGUN, TINT_KIND_WEAPON, { { 0.136f, 0.103f, 0.000f }, { 0.769f, 0.574f, 0.000f }, 0.700f } },
+    { "models/weapons/g_machn/", TINT_MACHINEGUN, TINT_KIND_WEAPON, { { 0.000f, 0.032f, 0.131f }, { 0.000f, 0.173f, 0.700f }, 0.275f } },
+    { "models/weapons/v_machn/", TINT_MACHINEGUN, TINT_KIND_WEAPON, { { 0.000f, 0.032f, 0.131f }, { 0.000f, 0.173f, 0.700f }, 0.700f } },
+    { "models/weapons/g_chain/", TINT_MACHINEGUN, TINT_KIND_WEAPON, { { 0.000f, 0.032f, 0.132f }, { 0.000f, 0.185f, 0.745f }, 0.300f } },
+    { "models/weapons/v_chain/", TINT_MACHINEGUN, TINT_KIND_WEAPON, { { 0.000f, 0.032f, 0.132f }, { 0.000f, 0.185f, 0.745f }, 0.700f } },
+    { "models/weapons/g_launch/", TINT_GRENADES, TINT_KIND_WEAPON, { { 0.125f, 0.069f, 0.012f }, { 0.890f, 0.424f, 0.027f }, 0.350f } },
+    { "models/weapons/v_launch/", TINT_GRENADES, TINT_KIND_WEAPON, { { 0.125f, 0.069f, 0.012f }, { 0.890f, 0.424f, 0.027f }, 0.700f } },
+    { "models/weapons/v_handgr/", TINT_GRENADES, TINT_KIND_WEAPON, { { -0.002f, 0.358f, 0.089f }, { 0.022f, 0.735f, 0.265f }, 0.700f } },
+    { "models/weapons/g_rocket/", TINT_ROCKETS, TINT_KIND_WEAPON, { { 0.137f, 0.013f, 0.013f }, { 0.826f, 0.077f, 0.077f }, 0.350f } },
+    { "models/weapons/v_rocket/", TINT_ROCKETS, TINT_KIND_WEAPON, { { 0.137f, 0.013f, 0.013f }, { 0.826f, 0.077f, 0.077f }, 0.700f } },
+    { "models/weapons/g_hyperb/", TINT_CELLS, TINT_KIND_WEAPON, { { 0.041f, 0.135f, 0.000f }, { 0.412f, 0.821f, 0.331f }, 0.300f } },
+    { "models/weapons/v_hyperb/", TINT_CELLS, TINT_KIND_WEAPON, { { 0.041f, 0.135f, 0.000f }, { 0.412f, 0.821f, 0.331f }, 0.700f } },
+    { "models/weapons/g_bfg/", TINT_CELLS, TINT_KIND_WEAPON, { { 0.042f, 0.137f, 0.002f }, { 0.407f, 0.813f, 0.326f }, 0.300f } },
+    { "models/weapons/v_bfg/", TINT_CELLS, TINT_KIND_WEAPON, { { 0.042f, 0.137f, 0.002f }, { 0.407f, 0.813f, 0.326f }, 0.700f } },
+    { "models/weapons/g_rail/", TINT_RAILGUN, TINT_KIND_WEAPON, { { 0.101f, 0.000f, 0.133f }, { 0.550f, 0.000f, 0.737f }, 0.300f } },
+    { "models/weapons/v_rail/", TINT_RAILGUN, TINT_KIND_WEAPON, { { 0.101f, 0.000f, 0.133f }, { 0.550f, 0.000f, 0.737f }, 0.700f } },
+    { "models/weapons/g_blast/", TINT_BLASTER, TINT_KIND_WEAPON, { { 0.000f, 0.130f, 0.153f }, { 0.001f, 0.269f, 0.307f }, 0.200f } },
+    { "models/weapons/v_blast/", TINT_BLASTER, TINT_KIND_WEAPON, { { 0.000f, 0.130f, 0.153f }, { 0.001f, 0.269f, 0.307f }, 0.700f } },
+    { "models/weapons/g_disint/", TINT_BLASTER, TINT_KIND_WEAPON, { { -0.003f, 0.111f, 0.129f }, { 0.523f, 0.854f, 0.892f }, 0.800f } },
+    { "models/weapons/v_disint/", TINT_BLASTER, TINT_KIND_WEAPON, { { -0.003f, 0.111f, 0.129f }, { 0.523f, 0.854f, 0.892f }, 0.800f } },
+    { "models/weapons/g_flareg/", TINT_WEAPONS, TINT_KIND_WEAPON, { { 0.134f, 0.070f, 0.006f }, { 0.888f, 0.819f, 0.702f }, 0.850f } },
+    { "models/weapons/v_flareg/", TINT_WEAPONS, TINT_KIND_WEAPON, { { 0.134f, 0.070f, 0.006f }, { 0.888f, 0.819f, 0.702f }, 0.850f } },
+    { "models/objects/grenade/", TINT_GRENADES, TINT_KIND_ITEM, { { 0.295f, 0.307f, 0.298f }, { -0.170f, 0.592f, 0.043f }, 0.275f } },
+    { "models/objects/grenade2/", TINT_GRENADES, TINT_KIND_ITEM, { { 0.296f, 0.305f, 0.298f }, { -0.170f, 0.577f, 0.037f }, 0.275f } },
+    { "models/objects/rocket/", TINT_ROCKETS, TINT_KIND_ITEM, { { 0.302f, 0.298f, 0.298f }, { 0.706f, -0.106f, -0.113f }, 0.275f } },
+    { "models/items/armor/body/", TINT_BODY_ARMOR, TINT_KIND_ITEM, { { 0.330f, 0.028f, 0.027f }, { 0.847f, 0.310f, 0.259f }, 0.650f } },
+    { "models/items/armor/combat/", TINT_COMBAT_ARMOR, TINT_KIND_ITEM, { { 0.327f, 0.241f, -0.000f }, { 0.832f, 0.653f, 0.162f }, 0.650f } },
+    { "models/items/armor/jacket/", TINT_JACKET_ARMOR, TINT_KIND_ITEM, { { 0.145f, 0.211f, 0.024f }, { 0.590f, 0.670f, 0.314f }, 0.700f } },
+    { "models/items/armor/shard/", TINT_ARMOR_SHARD, TINT_KIND_ITEM, { { 0.016f, 0.282f, 0.325f }, { 0.454f, 0.872f, 0.859f }, 0.800f } },
+    { "models/items/armor/screen/", TINT_POWER_SCREEN, TINT_KIND_ITEM, { { -0.000f, 0.097f, 0.330f }, { 0.348f, 0.491f, 0.747f }, 0.700f } },
+    { "models/items/armor/shield/", TINT_POWER_SHIELD, TINT_KIND_ITEM, { { 0.241f, -0.007f, 0.330f }, { 0.733f, 0.291f, 0.671f }, 0.650f } },
+    { "models/items/armor/effect/", TINT_ITEMS, TINT_KIND_ITEM, { { 0.282f, 0.325f, 0.325f }, { 1.045f, 1.176f, 0.710f }, 1.350f } },
+    { "models/items/healing/large/", TINT_HEALTH, TINT_KIND_ITEM, { { 0.350f, 0.052f, 0.208f }, { 0.786f, 0.474f, 0.721f }, 0.750f } },
+    { "models/items/healing/medium/", TINT_HEALTH, TINT_KIND_ITEM, { { 0.367f, 0.046f, 0.212f }, { 0.714f, 0.504f, 0.661f }, 0.750f } },
+    { "models/items/healing/stimpack/", TINT_HEALTH, TINT_KIND_ITEM, { { 0.336f, 0.055f, 0.207f }, { 0.792f, 0.428f, 0.681f }, 0.700f } },
+    { "models/items/mega_h/", TINT_HEALTH, TINT_KIND_ITEM, { { 0.328f, 0.057f, 0.211f }, { 0.850f, 0.402f, 0.666f }, 0.700f } },
+    { "models/items/adrenal/", TINT_ADRENALINE, TINT_KIND_ITEM, { { 0.070f, 0.196f, 0.346f }, { 0.413f, 0.493f, 0.612f }, 0.550f } },
+    { "models/items/quaddama/", TINT_QUAD, TINT_KIND_ITEM, { { 0.200f, 0.238f, 0.328f }, { 0.633f, 0.659f, 0.677f }, 0.650f } },
+    { "models/items/invulner/", TINT_INVULNERABILITY, TINT_KIND_ITEM, { { 0.345f, 0.173f, 0.067f }, { 0.850f, 0.584f, 0.220f }, 0.650f } },
+    { "models/items/band/", TINT_ITEMS, TINT_KIND_ITEM, { { 0.331f, 0.211f, 0.065f }, { 0.814f, 0.676f, 0.336f }, 0.700f } },
+    { "models/items/breather/", TINT_ITEMS, TINT_KIND_ITEM, { { 0.331f, 0.211f, 0.063f }, { 0.794f, 0.681f, 0.405f }, 0.700f } },
+    { "models/items/c_head/", TINT_ITEMS, TINT_KIND_ITEM, { { 0.332f, 0.212f, 0.064f }, { 0.891f, 0.703f, 0.376f }, 0.750f } },
+    { "models/items/enviro/", TINT_ITEMS, TINT_KIND_ITEM, { { 0.329f, 0.211f, 0.065f }, { 0.856f, 0.667f, 0.348f }, 0.700f } },
+    { "models/items/pack/", TINT_ITEMS, TINT_KIND_ITEM, { { 0.194f, 0.024f, 0.388f }, { 0.630f, 0.288f, 0.784f }, 0.700f } },
+    { "models/items/silencer/", TINT_ITEMS, TINT_KIND_ITEM, { { 0.327f, 0.212f, 0.065f }, { 0.864f, 0.663f, 0.392f }, 0.700f } },
+    { "models/items/keys/data_cd/", TINT_ITEMS, TINT_KIND_ITEM, { { 0.330f, 0.212f, 0.064f }, { 0.735f, 0.751f, 0.506f }, 0.800f } },
+    { "models/items/keys/key/", TINT_ITEMS, TINT_KIND_ITEM, { { 0.341f, 0.210f, 0.054f }, { 0.695f, 0.695f, 0.533f }, 0.700f } },
+    { "models/items/keys/pass/", TINT_ITEMS, TINT_KIND_ITEM, { { 0.327f, 0.209f, 0.067f }, { 0.816f, 0.619f, 0.280f }, 0.650f } },
+    { "models/items/keys/power/", TINT_ITEMS, TINT_KIND_ITEM, { { 0.332f, 0.211f, 0.061f }, { 0.851f, 0.662f, 0.394f }, 0.700f } },
+    { "models/items/keys/pyramid/", TINT_ITEMS, TINT_KIND_ITEM, { { 0.331f, 0.211f, 0.063f }, { 0.781f, 0.678f, 0.428f }, 0.700f } },
+    { "models/items/keys/red_key/", TINT_ITEMS, TINT_KIND_ITEM, { { 0.327f, 0.207f, 0.059f }, { 0.868f, 0.525f, 0.252f }, 0.600f } },
+    { "models/items/keys/spinner/", TINT_ITEMS, TINT_KIND_ITEM, { { 0.338f, 0.208f, 0.059f }, { 0.759f, 0.696f, 0.438f }, 0.700f } },
+    { "models/items/keys/target/", TINT_ITEMS, TINT_KIND_ITEM, { { 0.330f, 0.211f, 0.064f }, { 0.793f, 0.673f, 0.442f }, 0.700f } },
+};
+
+// Models the pack doesn't cover: other weapons, items and ammo, such as the
+// mission packs' ones, get the pack's plain orange item look.
+static const skin_tint_def_t skin_tint_weapon_default = {
+    "models/weapons/", TINT_WEAPONS, TINT_KIND_WEAPON,
+    { { 0.325f, 0.212f, 0.067f }, { 0.863f, 0.663f, 0.392f }, 0.700f }
+};
+
+static const skin_tint_def_t skin_tint_item_default = {
+    "models/items/", TINT_ITEMS, TINT_KIND_ITEM,
+    { { 0.325f, 0.212f, 0.067f }, { 0.863f, 0.663f, 0.392f }, 0.700f }
+};
+
+static const skin_tint_def_t skin_tint_ammo_default = {
+    "models/items/ammo/", TINT_ITEMS, TINT_KIND_AMMO,
+    { { 0.325f, 0.212f, 0.067f }, { 0.863f, 0.663f, 0.392f }, 0.700f }
+};
+
+static cvar_t   *cl_tint_cvars[TINT_NUM_GROUPS];
+static vec3_t   cl_tint_custom[TINT_NUM_GROUPS];
+static bool     cl_tint_has_custom[TINT_NUM_GROUPS];
+
+static void cl_tint_changed(cvar_t *self)
+{
+    for (int i = 0; i < TINT_NUM_GROUPS; i++) {
+        color_t color;
+
+        if (cl_tint_cvars[i] != self)
+            continue;
+
+        cl_tint_has_custom[i] = false;
+        if (!*self->string)
+            return;
+        if (!SCR_ParseColor(self->string, &color)) {
+            Com_WPrintf("Invalid value '%s' for '%s'\n", self->string, self->name);
+            return;
+        }
+        VectorSet(cl_tint_custom[i], color.u8[0] / 255.0f,
+                  color.u8[1] / 255.0f, color.u8[2] / 255.0f);
+        cl_tint_has_custom[i] = true;
+        return;
+    }
+}
+
+void CL_InitSkinTints(void)
+{
+    for (int i = 0; i < TINT_NUM_GROUPS; i++) {
+        char name[MAX_QPATH];
+
+        Q_concat(name, sizeof(name), "cl_tint_", tint_group_names[i]);
+        cl_tint_cvars[i] = Cvar_Get(name, "", CVAR_ARCHIVE);
+        cl_tint_cvars[i]->changed = cl_tint_changed;
+        cl_tint_changed(cl_tint_cvars[i]);
+    }
+}
+
 static bool model_starts_with(const char *model, const char *prefix)
 {
     return !Q_strncasecmp(model, prefix, strlen(prefix));
 }
 
-static bool CL_GetWeaponModelTint(const char *model, vec3_t tint)
+static const skin_tint_def_t *CL_FindSkinTint(const char *model)
 {
-    if (!cl_weapontint->integer)
-        return false;
+    for (int i = 0; i < q_countof(skin_tint_defs); i++)
+        if (model_starts_with(model, skin_tint_defs[i].prefix))
+            return &skin_tint_defs[i];
 
-    if (model_starts_with(model, "models/weapons/g_shotg/") ||
-        model_starts_with(model, "models/weapons/g_shotg2/") ||
-        model_starts_with(model, "models/weapons/v_shotg/") ||
-        model_starts_with(model, "models/weapons/v_shotg2/"))
-        VectorSet(tint, 1.0f, 0.75f, 0.0f);
-    else if (model_starts_with(model, "models/weapons/g_machn/") ||
-             model_starts_with(model, "models/weapons/g_chain/") ||
-             model_starts_with(model, "models/weapons/v_machn/") ||
-             model_starts_with(model, "models/weapons/v_chain/"))
-        VectorSet(tint, 0.0f, 0.25f, 1.0f);
-    else if (model_starts_with(model, "models/weapons/g_launch/") ||
-             model_starts_with(model, "models/weapons/v_launch/") ||
-             model_starts_with(model, "models/weapons/v_handgr/") ||
-             model_starts_with(model, "models/weapons/g_flareg/") ||
-             model_starts_with(model, "models/weapons/v_flareg/"))
-        VectorSet(tint, 1.0f, 0.55f, 0.1f);
-    else if (model_starts_with(model, "models/weapons/g_rocket/") ||
-             model_starts_with(model, "models/weapons/v_rocket/"))
-        VectorSet(tint, 1.0f, 0.1f, 0.1f);
-    else if (model_starts_with(model, "models/weapons/g_hyperb/") ||
-             model_starts_with(model, "models/weapons/v_hyperb/"))
-        VectorSet(tint, 0.3f, 1.0f, 0.0f);
-    else if (model_starts_with(model, "models/weapons/g_rail/") ||
-             model_starts_with(model, "models/weapons/v_rail/"))
-        VectorSet(tint, 0.75f, 0.0f, 1.0f);
-    else if (model_starts_with(model, "models/weapons/g_bfg/") ||
-             model_starts_with(model, "models/weapons/v_bfg/"))
-        VectorSet(tint, 0.3f, 1.0f, 0.0f);
-    else if (model_starts_with(model, "models/weapons/g_blast/") ||
-             model_starts_with(model, "models/weapons/v_blast/") ||
-             model_starts_with(model, "models/weapons/g_disint/") ||
-             model_starts_with(model, "models/weapons/v_disint/"))
-        VectorSet(tint, 0.0f, 0.85f, 1.0f);
-    else if (model_starts_with(model, "models/weapons/g_") ||
-             model_starts_with(model, "models/weapons/v_"))
-        VectorSet(tint, 1.0f, 0.65f, 0.2f);
-    else
-        return false;
+    if (model_starts_with(model, "models/items/ammo/"))
+        return &skin_tint_ammo_default;
+    if (model_starts_with(model, "models/items/"))
+        return &skin_tint_item_default;
+    if (model_starts_with(model, "models/weapons/g_") ||
+        model_starts_with(model, "models/weapons/v_"))
+        return &skin_tint_weapon_default;
 
-    return true;
+    return NULL;
 }
 
-static bool CL_GetWeaponIndexTint(int weapon, vec3_t tint)
+// Weapon models carried by players, in the order of the standard vwep list.
+static const skin_tint_def_t *CL_FindWeaponIndexTint(int weapon)
 {
-    if (!cl_weapontint->integer)
-        return false;
+    static const char *const models[] = {
+        NULL,
+        "models/weapons/g_blast/",
+        "models/weapons/g_shotg/",
+        "models/weapons/g_shotg2/",
+        "models/weapons/g_machn/",
+        "models/weapons/g_chain/",
+        "models/weapons/v_handgr/",
+        "models/weapons/g_launch/",
+        "models/weapons/g_rocket/",
+        "models/weapons/g_hyperb/",
+        "models/weapons/g_rail/",
+        "models/weapons/g_bfg/",
+    };
 
-    switch (weapon) {
-    case 2: // shotgun
-    case 3: // super shotgun
-        VectorSet(tint, 1.0f, 0.75f, 0.0f);
-        break;
-    case 4: // machinegun
-    case 5: // chaingun
-        VectorSet(tint, 0.0f, 0.25f, 1.0f);
-        break;
-    case 7: // grenade launcher
-        VectorSet(tint, 1.0f, 0.55f, 0.1f);
-        break;
-    case 8: // rocket launcher
-        VectorSet(tint, 1.0f, 0.1f, 0.1f);
-        break;
-    case 9: // hyperblaster
-    case 11: // BFG
-        VectorSet(tint, 0.3f, 1.0f, 0.0f);
-        break;
-    case 10: // railgun
-        VectorSet(tint, 0.75f, 0.0f, 1.0f);
-        break;
+    if (weapon > 0 && weapon < q_countof(models))
+        return CL_FindSkinTint(models[weapon]);
+
+    return &skin_tint_weapon_default;
+}
+
+static bool CL_SkinTintEnabled(const skin_tint_def_t *def)
+{
+    switch (def->kind) {
+    case TINT_KIND_AMMO:
+        return cl_ammotint->integer || cl_itemtint->integer;
+    case TINT_KIND_WEAPON:
+        return cl_weapontint->integer;
     default:
-        VectorSet(tint, 1.0f, 0.65f, 0.2f);
-        break;
+        return cl_itemtint->integer;
     }
+}
 
+// A custom color keeps the pack's typical contrast: about a third of the
+// color for black texels, rising to the full color on bright ones.
+static void CL_ResolveSkinTint(const skin_tint_def_t *def, skin_tint_t *tint)
+{
+    if (cl_tint_has_custom[def->group]) {
+        VectorScale(cl_tint_custom[def->group], 0.33f, tint->dark);
+        VectorScale(cl_tint_custom[def->group], 0.85f, tint->gain);
+        tint->gamma = 0.7f;
+    } else {
+        *tint = def->tint;
+    }
+}
+
+// Highlight shells use the color of a typical texel of the tinted skin,
+// brightened so that its strongest channel is 1.
+static void CL_SkinTintHighlightColor(const skin_tint_def_t *def, vec3_t color)
+{
+    skin_tint_t tint;
+    float m;
+
+    CL_ResolveSkinTint(def, &tint);
+    VectorMA(tint.dark, powf(0.3f, tint.gamma), tint.gain, color);
+    for (int i = 0; i < 3; i++)
+        color[i] = max(color[i], 0.0f);
+    m = max(color[0], max(color[1], color[2]));
+    if (m > 0.0f)
+        VectorScale(color, 1.0f / m, color);
+    else
+        VectorSet(color, 1.0f, 1.0f, 1.0f);
+}
+
+static bool CL_GetWeaponModelTint(const char *model, skin_tint_t *tint)
+{
+    const skin_tint_def_t *def = CL_FindSkinTint(model);
+
+    if (!def || def->kind != TINT_KIND_WEAPON || !CL_SkinTintEnabled(def))
+        return false;
+
+    CL_ResolveSkinTint(def, tint);
     return true;
 }
 
-static bool CL_GetModelSkinTint(const centity_state_t *state, vec3_t tint)
+static bool CL_GetWeaponIndexTint(int weapon, skin_tint_t *tint)
 {
-    const char *model;
+    const skin_tint_def_t *def;
+
+    if (!cl_weapontint->integer)
+        return false;
+
+    def = CL_FindWeaponIndexTint(weapon);
+    CL_ResolveSkinTint(def, tint);
+    return true;
+}
+
+static bool CL_GetModelSkinTint(const centity_state_t *state, skin_tint_t *tint)
+{
+    const skin_tint_def_t *def;
 
     if (state->modelindex == MODELINDEX_PLAYER && cl_playertint->integer) {
         int clientnum = state->skinnum & 0xff;
@@ -615,123 +829,42 @@ static bool CL_GetModelSkinTint(const centity_state_t *state, vec3_t tint)
             return false;
         ci = &cl.clientinfo[clientnum];
 
-        // Player tints get an extra 20% boost over item and weapon tints.
+        // Players aren't in the skin pack: they keep a tint of the lit
+        // color. Player tints get an extra 20% boost over the old item tints.
+        VectorClear(tint->dark);
+        tint->gamma = 0.0f;
         if (!Q_stricmp(ci->model_name, "male"))
-            VectorSet(tint, 2.0f, 2.0f, 2.0f);
+            VectorSet(tint->gain, 2.0f, 2.0f, 2.0f);
         else if (!Q_stricmp(ci->model_name, "female"))
-            VectorSet(tint, 0.08f, 1.2f, 0.05f);
+            VectorSet(tint->gain, 0.08f, 1.2f, 0.05f);
         else
-            VectorSet(tint, 1.2f, 0.78f, 0.24f);
+            VectorSet(tint->gain, 1.2f, 0.78f, 0.24f);
         return true;
     }
 
     if (!state->modelindex)
         return false;
 
-    model = cl.configstrings[cl.csr.models + state->modelindex];
+    def = CL_FindSkinTint(cl.configstrings[cl.csr.models + state->modelindex]);
+    if (!def || !CL_SkinTintEnabled(def))
+        return false;
 
-    // cl_itemtint covers all pickups; cl_ammotint can tint ammo on its own.
-    if ((cl_ammotint->integer || cl_itemtint->integer) &&
-        model_starts_with(model, "models/items/ammo/")) {
-        if (model_starts_with(model, "models/items/ammo/shells/"))
-            VectorSet(tint, 1.0f, 0.75f, 0.0f);
-        else if (model_starts_with(model, "models/items/ammo/bullets/"))
-            VectorSet(tint, 0.0f, 0.244f, 1.0f);
-        else if (model_starts_with(model, "models/items/ammo/cells/"))
-            VectorSet(tint, 0.3f, 1.0f, 0.0f);
-        else if (model_starts_with(model, "models/items/ammo/rockets/"))
-            VectorSet(tint, 1.0f, 0.085f, 0.085f);
-        else if (model_starts_with(model, "models/items/ammo/slugs/"))
-            VectorSet(tint, 0.748f, 0.0f, 1.0f);
-        else if (model_starts_with(model, "models/items/ammo/grenades/") ||
-                 model_starts_with(model, "models/items/ammo/mines/"))
-            VectorSet(tint, 1.0f, 0.446f, 0.0f);
-        else if (model_starts_with(model, "models/items/ammo/nuke/"))
-            VectorSet(tint, 0.45f, 1.0f, 0.15f);
-        else
-            VectorSet(tint, 1.0f, 0.55f, 0.1f);
-        return true;
-    }
+    CL_ResolveSkinTint(def, tint);
+    return true;
+}
 
-    if (CL_GetWeaponModelTint(model, tint))
-        return true;
+static void CL_SetEntitySkinTint(entity_t *ent, const skin_tint_t *tint)
+{
+    VectorCopy(tint->gain, ent->skin_tint);
+    VectorCopy(tint->dark, ent->skin_tint_dark);
+    ent->skin_tint_gamma = tint->gamma;
+}
 
-    if (cl_itemtint->integer && model_starts_with(model, "models/items/armor/")) {
-        if (model_starts_with(model, "models/items/armor/shard/"))
-            VectorSet(tint, 0.0f, 0.86f, 1.0f);
-        else if (model_starts_with(model, "models/items/armor/body/"))
-            VectorSet(tint, 1.0f, 0.10f, 0.10f);
-        else if (model_starts_with(model, "models/items/armor/combat/"))
-            VectorSet(tint, 1.0f, 0.74f, 0.0f);
-        else if (model_starts_with(model, "models/items/armor/jacket/"))
-            VectorSet(tint, 0.45f, 0.65f, 0.08f);
-        else if (model_starts_with(model, "models/items/armor/screen/"))
-            VectorSet(tint, 0.0f, 0.31f, 1.0f);
-        else if (model_starts_with(model, "models/items/armor/shield/"))
-            VectorSet(tint, 0.743f, 0.0f, 1.0f);
-        else if (model_starts_with(model, "models/items/armor/effect/"))
-            VectorSet(tint, 0.861f, 1.0f, 1.0f);
-        else
-            VectorSet(tint, 1.0f, 0.55f, 0.1f);
-        return true;
-    }
-
-    if (cl_itemtint->integer && model_starts_with(model, "models/items/mega_h/")) {
-        VectorSet(tint, 1.0f, 0.18f, 0.65f);
-        return true;
-    }
-
-    if (cl_itemtint->integer && model_starts_with(model, "models/items/adrenal/")) {
-        VectorSet(tint, 1.0f, 0.68f, 0.3f);
-        return true;
-    }
-
-    if (cl_itemtint->integer && model_starts_with(model, "models/items/healing/large/")) {
-        VectorSet(tint, 1.0f, 0.18f, 0.65f);
-        return true;
-    }
-
-    if (cl_itemtint->integer && model_starts_with(model, "models/items/healing/medium/")) {
-        VectorSet(tint, 1.0f, 0.18f, 0.65f);
-        return true;
-    }
-
-    if (cl_itemtint->integer && model_starts_with(model, "models/items/healing/stimpack/")) {
-        VectorSet(tint, 1.0f, 0.18f, 0.65f);
-        return true;
-    }
-
-    if (cl_itemtint->integer && model_starts_with(model, "models/items/quaddama/")) {
-        VectorSet(tint, 0.612f, 0.729f, 1.0f);
-        return true;
-    }
-
-    if (cl_itemtint->integer && model_starts_with(model, "models/items/invulner/")) {
-        VectorSet(tint, 1.0f, 0.563f, 0.222f);
-        return true;
-    }
-
-    if (cl_itemtint->integer && model_starts_with(model, "models/objects/rocket/")) {
-        VectorSet(tint, 8.0f, 8.0f, 8.0f);
-        return true;
-    }
-
-    if (cl_itemtint->integer &&
-        (model_starts_with(model, "models/objects/grenade/") ||
-         model_starts_with(model, "models/objects/grenade2/"))) {
-        VectorSet(tint, 8.0f, 8.0f, 8.0f);
-        return true;
-    }
-
-    // Cover pickups not present in the skin pack too (keys, bandolier,
-    // breather, silencer, Rogue items, and mod-specific models).
-    if (cl_itemtint->integer && model_starts_with(model, "models/items/") &&
-        !model_starts_with(model, "models/items/ammo/")) {
-        VectorSet(tint, 1.0f, 0.65f, 0.2f);
-        return true;
-    }
-
-    return false;
+static void CL_ClearEntitySkinTint(entity_t *ent)
+{
+    VectorSet(ent->skin_tint, 1.0f, 1.0f, 1.0f);
+    VectorClear(ent->skin_tint_dark);
+    ent->skin_tint_gamma = 0.0f;
 }
 
 static float CL_ItemHighlightBloom(void)
@@ -794,7 +927,7 @@ static uint64_t CL_GetPlayerHighlightShell(uint64_t player_shell, uint64_t power
     return (cl.time / 500) & 1 ? powerup_shell : player_shell;
 }
 
-static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *highlight)
+static bool CL_GetItemHighlightShell(const centity_state_t *state, item_highlight_t *highlight)
 {
     const char *model;
     bool item_highlight = cl_itemhighlight->integer;
@@ -948,7 +1081,7 @@ static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *
     return false;
 }
 
-static bool CL_GetWeaponHighlight(int weapon, item_highlight_t *highlight)
+static bool CL_GetWeaponHighlightShell(int weapon, item_highlight_t *highlight)
 {
     switch (weapon) {
     case 2: // shotgun
@@ -984,6 +1117,30 @@ static bool CL_GetWeaponHighlight(int weapon, item_highlight_t *highlight)
         VectorSet(highlight->color, 1.0f, 0.65f, 0.2f);
         return true;
     }
+}
+
+// Highlights pick their shell above and take their color from the skin tint
+// of the same model, so that tints and highlights agree.
+static bool CL_GetItemHighlight(const centity_state_t *state, item_highlight_t *highlight)
+{
+    const skin_tint_def_t *def;
+
+    if (!CL_GetItemHighlightShell(state, highlight))
+        return false;
+
+    def = CL_FindSkinTint(cl.configstrings[cl.csr.models + state->modelindex]);
+    if (def)
+        CL_SkinTintHighlightColor(def, highlight->color);
+    return true;
+}
+
+static bool CL_GetWeaponHighlight(int weapon, item_highlight_t *highlight)
+{
+    if (!CL_GetWeaponHighlightShell(weapon, highlight))
+        return false;
+
+    CL_SkinTintHighlightColor(CL_FindWeaponIndexTint(weapon), highlight->color);
+    return true;
 }
 
 #define RT_WATER_WAKE_SAMPLE_MSEC 100
@@ -1108,7 +1265,7 @@ static void CL_AddPacketEntities(void)
     uint64_t                custom_flags;
     item_highlight_t        item_highlight;
     item_highlight_t        player_highlight;
-    vec3_t                  skin_tint;
+    skin_tint_t             skin_tint = { 0 };
     bool                    has_item_highlight;
     bool                    has_player_highlight;
     bool                    has_skin_tint;
@@ -1136,8 +1293,8 @@ static void CL_AddPacketEntities(void)
         renderfx = s1->renderfx;
         has_item_highlight = CL_GetItemHighlight(s1, &item_highlight);
         has_player_highlight = CL_GetPlayerHighlight(s1, &player_highlight);
-        has_skin_tint = CL_GetModelSkinTint(s1, skin_tint);
-        VectorSet(ent.skin_tint, 1.0f, 1.0f, 1.0f);
+        has_skin_tint = CL_GetModelSkinTint(s1, &skin_tint);
+        CL_ClearEntitySkinTint(&ent);
         player_powerup_highlight_shell = CL_GetPlayerPowerupHighlightShell(s1->effects);
 
         // set frame
@@ -1474,7 +1631,7 @@ static void CL_AddPacketEntities(void)
         }
 
         if (has_skin_tint) {
-            VectorCopy(skin_tint, ent.skin_tint);
+            CL_SetEntitySkinTint(&ent, &skin_tint);
             ent.flags |= RF_SKINTINT;
             custom_flags |= RF_SKINTINT;
         }
@@ -1516,6 +1673,11 @@ static void CL_AddPacketEntities(void)
                 }
             }
             ent.flags = renderfx | RF_TRANSLUCENT;
+            if (has_item_highlight && !has_player_highlight) {
+                ent.flags |= RF_SKINTINT;
+                CL_ClearEntitySkinTint(&ent);
+                VectorCopy(item_highlight.color, ent.skin_tint);
+            }
             if (has_item_highlight || has_player_highlight) {
                 float bloom = CL_ItemHighlightBloom();
                 if (bloom)
@@ -1535,13 +1697,13 @@ static void CL_AddPacketEntities(void)
         ent.skin = 0;       // never use a custom skin on others
         ent.skinnum = 0;
         ent.flags = custom_flags & ~RF_SKINTINT;
-        VectorSet(ent.skin_tint, 1.0f, 1.0f, 1.0f);
+        CL_ClearEntitySkinTint(&ent);
         ent.alpha = custom_alpha;
 
         // duplicate for linked models
         if (s1->modelindex2) {
             item_highlight_t weapon_highlight;
-            vec3_t weapon_tint;
+            skin_tint_t weapon_tint = { 0 };
             bool has_weapon_highlight = false;
             bool has_weapon_tint = false;
 
@@ -1555,7 +1717,7 @@ static void CL_AddPacketEntities(void)
                     CL_GetWeaponHighlight(i, &weapon_highlight) : false;
                 if (i < 0 || i > cl.numWeaponModels - 1)
                     i = 0;
-                has_weapon_tint = CL_GetWeaponIndexTint(i, weapon_tint);
+                has_weapon_tint = CL_GetWeaponIndexTint(i, &weapon_tint);
                 ent.model = ci->weaponmodel[i];
                 if (!ent.model) {
                     if (i != 0)
@@ -1567,11 +1729,11 @@ static void CL_AddPacketEntities(void)
                 ent.model = cl.model_draw[s1->modelindex2];
                 has_weapon_tint = CL_GetWeaponModelTint(
                     cl.configstrings[cl.csr.models + s1->modelindex2],
-                    weapon_tint);
+                    &weapon_tint);
             }
 
             if (has_weapon_tint) {
-                VectorCopy(weapon_tint, ent.skin_tint);
+                CL_SetEntitySkinTint(&ent, &weapon_tint);
                 ent.flags |= RF_SKINTINT;
             }
 
@@ -1585,7 +1747,9 @@ static void CL_AddPacketEntities(void)
 
             if (has_weapon_highlight) {
                 float bloom = CL_ItemHighlightBloom();
-                ent.flags = weapon_highlight.shell | RF_TRANSLUCENT;
+                ent.flags = weapon_highlight.shell | RF_TRANSLUCENT | RF_SKINTINT;
+                CL_ClearEntitySkinTint(&ent);
+                VectorCopy(weapon_highlight.color, ent.skin_tint);
                 if (bloom)
                     ent.flags |= RF_BLOOM_ONLY;
                 else
@@ -1792,7 +1956,7 @@ static void CL_AddViewWeapon(void)
     const centity_t *ent;
     const player_state_t *ps, *ops;
     entity_t    gun;        // view model
-    vec3_t      weapon_tint;
+    skin_tint_t weapon_tint = { 0 };
     bool        has_weapon_tint = false;
     int         i, flags;
 
@@ -1831,7 +1995,7 @@ static void CL_AddViewWeapon(void)
     if (!gun_model) {
         int modelindex = ps->gunindex & GUNINDEX_MASK;
         has_weapon_tint = CL_GetWeaponModelTint(
-            cl.configstrings[cl.csr.models + modelindex], weapon_tint);
+            cl.configstrings[cl.csr.models + modelindex], &weapon_tint);
     }
 
     // set up gun position
@@ -1863,7 +2027,7 @@ static void CL_AddViewWeapon(void)
 
     gun.flags = RF_MINLIGHT | RF_DEPTHHACK | RF_WEAPONMODEL;
     if (has_weapon_tint) {
-        VectorCopy(weapon_tint, gun.skin_tint);
+        CL_SetEntitySkinTint(&gun, &weapon_tint);
         gun.flags |= RF_SKINTINT;
     }
     gun.alpha = Cvar_ClampValue(cl_gunalpha, 0.1f, 1.0f);

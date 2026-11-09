@@ -98,7 +98,13 @@ typedef struct entity_s {
 
     float   alpha;                  // ignore if RF_TRANSLUCENT isn't set
     color_t rgba;
-    vec3_t  skin_tint;     // RGB multiplier for the alias skin when RF_SKINTINT is set
+    // RF_SKINTINT: with skin_tint_gamma > 0, each skin texel becomes
+    // skin_tint_dark + skin_tint * luminance^skin_tint_gamma before lighting;
+    // with 0, skin_tint multiplies the luminance of the lit color. On a shell
+    // entity, skin_tint is the shell color instead.
+    vec3_t  skin_tint;
+    vec3_t  skin_tint_dark;
+    float   skin_tint_gamma;
 
     uint64_t    flags;
 
