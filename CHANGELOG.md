@@ -14,6 +14,9 @@ All notable changes to this fork are documented here. The format follows
 
 ### Fixed
 
+- Switching renderers no longer prints "Cmd_AddMacro: gl_viewcluster already
+  defined" and "gl_viewleaf already defined", and those macros now answer
+  from the renderer that is running.
 - Vulkan API misuse found with the Khronos validation layer: model shadows
   read height fog from the wrong place, a present semaphore could be reused
   while the presentation engine still waited on it, which can cause stutter

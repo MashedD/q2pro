@@ -1456,12 +1456,12 @@ static void vk_model_list_f(void)
 }
 
 #if USE_DEBUG
-static size_t vk_viewcluster_m(char *buffer, size_t size)
+size_t VKR_ViewCluster_m(char *buffer, size_t size)
 {
     return Q_snprintf(buffer, size, "%d", vk.world.viewcluster);
 }
 
-static size_t vk_viewleaf_m(char *buffer, size_t size)
+size_t VKR_ViewLeaf_m(char *buffer, size_t size)
 {
     const bsp_t *bsp = vk.world.cache;
 
@@ -12042,8 +12042,6 @@ bool VKR_Init(bool total)
 #if USE_DEBUG
     R_ClearDebugLines();
     Cmd_AddCommand("cleardebuglines", R_ClearDebugLines);
-    Cmd_AddMacro("gl_viewcluster", vk_viewcluster_m);
-    Cmd_AddMacro("gl_viewleaf", vk_viewleaf_m);
 #endif
 
     Com_Printf("------------------------\n");
