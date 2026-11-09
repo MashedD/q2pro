@@ -339,7 +339,7 @@ static client_t *dummy_find_slot(void)
 }
 
 #define MVD_USERINFO1 \
-    "\\name\\[MVDSPEC]\\skin\\male/grunt\\spectator\\1"
+    "\\name\\[MVDSPEC]\\skin\\male/grunt\\rate\\25000\\spectator\\1"
 
 #define MVD_USERINFO2 \
     "\\mvdspec\\" STRINGIFY(PROTOCOL_VERSION_MVD_CURRENT) "\\ip\\loopback"
@@ -406,6 +406,8 @@ static int dummy_create(void)
             s = "Connection refused";
         }
         Com_EPrintf("Dummy MVD client rejected by game: %s\n", s);
+        // release the slot, it was never linked into the client list
+        newcl->state = cs_free;
         mvd.dummy = NULL;
         return -1;
     }
