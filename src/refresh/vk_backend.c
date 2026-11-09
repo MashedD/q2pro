@@ -818,6 +818,7 @@ typedef struct {
     VkPipeline particle_add_pipeline;
     VkPipeline alias_pipeline;
     VkPipeline alias_bloom_pipeline;
+    VkPipeline alias_shell_bloom_pipeline;  // back faces culled, for shells
     VkPipeline alias_alpha_pipeline;
     VkPipeline alias_depth_pipeline;
     VkPipeline alias_blend_pipeline;
@@ -5978,6 +5979,11 @@ static void vk_destroy_swapchain(void)
         vk.alias_bloom_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.alias_shell_bloom_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_shell_bloom_pipeline, NULL);
+        vk.alias_shell_bloom_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.alias_alpha_pipeline) {
         vk.DestroyPipeline(vk.device, vk.alias_alpha_pipeline, NULL);
         vk.alias_alpha_pipeline = VK_NULL_HANDLE;
@@ -7177,6 +7183,17 @@ static bool vk_create_ssr_pipeline(void)
     return result == VK_SUCCESS;
 }
 
+// Blur sigma in bloom texels. OpenGL applies gl_bloom_sigma, scaled to the
+// view height, in its quarter-resolution target; scale it so the glow has
+// the same size on screen whatever vk_bloom_downsample is.
+static float vk_bloom_blur_sigma(void)
+{
+    float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
+
+    sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
+    return sigma * 4.0f / (float)vk_bloom_downsample_value();
+}
+
 static uint32_t vk_bloom_downsample_value(void)
 {
     int value = vk_bloom_downsample ? Cvar_ClampInteger(vk_bloom_downsample, 1, 16) : 4;
@@ -7907,7 +7924,8 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
             (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT) : 0,
     } };
-    if (pipeline == &vk.alias_bloom_pipeline) {
+    if (pipeline == &vk.alias_bloom_pipeline ||
+        pipeline == &vk.alias_shell_bloom_pipeline) {
         color_blend_attachment[1] = color_blend_attachment[0];
         color_blend_attachment[0].colorWriteMask = 0;
     } else if (pipeline == &vk.alias_pipeline ||
@@ -8277,6 +8295,10 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_bloom_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
+        // The projection flips the models' winding, so their front faces
+        // are the ones Vulkan calls back faces (see alias_cel_pipeline).
+        !vk_create_alias_pipeline(&vk.alias_shell_bloom_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_FRONT_BIT, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_shadow_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_TRUE, -1.0f, -2.0f, &shadow_depth_stencil) ||
@@ -9167,13 +9189,24 @@ static void vk_view_matrix(mat4_t matrix, const refdef_t *fd)
     matrix[15] = 1.0f;
 }
 
+// Left-handed view weapons are mirrored, which reverses their winding.
+static bool vk_entity_mirrored(const entity_t *ent)
+{
+    extern cvar_t *cl_gun;
+    extern cvar_t *info_hand;
+
+    if (!(ent->flags & RF_WEAPONMODEL))
+        return false;
+
+    return (info_hand && cl_gun && info_hand->integer == 1 && cl_gun->integer == 1) ||
+           (cl_gun && cl_gun->integer == 3);
+}
+
 static void vk_entity_projection_matrix(mat4_t matrix, const refdef_t *fd,
                                         const entity_t *ent)
 {
     extern cvar_t *cl_adjustfov;
-    extern cvar_t *cl_gun;
     extern cvar_t *cl_gunfov;
-    extern cvar_t *info_hand;
     extern float V_CalcFov(float fov_x, float width, float height);
 
     float fov_x = fd->fov_x;
@@ -9191,8 +9224,7 @@ static void vk_entity_projection_matrix(mat4_t matrix, const refdef_t *fd,
             }
         }
 
-        if ((info_hand && cl_gun && info_hand->integer == 1 && cl_gun->integer == 1) ||
-            (cl_gun && cl_gun->integer == 3))
+        if (vk_entity_mirrored(ent))
             reflect_x = -1.0f;
     }
 
@@ -12505,7 +12537,13 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         if (!texture)
             continue;
 
-        if (vk.drawing_bloom)
+        // Shells glow from their front faces only, as in OpenGL, which culls
+        // back faces. Without culling, their front and back faces were both
+        // blended around the model, doubling the glow into a bright ring.
+        if (vk.drawing_bloom && (ent->flags & RF_SHELL_MASK) &&
+            !vk_entity_mirrored(ent) && vk.alias_shell_bloom_pipeline)
+            pipeline = vk.alias_shell_bloom_pipeline;
+        else if (vk.drawing_bloom)
             pipeline = (bloom_only || bloom_shell) ? vk.alias_bloom_pipeline : VK_NULL_HANDLE;
         else if (translucent)
             pipeline = vk.alias_blend_pipeline;
@@ -19128,26 +19166,19 @@ static void vk_finish_postprocess_scene(void)
             0.0f,
             1.0f,
         };
-        float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
-        sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
-        // The fixed 9-tap kernel is normalized around sigma ~= 2 texels.
-        // OpenGL applies its requested sigma in the quarter-resolution
-        // target. Scale the offsets so the screen-space radius stays equal
-        // when vk_bloom_downsample changes.
-        sigma = max(sigma, 1.0f) * 2.0f /
-            (float)vk_bloom_downsample_value();
+        float sigma = vk_bloom_blur_sigma();
         int iterations = (vk_showbloom && vk_showbloom->integer >= 2) ? 0 :
             (gl_bloom ? Cvar_ClampInteger(gl_bloom, 1, 8) : 1);
         vec4_t blur_x = {
-            sigma / (float)bloom_w,
+            1.0f / (float)bloom_w,
             0.0f,
-            0.0f,
+            sigma,
             1.0f,
         };
         vec4_t blur_y = {
             0.0f,
-            sigma / (float)bloom_h,
-            0.0f,
+            1.0f / (float)bloom_h,
+            sigma,
             1.0f,
         };
 
@@ -19516,22 +19547,19 @@ void VKR_EndFrame(void)
             0.0f,
             1.0f,
         };
-        float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
-        sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
-        sigma = max(sigma, 1.0f) * 2.0f /
-            (float)vk_bloom_downsample_value();
+        float sigma = vk_bloom_blur_sigma();
         int iterations = (vk_showbloom && vk_showbloom->integer >= 2) ? 0 :
             (gl_bloom ? Cvar_ClampInteger(gl_bloom, 1, 8) : 1);
         vec4_t blur_x = {
-            sigma / (float)bloom_w,
+            1.0f / (float)bloom_w,
             0.0f,
-            0.0f,
+            sigma,
             1.0f,
         };
         vec4_t blur_y = {
             0.0f,
-            sigma / (float)bloom_h,
-            0.0f,
+            1.0f / (float)bloom_h,
+            sigma,
             1.0f,
         };
 
