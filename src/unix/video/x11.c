@@ -59,6 +59,7 @@ static struct {
     XErrorHandler   old_error_handler;
     XIOErrorHandler old_io_error_handler;
     bool        error_handlers_installed;
+    bool        hidden;     // _NET_WM_STATE_HIDDEN is set
 
     struct {
         Atom    delete;
@@ -583,6 +584,23 @@ static void message_event(XClientMessageEvent *event)
         Com_Quit(NULL, ERR_DISCONNECT);
 }
 
+// Called when the window is no longer hidden, for example after switching
+// back to its workspace. Without this the client stayed minimized, and drew
+// nothing, until a focus or map event arrived. Under XWayland the window can
+// keep X input focus while on another workspace, so none did.
+static void unhide(void)
+{
+    Window focus;
+    int revert;
+
+    if (!x11.hidden)
+        return;
+    x11.hidden = false;
+
+    XGetInputFocus(x11.dpy, &focus, &revert);
+    CL_Activate(focus == x11.win ? ACT_ACTIVATED : ACT_RESTORED);
+}
+
 static void property_event(XPropertyEvent *event)
 {
     Atom *state;
@@ -591,8 +609,11 @@ static void property_event(XPropertyEvent *event)
     Com_DDPrintf("%s\n", XAs(event->atom));
     if (event->atom != x11.atom.wm_state)
         return;
-    if (!(state = get_prop_list(x11.win, event->atom, XA_ATOM, 32, &nitems)))
+    if (!(state = get_prop_list(x11.win, event->atom, XA_ATOM, 32, &nitems))) {
+        // The window manager removed the last state, hidden included.
+        unhide();
         return;
+    }
 
     bool fs = false;
     bool hidden = false;
@@ -619,8 +640,12 @@ static void property_event(XPropertyEvent *event)
     if ((bool)vid_fullscreen->integer != fs)
         Cvar_SetInteger(vid_fullscreen, fs, FROM_CODE);
 
-    if (hidden)
+    if (hidden) {
+        x11.hidden = true;
         CL_Activate(ACT_MINIMIZED);
+    } else {
+        unhide();
+    }
 }
 
 static void raw_motion_event(XIRawEvent *event)
