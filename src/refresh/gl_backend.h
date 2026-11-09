@@ -45,3 +45,7 @@ void GLR_EndFrame(void);
 void GLR_ModeChanged(int width, int height, int flags);
 bool GLR_VideoSync(void);
 r_opengl_config_t GLR_GetGLConfig(void);
+#if USE_DEBUG
+size_t GLR_ViewCluster_m(char *buffer, size_t size);
+size_t GLR_ViewLeaf_m(char *buffer, size_t size);
+#endif

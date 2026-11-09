@@ -56,6 +56,11 @@ typedef struct refresh_backend_s {
     bool (*video_sync)(void);
 
     r_opengl_config_t (*get_gl_config)(void);
+
+#if USE_DEBUG
+    size_t (*view_cluster_m)(char *buffer, size_t size);
+    size_t (*view_leaf_m)(char *buffer, size_t size);
+#endif
 } refresh_backend_t;
 
 static const refresh_backend_t gl_backend = {
@@ -93,6 +98,10 @@ static const refresh_backend_t gl_backend = {
     .mode_changed = GLR_ModeChanged,
     .video_sync = GLR_VideoSync,
     .get_gl_config = GLR_GetGLConfig,
+#if USE_DEBUG
+    .view_cluster_m = GLR_ViewCluster_m,
+    .view_leaf_m = GLR_ViewLeaf_m,
+#endif
 };
 
 #if USE_VULKAN
@@ -131,6 +140,10 @@ static const refresh_backend_t vk_backend = {
     .mode_changed = VKR_ModeChanged,
     .video_sync = VKR_VideoSync,
     .get_gl_config = VKR_GetGLConfig,
+#if USE_DEBUG
+    .view_cluster_m = VKR_ViewCluster_m,
+    .view_leaf_m = VKR_ViewLeaf_m,
+#endif
 };
 #endif
 
@@ -162,6 +175,22 @@ static const refresh_backend_t *find_backend(const char *name)
     return NULL;
 }
 
+#if USE_DEBUG
+// Macros can't be removed once added, so they are registered once, here, and
+// forward to whichever renderer is running. Registering them in each renderer
+// left the first renderer's functions in place after a switch, with an
+// "already defined" warning.
+static size_t R_ViewCluster_m(char *buffer, size_t size)
+{
+    return active_backend()->view_cluster_m(buffer, size);
+}
+
+static size_t R_ViewLeaf_m(char *buffer, size_t size)
+{
+    return active_backend()->view_leaf_m(buffer, size);
+}
+#endif
+
 bool R_Init(bool total)
 {
     cvar_t *vid_ref = Cvar_Get("vid_ref", "gl", CVAR_ARCHIVE | CVAR_REFRESH);
@@ -170,6 +199,11 @@ bool R_Init(bool total)
     // so the menu also works while OpenGL runs, and in builds without
     // Vulkan, where it only offers "automatic".
     Cvar_Get("vk_devicelist", "\"automatic\" \"\"", CVAR_ROM);
+
+#if USE_DEBUG
+    Cmd_AddMacro("gl_viewcluster", R_ViewCluster_m);
+    Cmd_AddMacro("gl_viewleaf", R_ViewLeaf_m);
+#endif
 
     backend = find_backend(vid_ref->string);
     if (!backend) {
