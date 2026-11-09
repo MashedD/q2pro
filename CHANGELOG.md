@@ -6,6 +6,13 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Vulkan screenshots read a swapchain image that had already been handed to
+  the display, which the Vulkan specification forbids and which can give a
+  wrong or stale picture on some drivers. They now capture the next frame
+  before it is presented.
+
 ## [1.2.2] - 2026-11-09
 
 ### Fixed

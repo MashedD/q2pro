@@ -1276,9 +1276,26 @@ static void screenshot_done_cb(void *arg)
         Com_Printf("Wrote %s\n", s->filename);
     }
 
-    if (s->async) {
+    if (s->async || s->deferred) {
         Z_Free(s->filename);
         Z_Free(s);
+    }
+}
+
+static screenshot_t *pending_screenshot;
+
+static void save_screenshot(screenshot_t *s)
+{
+    if (s->async) {
+        asyncwork_t work = {
+            .work_cb = screenshot_work_cb,
+            .done_cb = screenshot_done_cb,
+            .cb_arg = s->deferred ? s : Z_CopyStruct(s),
+        };
+        Com_QueueAsyncWork(&work);
+    } else {
+        screenshot_work_cb(s);
+        screenshot_done_cb(s);
     }
 }
 
@@ -1288,6 +1305,11 @@ static void make_screenshot(const char *name, const char *ext,
     char        buffer[MAX_OSPATH];
     FILE        *fp;
     int         ret;
+
+    if (pending_screenshot) {
+        Com_Printf("A screenshot is already being taken.\n");
+        return;
+    }
 
     ret = create_screenshot(buffer, sizeof(buffer), &fp, name, ext);
     if (ret < 0) {
@@ -1305,26 +1327,52 @@ static void make_screenshot(const char *name, const char *ext,
     };
 
     ret = IMG_ReadPixels(&s);
+    if (ret == Q_ERR(EAGAIN)) {
+        // capture the next frame instead
+        s.deferred = true;
+        if (!async)
+            s.filename = Z_CopyString(buffer);
+        pending_screenshot = Z_CopyStruct(&s);
+        return;
+    }
     if (ret < 0) {
         s.status = ret;
         screenshot_done_cb(&s);
         return;
     }
 
-    if (async) {
-        asyncwork_t work = {
-            .work_cb = screenshot_work_cb,
-            .done_cb = screenshot_done_cb,
-            .cb_arg = Z_CopyStruct(&s),
-        };
-        Com_QueueAsyncWork(&work);
-    } else {
-        screenshot_work_cb(&s);
-        screenshot_done_cb(&s);
-    }
+    save_screenshot(&s);
 }
 
 #endif // USE_TGA || USE_JPG || USE_PNG
+
+screenshot_t *IMG_PendingScreenshot(void)
+{
+#if USE_TGA || USE_JPG || USE_PNG
+    return pending_screenshot;
+#else
+    return NULL;
+#endif
+}
+
+void IMG_FinishPendingScreenshot(int status)
+{
+#if USE_TGA || USE_JPG || USE_PNG
+    screenshot_t *s = pending_screenshot;
+
+    if (!s)
+        return;
+
+    pending_screenshot = NULL;
+    if (status < 0) {
+        s->status = status;
+        screenshot_done_cb(s);
+        return;
+    }
+
+    save_screenshot(s);
+#endif
+}
 
 /*
 ==================

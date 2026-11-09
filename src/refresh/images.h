@@ -117,6 +117,13 @@ struct screenshot_s {
     char *filename;
     int width, height, rowbytes, bpp, status, param;
     bool async;
+    bool deferred;  // captured with a later frame; freed when done
 };
 
+// Fills s->pixels from the last frame. A renderer that can't read it back
+// any more returns Q_ERR(EAGAIN): the screenshot then waits, the renderer
+// fills IMG_PendingScreenshot() from its next frame and calls
+// IMG_FinishPendingScreenshot().
 int IMG_ReadPixels(screenshot_t *s);
+screenshot_t *IMG_PendingScreenshot(void);
+void IMG_FinishPendingScreenshot(int status);
