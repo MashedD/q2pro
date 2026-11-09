@@ -6,6 +6,8 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-09
+
 ### Added
 
 - `cl_tint_<group>` sets a custom color for one group of tinted and
@@ -16,6 +18,15 @@ All notable changes to this fork are documented here. The format follows
 - `cl_itemtint`, `cl_weapontint` and `cl_ammotint` now recolor skins like the
   q2dl-skins-tinted-items-ammo-weapons skin pack, so the pack is no longer
   needed, and highlight shells use the same colors in both renderers.
+
+### Fixed
+
+- With Vulkan ray tracing, item highlight glows and other glows drawn only
+  into bloom were missing whenever ray-traced reflections were active.
+- Vulkan bloom showed a grid pattern and hard edges, because its blur
+  skipped texels; it now uses the same blur as the OpenGL renderer.
+- Vulkan shell glows, such as item highlights, formed a bright ring around
+  the model instead of an even glow.
 
 ## [1.2.0] - 2026-11-09
 
@@ -162,7 +173,8 @@ All new options are off or keep upstream's behaviour by default.
 - A game library without the executable permission is reported with the
   `chmod` command that fixes it, instead of only "Permission denied".
 
-[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/MashedD/q2pro/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/MashedD/q2pro/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/MashedD/q2pro/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/MashedD/q2pro/compare/v1.0.1...v1.1.0
