@@ -855,7 +855,8 @@ vk_rt_emissive::
     Default value is 0.35.
 
 vk_rt_skylight::
-    Cool ambient fill on surfaces open to the sky. Default value is 0.6.
+    Cool ambient fill on surfaces open to the sky. It also pales warm lamps
+    and their frames. Default value is 0 (disabled).
 
 vk_rt_sunlight::
     Warm light from a fixed high direction on surfaces open to the sky.
@@ -964,11 +965,11 @@ vk_rt_shockwaves::
     Expanding rings around explosions. Default value is 0.7.
 
 vk_rt_impact_marks::
-    Short-lived marks where shots hit. Default value is 0.75.
+    Short-lived marks where shots hit. Default value is 0 (disabled).
 
 vk_rt_rail_impact::
     An ionization pulse where rails land, in the rail trail's colors.
-    Default value is 0.65.
+    Default value is 0 (disabled).
 
 vk_rt_electric_filaments::
     Sparks for electric impacts. Default value is 0.75.

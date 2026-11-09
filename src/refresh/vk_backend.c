@@ -17927,7 +17927,7 @@ bool VKR_Init(bool total)
     vk_raytracing = Cvar_Get("vk_raytracing", "0", CVAR_ARCHIVE | CVAR_REFRESH);
     vk_rt_emissive = Cvar_Get("vk_rt_emissive", "0.35", CVAR_ARCHIVE);
     vk_rt_ao = Cvar_Get("vk_rt_ao", "0.24", CVAR_ARCHIVE);
-    vk_rt_skylight = Cvar_Get("vk_rt_skylight", "0.6", CVAR_ARCHIVE);
+    vk_rt_skylight = Cvar_Get("vk_rt_skylight", "0", CVAR_ARCHIVE);
     vk_rt_environment = Cvar_Get("vk_rt_environment", "0.65", CVAR_ARCHIVE);
     vk_rt_atmosphere = Cvar_Get("vk_rt_atmosphere", "0.45", CVAR_ARCHIVE);
     vk_rt_underwater_absorption = Cvar_Get("vk_rt_underwater_absorption",
@@ -17958,11 +17958,11 @@ bool VKR_Init(bool total)
     vk_rt_caustics = Cvar_Get("vk_rt_caustics", "0.65", CVAR_ARCHIVE);
     vk_rt_shadow_fringe = Cvar_Get("vk_rt_shadow_fringe", "0.6", CVAR_ARCHIVE);
     vk_rt_light_ripples = Cvar_Get("vk_rt_light_ripples", "0.6", CVAR_ARCHIVE);
-    vk_rt_rail_impact = Cvar_Get("vk_rt_rail_impact", "0.65", CVAR_ARCHIVE);
+    vk_rt_rail_impact = Cvar_Get("vk_rt_rail_impact", "0", CVAR_ARCHIVE);
     vk_rt_light_coronas = Cvar_Get("vk_rt_light_coronas", "0.6", CVAR_ARCHIVE);
     vk_rt_lava_embers = Cvar_Get("vk_rt_lava_embers", "0.65", CVAR_ARCHIVE);
     vk_rt_shockwaves = Cvar_Get("vk_rt_shockwaves", "0.7", CVAR_ARCHIVE);
-    vk_rt_impact_marks = Cvar_Get("vk_rt_impact_marks", "0.75", CVAR_ARCHIVE);
+    vk_rt_impact_marks = Cvar_Get("vk_rt_impact_marks", "0", CVAR_ARCHIVE);
     vk_rt_splash_ripples = Cvar_Get("vk_rt_splash_ripples", "0.75",
                                     CVAR_ARCHIVE);
     vk_rt_water_wakes = Cvar_Get("vk_rt_water_wakes", "0.75",
