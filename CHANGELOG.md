@@ -14,6 +14,9 @@ All notable changes to this fork are documented here. The format follows
 
 ### Fixed
 
+- With the X11 video driver, the screen stayed black after switching back to
+  the game's workspace on window managers that mark hidden windows (for
+  example under XWayland), until the window lost and regained focus.
 - Vulkan API misuse found with the Khronos validation layer: model shadows
   read height fog from the wrong place, a present semaphore could be reused
   while the presentation engine still waited on it, which can cause stutter
