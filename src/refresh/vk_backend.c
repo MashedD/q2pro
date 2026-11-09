@@ -7177,6 +7177,17 @@ static bool vk_create_ssr_pipeline(void)
     return result == VK_SUCCESS;
 }
 
+// Blur sigma in bloom texels. OpenGL applies gl_bloom_sigma, scaled to the
+// view height, in its quarter-resolution target; scale it so the glow has
+// the same size on screen whatever vk_bloom_downsample is.
+static float vk_bloom_blur_sigma(void)
+{
+    float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
+
+    sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
+    return sigma * 4.0f / (float)vk_bloom_downsample_value();
+}
+
 static uint32_t vk_bloom_downsample_value(void)
 {
     int value = vk_bloom_downsample ? Cvar_ClampInteger(vk_bloom_downsample, 1, 16) : 4;
@@ -19118,26 +19129,19 @@ static void vk_finish_postprocess_scene(void)
             0.0f,
             1.0f,
         };
-        float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
-        sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
-        // The fixed 9-tap kernel is normalized around sigma ~= 2 texels.
-        // OpenGL applies its requested sigma in the quarter-resolution
-        // target. Scale the offsets so the screen-space radius stays equal
-        // when vk_bloom_downsample changes.
-        sigma = max(sigma, 1.0f) * 2.0f /
-            (float)vk_bloom_downsample_value();
+        float sigma = vk_bloom_blur_sigma();
         int iterations = (vk_showbloom && vk_showbloom->integer >= 2) ? 0 :
             (gl_bloom ? Cvar_ClampInteger(gl_bloom, 1, 8) : 1);
         vec4_t blur_x = {
-            sigma / (float)bloom_w,
+            1.0f / (float)bloom_w,
             0.0f,
-            0.0f,
+            sigma,
             1.0f,
         };
         vec4_t blur_y = {
             0.0f,
-            sigma / (float)bloom_h,
-            0.0f,
+            1.0f / (float)bloom_h,
+            sigma,
             1.0f,
         };
 
@@ -19511,22 +19515,19 @@ void VKR_EndFrame(void)
             0.0f,
             1.0f,
         };
-        float sigma = vk_bloom_sigma ? Cvar_ClampValue(vk_bloom_sigma, 1.0f, 25.0f) : 4.0f;
-        sigma *= max((float)vk.fd.height, 1.0f) / 1080.0f;
-        sigma = max(sigma, 1.0f) * 2.0f /
-            (float)vk_bloom_downsample_value();
+        float sigma = vk_bloom_blur_sigma();
         int iterations = (vk_showbloom && vk_showbloom->integer >= 2) ? 0 :
             (gl_bloom ? Cvar_ClampInteger(gl_bloom, 1, 8) : 1);
         vec4_t blur_x = {
-            sigma / (float)bloom_w,
+            1.0f / (float)bloom_w,
             0.0f,
-            0.0f,
+            sigma,
             1.0f,
         };
         vec4_t blur_y = {
             0.0f,
-            sigma / (float)bloom_h,
-            0.0f,
+            1.0f / (float)bloom_h,
+            sigma,
             1.0f,
         };
 
