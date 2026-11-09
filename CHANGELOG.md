@@ -8,6 +8,13 @@ All notable changes to this fork are documented here. The format follows
 
 ### Added
 
+- Optional ray tracing for the Vulkan renderer (`vk_raytracing`, off by
+  default): shadows from dynamic lights, ambient occlusion, colored light
+  from glowing surfaces, screen-space reflections and highlights, liquid and
+  atmosphere effects, and small effects for impacts, splashes, teleports and
+  explosions, each with its own `vk_rt_*` strength setting and a "Vulkan ray
+  tracing" menu. Needs a GPU and driver with Vulkan ray queries. The release
+  packages include `materials/rt_reflections.mat` in `q2pro.pkz`.
 - `gl_bloom_lamps` lets glowing world surfaces without a glow map feed bloom,
   in both renderers, so plain lamps glow too. Off by default; the release
   packages turn it on.
