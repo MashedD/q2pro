@@ -40,7 +40,7 @@ cd "$tmp/build"
 mkdir -p "$out" baseq2
 cp "$src/src/client/ui/q2pro.menu" baseq2/
 # Default settings, packed so that they take priority over pak0's default.cfg.
-(cd "$src/data/baseq2" && zip -q -X -9 "$OLDPWD/baseq2/q2pro.pkz" default.cfg)
+(cd "$src/data/baseq2" && zip -q -X -9 "$OLDPWD/baseq2/q2pro.pkz" default.cfg materials/rt_reflections.mat)
 mv "game$cpu.dll" baseq2/
 if [ -n "$suffix" ]; then
     mv q2pro.exe "q2pro$suffix.exe"

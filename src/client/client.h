@@ -82,6 +82,15 @@ typedef struct {
     int             trailcount;         // for diminishing grenade trails
     vec3_t          lerp_origin;        // for trails (variable hz)
 
+    vec3_t          rt_water_wake_sample_origin;
+    vec3_t          rt_water_wake_origin;
+    vec3_t          rt_water_wake_normal;
+    vec3_t          rt_water_wake_direction;
+    int             rt_water_wake_sample_time;
+    int             rt_water_wake_seen_time;
+    float           rt_water_wake_scale;
+    bool            rt_water_wake_valid;
+
 #if USE_FPS
     int             prev_frame;
     int             anim_start;
@@ -835,6 +844,12 @@ void CL_AddWeaponMuzzleFX(cl_muzzlefx_t fx, const vec3_t offset, float scale);
 void CL_AddMuzzleFX(const vec3_t origin, const vec3_t angles, cl_muzzlefx_t fx, int skin, float scale);
 
 void CL_SmokeAndFlash(const vec3_t origin);
+
+void CL_RTTeleportVortex(const vec3_t origin, rt_teleport_type_t type);
+void CL_RTItemRespawn(const vec3_t origin);
+void CL_RTLandingDust(int entnum, rt_landing_type_t type);
+void CL_RTEnergyCollapse(const vec3_t origin,
+                         rt_energy_collapse_type_t type);
 void CL_DrawBeam(const vec3_t org, const vec3_t end, qhandle_t model);
 void CL_PlayFootstepSfx(int step_id, int entnum, float volume, float attenuation);
 

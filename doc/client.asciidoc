@@ -822,6 +822,188 @@ vk_perf_stats::
     When set, prints a line per second with the present mode, frames in flight
     and the number of draws, batches and binds per category. Default value is 0.
 
+vk_raytracing::
+    Enables ray-traced lighting and effects on top of the normal Vulkan
+    renderer, using ray queries. Lightmaps, glow maps and bloom stay as they
+    are; ray tracing adds shadows from dynamic lights, ambient occlusion,
+    colored light from glowing surfaces, reflections and the effects below.
+    Ambient occlusion and surface light are computed once when a map loads,
+    into an atlas of up to 2048x2048 texels, and a summary line is printed;
+    if that fails they are traced every frame instead, nearby only. With
+    ‘gl_bloom’, ray-traced highlights and lamps without a glow map also feed
+    bloom. Needs a
+    GPU and driver with Vulkan 1.2, acceleration structures and ray queries;
+    without them a warning names what is missing and the renderer carries on
+    without ray tracing. Changing it restarts the renderer. Default value is
+    0 (disabled).
+
+The ‘vk_rt_*’ variables below only have an effect while ‘vk_raytracing’ is
+on. Each sets the strength of one effect from 0 to 1 unless noted, takes
+effect immediately, and 0 disables the effect. Only opaque world surfaces
+cast ray-traced shadows, not models or translucent surfaces.
+
+Lighting:
+
+vk_rt_ao::
+    Ambient occlusion in corners, where walls meet floors and under ledges,
+    from 0 to 0.5. Glow-mapped pixels are not darkened. Default value is 0.24.
+
+vk_rt_emissive::
+    Colored light cast by glowing world surfaces (‘SURF_LIGHT’), with soft
+    shadows, from 0 to 2. The color comes from the surface's glow map or its
+    brightest texels, and the added light is capped relative to the lightmap.
+    Default value is 0.35.
+
+vk_rt_skylight::
+    Cool ambient fill on surfaces open to the sky. It also pales warm lamps
+    and their frames. Default value is 0 (disabled).
+
+vk_rt_sunlight::
+    Warm light from a fixed high direction on surfaces open to the sky.
+    Default value is 0.65.
+
+vk_rt_bounce::
+    Colored light spilling from explosions, projectiles and muzzle flashes
+    onto nearby surfaces; walls block it. Default value is 0.65.
+
+vk_rt_shadow_fringe::
+    Colored edges on the soft shadows of the strongest nearby dynamic light.
+    Default value is 0.6.
+
+vk_rt_light_ripples::
+    Animated rings of light around strong dynamic lights. Default value is
+    0.6.
+
+vk_rt_afterglow::
+    How long bright, short-lived dynamic lights take to fade out after they
+    disappear, in seconds, from 0 to 1. Default value is 0.35.
+
+vk_rt_emissive_halo::
+    Colored glow around the edges of glowing surfaces. Default value is 0.65.
+
+vk_rt_emissive_flicker::
+    Irregular flicker of lamps, their halos and their bloom. Default value is
+    0.55.
+
+Reflections and materials:
+
+vk_rt_reflections::
+    Screen-space reflections on floors and on walls seen at a grazing angle.
+    Only what is on screen can be reflected. Needs ‘gl_multisamples’ 0 (no
+    MSAA). Default value is 0.35.
+
+vk_rt_reflection_glints::
+    Small colored highlights around bright things in the reflections.
+    Default value is 0.55.
+
+vk_rt_reflection_dispersion::
+    Red and blue fringes around bright details in smooth reflections.
+    Default value is 0.6.
+
+vk_rt_specular::
+    Highlights from dynamic lights and nearby glowing surfaces: small and
+    sharp on smooth materials, broad and faint on rough ones. 0 disables the
+    highlights but not the reflections. Default value is 0.45.
+
+vk_rt_environment::
+    A cool sheen on reflective materials. Default value is 0.65.
+
+materials/rt_reflections.mat::
+    How reflective and how rough each texture is, for ‘vk_rt_reflections’,
+    ‘vk_rt_specular’ and ‘vk_rt_environment’, read when a map loads. Each
+    entry names a texture and gives values from 0 to 1:
+
+    textures/base_floor:
+        reflect 0.85
+        roughness 0.35
+
+    Textures that aren't listed get a conservative default. Liquids and
+    translucent surfaces never reflect. The release packages include a file
+    for the original game's textures.
+
+Liquids and atmosphere:
+
+vk_rt_liquids::
+    Animated ripples, a colored sheen at grazing angles and highlights from
+    dynamic lights on water, slime and lava. Default value is 0.65.
+
+vk_rt_caustics::
+    Animated caustics on nearby surfaces while the view is under water.
+    Default value is 0.65.
+
+vk_rt_underwater_absorption::
+    Blue-green fading with distance while the view is under water. Default
+    value is 0.65.
+
+vk_rt_atmosphere::
+    Blue-gray haze with distance. Default value is 0.45.
+
+vk_rt_light_scattering::
+    Strong dynamic lights glow inside fog. Default value is 0.5.
+
+vk_rt_fog_turbulence::
+    Slowly moving density in fog. Default value is 0.4.
+
+vk_rt_dust::
+    Drifting dust motes near the viewer. Default value is 0.35.
+
+vk_rt_dust_lighting::
+    How strongly nearby dynamic lights color the dust. Default value is 0.65.
+
+Particle effects:
+
+vk_rt_emissive_motes::
+    Faint energy motes around glowing surfaces. Default value is 0.45.
+
+vk_rt_lava_embers::
+    Embers rising from lava. Default value is 0.65.
+
+vk_rt_light_coronas::
+    Halos around strong combat lights. Default value is 0.6.
+
+vk_rt_shockwaves::
+    Expanding rings around explosions. Default value is 0.7.
+
+vk_rt_impact_marks::
+    Short-lived marks where shots hit. Default value is 0 (disabled).
+
+vk_rt_rail_impact::
+    An ionization pulse where rails land, in the rail trail's colors.
+    Default value is 0 (disabled).
+
+vk_rt_electric_filaments::
+    Sparks for electric impacts. Default value is 0.75.
+
+vk_rt_splash_ripples::
+    Rings on water, slime and lava splashes. Default value is 0.75.
+
+vk_rt_water_wakes::
+    Wakes behind players moving through water. Default value is 0.75.
+
+vk_rt_teleport_vortex::
+    A vortex at teleports. Default value is 0.8.
+
+vk_rt_item_respawn::
+    A glow where items respawn. Default value is 0.8.
+
+vk_rt_landing_dust::
+    Dust when players land after a fall. Default value is 0.7.
+
+vk_rt_energy_collapse::
+    A collapse effect where BFG and tracker shots hit. Default value is 0.8.
+
+vk_rt_debug::
+    Shows ray tracing data instead of the normal picture, for debugging: 1
+    shows the baked atlas coverage, 2 the ambient occlusion, 3 the surface
+    light, 4 the reflection strength, 5 which surfaces reflect (green), 6
+    reflection rays that hit (blue) or missed (brown), 7 only the reflections
+    and 8 only the specular highlights (cyan from dynamic lights, amber from
+    glowing surfaces). 9 to 18 show single effects, amplified eight times:
+    color bounce, caustics, shadow fringes, sky light, environment sheen,
+    afterglow, sunlight, emissive halos, light ripples and reflection glints.
+    19 shows which lamps flicker and how strongly, and 20 the reflection
+    dispersion, amplified twelve times. Default value is 0 (normal picture).
+
 OpenGL Renderer
 ~~~~~~~~~~~~~~~
 

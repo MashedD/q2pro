@@ -18,5 +18,5 @@ void main()
     vec2 local = (v_uv - pc.uv.xy) / span;
     vec2 tc = v_uv + span * vec2(0.0025) * sin(local.ts * 31.415926 + pc.color.x);
     tc = clamp(tc, pc.uv.xy, pc.uv.zw);
-    out_color = texture(tex_sampler, tc);
+    out_color = vec4(texture(tex_sampler, tc).rgb, 1.0);
 }

@@ -343,11 +343,23 @@ if vulkan.found()
   endif
 endif
 if vulkan.found()
+  vulkan_rt_headers = cc.has_header_symbol(
+    'vulkan/vulkan.h',
+    'VK_KHR_RAY_QUERY_EXTENSION_NAME',
+    dependencies: vulkan,
+  )
+  if get_option('vulkan-raytracing').enabled() and not vulkan_rt_headers
+    error('Vulkan ray tracing was enabled, but the Vulkan headers are too old')
+  endif
+  config.set10('USE_VULKAN_RAYTRACING',
+    vulkan_rt_headers and not get_option('vulkan-raytracing').disabled())
   vk_shader_headers = []
   foreach shader : ['vk_rect.vert', 'vk_rect.frag', 'vk_vignette.vert',
                     'vk_tex.vert', 'vk_tex.frag',
                     'vk_waterwarp.frag',
                     'vk_bloom_downscale.frag', 'vk_bloom_blur.frag',
+                    'vk_ssr.vert', 'vk_ssr.frag', 'vk_ssr_resolve.frag',
+                    'vk_scene.frag',
                     'vk_color3d.vert', 'vk_color3d.frag',
                     'vk_world.vert', 'vk_world.frag', 'vk_world_alpha.frag',
                     'vk_world_lit.vert', 'vk_world_lit.frag',
@@ -367,6 +379,35 @@ if vulkan.found()
                 glslc, '@INPUT@', '@OUTPUT@'],
     )
   endforeach
+  if config.get('USE_VULKAN_RAYTRACING', 0) != 0
+    # Ray queries need SPIR-V for Vulkan 1.2. Several variants are built from
+    # one source: [output, source, defines].
+    foreach rt_shader : [
+      ['vk_rt_ao_bake_vert_spv.h', 'vk_rt_ao_bake.vert', []],
+      ['vk_rt_ao_bake_frag_spv.h', 'vk_rt_ao_bake.frag', []],
+      ['vk_world_pixel_rt_vert_spv.h', 'vk_world_pixel_rt.vert', []],
+      ['vk_world_lit_rt_frag_spv.h', 'vk_world_lit_rt.frag', []],
+      ['vk_world_pixel_rt_frag_spv.h', 'vk_world_pixel_rt.frag', []],
+      ['vk_world_pixel_rt_alpha_frag_spv.h', 'vk_world_pixel_rt.frag',
+       ['-DRT_ALPHA_TEST=1']],
+      ['vk_world_pixel_rt_glow_frag_spv.h', 'vk_world_pixel_rt.frag',
+       ['-DRT_GLOWMAP=1']],
+      ['vk_world_pixel_rt_glow_alpha_frag_spv.h', 'vk_world_pixel_rt.frag',
+       ['-DRT_GLOWMAP=1', '-DRT_ALPHA_TEST=1']],
+      ['vk_world_pixel_rt_quad_frag_spv.h', 'vk_world_pixel_rt.frag',
+       ['-DRT_QUAD_SHARING=1']],
+      ['vk_world_pixel_rt_quad_glow_frag_spv.h', 'vk_world_pixel_rt.frag',
+       ['-DRT_QUAD_SHARING=1', '-DRT_GLOWMAP=1']],
+    ]
+      vk_shader_headers += custom_target(rt_shader[0].underscorify(),
+        input: 'src/refresh' / rt_shader[1],
+        output: rt_shader[0],
+        command: [find_program('python3'), files('src/refresh/vk_shader.py'),
+                  glslc, '@INPUT@', '@OUTPUT@', '--target-env=vulkan1.2'] +
+                 rt_shader[2],
+      )
+    endforeach
+  endif
   common_deps += vulkan.partial_dependency(compile_args: true, includes: true)
   refresh_src += ['src/refresh/vk_backend.c', vk_shader_headers]
   config.set10('USE_VULKAN', true)
@@ -654,6 +695,7 @@ summary({
   'tga'                : config.get('USE_TGA', 0) != 0,
   'variable-fps'       : config.get('USE_FPS', 0) != 0,
   'vulkan'             : config.get('USE_VULKAN', 0) != 0,
+  'vulkan ray tracing' : config.get('USE_VULKAN_RAYTRACING', 0) != 0,
   'wayland'            : config.get('USE_WAYLAND', 0) != 0,
   'windows-crash-dumps': config.get('USE_DBGHELP', 0) != 0,
   'windows-egl'        : config.get('USE_WIN32EGL', 0) != 0,
