@@ -19105,6 +19105,16 @@ static void vk_finish_postprocess_scene(void)
     bool bloom = vk.frame_bloom;
     bool waterwarp = vk.frame_waterwarp;
 
+    // Entities that only feed bloom are drawn while the scene pass is still
+    // open. Screen-space reflections end that pass, and drawing them later
+    // lost highlight glows, shell glows and beam bloom with ray tracing on.
+    // They write only the bloom target, which the reflections don't read.
+    if (bloom && vk.render_pass_active && vk.fd_valid) {
+        vk_draw_bloom_source_entities(&vk.fd);
+        vk_draw_bloom_beams(&vk.fd);
+        vk_draw_bloom_only_entities(&vk.fd);
+    }
+
     vk_render_ssr();
 
     if (bloom) {
@@ -19141,11 +19151,6 @@ static void vk_finish_postprocess_scene(void)
             1.0f,
         };
 
-        if (vk.render_pass_active && vk.fd_valid) {
-            vk_draw_bloom_source_entities(&vk.fd);
-            vk_draw_bloom_beams(&vk.fd);
-            vk_draw_bloom_only_entities(&vk.fd);
-        }
         if (vk.render_pass_active) {
             vk.CmdEndRenderPass(cmd);
             vk.render_pass_active = false;
