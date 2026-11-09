@@ -776,17 +776,29 @@ static void CL_ResolveSkinTint(const skin_tint_def_t *def, skin_tint_t *tint)
     }
 }
 
-// Highlight shells use the color of a typical texel of the tinted skin,
-// brightened so that its strongest channel is 1.
+// Highlight shells use the hue of a typical texel of the tinted skin. Shells
+// glow through bloom, where pale colors wash out over the model, so the pack
+// colors get most of their gray removed, which makes them about as vivid as
+// the plain shell colors used before. A custom color is used as it is.
 static void CL_SkinTintHighlightColor(const skin_tint_def_t *def, vec3_t color)
 {
     skin_tint_t tint;
-    float m;
+    float m, gray;
 
-    CL_ResolveSkinTint(def, &tint);
-    VectorMA(tint.dark, powf(0.3f, tint.gamma), tint.gain, color);
-    for (int i = 0; i < 3; i++)
-        color[i] = max(color[i], 0.0f);
+    if (cl_tint_has_custom[def->group]) {
+        VectorCopy(cl_tint_custom[def->group], color);
+    } else {
+        CL_ResolveSkinTint(def, &tint);
+        VectorMA(tint.dark, powf(0.3f, tint.gamma), tint.gain, color);
+        for (int i = 0; i < 3; i++)
+            color[i] = max(color[i], 0.0f);
+        m = max(color[0], max(color[1], color[2]));
+        gray = 0.85f * min(color[0], min(color[1], color[2]));
+        if (m > gray)
+            for (int i = 0; i < 3; i++)
+                color[i] = (color[i] - gray) / (m - gray) * m;
+    }
+
     m = max(color[0], max(color[1], color[2]));
     if (m > 0.0f)
         VectorScale(color, 1.0f / m, color);
