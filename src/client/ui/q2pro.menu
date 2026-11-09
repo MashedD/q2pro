@@ -193,14 +193,6 @@ begin effects
         "entity cel-shading" gl_celshading no 1x 2x 3x
     toggle --status "Pulsing glow around items such as ammo, health and armor" \
         "entity glowing" cl_noglow ~
-    toggle --status "Colored shell around health, armor and powerups" \
-        "item highlighting" cl_itemhighlight
-    toggle --status "Colored shell around weapon pickups and weapons held by players" \
-        "weapon highlighting" cl_weaponhighlight
-    toggle --status "Colored shell around ammo, in the color of its weapon" \
-        "ammo highlighting" cl_ammohighlight
-    toggle --status "Colored shell around players: male white, female green, other models orange" \
-        "player highlighting" cl_playerhighlight
     toggle --status "Recolor item skins instead of drawing a shell. Shaders backend only" \
         "tint item skins" cl_itemtint
     toggle --status "Recolor weapon skins, including your own view weapon. Shaders backend only" \
@@ -209,6 +201,14 @@ begin effects
         "tint ammo skins" cl_ammotint
     toggle --status "Recolor player skins: male white, female green, other models amber. Shaders backend only" \
         "tint player skins" cl_playertint
+    toggle --status "Colored shell around health, armor and powerups" \
+        "item highlighting" cl_itemhighlight
+    toggle --status "Colored shell around weapon pickups and weapons held by players" \
+        "weapon highlighting" cl_weaponhighlight
+    toggle --status "Colored shell around ammo, in the color of its weapon" \
+        "ammo highlighting" cl_ammohighlight
+    toggle --status "Colored shell around players: male white, female green, other models orange" \
+        "player highlighting" cl_playerhighlight
     toggle --status "Glow around glowmaps and glowing highlights (shaders backend)" \
         "bloom" gl_bloom
     range --status "Glow strength of highlights. Needs bloom. 0 keeps a plain shell" \
