@@ -818,6 +818,7 @@ typedef struct {
     VkPipeline particle_add_pipeline;
     VkPipeline alias_pipeline;
     VkPipeline alias_bloom_pipeline;
+    VkPipeline alias_shell_bloom_pipeline;  // back faces culled, for shells
     VkPipeline alias_alpha_pipeline;
     VkPipeline alias_depth_pipeline;
     VkPipeline alias_blend_pipeline;
@@ -5978,6 +5979,11 @@ static void vk_destroy_swapchain(void)
         vk.alias_bloom_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.alias_shell_bloom_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.alias_shell_bloom_pipeline, NULL);
+        vk.alias_shell_bloom_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.alias_alpha_pipeline) {
         vk.DestroyPipeline(vk.device, vk.alias_alpha_pipeline, NULL);
         vk.alias_alpha_pipeline = VK_NULL_HANDLE;
@@ -7918,7 +7924,8 @@ static bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write,
             (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT) : 0,
     } };
-    if (pipeline == &vk.alias_bloom_pipeline) {
+    if (pipeline == &vk.alias_bloom_pipeline ||
+        pipeline == &vk.alias_shell_bloom_pipeline) {
         color_blend_attachment[1] = color_blend_attachment[0];
         color_blend_attachment[0].colorWriteMask = 0;
     } else if (pipeline == &vk.alias_pipeline ||
@@ -8288,6 +8295,10 @@ static bool vk_create_swapchain(int width, int height)
         !vk_create_alias_pipeline(&vk.alias_blend_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_bloom_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
+                                  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
+        // The projection flips the models' winding, so their front faces
+        // are the ones Vulkan calls back faces (see alias_cel_pipeline).
+        !vk_create_alias_pipeline(&vk.alias_shell_bloom_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE, VK_CULL_MODE_FRONT_BIT, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_FALSE, 0.0f, 0.0f, NULL) ||
         !vk_create_alias_pipeline(&vk.alias_shadow_pipeline, VK_FALSE, VK_TRUE, VK_TRUE, VK_FALSE, VK_TRUE, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_COMPARE_OP_LESS_OR_EQUAL, VK_TRUE, -1.0f, -2.0f, &shadow_depth_stencil) ||
@@ -9178,13 +9189,24 @@ static void vk_view_matrix(mat4_t matrix, const refdef_t *fd)
     matrix[15] = 1.0f;
 }
 
+// Left-handed view weapons are mirrored, which reverses their winding.
+static bool vk_entity_mirrored(const entity_t *ent)
+{
+    extern cvar_t *cl_gun;
+    extern cvar_t *info_hand;
+
+    if (!(ent->flags & RF_WEAPONMODEL))
+        return false;
+
+    return (info_hand && cl_gun && info_hand->integer == 1 && cl_gun->integer == 1) ||
+           (cl_gun && cl_gun->integer == 3);
+}
+
 static void vk_entity_projection_matrix(mat4_t matrix, const refdef_t *fd,
                                         const entity_t *ent)
 {
     extern cvar_t *cl_adjustfov;
-    extern cvar_t *cl_gun;
     extern cvar_t *cl_gunfov;
-    extern cvar_t *info_hand;
     extern float V_CalcFov(float fov_x, float width, float height);
 
     float fov_x = fd->fov_x;
@@ -9202,8 +9224,7 @@ static void vk_entity_projection_matrix(mat4_t matrix, const refdef_t *fd,
             }
         }
 
-        if ((info_hand && cl_gun && info_hand->integer == 1 && cl_gun->integer == 1) ||
-            (cl_gun && cl_gun->integer == 3))
+        if (vk_entity_mirrored(ent))
             reflect_x = -1.0f;
     }
 
@@ -12516,7 +12537,13 @@ static void vk_draw_alias_model(const entity_t *ent, const refdef_t *fd)
         if (!texture)
             continue;
 
-        if (vk.drawing_bloom)
+        // Shells glow from their front faces only, as in OpenGL, which culls
+        // back faces. Without culling, their front and back faces were both
+        // blended around the model, doubling the glow into a bright ring.
+        if (vk.drawing_bloom && (ent->flags & RF_SHELL_MASK) &&
+            !vk_entity_mirrored(ent) && vk.alias_shell_bloom_pipeline)
+            pipeline = vk.alias_shell_bloom_pipeline;
+        else if (vk.drawing_bloom)
             pipeline = (bloom_only || bloom_shell) ? vk.alias_bloom_pipeline : VK_NULL_HANDLE;
         else if (translucent)
             pipeline = vk.alias_blend_pipeline;
