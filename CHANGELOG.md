@@ -6,6 +6,8 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-09
+
 ### Added
 
 - Optional ray tracing for the Vulkan renderer (`vk_raytracing`, off by
@@ -149,7 +151,8 @@ All new options are off or keep upstream's behaviour by default.
 - A game library without the executable permission is reported with the
   `chmod` command that fixes it, instead of only "Permission denied".
 
-[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/MashedD/q2pro/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/MashedD/q2pro/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/MashedD/q2pro/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/MashedD/q2pro/compare/v1.0.0...v1.0.1
