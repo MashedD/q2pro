@@ -26,6 +26,9 @@ All notable changes to this fork are documented here. The format follows
   feature, and started frames without bloom (menus, loading) with its second
   color target in the wrong layout. GPUs without the feature now get a
   warning and no bloom instead of undefined results.
+- When the Vulkan swapchain can't be created, for example while the window
+  is minimized, the renderer skips frames and retries every second instead
+  of using a missing swapchain until the next video mode change.
 
 ## [1.1.1] - 2026-11-07
 
