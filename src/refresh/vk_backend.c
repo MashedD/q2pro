@@ -866,6 +866,13 @@ typedef struct {
     uint32_t swapchain_image_count;
     unsigned swapchain_retry_time;
     bool swapchain_transfer_src;
+
+    // screenshot copied from the frame being presented (VKR_ReadPixels)
+    vk_buffer_t screenshot_readback;
+    void *screenshot_mapped;
+    uint32_t screenshot_width;
+    uint32_t screenshot_height;
+    bool screenshot_recorded;
     bool swapchain_deferred;
     bool swapchain_recreate_failed;
     vk_queue_families_t queues;
@@ -1103,6 +1110,7 @@ static bool vk_create_shockwave_texture(void);
 static bool vk_create_impact_texture(void);
 static uint32_t vk_frames_in_flight_value(void);
 static uint32_t vk_bloom_downsample_value(void);
+static void vk_finish_screenshot(int status);
 static void vk_entity_axis(const entity_t *ent, vec3_t axis[3]);
 static void vk_entity_mvp(mat4_t out, const refdef_t *fd,
                           const entity_t *ent, const vec3_t axis[3]);
@@ -8396,6 +8404,9 @@ static void vk_transition_image(VkCommandBuffer cmd, uint32_t image_index,
         src_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     } else if (vk.swapchain_layouts[image_index] == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR) {
         src_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+        src_access = 0;
+    } else if (vk.swapchain_layouts[image_index] == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+        src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         src_access = 0;
     } else {
         src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
@@ -18155,6 +18166,10 @@ void VKR_Shutdown(bool total)
         return;
     }
 
+    // A screenshot waiting for the next frame won't get one.
+    if (IMG_PendingScreenshot())
+        vk_finish_screenshot(Q_ERR(ECANCELED));
+
     if (vk_swapinterval)
         vk_swapinterval->changed = NULL;
     if (vk_present_mode)
@@ -18849,62 +18864,68 @@ static bool vk_screenshot_format_offsets(int offsets[3])
     }
 }
 
+// Screenshots are taken from the swapchain image of the next frame, copied
+// just before it is presented. Between frames the last image already belongs
+// to the presentation engine and must not be read
+// (UNASSIGNED-non-acquired-swapchain-image-used).
 int VKR_ReadPixels(screenshot_t *s)
 {
+    int offsets[3];
+
     if (!vk.swapchain || !vk.swapchain_transfer_src ||
         !vk.swapchain_images || !vk.swapchain_layouts)
         return Q_ERR(ENOTSUP);
     if (vk.frame_active)
         return Q_ERR(EBUSY);
-    if (!vk.swapchain_extent.width || !vk.swapchain_extent.height)
-        return Q_ERR(EINVAL);
-
-    int offsets[3];
     if (!vk_screenshot_format_offsets(offsets))
         return Q_ERR(ENOTSUP);
 
-    if (vk.swapchain_extent.width > INT_MAX ||
-        vk.swapchain_extent.height > INT_MAX)
-        return Q_ERR(EOVERFLOW);
+    return Q_ERR(EAGAIN);
+}
 
-    int width = vk.swapchain_extent.width;
-    int height = vk.swapchain_extent.height;
+static void vk_finish_screenshot(int status)
+{
+    if (vk.screenshot_mapped)
+        vk.UnmapMemory(vk.device, vk.screenshot_readback.memory);
+    vk.screenshot_mapped = NULL;
+    vk_destroy_buffer(&vk.screenshot_readback);
+    vk.screenshot_recorded = false;
+    IMG_FinishPendingScreenshot(status);
+}
 
-    if (width > INT_MAX / 4)
-        return Q_ERR(EOVERFLOW);
+// Records a copy of the current swapchain image into a readback buffer when
+// a screenshot is waiting. Called right before the transition to present.
+static void vk_record_screenshot(VkCommandBuffer cmd)
+{
+    int offsets[3];
 
-    int src_rowbytes = width * 4;
-    if (height > INT_MAX / src_rowbytes)
-        return Q_ERR(EOVERFLOW);
+    if (!IMG_PendingScreenshot() || vk.screenshot_recorded)
+        return;
+    if (!vk.swapchain_transfer_src || !vk_screenshot_format_offsets(offsets)) {
+        vk_finish_screenshot(Q_ERR(ENOTSUP));
+        return;
+    }
 
-    int src_size = src_rowbytes * height;
-    int dst_rowbytes = width * 3;
-    if (height > INT_MAX / dst_rowbytes)
-        return Q_ERR(EOVERFLOW);
+    uint32_t width = vk.swapchain_extent.width;
+    uint32_t height = vk.swapchain_extent.height;
+    if (!width || !height || width > INT_MAX / 4 ||
+        height > INT_MAX / (width * 4)) {
+        vk_finish_screenshot(Q_ERR(EOVERFLOW));
+        return;
+    }
 
-    int dst_size = dst_rowbytes * height;
-    vk_buffer_t readback = { 0 };
-    VkCommandBuffer cmd = VK_NULL_HANDLE;
-    void *mapped = NULL;
-    int ret = Q_ERR_FAILURE;
-
-    if (!vk_create_buffer(src_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    VkDeviceSize size = (VkDeviceSize)width * height * 4;
+    if (!vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                          &readback.buffer, &readback.memory))
-        return Q_ERR_FAILURE;
-    readback.size = src_size;
-
-    if (vk.DeviceWaitIdle(vk.device) != VK_SUCCESS)
-        goto out;
-
-    VkImageLayout old_layout = vk.swapchain_layouts[vk.current_image];
-    if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED) {
-        ret = Q_ERR(ENOTSUP);
-        goto out;
+                          &vk.screenshot_readback.buffer,
+                          &vk.screenshot_readback.memory)) {
+        vk_finish_screenshot(Q_ERR_FAILURE);
+        return;
     }
-    if (!vk_begin_immediate(&cmd))
-        goto out;
+    vk.screenshot_readback.size = size;
+    vk.screenshot_width = width;
+    vk.screenshot_height = height;
 
     vk_transition_image(cmd, vk.current_image,
                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -18912,48 +18933,72 @@ int VKR_ReadPixels(screenshot_t *s)
                         VK_PIPELINE_STAGE_TRANSFER_BIT);
 
     VkBufferImageCopy copy = {
-        .bufferOffset = 0,
-        .bufferRowLength = 0,
-        .bufferImageHeight = 0,
         .imageSubresource = {
             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .mipLevel = 0,
-            .baseArrayLayer = 0,
             .layerCount = 1,
         },
-        .imageExtent = {
-            .width = width,
-            .height = height,
-            .depth = 1,
-        },
+        .imageExtent = { width, height, 1 },
     };
     vk.CmdCopyImageToBuffer(cmd, vk.swapchain_images[vk.current_image],
                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                            readback.buffer, 1, &copy);
+                            vk.screenshot_readback.buffer, 1, &copy);
 
-    VkAccessFlags dst_access = 0;
-    VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-    if (old_layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
-        dst_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        dst_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkBufferMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = vk.screenshot_readback.buffer,
+        .size = VK_WHOLE_SIZE,
+    };
+    vk.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                          VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL,
+                          1, &barrier, 0, NULL);
+
+    vk.screenshot_recorded = true;
+}
+
+// Waits for the frame with the copy and hands the pixels to the screenshot
+// code, which writes the file.
+static void vk_complete_screenshot(VkFence fence)
+{
+    int offsets[3];
+    void *mapped = NULL;
+
+    if (!vk.screenshot_recorded)
+        return;
+
+    VkResult result = vk.WaitForFences(vk.device, 1, &fence, VK_TRUE, UINT64_MAX);
+    if (result != VK_SUCCESS) {
+        vk_fail_result("vkWaitForFences", result);
+        vk_finish_screenshot(Q_ERR_FAILURE);
+        return;
     }
-    vk_transition_image(cmd, vk.current_image, old_layout, dst_access, dst_stage);
 
-    bool copied = vk_end_immediate(cmd);
-    cmd = VK_NULL_HANDLE;
-    if (!copied)
-        goto out;
-
-    VkResult result = vk.MapMemory(vk.device, readback.memory, 0,
-                                   readback.size, 0, &mapped);
+    result = vk.MapMemory(vk.device, vk.screenshot_readback.memory, 0,
+                          vk.screenshot_readback.size, 0, &mapped);
     if (result != VK_SUCCESS) {
         vk_fail_result("vkMapMemory", result);
-        goto out;
+        vk_finish_screenshot(Q_ERR_FAILURE);
+        return;
     }
+    vk.screenshot_mapped = mapped;
+
+    screenshot_t *s = IMG_PendingScreenshot();
+    if (!s || !vk_screenshot_format_offsets(offsets)) {
+        vk_finish_screenshot(Q_ERR(ENOTSUP));
+        return;
+    }
+
+    int width = vk.screenshot_width;
+    int height = vk.screenshot_height;
+    int src_rowbytes = width * 4;
+    int dst_rowbytes = width * 3;
 
     s->bpp = 3;
     s->rowbytes = dst_rowbytes;
-    s->pixels = R_Malloc(dst_size);
+    s->pixels = R_Malloc(dst_rowbytes * height);
     s->width = width;
     s->height = height;
 
@@ -18972,15 +19017,7 @@ int VKR_ReadPixels(screenshot_t *s)
         }
     }
 
-    ret = Q_ERR_SUCCESS;
-
-out:
-    if (mapped)
-        vk.UnmapMemory(vk.device, readback.memory);
-    if (cmd)
-        vk.FreeCommandBuffers(vk.device, vk.command_pool, 1, &cmd);
-    vk_destroy_buffer(&readback);
-    return ret;
+    vk_finish_screenshot(Q_ERR_SUCCESS);
 }
 
 static void vk_begin_render_pass_sized(VkRenderPass render_pass,
@@ -19686,6 +19723,8 @@ void VKR_EndFrame(void)
                              vk.timestamp_query_pool, vk.frame_index * 2 + 1);
     }
 
+    vk_record_screenshot(cmd);
+
     vk_transition_image(cmd, vk.current_image,
                         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                         0,
@@ -19696,6 +19735,8 @@ void VKR_EndFrame(void)
     vk.record_usec = vk_time_usec() - vk.frame_start_usec;
     if (result != VK_SUCCESS) {
         Com_EPrintf("vkEndCommandBuffer failed: Vulkan error %d\n", result);
+        if (vk.screenshot_recorded)
+            vk_finish_screenshot(Q_ERR_FAILURE);
         vk.frame_active = false;
         return;
     }
@@ -19719,6 +19760,8 @@ void VKR_EndFrame(void)
     result = vk.ResetFences(vk.device, 1, &frame_fence);
     if (result != VK_SUCCESS) {
         Com_EPrintf("vkResetFences failed: Vulkan error %d\n", result);
+        if (vk.screenshot_recorded)
+            vk_finish_screenshot(Q_ERR_FAILURE);
         vk.frame_active = false;
         return;
     }
@@ -19728,6 +19771,8 @@ void VKR_EndFrame(void)
     vk.submit_usec = vk_time_usec() - start;
     if (result != VK_SUCCESS) {
         Com_EPrintf("vkQueueSubmit failed: Vulkan error %d\n", result);
+        if (vk.screenshot_recorded)
+            vk_finish_screenshot(Q_ERR_FAILURE);
         vk_recreate_signaled_frame_fence();
         vk.frame_active = false;
         return;
@@ -19758,6 +19803,8 @@ void VKR_EndFrame(void)
 
     if (vk_finish && vk_finish->integer)
         vk.DeviceWaitIdle(vk.device);
+
+    vk_complete_screenshot(frame_fence);
 
     vk_log_perf_stats();
 
