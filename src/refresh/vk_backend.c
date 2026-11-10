@@ -10271,7 +10271,7 @@ static void vk_world_face_scroll(const mface_t *face, float time, float scroll[4
 
 static bool vk_world_lamp_bloom_enabled(void)
 {
-    return vk.raytracing_active || (vk_bloom_lamps && vk_bloom_lamps->integer);
+    return vk_bloom_lamps && vk_bloom_lamps->integer;
 }
 
 static void vk_world_light_params(const mface_t *face, float color[4], float scroll[4])
@@ -10288,9 +10288,8 @@ static void vk_world_light_params(const mface_t *face, float color[4], float scr
     scroll[3] = 0.0f;
 
     // Mark glowing faces without a glow map with a small fraction in the
-    // mode, so the world shaders let their bright texels feed bloom: with
-    // gl_bloom_lamps, as the OpenGL renderer does, and always with ray
-    // tracing, as the archived ray tracing builds did.
+    // mode, so the world shaders let their bright texels feed bloom
+    // (gl_bloom_lamps), as the OpenGL renderer does.
     if (vk_world_lamp_bloom_enabled() &&
         !(face->drawflags & (SURF_TRANS_MASK | SURF_WARP | SURF_NODRAW)) &&
         (face->texinfo->c.flags & SURF_LIGHT) &&

@@ -6,6 +6,12 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Lamps without a glow map (`gl_bloom_lamps`) glow as strongly as in the
+  archived builds again, in both renderers and with ray tracing, and
+  `gl_bloom_lamps 0` now also turns them off with ray tracing.
+
 ### Fixed
 
 - Vulkan screenshots read a swapchain image that had already been handed to
