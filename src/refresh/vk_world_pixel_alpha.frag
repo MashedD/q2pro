@@ -44,13 +44,17 @@ vec3 dynamic_light()
 }
 
 // Glowing faces without a glow map are marked with a fraction in the mode
-// (gl_bloom_lamps). As in the OpenGL renderer, their bright texture texels,
-// not the lit color, feed bloom three times over, so lamps glow like a glow
-// map would make them.
-vec3 static_lamp_bloom(vec3 texel)
+// (gl_bloom_lamps). As in the OpenGL renderer, 0.125 (1) feeds their lit
+// color to bloom, and 0.375 (2) their bright texture texels three times
+// over, like the archived builds.
+vec3 static_lamp_bloom(vec3 texel, vec3 lit)
 {
-    if (fract(v_mode) < 0.0625)
+    float mark = fract(v_mode);
+
+    if (mark < 0.0625)
         return vec3(0.0);
+    if (mark < 0.25)
+        return lit;
 
     float luma = dot(texel, vec3(0.2126, 0.7152, 0.0722));
     return texel * smoothstep(0.02, 0.18, luma) * 3.0 * max(pc.intensity, 0.0);
@@ -92,7 +96,7 @@ void main()
         }
     }
 
-    vec3 lamp_bloom = static_lamp_bloom(lamp_texel);
+    vec3 lamp_bloom = static_lamp_bloom(lamp_texel, out_color.rgb);
     if (pc.fog.a < 0.0) {
         out_color.rgb = mix(out_color.rgb, pc.fog.rgb, -pc.fog.a);
         lamp_bloom *= 1.0 + pc.fog.a;

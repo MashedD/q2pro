@@ -675,6 +675,8 @@ void GL_Flush3D(void)
     // cvar here lets it take effect without reloading the map.
     if (!(state & GLS_BLOOM_GENERATE) || !gl_bloom_lamps->integer)
         state &= ~GLS_BLOOM_SHELL;
+    else if ((state & GLS_BLOOM_SHELL) && gl_bloom_lamps->integer >= 2)
+        state |= GLS_BLOOM_LAMP_STRONG;
 
     if (!(state & GLS_TEXTURE_REPLACE))
         array |= GLA_COLOR;

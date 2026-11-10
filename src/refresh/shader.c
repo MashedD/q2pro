@@ -634,11 +634,12 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
     }
 
     if (bits & GLS_BLOOM_GENERATE) {
-        if ((bits & GLS_BLOOM_SHELL) && (bits & GLS_LIGHTMAP_ENABLE)) {
-            // Glowing world faces without a glow map (gl_bloom_lamps): seed
-            // bloom from their bright texture texels, three times over, so
-            // they glow like a glow map would make them. The lightmap is left
-            // out, so dynamic lights don't recolor the halo.
+        if ((bits & GLS_BLOOM_LAMP_STRONG) && (bits & GLS_LIGHTMAP_ENABLE)) {
+            // Glowing world faces without a glow map, gl_bloom_lamps 2: seed
+            // bloom from their bright texture texels, three times over, like
+            // the archived builds. The lightmap is left out, so dynamic
+            // lights don't recolor the halo. gl_bloom_lamps 1 uses the lit
+            // color below, for a softer glow.
             GLSL(
                 vec3 lamp = texture(u_texture, tc).rgb;
                 float lamp_luma = dot(lamp, vec3(0.2126, 0.7152, 0.0722));

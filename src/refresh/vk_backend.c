@@ -10288,13 +10288,14 @@ static void vk_world_light_params(const mface_t *face, float color[4], float scr
     scroll[3] = 0.0f;
 
     // Mark glowing faces without a glow map with a small fraction in the
-    // mode, so the world shaders let their bright texels feed bloom
-    // (gl_bloom_lamps), as the OpenGL renderer does.
+    // mode, so the world shaders let them feed bloom (gl_bloom_lamps), as the
+    // OpenGL renderer does: 0.125 for the lit color (1), 0.375 for the
+    // stronger glow from their bright texels (2).
     if (vk_world_lamp_bloom_enabled() &&
         !(face->drawflags & (SURF_TRANS_MASK | SURF_WARP | SURF_NODRAW)) &&
         (face->texinfo->c.flags & SURF_LIGHT) &&
         !face->texinfo->image->texnum2)
-        scroll[2] += 0.125f;
+        scroll[2] += vk_bloom_lamps->integer >= 2 ? 0.375f : 0.125f;
 
     if (fullbright || (face->drawflags & vk.world.nolm_mask))
         return;

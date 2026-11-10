@@ -8,9 +8,10 @@ All notable changes to this fork are documented here. The format follows
 
 ### Changed
 
-- Lamps without a glow map (`gl_bloom_lamps`) glow as strongly as in the
-  archived builds again, in both renderers and with ray tracing, and
-  `gl_bloom_lamps 0` now also turns them off with ray tracing.
+- `gl_bloom_lamps 2` makes lamps without a glow map glow as strongly as in
+  the archived builds, in both renderers and with ray tracing; 1 keeps the
+  softer glow. The release packages use 2. `gl_bloom_lamps 0` now also turns
+  lamp glow off with ray tracing.
 
 ### Fixed
 
