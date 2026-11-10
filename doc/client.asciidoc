@@ -851,8 +851,8 @@ vk_raytracing::
     Ambient occlusion and surface light are computed once when a map loads,
     into an atlas of up to 2048x2048 texels, and a summary line is printed;
     if that fails they are traced every frame instead, nearby only. With
-    ‘gl_bloom’, ray-traced highlights and lamps without a glow map also feed
-    bloom. Needs a
+    ‘gl_bloom’, ray-traced highlights also feed bloom, and so do lamps
+    without a glow map when ‘gl_bloom_lamps’ is set. Needs a
     GPU and driver with Vulkan 1.2, acceleration structures and ray queries;
     without them a warning names what is missing and the renderer carries on
     without ray tracing. Changing it restarts the renderer. Default value is
@@ -1102,8 +1102,11 @@ gl_bloom::
 gl_bloom_lamps::
     With ‘gl_bloom’, also lets glowing world surfaces (‘SURF_LIGHT’) that
     have no glow map feed bloom, so plain lamps glow as well. Applies to both
-    renderers. Default value is 0 (only glow maps feed bloom). The release
-    packages turn it on.
+    renderers, with or without ray tracing. Default value is 1.
+      - 0 — only glow maps feed bloom
+      - 1 — a soft glow from the lamps' lit color
+      - 2 — a strong glow from their bright texture texels, three times over,
+        like the archived builds
 
 gl_bloom_sigma::
     Specifies strength parameter of gaussian blur filter used for the bloom

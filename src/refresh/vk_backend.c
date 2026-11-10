@@ -10271,7 +10271,7 @@ static void vk_world_face_scroll(const mface_t *face, float time, float scroll[4
 
 static bool vk_world_lamp_bloom_enabled(void)
 {
-    return vk.raytracing_active || (vk_bloom_lamps && vk_bloom_lamps->integer);
+    return vk_bloom_lamps && vk_bloom_lamps->integer;
 }
 
 static void vk_world_light_params(const mface_t *face, float color[4], float scroll[4])
@@ -10288,14 +10288,14 @@ static void vk_world_light_params(const mface_t *face, float color[4], float scr
     scroll[3] = 0.0f;
 
     // Mark glowing faces without a glow map with a small fraction in the
-    // mode, so the world shaders let their bright texels feed bloom: with
-    // gl_bloom_lamps, as the OpenGL renderer does, and always with ray
-    // tracing, as the archived ray tracing builds did.
+    // mode, so the world shaders let them feed bloom (gl_bloom_lamps), as the
+    // OpenGL renderer does: 0.125 for the lit color (1), 0.375 for the
+    // stronger glow from their bright texels (2).
     if (vk_world_lamp_bloom_enabled() &&
         !(face->drawflags & (SURF_TRANS_MASK | SURF_WARP | SURF_NODRAW)) &&
         (face->texinfo->c.flags & SURF_LIGHT) &&
         !face->texinfo->image->texnum2)
-        scroll[2] += 0.125f;
+        scroll[2] += vk_bloom_lamps->integer >= 2 ? 0.375f : 0.125f;
 
     if (fullbright || (face->drawflags & vk.world.nolm_mask))
         return;
@@ -17978,7 +17978,7 @@ bool VKR_Init(bool total)
     vk_showbloom = Cvar_Get("gl_showbloom", "0", CVAR_CHEAT);
     vk_waterwarp = Cvar_Get("gl_waterwarp", "0", 0);
     vk_bloom_sigma = Cvar_Get("gl_bloom_sigma", "4", 0);
-    vk_bloom_lamps = Cvar_Get("gl_bloom_lamps", "0", CVAR_ARCHIVE);
+    vk_bloom_lamps = Cvar_Get("gl_bloom_lamps", "1", CVAR_ARCHIVE);
     vk_bloom_downsample = Cvar_Get("vk_bloom_downsample", "4", 0);
     vk_perf_stats = Cvar_Get("vk_perf_stats", "0", 0);
     vk_frames_in_flight = Cvar_Get("vk_frames_in_flight", "2", CVAR_ARCHIVE);
