@@ -10,8 +10,10 @@ All notable changes to this fork are documented here. The format follows
 
 - `gl_bloom_lamps 2` makes lamps without a glow map glow as strongly as in
   the archived builds, in both renderers and with ray tracing; 1 keeps the
-  softer glow. The release packages use 2. `gl_bloom_lamps 0` now also turns
-  lamp glow off with ray tracing.
+  softer glow and is now the default, so lamps glow whenever bloom is on.
+  The release packages no longer set it, and the effects and ray tracing
+  menus have a "lamp bloom" entry. `gl_bloom_lamps 0` now also turns lamp
+  glow off with ray tracing.
 
 ### Fixed
 

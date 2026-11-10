@@ -17978,7 +17978,7 @@ bool VKR_Init(bool total)
     vk_showbloom = Cvar_Get("gl_showbloom", "0", CVAR_CHEAT);
     vk_waterwarp = Cvar_Get("gl_waterwarp", "0", 0);
     vk_bloom_sigma = Cvar_Get("gl_bloom_sigma", "4", 0);
-    vk_bloom_lamps = Cvar_Get("gl_bloom_lamps", "0", CVAR_ARCHIVE);
+    vk_bloom_lamps = Cvar_Get("gl_bloom_lamps", "1", CVAR_ARCHIVE);
     vk_bloom_downsample = Cvar_Get("vk_bloom_downsample", "4", 0);
     vk_perf_stats = Cvar_Get("vk_perf_stats", "0", 0);
     vk_frames_in_flight = Cvar_Get("vk_frames_in_flight", "2", CVAR_ARCHIVE);

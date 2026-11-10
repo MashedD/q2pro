@@ -1102,8 +1102,7 @@ gl_bloom::
 gl_bloom_lamps::
     With ‘gl_bloom’, also lets glowing world surfaces (‘SURF_LIGHT’) that
     have no glow map feed bloom, so plain lamps glow as well. Applies to both
-    renderers, with or without ray tracing. Default value is 0. The release
-    packages set it to 2.
+    renderers, with or without ray tracing. Default value is 1.
       - 0 — only glow maps feed bloom
       - 1 — a soft glow from the lamps' lit color
       - 2 — a strong glow from their bright texture texels, three times over,

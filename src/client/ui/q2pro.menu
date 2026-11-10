@@ -133,6 +133,8 @@ begin raytracing
         "ray tracing" vk_raytracing
     toggle --status "Allow bright ray-traced effects and lamps to contribute bloom" \
         "bloom" gl_bloom
+    values --status "Glow of lamps without a glowmap. Needs bloom. Strong is like the archived builds" \
+        "lamp bloom" gl_bloom_lamps off soft strong
     blank
     action --align "lighting..." pushmenu rt_lighting
     action --align "reflections and materials..." pushmenu rt_materials
@@ -316,6 +318,8 @@ begin effects
         "player highlighting" cl_playerhighlight
     toggle --status "Glow around glowmaps and glowing highlights (shaders backend)" \
         "bloom" gl_bloom
+    values --status "Glow of lamps without a glowmap. Needs bloom. Strong is like the archived builds" \
+        "lamp bloom" gl_bloom_lamps off soft strong
     range --status "Glow strength of highlights. Needs bloom. 0 keeps a plain shell" \
         "highlight bloom" cl_itemhighlight_glow 0 5 1
     values --status "Shadows under models. Fade makes them lighter with distance" \
