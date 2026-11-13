@@ -817,6 +817,19 @@ static bool CL_GetWeaponModelTint(const char *model, skin_tint_t *tint)
     return true;
 }
 
+// Your own first-person weapon has its own switch, cl_guntint, so weapons
+// on the map and in other players' hands can be tinted without it.
+static bool CL_GetGunTint(const char *model, skin_tint_t *tint)
+{
+    const skin_tint_def_t *def = CL_FindSkinTint(model);
+
+    if (!cl_guntint->integer || !def || def->kind != TINT_KIND_WEAPON)
+        return false;
+
+    CL_ResolveSkinTint(def, tint);
+    return true;
+}
+
 static bool CL_GetWeaponIndexTint(int weapon, skin_tint_t *tint)
 {
     const skin_tint_def_t *def;
@@ -2006,7 +2019,7 @@ static void CL_AddViewWeapon(void)
 
     if (!gun_model) {
         int modelindex = ps->gunindex & GUNINDEX_MASK;
-        has_weapon_tint = CL_GetWeaponModelTint(
+        has_weapon_tint = CL_GetGunTint(
             cl.configstrings[cl.csr.models + modelindex], &weapon_tint);
     }
 

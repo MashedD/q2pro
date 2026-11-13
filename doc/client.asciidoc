@@ -321,11 +321,16 @@ cl_itemtint::
     is 0 (disabled).
 
 cl_weapontint::
-    Recolors the skins of weapon pickups, of weapons held by players and of
-    your own view weapon, in the colors of the skin pack (see ‘cl_itemtint’).
-    View weapons, which the pack doesn't have, use the color of their pickup
-    with a softer gradient that keeps their shading. Only effective if
+    Recolors the skins of weapon pickups and of weapons held by other
+    players, in the colors of the skin pack (see ‘cl_itemtint’). Your own
+    first-person weapon has its own switch, ‘cl_guntint’. Only effective if
     ‘gl_shaders’ is enabled. Default value is 0 (disabled).
+
+cl_guntint::
+    Recolors the weapon you hold in first person, in the color of its pickup
+    in the skin pack, with a softer gradient that keeps its shading (the pack
+    has no first-person weapons). Only effective if ‘gl_shaders’ is enabled.
+    Default value is 0 (disabled).
 
 cl_ammotint::
     Recolors the skins of ammo pickups only, in the colors of the skin pack

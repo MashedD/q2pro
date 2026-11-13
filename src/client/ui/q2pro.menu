@@ -302,8 +302,10 @@ begin effects
         "entity glowing" cl_noglow ~
     toggle --status "Recolor item skins instead of drawing a shell. Shaders backend only" \
         "tint item skins" cl_itemtint
-    toggle --status "Recolor weapon skins, including your own view weapon. Shaders backend only" \
+    toggle --status "Recolor weapons on the map and in other players' hands. Shaders backend only" \
         "tint weapon skins" cl_weapontint
+    toggle --status "Recolor the weapon you hold in first person. Shaders backend only" \
+        "tint your weapon" cl_guntint
     toggle --status "Recolor ammo skins. Shaders backend only" \
         "tint ammo skins" cl_ammotint
     toggle --status "Recolor player skins: male white, female green, other models amber. Shaders backend only" \

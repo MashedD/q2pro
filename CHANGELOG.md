@@ -6,6 +6,12 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `cl_guntint` tints the weapon you hold in first person on its own;
+  `cl_weapontint` now only covers weapons on the map and in other players'
+  hands, and the effects menu has a "tint your weapon" entry.
+
 ### Changed
 
 - `gl_bloom_lamps 2` makes lamps without a glow map glow as strongly as in

@@ -47,6 +47,7 @@ cvar_t  *cl_weaponhighlight;
 cvar_t  *cl_ammohighlight;
 cvar_t  *cl_itemtint;
 cvar_t  *cl_weapontint;
+cvar_t  *cl_guntint;
 cvar_t  *cl_ammotint;
 cvar_t  *cl_playertint;
 cvar_t  *cl_itemhighlight_glow;
@@ -2795,6 +2796,7 @@ static void CL_InitLocal(void)
     cl_itemtint = Cvar_Get("cl_itemtint", "0", CVAR_ARCHIVE);
     CL_InitSkinTints();
     cl_weapontint = Cvar_Get("cl_weapontint", "0", CVAR_ARCHIVE);
+    cl_guntint = Cvar_Get("cl_guntint", "0", CVAR_ARCHIVE);
     cl_ammotint = Cvar_Get("cl_ammotint", "0", CVAR_ARCHIVE);
     cl_playertint = Cvar_Get("cl_playertint", "0", CVAR_ARCHIVE);
     cl_itemhighlight_glow = Cvar_Get("cl_itemhighlight_glow", "0", CVAR_ARCHIVE);
