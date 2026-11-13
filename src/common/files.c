@@ -3710,6 +3710,10 @@ void FS_AddConfigFiles(bool init)
     // default.cfg may come from packfile, but config.cfg and autoexec.cfg
     // must be real files within the game directory.
     Com_AddConfigFile(COM_DEFAULT_CFG, flag);
+    // Defaults of a packaged release (q2pro.pkz) go on top of the game's own
+    // default.cfg instead of replacing it, so they fit the full game and the
+    // demo alike. Nothing happens when the file doesn't exist.
+    Com_AddConfigFile(COM_PACKAGE_CFG, flag);
     Com_AddConfigFile(COM_CONFIG_CFG, FS_TYPE_REAL | flag);
 
     // autoexec.cfg is executed twice, first from basedir and then from

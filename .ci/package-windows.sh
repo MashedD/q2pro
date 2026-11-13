@@ -39,8 +39,8 @@ cd "$tmp/build"
 "$triplet-strip" q2pro.exe q2proded.exe "game$cpu.dll"
 mkdir -p "$out" baseq2
 cp "$src/src/client/ui/q2pro.menu" baseq2/
-# Default settings, packed so that they take priority over pak0's default.cfg.
-(cd "$src/data/baseq2" && zip -q -X -9 "$OLDPWD/baseq2/q2pro.pkz" default.cfg materials/rt_reflections.mat)
+# Package defaults, run by the engine right after the game's default.cfg.
+(cd "$src/data/baseq2" && zip -q -X -9 "$OLDPWD/baseq2/q2pro.pkz" q2pro-defaults.cfg materials/rt_reflections.mat)
 mv "game$cpu.dll" baseq2/
 if [ -n "$suffix" ]; then
     mv q2pro.exe "q2pro$suffix.exe"

@@ -17,6 +17,12 @@ All notable changes to this fork are documented here. The format follows
 
 ### Fixed
 
+- With the demo's data, the release packages broke starting a new game and
+  the attract mode: their `q2pro.pkz` replaced the game's `default.cfg` with
+  one written for the full game, whose `newgame` and `dedicated_start` load
+  `base1`. The package defaults now live in `q2pro-defaults.cfg`, which the
+  engine runs right after the game's own `default.cfg`, so the full game and
+  the demo keep their aliases.
 - Vulkan screenshots read a swapchain image that had already been handed to
   the display, which the Vulkan specification forbids and which can give a
   wrong or stale picture on some drivers. They now capture the next frame
