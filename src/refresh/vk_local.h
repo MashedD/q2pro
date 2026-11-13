@@ -810,19 +810,20 @@ typedef struct {
 
 extern vk_state_t vk;
 
-// vk_backend.c: buffers and meshes
-bool vk_upload_buffer(vk_buffer_t *dst, const void *data,
-                      VkDeviceSize size, VkBufferUsageFlags usage);
-void vk_destroy_buffer(vk_buffer_t *buffer);
+// vk_backend.c
+extern const VkPipelineDynamicStateCreateInfo vk_3d_dynamic_state;
+bool vk_fail_result(const char *what, VkResult result);
+bool vk_shadow_stencil_enabled(void);
+bool vk_upload_buffer(vk_buffer_t *dst, const void *data, VkDeviceSize size,
+                      VkBufferUsageFlags usage);
 bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
                     uint32_t vertex_count, const uint32_t *indices,
                     uint32_t index_count);
-void vk_destroy_mesh(vk_mesh_t *mesh);
-uint32_t *vk_build_line_indices(const uint32_t *indices,
-                                uint32_t index_count,
+int vk_pixel_lightmap_mode(void);
+uint32_t *vk_build_line_indices(const uint32_t *indices, uint32_t index_count,
                                 uint32_t *line_index_count);
-
-// vk_backend.c: cvars
+void vk_destroy_buffer(vk_buffer_t *buffer);
+void vk_destroy_mesh(vk_mesh_t *mesh);
 #if USE_MD5
 extern cvar_t *vk_md5_load;
 #endif
@@ -831,5 +832,39 @@ extern cvar_t *vk_md5_load;
 vk_model_t *vk_model_for_handle(qhandle_t handle);
 void vk_free_models(bool all);
 void vk_model_list_f(void);
+
+// vk_pipeline.c
+VkPipelineDepthStencilStateCreateInfo vk_shadow_depth_stencil_state(void);
+VkShaderModule vk_create_shader_module(const uint32_t *code, size_t code_size);
+bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write, bool blend,
+                              bool color_write, bool alpha_test, bool color_only,
+                              VkCullModeFlags cull_mode,
+                              VkPolygonMode polygon_mode,
+                              VkPrimitiveTopology topology,
+                              VkCompareOp depth_compare, bool depth_bias_enable,
+                              float depth_bias_constant, float depth_bias_slope,
+                              VkPipelineDepthStencilStateCreateInfo *stencil_state);
+bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
+                                bool depth_write, bool blend, bool additive,
+                                VkPrimitiveTopology topology);
+bool vk_create_pixel_world_pipeline(VkPipeline *pipeline, bool alpha_test,
+                                    bool glowmap, bool fast_path,
+                                    bool ray_query);
+bool vk_create_pixel_world_pipeline_layout(void);
+bool vk_create_rect_pipeline(void);
+bool vk_create_rect_pipeline_ex(VkPipeline *pipeline, const uint32_t *vert_spv,
+                                size_t vert_size);
+bool vk_create_render_pass(void);
+bool vk_create_ssr_pipeline(void);
+bool vk_create_texture_pipeline(void);
+bool vk_create_texture_pipeline_ex(VkPipeline *pipeline,
+                                   const uint32_t *frag_spv, size_t frag_size,
+                                   bool additive, VkExtent2D extent,
+                                   bool postprocess);
+bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
+                              bool depth_write, bool blend, bool alpha_test,
+                              bool additive, bool glowmap, bool smooth_dlights,
+                              bool color_write);
+bool vk_validate_pixel_lightmap_shaders(void);
 
 #endif // USE_VULKAN
