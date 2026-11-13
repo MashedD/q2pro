@@ -561,6 +561,7 @@ extern cvar_t   *cl_weaponhighlight;
 extern cvar_t   *cl_ammohighlight;
 extern cvar_t   *cl_itemtint;
 extern cvar_t   *cl_weapontint;
+extern cvar_t   *cl_guntint;
 extern cvar_t   *cl_ammotint;
 extern cvar_t   *cl_playertint;
 extern cvar_t   *cl_itemhighlight_glow;
