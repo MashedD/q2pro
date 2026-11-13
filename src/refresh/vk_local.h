@@ -811,7 +811,25 @@ typedef struct {
 extern vk_state_t vk;
 
 // vk_backend.c
+extern byte vk_gammatable[256];
 extern const VkPipelineDynamicStateCreateInfo vk_3d_dynamic_state;
+extern cvar_t *vk_anisotropy;
+extern cvar_t *vk_bilerp_chars;
+extern cvar_t *vk_bilerp_pics;
+extern cvar_t *vk_bilerp_skies;
+extern cvar_t *vk_downsample_skins;
+extern cvar_t *vk_gamma_scale_pics;
+extern cvar_t *vk_invert;
+extern cvar_t *vk_nobind;
+extern cvar_t *vk_partshape;
+extern cvar_t *vk_picmip;
+extern cvar_t *vk_round_down;
+extern cvar_t *vk_texturemode;
+bool vk_begin_immediate(VkCommandBuffer *cmd);
+bool vk_create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
+                      VkMemoryPropertyFlags properties, VkBuffer *buffer,
+                      VkDeviceMemory *memory);
+bool vk_end_immediate(VkCommandBuffer cmd);
 bool vk_fail_result(const char *what, VkResult result);
 bool vk_shadow_stencil_enabled(void);
 bool vk_upload_buffer(vk_buffer_t *dst, const void *data, VkDeviceSize size,
@@ -820,10 +838,16 @@ bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
                     uint32_t vertex_count, const uint32_t *indices,
                     uint32_t index_count);
 int vk_pixel_lightmap_mode(void);
+int vk_upscale_level(uint32_t width, uint32_t height, imagetype_t type,
+                     imageflags_t flags);
 uint32_t *vk_build_line_indices(const uint32_t *indices, uint32_t index_count,
                                 uint32_t *line_index_count);
+uint32_t vk_find_memory_type(uint32_t type_bits,
+                             VkMemoryPropertyFlags properties);
+uint32_t vk_mip_level_count(uint32_t width, uint32_t height);
 void vk_destroy_buffer(vk_buffer_t *buffer);
 void vk_destroy_mesh(vk_mesh_t *mesh);
+void vk_mip_map(byte *out, const byte *in, uint32_t width, uint32_t height);
 #if USE_MD5
 extern cvar_t *vk_md5_load;
 #endif
@@ -866,5 +890,41 @@ bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
                               bool additive, bool glowmap, bool smooth_dlights,
                               bool color_write);
 bool vk_validate_pixel_lightmap_shaders(void);
+
+// vk_texture.c
+VkSampler vk_sampler_for_pic_flags(imageflags_t flags);
+bool vk_create_beam_texture(void);
+bool vk_create_default_texture(void);
+bool vk_create_impact_texture(void);
+bool vk_create_nearest_sampler(VkSampler *sampler,
+                               VkSamplerAddressMode address_mode);
+bool vk_create_particle_texture(void);
+bool vk_create_postprocess_sampler(VkSampler *sampler);
+bool vk_create_sampler(VkSampler *sampler);
+bool vk_create_shell_texture(void);
+bool vk_create_shockwave_texture(void);
+bool vk_create_sky_sampler(VkSampler *sampler);
+bool vk_upload_cubemap(image_t *image, const byte *pic);
+bool vk_upload_texture(image_t *image, byte *pic);
+bool vk_upload_texture_data(vk_texture_t *texture, uint32_t width,
+                            uint32_t height, const void *pixels, bool mipmaps);
+const vk_texture_t *vk_texture_for_index(unsigned index, bool allow_nobind);
+vk_cubemap_t *vk_find_cubemap(const image_t *image);
+void vk_destroy_texture(image_t *image);
+void vk_destroy_texture_resource(vk_texture_t *texture);
+void vk_sampler_selection_changed(cvar_t *self);
+void vk_texture_barrier(VkCommandBuffer cmd, VkImage image,
+                        VkImageLayout old_layout, VkImageLayout new_layout,
+                        VkAccessFlags src_access, VkAccessFlags dst_access,
+                        VkPipelineStageFlags src_stage,
+                        VkPipelineStageFlags dst_stage);
+void vk_texturemode_changed(cvar_t *self);
+void vk_texturemode_g(genctx_t *ctx);
+void vk_unload_cubemap(image_t *image);
+void vk_unload_image(image_t *image);
+void vk_update_texture_descriptor(vk_texture_t *texture);
+void vk_update_texture_descriptor_with_sampler(vk_texture_t *texture,
+                                               VkSampler sampler);
+void vk_upload_image(image_t *image, byte *pic);
 
 #endif // USE_VULKAN
