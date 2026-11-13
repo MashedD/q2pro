@@ -808,6 +808,18 @@ typedef struct {
     VkIndexType bound_index_type;
 } vk_state_t;
 
+// Entity passes, in drawing order; see vk_entity_in_pass().
+typedef enum {
+    VK_ENTITY_BMODEL,
+    VK_ENTITY_OPAQUE,
+    VK_ENTITY_ALPHA_BACK,
+    VK_ENTITY_BMODEL_ALPHA,
+    VK_ENTITY_BEAM,
+    VK_ENTITY_ALPHA_FRONT,
+    VK_ENTITY_BLOOM_ONLY,
+    VK_ENTITY_BLOOM_SOURCE,
+} vk_entity_pass_t;
+
 extern vk_state_t vk;
 
 // vk_backend.c
@@ -817,6 +829,8 @@ extern cvar_t *vk_anisotropy;
 extern cvar_t *vk_bilerp_chars;
 extern cvar_t *vk_bilerp_pics;
 extern cvar_t *vk_bilerp_skies;
+extern cvar_t *vk_bloom_downsample;
+extern cvar_t *vk_bloom_sigma;
 extern cvar_t *vk_downsample_skins;
 extern cvar_t *vk_fontshadow;
 extern cvar_t *vk_gamma_scale_pics;
@@ -824,8 +838,16 @@ extern cvar_t *vk_invert;
 extern cvar_t *vk_nobind;
 extern cvar_t *vk_partshape;
 extern cvar_t *vk_picmip;
+extern cvar_t *vk_raytracing;
 extern cvar_t *vk_round_down;
+extern cvar_t *vk_rt_debug;
+extern cvar_t *vk_rt_reflection_dispersion;
+extern cvar_t *vk_rt_reflection_glints;
+extern cvar_t *vk_rt_reflections;
+extern cvar_t *vk_showbloom;
 extern cvar_t *vk_texturemode;
+extern cvar_t *vk_waterwarp;
+VkClearColorValue vk_frame_clear_color(void);
 bool vk_begin_immediate(VkCommandBuffer *cmd);
 bool vk_create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
                       VkMemoryPropertyFlags properties, VkBuffer *buffer,
@@ -848,12 +870,37 @@ uint32_t *vk_build_line_indices(const uint32_t *indices, uint32_t index_count,
 uint32_t vk_find_memory_type(uint32_t type_bits,
                              VkMemoryPropertyFlags properties);
 uint32_t vk_mip_level_count(uint32_t width, uint32_t height);
+void vk_begin_render_pass(VkRenderPass render_pass, VkFramebuffer framebuffer,
+                          VkClearColorValue color);
+void vk_begin_render_pass_sized(VkRenderPass render_pass,
+                                VkFramebuffer framebuffer,
+                                VkClearColorValue color, uint32_t width,
+                                uint32_t height);
+void vk_bind_pipeline(VkCommandBuffer cmd, VkPipelineBindPoint bind_point,
+                      VkPipeline pipeline);
+void vk_bind_texture_descriptor(VkCommandBuffer cmd, VkDescriptorSet set);
 void vk_clear_rect(int x, int y, int w, int h, uint32_t color);
 void vk_destroy_buffer(vk_buffer_t *buffer);
 void vk_destroy_mesh(vk_mesh_t *mesh);
+void vk_draw_entities(const refdef_t *fd, vk_entity_pass_t pass);
 void vk_draw_texture_resource(int x, int y, int w, int h, float s1, float t1,
                               float s2, float t2, const vk_texture_t *texture);
 void vk_mip_map(byte *out, const byte *in, uint32_t width, uint32_t height);
+void vk_projection_matrix(mat4_t m, float fov_x, float fov_y, int rdflags);
+void vk_push_constants(VkCommandBuffer cmd, uint32_t size, const void *data);
+void vk_reset_bind_cache(void);
+void vk_set_3d_viewport(const refdef_t *fd);
+void vk_transition_color_target(VkCommandBuffer cmd, vk_texture_t *texture,
+                                VkImageLayout *layout, VkImageLayout new_layout,
+                                VkAccessFlags dst_access,
+                                VkPipelineStageFlags dst_stage);
+void vk_transition_depth(VkCommandBuffer cmd, VkImageLayout new_layout,
+                         VkAccessFlags dst_access,
+                         VkPipelineStageFlags dst_stage);
+void vk_transition_scene(VkCommandBuffer cmd, VkImageLayout new_layout,
+                         VkAccessFlags dst_access,
+                         VkPipelineStageFlags dst_stage);
+void vk_view_matrix(mat4_t matrix, const refdef_t *fd);
 #if USE_MD5
 extern cvar_t *vk_md5_load;
 #endif
@@ -896,6 +943,23 @@ bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
                               bool additive, bool glowmap, bool smooth_dlights,
                               bool color_write);
 bool vk_validate_pixel_lightmap_shaders(void);
+
+// vk_postprocess.c
+bool vk_bloom_enabled_for_frame(void);
+bool vk_bloom_requested(void);
+bool vk_bloom_supported(void);
+bool vk_ssr_enabled_for_frame(void);
+bool vk_waterwarp_enabled_for_frame(void);
+float vk_bloom_blur_sigma(void);
+uint32_t vk_bloom_downsample_value(void);
+void vk_composite_scene_texture(void);
+void vk_draw_fullscreen_texture_sized(VkPipeline pipeline,
+                                      const vk_texture_t *texture,
+                                      const vec4_t color, uint32_t width,
+                                      uint32_t height);
+void vk_draw_refdef_texture(VkPipeline pipeline, const vk_texture_t *texture,
+                            const vec4_t color);
+void vk_finish_postprocess_scene(void);
 
 // vk_texture.c
 VkSampler vk_sampler_for_pic_flags(imageflags_t flags);
