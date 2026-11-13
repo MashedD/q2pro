@@ -77,7 +77,8 @@ did not happen.
   `doc/server.asciidoc`.
 - Treat network messages, downloads and map, model and demo files as untrusted.
 - Keep upstream copyright notices and attribution.
-- Windows, macOS and FreeBSD may only be build-tested; say so when that applies.
+- Windows and FreeBSD may only be build-tested; say so when that applies.
+  macOS is not supported and its CI job is disabled.
 
 ## Releases
 
