@@ -410,6 +410,7 @@ if vulkan.found()
   endif
   common_deps += vulkan.partial_dependency(compile_args: true, includes: true)
   refresh_src += ['src/refresh/vk_backend.c', vk_shader_headers]
+  refresh_src += ['src/refresh/vk_model.c']
   config.set10('USE_VULKAN', true)
 endif
 
