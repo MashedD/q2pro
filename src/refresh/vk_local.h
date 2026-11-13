@@ -810,4 +810,26 @@ typedef struct {
 
 extern vk_state_t vk;
 
+// vk_backend.c: buffers and meshes
+bool vk_upload_buffer(vk_buffer_t *dst, const void *data,
+                      VkDeviceSize size, VkBufferUsageFlags usage);
+void vk_destroy_buffer(vk_buffer_t *buffer);
+bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
+                    uint32_t vertex_count, const uint32_t *indices,
+                    uint32_t index_count);
+void vk_destroy_mesh(vk_mesh_t *mesh);
+uint32_t *vk_build_line_indices(const uint32_t *indices,
+                                uint32_t index_count,
+                                uint32_t *line_index_count);
+
+// vk_backend.c: cvars
+#if USE_MD5
+extern cvar_t *vk_md5_load;
+#endif
+
+// vk_model.c
+vk_model_t *vk_model_for_handle(qhandle_t handle);
+void vk_free_models(bool all);
+void vk_model_list_f(void);
+
 #endif // USE_VULKAN
