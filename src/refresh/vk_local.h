@@ -818,6 +818,7 @@ extern cvar_t *vk_bilerp_chars;
 extern cvar_t *vk_bilerp_pics;
 extern cvar_t *vk_bilerp_skies;
 extern cvar_t *vk_downsample_skins;
+extern cvar_t *vk_fontshadow;
 extern cvar_t *vk_gamma_scale_pics;
 extern cvar_t *vk_invert;
 extern cvar_t *vk_nobind;
@@ -837,6 +838,8 @@ bool vk_upload_buffer(vk_buffer_t *dst, const void *data, VkDeviceSize size,
 bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
                     uint32_t vertex_count, const uint32_t *indices,
                     uint32_t index_count);
+int vk_2d_height(void);
+int vk_2d_width(void);
 int vk_pixel_lightmap_mode(void);
 int vk_upscale_level(uint32_t width, uint32_t height, imagetype_t type,
                      imageflags_t flags);
@@ -845,8 +848,11 @@ uint32_t *vk_build_line_indices(const uint32_t *indices, uint32_t index_count,
 uint32_t vk_find_memory_type(uint32_t type_bits,
                              VkMemoryPropertyFlags properties);
 uint32_t vk_mip_level_count(uint32_t width, uint32_t height);
+void vk_clear_rect(int x, int y, int w, int h, uint32_t color);
 void vk_destroy_buffer(vk_buffer_t *buffer);
 void vk_destroy_mesh(vk_mesh_t *mesh);
+void vk_draw_texture_resource(int x, int y, int w, int h, float s1, float t1,
+                              float s2, float t2, const vk_texture_t *texture);
 void vk_mip_map(byte *out, const byte *in, uint32_t width, uint32_t height);
 #if USE_MD5
 extern cvar_t *vk_md5_load;
