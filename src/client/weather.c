@@ -109,6 +109,7 @@ static struct {
     bool            have_candidates;
 
     r_snow_vertex_t *vertices;      // snow cover mesh
+    int             num_vertices;
     uint32_t        *indices;
     int             num_indices;
     bool            dirty;          // send to the renderer
@@ -297,7 +298,7 @@ void CL_AddWeather(void)
     if (!cover.built)
         cover_build();
     if (cover.dirty) {
-        R_SetSnowCover(cover.vertices, cover.num_samples, cover.indices, cover.num_indices);
+        R_SetSnowCover(cover.vertices, cover.num_vertices, cover.indices, cover.num_indices);
         cover.dirty = false;
     }
     if (cover.num_indices)
@@ -579,6 +580,53 @@ static void cover_add_face(const mface_t *face, bool liquid)
     }
 }
 
+// Fills single missing points that have floor on all four sides, which
+// sampling misses where the edges of faces meet, so the cover has no holes.
+static void cover_fill_holes(void)
+{
+    int num = cover.num_samples;
+
+    for (int i = 0; i < num; i++) {
+        const cover_sample_t *s = &cover.samples[i];
+        int x = s->x + 1, y = s->y;
+        int n[4];
+        float z = 0;
+        bool open = true, liquid = false;
+
+        if (cover_find(x, y, s->org[2], 16) >= 0)
+            continue;
+        n[0] = i;
+        n[1] = cover_find(x + 1, y, s->org[2], 16);
+        n[2] = cover_find(x, y + 1, s->org[2], 16);
+        n[3] = cover_find(x, y - 1, s->org[2], 16);
+        if (n[1] < 0 || n[2] < 0 || n[3] < 0)
+            continue;
+        for (int j = 0; j < 4; j++) {
+            const cover_sample_t *o = &cover.samples[n[j]];
+            z += o->org[2] * 0.25f;
+            open &= o->open;
+            liquid |= o->open && !o->cover;
+        }
+
+        vec3_t p = { x * COVER_GRID, y * COVER_GRID, z + 4 };
+        if (CM_PointContents(p, cl.bsp->nodes, cl.csr.extended) & MASK_SOLID)
+            continue;   // a thin pillar
+        if (cover.num_samples >= COVER_MAX_SAMPLES)
+            return;
+
+        cover_sample_t *f = &cover.samples[cover.num_samples];
+        VectorSet(f->org, p[0], p[1], z);
+        f->x = x;
+        f->y = y;
+        f->open = open && cover_exposed(f->org, &f->sky_z);
+        f->cover = f->open && !liquid;
+        f->noise = cover_noise(p[0], p[1]);
+        unsigned h = cover_hash(x, y);
+        f->next = cover.hash[h];
+        cover.hash[h] = cover.num_samples++;
+    }
+}
+
 static void cover_free(void)
 {
     Z_Freep(&cover.samples);
@@ -693,29 +741,165 @@ static void update_candidates(const vec3_t view)
     cover.have_candidates = true;
 }
 
+typedef enum {
+    EDGE_NONE,      // the floor goes on, at another height or unsampled
+    EDGE_WALL,
+    EDGE_DROP,
+} edge_type_t;
+
+static const int edge_dirs[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+
+// Looks from a point without a grid neighbour towards where it would be, and
+// returns what ends the floor there and how far away.
+static edge_type_t probe_edge(const cover_sample_t *s, int dir, float *dist)
+{
+    static const vec3_t zero = { 0, 0, 0 };
+    trace_t tr;
+    vec3_t p, end;
+
+    *dist = 0;
+    for (int step = 2; step <= COVER_GRID; step += 2) {
+        VectorSet(p, s->org[0] + edge_dirs[dir][0] * step,
+                  s->org[1] + edge_dirs[dir][1] * step, s->org[2] + 4);
+        if (CM_PointContents(p, cl.bsp->nodes, cl.csr.extended) & MASK_SOLID)
+            return EDGE_WALL;
+        VectorSet(end, p[0], p[1], s->org[2] - 4);
+        CM_BoxTrace(&tr, p, end, zero, zero, cl.bsp->nodes,
+                    MASK_SOLID | MASK_WATER, cl.csr.extended);
+        if (tr.fraction == 1.0f)
+            return EDGE_DROP;
+        *dist = step;
+    }
+    *dist = 0;
+    return EDGE_NONE;
+}
+
+static int compare_edges(const void *p1, const void *p2)
+{
+    uint64_t a = *(const uint64_t *)p1, b = *(const uint64_t *)p2;
+    return a < b ? -1 : a > b;
+}
+
+static void add_triangle(int a, int b, int c)
+{
+    uint32_t *idx = &cover.indices[cover.num_indices];
+    idx[0] = a; idx[1] = b; idx[2] = c;
+    cover.num_indices += 3;
+}
+
+// Walls between the snow and the floor along the open edges of the mesh, so
+// snow ending at a ledge or a step shows its depth.
+static void add_skirts(const float *height)
+{
+    int num_tris = cover.num_indices / 3;
+    uint64_t *edges = Z_Malloc(sizeof(*edges) * 3 * max(num_tris, 1));
+    int num_edges = 0;
+
+    for (int i = 0; i < num_tris; i++) {
+        const uint32_t *t = &cover.indices[i * 3];
+        for (int j = 0; j < 3; j++) {
+            uint32_t a = t[j], b = t[(j + 1) % 3];
+            edges[num_edges++] = (uint64_t)min(a, b) << 32 | max(a, b);
+        }
+    }
+    qsort(edges, num_edges, sizeof(*edges), compare_edges);
+
+    int num_open = 0;
+    for (int i = 0; i < num_edges; i++)
+        if ((i == 0 || edges[i] != edges[i - 1]) &&
+            (i + 1 == num_edges || edges[i] != edges[i + 1]))
+            num_open++;
+    cover.indices = Z_Realloc(cover.indices, sizeof(uint32_t) *
+                              (cover.num_indices + 6 * num_open + 1));
+
+    int *bottom = Z_Malloc(sizeof(int) * cover.num_samples);
+    memset(bottom, 0xff, sizeof(int) * cover.num_samples);
+
+    for (int i = 0; i < num_edges; i++) {
+        if ((i > 0 && edges[i] == edges[i - 1]) ||
+            (i + 1 < num_edges && edges[i] == edges[i + 1]))
+            continue;   // shared by two triangles
+
+        int v[2] = { edges[i] >> 32, edges[i] & 0xffffffff };
+        if (height[v[0]] <= 0 && height[v[1]] <= 0)
+            continue;
+
+        for (int j = 0; j < 2; j++) {
+            if (bottom[v[j]] >= 0)
+                continue;
+            r_snow_vertex_t *b = &cover.vertices[cover.num_vertices];
+            *b = cover.vertices[v[j]];
+            b->height = -2;     // stays under the floor
+            for (int c = 0; c < 3; c++)
+                b->color.u8[c] = b->color.u8[c] * 3 / 4;
+            bottom[v[j]] = cover.num_vertices++;
+        }
+        add_triangle(v[0], v[1], bottom[v[1]]);
+        add_triangle(v[0], bottom[v[1]], bottom[v[0]]);
+    }
+
+    Z_Free(bottom);
+    Z_Free(edges);
+}
+
 static void build_mesh(float depth)
 {
     float *height = Z_Malloc(sizeof(float) * cover.num_samples);
+    float *bank = Z_Mallocz(sizeof(float) * cover.num_samples);
+    vec2_t *shift = Z_Mallocz(sizeof(vec2_t) * cover.num_samples);
 
-    // blur coverage twice over the 3x3 neighbourhood; missing neighbours are
-    // bare ground, so drifts taper towards walls and roofs
+    // Where the floor ends, find what ends it: snow is pushed up to it, and
+    // banks up against walls.
+    for (int i = 0; i < cover.num_samples; i++) {
+        const cover_sample_t *s = &cover.samples[i];
+        float extent[4] = { 0 };
+        bool missing[4];
+
+        for (int d = 0; d < 4; d++) {
+            missing[d] = cover_find(s->x + edge_dirs[d][0], s->y + edge_dirs[d][1],
+                                    s->org[2], 16) < 0;
+            if (!missing[d])
+                continue;
+            edge_type_t type = probe_edge(s, d, &extent[d]);
+            if (type == EDGE_WALL) {
+                bank[i] = 1;
+                extent[d] = max(extent[d] - 1, 0);
+            }
+        }
+        // a strip one point wide stays where it is
+        if (missing[0] != missing[1])
+            shift[i][0] = missing[0] ? extent[0] : -extent[1];
+        if (missing[2] != missing[3])
+            shift[i][1] = missing[2] ? extent[2] : -extent[3];
+    }
+
+    // blur coverage twice over the 3x3 neighbourhood, so drifts taper towards
+    // roofs; walls and drops don't count, so ledges are covered to the edge
     float *tmp = Z_Malloc(sizeof(float) * cover.num_samples);
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < cover.num_samples; i++) {
             const cover_sample_t *s = &cover.samples[i];
-            float sum = 0;
+            float sum = 0, wall = 0;
+            int n = 0;
             for (int dy = -1; dy <= 1; dy++)
                 for (int dx = -1; dx <= 1; dx++) {
                     int j = cover_find(s->x + dx, s->y + dy, s->org[2], 16);
-                    if (j >= 0)
+                    if (j >= 0) {
                         sum += cover.samples[j].cover;
+                        wall = max(wall, bank[j]);
+                        n++;
+                    }
                 }
-            tmp[i] = sum / 9;
+            tmp[i] = sum / n;
+            // spread the banks one point away from the wall, a little lower
+            if (pass == 0)
+                height[i] = max(bank[i], wall * 0.5f);
         }
         for (int i = 0; i < cover.num_samples; i++)
             cover.samples[i].cover = tmp[i];
     }
     Z_Free(tmp);
+    memcpy(bank, height, sizeof(float) * cover.num_samples);
 
     for (int i = 0; i < cover.num_samples; i++) {
         const cover_sample_t *s = &cover.samples[i];
@@ -724,28 +908,55 @@ static void build_mesh(float depth)
         // the grid, which stays under the floor
         float f = Q_clipf((s->cover - 0.6f) / 0.4f, -1.25f, 1.0f);
         height[i] = depth * (0.3f + 0.7f * s->noise) * f;
+        if (f > 0)
+            height[i] += depth * 0.6f * bank[i] * f;
     }
 
-    // two triangles per grid square that has any snow
-    cover.indices = Z_Malloc(sizeof(uint32_t) * 6 * cover.num_samples);
+    // two triangles per grid square that has any snow, or one where a wall
+    // cuts off a corner
+    cover.indices = Z_Malloc(sizeof(uint32_t) * 9 * cover.num_samples);
     for (int i = 0; i < cover.num_samples; i++) {
         const cover_sample_t *s = &cover.samples[i];
         int r = cover_find(s->x + 1, s->y, s->org[2], 16);
         int u = cover_find(s->x, s->y + 1, s->org[2], 16);
         int d = cover_find(s->x + 1, s->y + 1, s->org[2], 16);
+        int c[4] = { i, r, d, u };  // counterclockwise
+        int n = (r >= 0) + (u >= 0) + (d >= 0);
 
-        if (r < 0 || u < 0 || d < 0)
+        if (n < 2)
             continue;
-        if (height[i] <= 0 && height[r] <= 0 && height[u] <= 0 && height[d] <= 0)
+        if (n == 3) {
+            if (height[i] <= 0 && height[r] <= 0 && height[u] <= 0 && height[d] <= 0)
+                continue;
+            add_triangle(i, r, d);
+            add_triangle(i, d, u);
             continue;
+        }
 
-        uint32_t *idx = &cover.indices[cover.num_indices];
-        idx[0] = i; idx[1] = r; idx[2] = d;
-        idx[3] = i; idx[4] = d; idx[5] = u;
-        cover.num_indices += 6;
+        // three corners: one triangle of them
+        int t[3], k = 0;
+        bool any = false;
+        for (int j = 0; j < 4; j++) {
+            if (c[j] < 0)
+                continue;
+            t[k++] = c[j];
+            any |= height[c[j]] > 0;
+        }
+        if (any)
+            add_triangle(t[0], t[1], t[2]);
+    }
+    // the corner missing from a square starting at a missing point
+    for (int i = 0; i < cover.num_samples; i++) {
+        const cover_sample_t *s = &cover.samples[i];
+        if (cover_find(s->x - 1, s->y - 1, s->org[2], 16) >= 0)
+            continue;
+        int l = cover_find(s->x - 1, s->y, s->org[2], 16);
+        int b = cover_find(s->x, s->y - 1, s->org[2], 16);
+        if (l >= 0 && b >= 0 && (height[i] > 0 || height[l] > 0 || height[b] > 0))
+            add_triangle(b, i, l);
     }
 
-    cover.vertices = Z_Malloc(sizeof(*cover.vertices) * cover.num_samples);
+    cover.vertices = Z_Malloc(sizeof(*cover.vertices) * cover.num_samples * 2);
     for (int i = 0; i < cover.num_samples; i++) {
         const cover_sample_t *s = &cover.samples[i];
         r_snow_vertex_t *v = &cover.vertices[i];
@@ -786,8 +997,15 @@ static void build_mesh(float depth)
         v->length = max(min(0.25f + 0.2f * s->noise, 1 - v->start), 0.05f);
         v->height = height[i];
         VectorCopy(s->org, v->origin);
+        v->origin[0] += shift[i][0];
+        v->origin[1] += shift[i][1];
     }
+    cover.num_vertices = cover.num_samples;
 
+    add_skirts(height);
+
+    Z_Free(shift);
+    Z_Free(bank);
     Z_Free(height);
 }
 
@@ -826,6 +1044,7 @@ static void cover_build(void)
         cover_add_face(face, flags & SURF_WARP);
     }
     Z_Free(inline_face);
+    cover_fill_holes();
 
     build_spawn_index();
     if (depth > 0 && cover.num_samples)
