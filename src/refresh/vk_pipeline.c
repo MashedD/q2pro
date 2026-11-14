@@ -586,14 +586,14 @@ static bool vk_create_color3d_pipeline_ex(VkPipeline *pipeline, bool depth_test,
                                           bool depth_write, bool blend, bool additive,
                                           VkPrimitiveTopology topology,
                                           const uint32_t *vert_spv, size_t vert_size,
+                                          const uint32_t *frag_spv, size_t frag_size,
                                           bool growth)
 {
     VkShaderModule vert = vk_create_shader_module(vert_spv, vert_size);
     if (!vert)
         return false;
 
-    VkShaderModule frag = vk_create_shader_module(vk_color3d_frag_spv,
-                                                  sizeof(vk_color3d_frag_spv));
+    VkShaderModule frag = vk_create_shader_module(frag_spv, frag_size);
     if (!frag) {
         vk.DestroyShaderModule(vk.device, vert, NULL);
         return false;
@@ -745,7 +745,9 @@ bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
     return vk_create_color3d_pipeline_ex(pipeline, depth_test, depth_write,
                                          blend, additive, topology,
                                          vk_color3d_vert_spv,
-                                         sizeof(vk_color3d_vert_spv), false);
+                                         sizeof(vk_color3d_vert_spv),
+                                         vk_color3d_frag_spv,
+                                         sizeof(vk_color3d_frag_spv), false);
 }
 
 bool vk_create_snow_pipeline(VkPipeline *pipeline)
@@ -753,7 +755,9 @@ bool vk_create_snow_pipeline(VkPipeline *pipeline)
     return vk_create_color3d_pipeline_ex(pipeline, true, true, false, false,
                                          VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
                                          vk_snow_vert_spv,
-                                         sizeof(vk_snow_vert_spv), true);
+                                         sizeof(vk_snow_vert_spv),
+                                         vk_snow_frag_spv,
+                                         sizeof(vk_snow_frag_spv), true);
 }
 
 bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,

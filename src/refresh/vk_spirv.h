@@ -75,6 +75,10 @@ static const uint32_t vk_snow_vert_spv[] =
 #include "vk_snow_vert_spv.h"
 ;
 
+static const uint32_t vk_snow_frag_spv[] =
+#include "vk_snow_frag_spv.h"
+;
+
 static const uint32_t vk_world_vert_spv[] =
 #include "vk_world_vert_spv.h"
 ;
