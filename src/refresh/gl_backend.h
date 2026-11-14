@@ -22,6 +22,8 @@ void GLR_SetSky(const char *name, float rotate, bool autorotate,
 void GLR_EndRegistration(void);
 void GLR_RenderFrame(const refdef_t *fd);
 void GLR_LightPoint(const vec3_t origin, vec3_t light);
+void GLR_SetSnowCover(const vec3_t *positions, const color_t *colors,
+                      int num_vertices, const uint32_t *indices, int num_indices);
 void GLR_ClearColor(void);
 void GLR_SetAlpha(float alpha);
 void GLR_SetColor(uint32_t color);

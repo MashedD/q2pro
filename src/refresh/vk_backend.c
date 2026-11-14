@@ -1531,7 +1531,7 @@ void vk_entity_model_matrix(mat4_t model, const entity_t *ent,
     model[15] = 1.0f;
 }
 
-static void vk_world_mvp(mat4_t out, const refdef_t *fd)
+void vk_world_mvp(mat4_t out, const refdef_t *fd)
 {
     mat4_t proj, view;
 
@@ -2679,6 +2679,7 @@ void VKR_Shutdown(bool total)
         if (vk.device && vk.DeviceWaitIdle)
             vk.DeviceWaitIdle(vk.device);
         vk_free_world();
+        vk_free_snow_cover();
         vk_free_models(true);
 #if USE_DEBUG
         r_charset = 0;
@@ -2766,6 +2767,7 @@ void VKR_Shutdown(bool total)
     }
 
     vk_free_world();
+    vk_free_snow_cover();
     vk_free_models(true);
     vk_destroy_mesh(&vk.skybox);
     vk_destroy_mesh(&vk.sprite_quad);
@@ -2887,6 +2889,7 @@ void VKR_BeginRegistration(const char *map)
     memset(vk.afterglow_lights, 0, sizeof(vk.afterglow_lights));
     vk.afterglow_frame = 0;
     vk.afterglow_time = 0.0f;
+    vk_free_snow_cover();
     vk_load_world(map);
 }
 
@@ -3001,6 +3004,7 @@ void VKR_RenderFrame(const refdef_t *fd)
 
     vk_draw_entities(fd, VK_ENTITY_BMODEL);
     vk_draw_entities(fd, VK_ENTITY_OPAQUE);
+    vk_draw_snow_cover(fd);
     vk_draw_entities(fd, VK_ENTITY_ALPHA_BACK);
     vk_draw_entities(fd, VK_ENTITY_BMODEL_ALPHA);
     if (drawworld && vk.world.mesh.index_count) {

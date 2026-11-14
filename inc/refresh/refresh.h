@@ -269,6 +269,12 @@ void    R_EndRegistration(void);
 void    R_RenderFrame(const refdef_t *fd);
 void    R_LightPoint(const vec3_t origin, vec3_t light);
 
+// Snow cover drawn with the opaque world: lit, colored triangles in world
+// space. Replaces the previous mesh; num_vertices 0 removes it. The renderer
+// drops it when a map is loaded or the renderer restarts.
+void    R_SetSnowCover(const vec3_t *positions, const color_t *colors,
+                       int num_vertices, const uint32_t *indices, int num_indices);
+
 void    R_ClearColor(void);
 void    R_SetAlpha(float clpha);
 void    R_SetColor(uint32_t color);

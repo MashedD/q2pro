@@ -25,6 +25,8 @@ void VKR_SetSky(const char *name, float rotate, bool autorotate,
 void VKR_EndRegistration(void);
 void VKR_RenderFrame(const refdef_t *fd);
 void VKR_LightPoint(const vec3_t origin, vec3_t light);
+void VKR_SetSnowCover(const vec3_t *positions, const color_t *colors,
+                      int num_vertices, const uint32_t *indices, int num_indices);
 void VKR_ClearColor(void);
 void VKR_SetAlpha(float alpha);
 void VKR_SetColor(uint32_t color);
