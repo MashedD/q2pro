@@ -823,6 +823,13 @@ typedef enum {
 extern vk_state_t vk;
 
 // vk_backend.c
+#if USE_VULKAN_RAYTRACING
+bool vk_build_mesh_blas(vk_acceleration_structure_t *as,
+                        const vk_buffer_t *vertices, uint32_t vertex_count,
+                        const vk_buffer_t *indices, uint32_t index_count);
+void vk_destroy_acceleration_structure(vk_acceleration_structure_t *as);
+#endif
+extern bool vk_pixel_lightmaps_warned;
 extern byte vk_gammatable[256];
 extern const VkPipelineDynamicStateCreateInfo vk_3d_dynamic_state;
 extern cvar_t *vk_anisotropy;
@@ -831,81 +838,113 @@ extern cvar_t *vk_bilerp_chars;
 extern cvar_t *vk_bilerp_pics;
 extern cvar_t *vk_bilerp_skies;
 extern cvar_t *vk_bloom_downsample;
+extern cvar_t *vk_bloom_lamps;
 extern cvar_t *vk_bloom_sigma;
 extern cvar_t *vk_brightness;
 extern cvar_t *vk_celshading;
 extern cvar_t *vk_coloredlightmaps;
 extern cvar_t *vk_cull_models;
+extern cvar_t *vk_cull_nodes;
+extern cvar_t *vk_dlight_falloff;
 extern cvar_t *vk_dotshading;
 extern cvar_t *vk_doublelight_entities;
 extern cvar_t *vk_downsample_skins;
 extern cvar_t *vk_drawentities;
 extern cvar_t *vk_draworder;
+extern cvar_t *vk_drawsky;
+extern cvar_t *vk_dynamic;
 extern cvar_t *vk_flarespeed;
+extern cvar_t *vk_fog;
 extern cvar_t *vk_fontshadow;
 extern cvar_t *vk_fullbright;
 extern cvar_t *vk_gamma_scale_pics;
+extern cvar_t *vk_intensity;
 extern cvar_t *vk_invert;
+extern cvar_t *vk_lightgrid;
+extern cvar_t *vk_lightmap;
+extern cvar_t *vk_lockpvs;
 extern cvar_t *vk_md5_distance;
 extern cvar_t *vk_md5_use;
 extern cvar_t *vk_modulate;
 extern cvar_t *vk_modulate_entities;
+extern cvar_t *vk_modulate_world;
 extern cvar_t *vk_nobind;
+extern cvar_t *vk_novis;
 extern cvar_t *vk_partscale;
 extern cvar_t *vk_partshape;
 extern cvar_t *vk_partstyle;
 extern cvar_t *vk_picmip;
+extern cvar_t *vk_pixel_lightmaps;
 extern cvar_t *vk_raytracing;
 extern cvar_t *vk_round_down;
 extern cvar_t *vk_rt_afterglow;
+extern cvar_t *vk_rt_ao;
+extern cvar_t *vk_rt_atmosphere;
+extern cvar_t *vk_rt_bounce;
+extern cvar_t *vk_rt_caustics;
 extern cvar_t *vk_rt_debug;
 extern cvar_t *vk_rt_dust;
 extern cvar_t *vk_rt_dust_lighting;
 extern cvar_t *vk_rt_electric_filaments;
+extern cvar_t *vk_rt_emissive;
+extern cvar_t *vk_rt_emissive_flicker;
+extern cvar_t *vk_rt_emissive_halo;
 extern cvar_t *vk_rt_emissive_motes;
 extern cvar_t *vk_rt_energy_collapse;
+extern cvar_t *vk_rt_environment;
+extern cvar_t *vk_rt_fog_turbulence;
 extern cvar_t *vk_rt_impact_marks;
 extern cvar_t *vk_rt_item_respawn;
 extern cvar_t *vk_rt_landing_dust;
 extern cvar_t *vk_rt_lava_embers;
 extern cvar_t *vk_rt_light_coronas;
+extern cvar_t *vk_rt_light_ripples;
+extern cvar_t *vk_rt_light_scattering;
+extern cvar_t *vk_rt_liquids;
 extern cvar_t *vk_rt_rail_impact;
 extern cvar_t *vk_rt_reflection_dispersion;
 extern cvar_t *vk_rt_reflection_glints;
 extern cvar_t *vk_rt_reflections;
+extern cvar_t *vk_rt_shadow_fringe;
 extern cvar_t *vk_rt_shockwaves;
+extern cvar_t *vk_rt_skylight;
+extern cvar_t *vk_rt_specular;
 extern cvar_t *vk_rt_splash_ripples;
+extern cvar_t *vk_rt_sunlight;
 extern cvar_t *vk_rt_teleport_vortex;
+extern cvar_t *vk_rt_underwater_absorption;
 extern cvar_t *vk_rt_water_wakes;
+extern cvar_t *vk_saturation;
 extern cvar_t *vk_shadows;
 extern cvar_t *vk_showbloom;
 extern cvar_t *vk_showorigins;
 extern cvar_t *vk_texturemode;
+extern cvar_t *vk_vertexlight;
 extern cvar_t *vk_waterwarp;
 VkClearColorValue vk_frame_clear_color(void);
 bool vk_alias_model_culled(const vk_model_t *model, const entity_t *ent,
                            const vec3_t axis[3], uint32_t frame,
                            uint32_t oldframe);
 bool vk_alias_model_has_glowmap(const vk_model_t *model);
+bool vk_bake_world_rt_ao(const bsp_t *bsp, const vk_world_face_t *faces,
+                         uint32_t face_count, const vk_vertex_t *vertices,
+                         const uint32_t *indices, const float *lmuv_data);
 bool vk_begin_immediate(VkCommandBuffer *cmd);
+bool vk_build_world_tlas(void);
 bool vk_create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
                       VkMemoryPropertyFlags properties, VkBuffer *buffer,
                       VkDeviceMemory *memory);
-bool vk_dynamic_lights_enabled(void);
 bool vk_end_immediate(VkCommandBuffer cmd);
 bool vk_entity_mirrored(const entity_t *ent);
 bool vk_fail_result(const char *what, VkResult result);
 bool vk_shadow_stencil_enabled(void);
-bool vk_static_light_point(const vec3_t origin, const refdef_t *fd,
-                           vec3_t light);
 bool vk_upload_buffer(vk_buffer_t *dst, const void *data, VkDeviceSize size,
                       VkBufferUsageFlags usage);
 bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
                     uint32_t vertex_count, const uint32_t *indices,
                     uint32_t index_count);
-float vk_glowmap_intensity(void);
-float vk_lava_ember_random(uint32_t value);
-float vk_texture_intensity(void);
+bool vk_world_face_is_inline(const bsp_t *bsp, const mface_t *face);
+const vk_rt_material_rule_t *vk_rt_material_rule(const char *name);
 int vk_2d_height(void);
 int vk_2d_width(void);
 int vk_pixel_lightmap_mode(void);
@@ -916,6 +955,7 @@ uint32_t *vk_build_line_indices(const uint32_t *indices, uint32_t index_count,
 uint32_t vk_find_memory_type(uint32_t type_bits,
                              VkMemoryPropertyFlags properties);
 uint32_t vk_mip_level_count(uint32_t width, uint32_t height);
+uint64_t vk_time_usec(void);
 vk_alias_lerp_t vk_alias_lerp_for_entity(const vk_model_t *model,
                                          const entity_t *ent,
                                          const refdef_t *fd);
@@ -929,6 +969,8 @@ void vk_bind_index_buffer(VkCommandBuffer cmd, VkBuffer buffer,
                           VkDeviceSize offset, VkIndexType type);
 void vk_bind_pipeline(VkCommandBuffer cmd, VkPipelineBindPoint bind_point,
                       VkPipeline pipeline);
+void vk_bind_pixel_world_descriptor(VkCommandBuffer cmd, uint32_t set_index,
+                                    VkDescriptorSet set);
 void vk_bind_texture_descriptor(VkCommandBuffer cmd, VkDescriptorSet set);
 void vk_bind_vertex_buffers(VkCommandBuffer cmd, uint32_t first, uint32_t count,
                             const VkBuffer *buffers,
@@ -937,10 +979,6 @@ void vk_clear_rect(int x, int y, int w, int h, uint32_t color);
 void vk_count_batch3d(void);
 void vk_destroy_buffer(vk_buffer_t *buffer);
 void vk_destroy_mesh(vk_mesh_t *mesh);
-void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd,
-                    bool translucent_faces);
-void vk_draw_fx_outlines(const vk_mesh_t *mesh, const vk_buffer_t *indices,
-                         uint32_t index_count, const mat4_t mvp);
 void vk_draw_null_model(const entity_t *ent, const refdef_t *fd);
 void vk_draw_texture_resource(int x, int y, int w, int h, float s1, float t1,
                               float s2, float t2, const vk_texture_t *texture);
@@ -949,15 +987,17 @@ void vk_entity_model_matrix(mat4_t model, const entity_t *ent,
                             const vec3_t axis[3]);
 void vk_entity_mvp(mat4_t out, const refdef_t *fd, const entity_t *ent,
                    const vec3_t axis[3]);
-void vk_fog_params(const refdef_t *fd, float fog[4]);
-void vk_height_fog_params(const refdef_t *fd, float start[4], float end[4],
-                          float view[4], float params[4]);
+void vk_free_world(void);
+void vk_load_rt_materials(void);
 void vk_matrix_multiply(mat4_t out, const mat4_t a, const mat4_t b);
 void vk_mip_map(byte *out, const byte *in, uint32_t width, uint32_t height);
 void vk_model_mvp(mat4_t out, const refdef_t *fd, const mat4_t model);
 void vk_projection_matrix(mat4_t m, float fov_x, float fov_y, int rdflags);
 void vk_push_constants(VkCommandBuffer cmd, uint32_t size, const void *data);
+void vk_push_pixel_world_constants(VkCommandBuffer cmd, uint32_t size,
+                                   const void *data);
 void vk_reset_bind_cache(void);
+void vk_rt_prefix_error(const char *stage);
 void vk_set_3d_viewport(const refdef_t *fd);
 void vk_transition_color_target(VkCommandBuffer cmd, vk_texture_t *texture,
                                 VkImageLayout *layout, VkImageLayout new_layout,
@@ -969,6 +1009,8 @@ void vk_transition_depth(VkCommandBuffer cmd, VkImageLayout new_layout,
 void vk_transition_scene(VkCommandBuffer cmd, VkImageLayout new_layout,
                          VkAccessFlags dst_access,
                          VkPipelineStageFlags dst_stage);
+void vk_unmap_world_batch_indices(void);
+void vk_update_rt_ao_descriptor(void);
 void vk_view_matrix(mat4_t matrix, const refdef_t *fd);
 #if USE_MD5
 extern cvar_t *vk_md5_load;
@@ -1078,5 +1120,40 @@ void vk_update_texture_descriptor(vk_texture_t *texture);
 void vk_update_texture_descriptor_with_sampler(vk_texture_t *texture,
                                                VkSampler sampler);
 void vk_upload_image(image_t *image, byte *pic);
+
+// vk_world.c
+bool vk_dynamic_lights_enabled(void);
+bool vk_static_light_point(const vec3_t origin, const refdef_t *fd,
+                           vec3_t light);
+float vk_glowmap_intensity(void);
+float vk_lightstyle_value(const refdef_t *fd, byte style);
+float vk_texture_intensity(void);
+int vk_view_liquid_kind(const refdef_t *fd);
+int vk_world_liquid_kind(const mface_t *face);
+void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd,
+                    bool translucent_faces);
+void vk_draw_fx_outlines(const vk_mesh_t *mesh, const vk_buffer_t *indices,
+                         uint32_t index_count, const mat4_t mvp);
+void vk_draw_skybox(const refdef_t *fd);
+void vk_draw_world_mesh(const mat4_t mvp, bool marked_only, VkPipeline pipeline,
+                        vk_world_pass_t pass, float entity_alpha,
+                        const refdef_t *fd, const entity_t *ent,
+                        const vec3_t axis[3]);
+void vk_draw_world_outlines(const mat4_t mvp, bool marked_only,
+                            vk_world_pass_t pass, const refdef_t *fd,
+                            const entity_t *ent);
+void vk_fog_params(const refdef_t *fd, float fog[4]);
+void vk_height_fog_params(const refdef_t *fd, float start[4], float end[4],
+                          float view[4], float params[4]);
+void vk_mark_world_faces(const refdef_t *fd);
+void vk_setup_world_frustum(const refdef_t *fd);
+void vk_update_afterglow(const refdef_t *fd);
+void vk_update_world_view(const refdef_t *fd);
+
+// vk_world_load.c
+float vk_lava_ember_random(uint32_t value);
+void vk_destroy_pixel_lightmap_staging(void);
+void vk_load_world(const char *name);
+void vk_rebuild_world_lighting(void);
 
 #endif // USE_VULKAN
