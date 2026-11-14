@@ -229,6 +229,13 @@ cl_railcore_color::
 cl_railcore_width::
     Width of the rail core beam. Default value is 3.
 
+cl_snow::
+    Makes it snow on any map, from 0 (off) to 4 (heavy). Flakes only fall
+    where the sky is above: under roofs and ceilings it stays dry. They drift
+    with a slowly changing wind and disappear when they reach the ground or
+    water. Snow is drawn by the client, so it shows in both renderers and is
+    not seen by other players. Default value is 0 (disabled).
+
 cl_railcore_glow::
     Adds a soft, wider additive glow around the rail core and turns its
     center paler, from 0 to 1. Only affects the core of the alternative rail

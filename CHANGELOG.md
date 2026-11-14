@@ -6,6 +6,10 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `cl_snow` makes it snow on any map, only where the sky is above.
+
 ### Fixed
 
 - After leaving a map with Vulkan ray-traced reflections on, the first

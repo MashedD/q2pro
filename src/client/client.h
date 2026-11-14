@@ -780,6 +780,11 @@ bool CL_SeekDemoMessage(void);
 
 void CL_DeltaFrame(void);
 void CL_AddEntities(void);
+
+// weather.c
+void CL_InitWeather(void);
+void CL_ClearWeather(void);
+void CL_AddWeather(void);
 void CL_InitSkinTints(void);
 void CL_CalcViewValues(void);
 
