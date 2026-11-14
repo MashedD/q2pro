@@ -823,12 +823,6 @@ typedef enum {
 extern vk_state_t vk;
 
 // vk_backend.c
-#if USE_VULKAN_RAYTRACING
-bool vk_build_mesh_blas(vk_acceleration_structure_t *as,
-                        const vk_buffer_t *vertices, uint32_t vertex_count,
-                        const vk_buffer_t *indices, uint32_t index_count);
-void vk_destroy_acceleration_structure(vk_acceleration_structure_t *as);
-#endif
 extern bool vk_pixel_lightmaps_warned;
 extern byte vk_gammatable[256];
 extern const VkPipelineDynamicStateCreateInfo vk_3d_dynamic_state;
@@ -926,14 +920,13 @@ bool vk_alias_model_culled(const vk_model_t *model, const entity_t *ent,
                            const vec3_t axis[3], uint32_t frame,
                            uint32_t oldframe);
 bool vk_alias_model_has_glowmap(const vk_model_t *model);
-bool vk_bake_world_rt_ao(const bsp_t *bsp, const vk_world_face_t *faces,
-                         uint32_t face_count, const vk_vertex_t *vertices,
-                         const uint32_t *indices, const float *lmuv_data);
 bool vk_begin_immediate(VkCommandBuffer *cmd);
-bool vk_build_world_tlas(void);
 bool vk_create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
                       VkMemoryPropertyFlags properties, VkBuffer *buffer,
                       VkDeviceMemory *memory);
+bool vk_create_color_target(vk_texture_t *texture, uint32_t width,
+                            uint32_t height, VkFormat format,
+                            VkImageUsageFlags extra_usage);
 bool vk_end_immediate(VkCommandBuffer cmd);
 bool vk_entity_mirrored(const entity_t *ent);
 bool vk_fail_result(const char *what, VkResult result);
@@ -943,8 +936,6 @@ bool vk_upload_buffer(vk_buffer_t *dst, const void *data, VkDeviceSize size,
 bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
                     uint32_t vertex_count, const uint32_t *indices,
                     uint32_t index_count);
-bool vk_world_face_is_inline(const bsp_t *bsp, const mface_t *face);
-const vk_rt_material_rule_t *vk_rt_material_rule(const char *name);
 int vk_2d_height(void);
 int vk_2d_width(void);
 int vk_pixel_lightmap_mode(void);
@@ -988,7 +979,6 @@ void vk_entity_model_matrix(mat4_t model, const entity_t *ent,
 void vk_entity_mvp(mat4_t out, const refdef_t *fd, const entity_t *ent,
                    const vec3_t axis[3]);
 void vk_free_world(void);
-void vk_load_rt_materials(void);
 void vk_matrix_multiply(mat4_t out, const mat4_t a, const mat4_t b);
 void vk_mip_map(byte *out, const byte *in, uint32_t width, uint32_t height);
 void vk_model_mvp(mat4_t out, const refdef_t *fd, const mat4_t model);
@@ -997,7 +987,6 @@ void vk_push_constants(VkCommandBuffer cmd, uint32_t size, const void *data);
 void vk_push_pixel_world_constants(VkCommandBuffer cmd, uint32_t size,
                                    const void *data);
 void vk_reset_bind_cache(void);
-void vk_rt_prefix_error(const char *stage);
 void vk_set_3d_viewport(const refdef_t *fd);
 void vk_transition_color_target(VkCommandBuffer cmd, vk_texture_t *texture,
                                 VkImageLayout *layout, VkImageLayout new_layout,
@@ -1010,7 +999,6 @@ void vk_transition_scene(VkCommandBuffer cmd, VkImageLayout new_layout,
                          VkAccessFlags dst_access,
                          VkPipelineStageFlags dst_stage);
 void vk_unmap_world_batch_indices(void);
-void vk_update_rt_ao_descriptor(void);
 void vk_view_matrix(mat4_t matrix, const refdef_t *fd);
 #if USE_MD5
 extern cvar_t *vk_md5_load;
@@ -1084,6 +1072,24 @@ void vk_draw_fullscreen_texture_sized(VkPipeline pipeline,
 void vk_draw_refdef_texture(VkPipeline pipeline, const vk_texture_t *texture,
                             const vec4_t color);
 void vk_finish_postprocess_scene(void);
+
+// vk_rt.c
+bool vk_bake_world_rt_ao(const bsp_t *bsp, const vk_world_face_t *faces,
+                         uint32_t face_count, const vk_vertex_t *vertices,
+                         const uint32_t *indices, const float *lmuv_data);
+bool vk_build_world_tlas(void);
+bool vk_world_face_is_inline(const bsp_t *bsp, const mface_t *face);
+const vk_rt_material_rule_t *vk_rt_material_rule(const char *name);
+void vk_load_rt_materials(void);
+void vk_probe_raytracing(void);
+void vk_rt_prefix_error(const char *stage);
+void vk_update_rt_ao_descriptor(void);
+#if USE_VULKAN_RAYTRACING
+bool vk_build_mesh_blas(vk_acceleration_structure_t *as,
+                        const vk_buffer_t *vertices, uint32_t vertex_count,
+                        const vk_buffer_t *indices, uint32_t index_count);
+void vk_destroy_acceleration_structure(vk_acceleration_structure_t *as);
+#endif
 
 // vk_texture.c
 VkSampler vk_sampler_for_pic_flags(imageflags_t flags);
