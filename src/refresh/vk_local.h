@@ -824,8 +824,8 @@ extern vk_state_t vk;
 
 // vk_backend.c
 extern bool vk_pixel_lightmaps_warned;
+extern bool vk_present_mode_warned;
 extern byte vk_gammatable[256];
-extern const VkPipelineDynamicStateCreateInfo vk_3d_dynamic_state;
 extern cvar_t *vk_anisotropy;
 extern cvar_t *vk_beamstyle;
 extern cvar_t *vk_bilerp_chars;
@@ -839,6 +839,8 @@ extern cvar_t *vk_celshading;
 extern cvar_t *vk_coloredlightmaps;
 extern cvar_t *vk_cull_models;
 extern cvar_t *vk_cull_nodes;
+extern cvar_t *vk_device;
+extern cvar_t *vk_devicelist;
 extern cvar_t *vk_dlight_falloff;
 extern cvar_t *vk_dotshading;
 extern cvar_t *vk_doublelight_entities;
@@ -850,6 +852,7 @@ extern cvar_t *vk_dynamic;
 extern cvar_t *vk_flarespeed;
 extern cvar_t *vk_fog;
 extern cvar_t *vk_fontshadow;
+extern cvar_t *vk_frames_in_flight;
 extern cvar_t *vk_fullbright;
 extern cvar_t *vk_gamma_scale_pics;
 extern cvar_t *vk_intensity;
@@ -869,6 +872,7 @@ extern cvar_t *vk_partshape;
 extern cvar_t *vk_partstyle;
 extern cvar_t *vk_picmip;
 extern cvar_t *vk_pixel_lightmaps;
+extern cvar_t *vk_present_mode;
 extern cvar_t *vk_raytracing;
 extern cvar_t *vk_round_down;
 extern cvar_t *vk_rt_afterglow;
@@ -912,10 +916,13 @@ extern cvar_t *vk_saturation;
 extern cvar_t *vk_shadows;
 extern cvar_t *vk_showbloom;
 extern cvar_t *vk_showorigins;
+extern cvar_t *vk_swapinterval;
 extern cvar_t *vk_texturemode;
 extern cvar_t *vk_vertexlight;
 extern cvar_t *vk_waterwarp;
 VkClearColorValue vk_frame_clear_color(void);
+VkFormat vk_choose_depth_format(bool stencil);
+VkSampleCountFlagBits vk_choose_sample_count(void);
 bool vk_alias_model_culled(const vk_model_t *model, const entity_t *ent,
                            const vec3_t axis[3], uint32_t frame,
                            uint32_t oldframe);
@@ -927,18 +934,20 @@ bool vk_create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
 bool vk_create_color_target(vk_texture_t *texture, uint32_t width,
                             uint32_t height, VkFormat format,
                             VkImageUsageFlags extra_usage);
+bool vk_depth_format_has_stencil(VkFormat format);
 bool vk_end_immediate(VkCommandBuffer cmd);
 bool vk_entity_mirrored(const entity_t *ent);
 bool vk_fail_result(const char *what, VkResult result);
 bool vk_shadow_stencil_enabled(void);
+bool vk_shadow_stencil_requested(void);
 bool vk_upload_buffer(vk_buffer_t *dst, const void *data, VkDeviceSize size,
                       VkBufferUsageFlags usage);
 bool vk_upload_mesh(vk_mesh_t *mesh, const vk_vertex_t *vertices,
                     uint32_t vertex_count, const uint32_t *indices,
                     uint32_t index_count);
+const char *vk_format_name(VkFormat format);
 int vk_2d_height(void);
 int vk_2d_width(void);
-int vk_pixel_lightmap_mode(void);
 int vk_upscale_level(uint32_t width, uint32_t height, imagetype_t type,
                      imageflags_t flags);
 uint32_t *vk_build_line_indices(const uint32_t *indices, uint32_t index_count,
@@ -1003,6 +1012,28 @@ void vk_view_matrix(mat4_t matrix, const refdef_t *fd);
 #if USE_MD5
 extern cvar_t *vk_md5_load;
 #endif
+
+// vk_device.c
+extern const VkPipelineDynamicStateCreateInfo vk_3d_dynamic_state;
+bool vk_create_device(void);
+bool vk_create_frame_resources(void);
+bool vk_create_instance(void);
+bool vk_create_surface(void);
+bool vk_create_swapchain(int width, int height);
+bool vk_create_timestamp_query_pool(void);
+bool vk_load_global(void);
+bool vk_mrt_requested(void);
+bool vk_pick_physical_device(void);
+bool vk_recreate_swapchain(const char *reason);
+const char *vk_device_type_string(VkPhysicalDeviceType type);
+const char *vk_present_mode_name(VkPresentModeKHR mode);
+int vk_pixel_lightmap_mode(void);
+uint32_t vk_frames_in_flight_value(void);
+void vk_destroy_swapchain(void);
+void vk_drawsky_changed(cvar_t *self);
+void vk_present_mode_changed(cvar_t *self);
+void vk_strings_f(void);
+void vk_swapinterval_changed(cvar_t *self);
 
 // vk_entity.c
 float vk_entity_light_modulate(void);
