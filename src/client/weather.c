@@ -861,10 +861,13 @@ static void build_mesh(float depth)
             if (!missing[d])
                 continue;
             edge_type_t type = probe_edge(s, d, &extent[d]);
-            if (type == EDGE_WALL) {
+            if (type == EDGE_WALL)
                 bank[i] = 1;
-                extent[d] = max(extent[d] - 1, 0);
-            }
+            // keep the side of the snow a unit away from the wall or the
+            // face below the drop, even for a point right on the edge, so
+            // the two never fight for depth
+            if (type != EDGE_NONE)
+                extent[d] -= 1;
         }
         // a strip one point wide stays where it is
         if (missing[0] != missing[1])
