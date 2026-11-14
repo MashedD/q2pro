@@ -230,7 +230,8 @@ cl_railcore_width::
     Width of the rail core beam. Default value is 3.
 
 cl_snow::
-    Makes it snow on any map, from 0 (off) to 4 (heavy). Flakes only fall
+    Makes it snow on any map, from 0 (off) to 4 (heavy); 1 is light snow
+    with few flakes, which hides little and costs little. Flakes only fall
     where the sky is above: under roofs and ceilings it stays dry. They drift
     with a slowly changing wind, fade with distance so they hide little, and
     disappear when they reach the ground or water. Snow is drawn by the

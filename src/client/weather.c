@@ -310,7 +310,8 @@ void CL_AddWeather(void)
     update_exposure(view, dt);
     update_sounds(amount, dt);
 
-    count = min((int)(amount * 1000), WEATHER_MAX_FLAKES);
+    // light snow is sparse, so it hides little and costs little
+    count = min((int)(400 * amount * sqrtf(amount)), WEATHER_MAX_FLAKES);
 
     memset(&p, 0, sizeof(p));
     p.color = -1;
@@ -789,7 +790,7 @@ static void add_triangle(int a, int b, int c)
 
 // Walls between the snow and the floor along the open edges of the mesh, so
 // snow ending at a ledge or a step shows its depth.
-static void add_skirts(const float *height)
+static void add_skirts(void)
 {
     int num_tris = cover.num_indices / 3;
     uint64_t *edges = Z_Malloc(sizeof(*edges) * 3 * max(num_tris, 1));
@@ -812,8 +813,10 @@ static void add_skirts(const float *height)
     cover.indices = Z_Realloc(cover.indices, sizeof(uint32_t) *
                               (cover.num_indices + 6 * num_open + 1));
 
-    int *bottom = Z_Malloc(sizeof(int) * cover.num_samples);
-    memset(bottom, 0xff, sizeof(int) * cover.num_samples);
+    int num_top = cover.num_vertices;
+    cover.vertices = Z_Realloc(cover.vertices, sizeof(*cover.vertices) * num_top * 2);
+    int *bottom = Z_Malloc(sizeof(int) * num_top);
+    memset(bottom, 0xff, sizeof(int) * num_top);
 
     for (int i = 0; i < num_edges; i++) {
         if ((i > 0 && edges[i] == edges[i - 1]) ||
@@ -821,7 +824,7 @@ static void add_skirts(const float *height)
             continue;   // shared by two triangles
 
         int v[2] = { edges[i] >> 32, edges[i] & 0xffffffff };
-        if (height[v[0]] <= 0 && height[v[1]] <= 0)
+        if (cover.vertices[v[0]].height <= 0 && cover.vertices[v[1]].height <= 0)
             continue;
 
         for (int j = 0; j < 2; j++) {
@@ -847,6 +850,8 @@ static void build_mesh(float depth)
     float *height = Z_Malloc(sizeof(float) * cover.num_samples);
     float *bank = Z_Mallocz(sizeof(float) * cover.num_samples);
     vec2_t *shift = Z_Mallocz(sizeof(vec2_t) * cover.num_samples);
+    float (*strip)[2][2] = Z_Mallocz(sizeof(*strip) * cover.num_samples);
+    byte *strip_axes = Z_Mallocz(cover.num_samples);
 
     // Where the floor ends, find what ends it: snow is pushed up to it, and
     // banks up against walls.
@@ -869,11 +874,18 @@ static void build_mesh(float depth)
             if (type != EDGE_NONE)
                 extent[d] -= 1;
         }
-        // a strip one point wide stays where it is
-        if (missing[0] != missing[1])
-            shift[i][0] = missing[0] ? extent[0] : -extent[1];
-        if (missing[2] != missing[3])
-            shift[i][1] = missing[2] ? extent[2] : -extent[3];
+        // a strip one point wide, such as a narrow ledge or the top of a
+        // wall, gets snow of its own width on both sides of the point
+        for (int a = 0; a < 2; a++) {
+            bool hi = missing[a * 2], lo = missing[a * 2 + 1];
+            if (hi != lo) {
+                shift[i][a] = hi ? extent[a * 2] : -extent[a * 2 + 1];
+            } else if (hi && extent[a * 2] + extent[a * 2 + 1] > 1) {
+                strip[i][a][0] = -extent[a * 2 + 1];
+                strip[i][a][1] = extent[a * 2];
+                strip_axes[i] |= BIT(a);
+            }
+        }
     }
 
     // blur coverage twice over the 3x3 neighbourhood, so drifts taper towards
@@ -917,7 +929,7 @@ static void build_mesh(float depth)
 
     // two triangles per grid square that has any snow, or one where a wall
     // cuts off a corner
-    cover.indices = Z_Malloc(sizeof(uint32_t) * 9 * cover.num_samples);
+    cover.indices = Z_Malloc(sizeof(uint32_t) * 21 * cover.num_samples);
     for (int i = 0; i < cover.num_samples; i++) {
         const cover_sample_t *s = &cover.samples[i];
         int r = cover_find(s->x + 1, s->y, s->org[2], 16);
@@ -959,7 +971,7 @@ static void build_mesh(float depth)
             add_triangle(b, i, l);
     }
 
-    cover.vertices = Z_Malloc(sizeof(*cover.vertices) * cover.num_samples * 2);
+    cover.vertices = Z_Malloc(sizeof(*cover.vertices) * cover.num_samples * 5);
     for (int i = 0; i < cover.num_samples; i++) {
         const cover_sample_t *s = &cover.samples[i];
         r_snow_vertex_t *v = &cover.vertices[i];
@@ -993,11 +1005,12 @@ static void build_mesh(float depth)
         }
         v->color.u8[3] = 255;
 
-        // the most open spots start first and the snow spreads outwards
-        // from them, with noise so it doesn't grow in rings
-        float patch = cover_noise(s->org[0] * 0.6f + 517, s->org[1] * 0.6f - 233);
-        v->start = Q_clipf(0.55f * (1 - inner) + 0.3f * patch, 0, 0.85f);
-        v->length = max(min(0.25f + 0.2f * s->noise, 1 - v->start), 0.05f);
+        // snow starts as a dusting everywhere at about the same time, a
+        // little earlier in the most open spots, and the renderer breaks its
+        // edges up finely; it then takes a while to reach its full depth
+        float patch = cover_noise(s->org[0] * 1.5f + 517, s->org[1] * 1.5f - 233);
+        v->start = Q_clipf(0.12f * (1 - inner) + 0.12f * patch, 0, 0.5f);
+        v->length = max(min(0.45f + 0.3f * s->noise, 1 - v->start), 0.05f);
         v->height = height[i];
         VectorCopy(s->org, v->origin);
         v->origin[0] += shift[i][0];
@@ -1005,8 +1018,43 @@ static void build_mesh(float depth)
     }
     cover.num_vertices = cover.num_samples;
 
-    add_skirts(height);
+    // strips: a quad between each point and the next one along the strip,
+    // from copies of the points moved to both sides
+    int (*side)[2][2] = Z_Malloc(sizeof(*side) * cover.num_samples);
+    memset(side, 0xff, sizeof(*side) * cover.num_samples);
+    for (int i = 0; i < cover.num_samples; i++) {
+        for (int a = 0; a < 2; a++) {
+            if (!(strip_axes[i] & BIT(a)))
+                continue;
+            for (int k = 0; k < 2; k++) {
+                r_snow_vertex_t *v = &cover.vertices[cover.num_vertices];
+                *v = cover.vertices[i];
+                v->origin[a] += strip[i][a][k];
+                side[i][a][k] = cover.num_vertices++;
+            }
+        }
+    }
+    for (int i = 0; i < cover.num_samples; i++) {
+        const cover_sample_t *s = &cover.samples[i];
+        for (int a = 0; a < 2; a++) {
+            if (!(strip_axes[i] & BIT(a)))
+                continue;
+            // the next point runs along the other axis
+            int j = cover_find(s->x + a, s->y + !a, s->org[2], 16);
+            if (j < 0 || !(strip_axes[j] & BIT(a)))
+                continue;
+            if (height[i] <= 0 && height[j] <= 0)
+                continue;
+            add_triangle(side[i][a][0], side[i][a][1], side[j][a][1]);
+            add_triangle(side[i][a][0], side[j][a][1], side[j][a][0]);
+        }
+    }
+    Z_Free(side);
 
+    add_skirts();
+
+    Z_Free(strip_axes);
+    Z_Free(strip);
     Z_Free(shift);
     Z_Free(bank);
     Z_Free(height);
