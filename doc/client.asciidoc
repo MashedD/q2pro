@@ -233,9 +233,9 @@ cl_snow::
     Makes it snow on any map, from 0 (off) to 4 (heavy). Flakes only fall
     where the sky is above: under roofs and ceilings it stays dry. They drift
     with a slowly changing wind, fade with distance so they hide little, and
-    disappear when they reach the ground or
-    water. Snow is drawn by the client, so it shows in both renderers and is
-    not seen by other players. Default value is 0 (disabled).
+    disappear when they reach the ground or water. Snow is drawn by the
+    client, so it shows in both renderers and is not seen by other players.
+    Default value is 0 (disabled).
 
     Snow can have sounds, which the game doesn't include: they are played when
     these files exist in ‘sound/weather/’: ‘snow_wind.wav’, a wind loop that is
