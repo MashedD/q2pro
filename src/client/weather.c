@@ -38,7 +38,8 @@ the Free Software Foundation; either version 2 of the License, or
 #define WEATHER_BAND        256     // viewer height band of a cached column
 #define WEATHER_HASH        16384   // column cache size, power of two
 #define WEATHER_MAX_FLAKES  4096
-#define WEATHER_RADIUS      1024    // flakes are kept within this of the viewer
+#define WEATHER_RADIUS      768     // flakes are kept within this of the viewer
+#define WEATHER_FADE        320     // and fade out from this distance
 #define WEATHER_HEIGHT      384     // and at most this far above it
 #define WEATHER_PROBES      48      // new columns probed per frame
 
@@ -308,12 +309,11 @@ void CL_AddWeather(void)
     update_exposure(view, dt);
     update_sounds(amount, dt);
 
-    count = min((int)(amount * 1500), WEATHER_MAX_FLAKES);
+    count = min((int)(amount * 1000), WEATHER_MAX_FLAKES);
 
     memset(&p, 0, sizeof(p));
     p.color = -1;
     p.rgba.u32 = U32_WHITE;
-    p.alpha = 0.9f;
 
     for (int i = 0; i < count; i++) {
         snowflake_t *f = &snowflakes[i];
@@ -328,13 +328,24 @@ void CL_AddWeather(void)
             f->org[1] += (weather_wind[1] + cosf(t * 1.1f + f->phase) * 8) * dt;
             f->org[2] -= f->fall * dt;
 
+            // a flake that lands starts again at the top, but one left
+            // behind by the viewer goes anywhere around the new position,
+            // so snow is already falling everywhere there
             float dx = f->org[0] - view[0];
             float dy = f->org[1] - view[1];
-            if (f->org[2] <= f->ground_z || dx * dx + dy * dy > WEATHER_RADIUS * WEATHER_RADIUS) {
+            if (dx * dx + dy * dy > WEATHER_RADIUS * WEATHER_RADIUS) {
+                if (!spawn_flake(f, view, true))
+                    continue;
+            } else if (f->org[2] <= f->ground_z) {
                 if (!spawn_flake(f, view, false))
                     continue;
             }
         }
+
+        // distant flakes fade, so snow doesn't hide the far side of an area
+        float dist = hypotf(f->org[0] - view[0], f->org[1] - view[1]);
+        float fade = Q_clipf((dist - WEATHER_FADE) / (WEATHER_RADIUS - WEATHER_FADE), 0, 1);
+        p.alpha = 0.9f * (1 - 0.8f * fade);
 
         VectorCopy(f->org, p.origin);
         p.scale = f->size;

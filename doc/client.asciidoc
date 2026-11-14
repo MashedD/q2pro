@@ -232,7 +232,8 @@ cl_railcore_width::
 cl_snow::
     Makes it snow on any map, from 0 (off) to 4 (heavy). Flakes only fall
     where the sky is above: under roofs and ceilings it stays dry. They drift
-    with a slowly changing wind and disappear when they reach the ground or
+    with a slowly changing wind, fade with distance so they hide little, and
+    disappear when they reach the ground or
     water. Snow is drawn by the client, so it shows in both renderers and is
     not seen by other players. Default value is 0 (disabled).
 
