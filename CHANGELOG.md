@@ -6,6 +6,14 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- After leaving a map with Vulkan ray-traced reflections on, the first
+  frame without a 3D view could keep showing the last view of the map
+  instead of the console or menu, and with bloom on that frame started a
+  render pass with a target in the wrong layout (a Vulkan validation
+  error).
+
 ## [1.3.0] - 2026-11-13
 
 ### Added

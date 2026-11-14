@@ -335,6 +335,11 @@ static void vk_composite_ssr(void)
                           &vk.ssr_resolve_texture, white);
 }
 
+// Runs bloom, reflections and waterwarp and puts the scene target on screen.
+// Called at the end of VKR_RenderFrame(), and again by VKR_EndFrame() for
+// frames without a 3D view, such as the first menu frame after a disconnect:
+// VKR_BeginFrame() chose the scene target from the previous view, so it
+// still has to be shown, but without effects that need this frame's view.
 void vk_finish_postprocess_scene(void)
 {
     if (!vk.frame_bloom && !vk.frame_waterwarp && !vk.frame_ssr)
@@ -342,7 +347,10 @@ void vk_finish_postprocess_scene(void)
 
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
     bool bloom = vk.frame_bloom;
-    bool waterwarp = vk.frame_waterwarp;
+
+    // Reflections trace this frame's view; without one there is nothing to
+    // reflect, and the resolve target holds a previous frame's.
+    vk.frame_ssr = vk.frame_ssr && vk.fd_valid;
 
     // Entities that only feed bloom are drawn while the scene pass is still
     // open. Screen-space reflections end that pass, and drawing them later
@@ -464,7 +472,7 @@ void vk_finish_postprocess_scene(void)
         }
     }
 
-    if (!bloom && (waterwarp || vk.frame_ssr)) {
+    if (!bloom) {
         if (vk.render_pass_active) {
             vk.CmdEndRenderPass(cmd);
             vk.render_pass_active = false;
