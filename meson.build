@@ -410,6 +410,8 @@ if vulkan.found()
   endif
   common_deps += vulkan.partial_dependency(compile_args: true, includes: true)
   refresh_src += ['src/refresh/vk_backend.c', vk_shader_headers]
+  refresh_src += ['src/refresh/vk_world_load.c']
+  refresh_src += ['src/refresh/vk_world.c']
   refresh_src += ['src/refresh/vk_entity.c']
   refresh_src += ['src/refresh/vk_particles.c']
   refresh_src += ['src/refresh/vk_postprocess.c']
