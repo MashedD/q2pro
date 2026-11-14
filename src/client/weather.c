@@ -555,7 +555,9 @@ static void cover_free(void)
 
 static void cover_build(void)
 {
+#if USE_DEBUG
     unsigned start = Sys_Milliseconds();
+#endif
     float depth = Cvar_ClampValue(cl_snow_cover, 0, 32);
 
     cover_free();
@@ -585,11 +587,13 @@ static void cover_build(void)
     }
     Z_Free(inline_face);
 
+#if USE_DEBUG
     int exposed = 0;
     for (int i = 0; i < cover.num_samples; i++)
         exposed += cover.samples[i].cover > 0;
     Com_DPrintf("Snow cover: %d grid points, %d under open sky\n",
                 cover.num_samples, exposed);
+#endif
     if (!cover.num_samples)
         return;
 
@@ -679,8 +683,10 @@ static void cover_build(void)
         cover.colors[i] = s->color;
     }
 
+#if USE_DEBUG
     Com_DPrintf("Snow cover: %d points, %d triangles, %u ms\n",
                 cover.num_samples, cover.num_indices / 3, Sys_Milliseconds() - start);
+#endif
     cover.dirty = true;
 }
 
