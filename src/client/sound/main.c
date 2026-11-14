@@ -808,6 +808,24 @@ void S_PauseRawSamples(bool paused)
 // Update sound buffer
 // =======================================================================
 
+local_loop_t s_local_loops[S_MAX_LOCAL_LOOPS];
+
+void S_SetLocalLoop(int slot, qhandle_t sfx, float volume)
+{
+    if (slot < 0 || slot >= S_MAX_LOCAL_LOOPS)
+        return;
+
+    s_local_loops[slot].sfx = volume > 0 ? sfx : 0;
+    s_local_loops[slot].volume = Q_clipf(volume, 0, 1);
+}
+
+// Local loops follow the same rules as entity loop sounds: silent while
+// paused, disconnected or with sound inactive.
+bool S_LocalLoopsActive(void)
+{
+    return cls.state == ca_active && s_active && !sv_paused->integer;
+}
+
 int S_BuildSoundList(int *sounds)
 {
     int             i, num, count;

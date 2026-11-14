@@ -199,6 +199,7 @@ void CL_RegisterSounds(void)
 
     S_BeginRegistration();
     CL_RegisterTEntSounds();
+    CL_RegisterWeatherSounds();
     for (i = 1; i < cl.csr.max_sounds; i++) {
         s = cl.configstrings[cl.csr.sounds + i];
         if (!s[0])

@@ -30,6 +30,11 @@ void S_ParseStartSound(void);
 void S_StartLocalSound(const char *s);
 void S_StartLocalSoundOnce(const char *s);
 
+// Looping sounds heard everywhere at the given volume, such as ambience.
+// A slot keeps playing until it is set again with another sound or volume 0.
+#define S_MAX_LOCAL_LOOPS   4
+void S_SetLocalLoop(int slot, qhandle_t sfx, float volume);
+
 void S_FreeAllSounds(void);
 void S_StopAllSounds(void);
 void S_Update(void);

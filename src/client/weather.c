@@ -17,6 +17,11 @@ the Free Software Foundation; either version 2 of the License, or
 // Flakes live in their own pool, drift with a slowly changing wind and are
 // respawned at the sky when they reach the ground of their column.
 //
+// Sounds are optional files in sound/weather/: a wind loop and a soft snow
+// ambience whose volume follows how much open sky is around the viewer,
+// occasional gusts, and footsteps on ground under open sky. The game has no
+// such sounds; without the files snow is silent.
+//
 
 #include "client.h"
 
@@ -51,6 +56,27 @@ typedef struct {
 } snowflake_t;
 
 static cvar_t   *cl_snow;
+static cvar_t   *cl_snow_volume;
+
+#define WEATHER_STEPS   3
+#define WEATHER_GUSTS   2
+
+static struct {
+    qhandle_t   wind;
+    qhandle_t   ambience;
+    qhandle_t   gusts[WEATHER_GUSTS];
+    qhandle_t   steps[WEATHER_STEPS];
+    int         num_gusts;
+    int         num_steps;
+    int         last_step;
+} weather_sfx;
+
+static float    weather_exposure;   // 0 indoors .. 1 under open sky
+static float    weather_gust_timer;
+
+static void update_exposure(const vec3_t view, float dt);
+static void update_sounds(float amount, float dt);
+static void stop_sounds(void);
 
 static weather_column_t weather_columns[WEATHER_HASH];
 static snowflake_t      snowflakes[WEATHER_MAX_FLAKES];
@@ -197,11 +223,15 @@ void CL_AddWeather(void)
     int count;
     particle_t p;
 
-    if (!amount || !cl.bsp || cls.state != ca_active)
+    if (!amount || !cl.bsp || cls.state != ca_active) {
+        stop_sounds();
         return;
+    }
 
     weather_probes = WEATHER_PROBES;
     update_wind(dt);
+    update_exposure(view, dt);
+    update_sounds(amount, dt);
 
     count = min((int)(amount * 1500), WEATHER_MAX_FLAKES);
 
@@ -237,6 +267,112 @@ void CL_AddWeather(void)
     }
 }
 
+// Fraction of the columns around the viewer that have sky above, from those
+// already probed; changes are smoothed over a second or two.
+static void update_exposure(const vec3_t view, float dt)
+{
+    static const float offsets[][2] = {
+        { 0, 0 }, { 160, 0 }, { -160, 0 }, { 0, 160 }, { 0, -160 },
+        { 320, 320 }, { -320, 320 }, { 320, -320 }, { -320, -320 },
+    };
+    int known = 0, sky = 0;
+
+    for (int i = 0; i < q_countof(offsets); i++) {
+        const weather_column_t *col = find_column(view[0] + offsets[i][0],
+                                                  view[1] + offsets[i][1], view[2]);
+        if (!col)
+            continue;
+        known++;
+        // the viewer's own column counts three times
+        if (col->state == COLUMN_SKY)
+            sky += i ? 1 : 3;
+    }
+
+    float target = known ? min(sky / (float)(known + 2), 1.0f) : weather_exposure;
+    weather_exposure += (target - weather_exposure) * min(dt * 1.5f, 1.0f);
+}
+
+static void update_sounds(float amount, float dt)
+{
+    float volume = Cvar_ClampValue(cl_snow_volume, 0, 1) * min(amount, 1.0f);
+
+    // wind stays faintly audible indoors, like through windows
+    S_SetLocalLoop(0, weather_sfx.wind, volume * (0.12f + 0.55f * weather_exposure));
+    S_SetLocalLoop(1, weather_sfx.ambience, volume * 0.35f * weather_exposure);
+
+    weather_gust_timer -= dt;
+    if (weather_gust_timer <= 0) {
+        weather_gust_timer = 8 + frand() * 14;
+        if (weather_sfx.num_gusts && weather_exposure > 0.2f)
+            S_StartSound(NULL, cl.frame.clientNum + 1, CHAN_AUTO,
+                         weather_sfx.gusts[Q_rand_uniform(weather_sfx.num_gusts)],
+                         volume * 0.6f * weather_exposure, ATTN_NONE, 0);
+    }
+}
+
+static void stop_sounds(void)
+{
+    S_SetLocalLoop(0, 0, 0);
+    S_SetLocalLoop(1, 0, 0);
+}
+
+/*
+==============
+CL_SnowFootstep
+
+Plays a snow step instead of the surface's own when an entity walks on
+ground under open sky while it snows. Returns false to keep the normal step.
+==============
+*/
+bool CL_SnowFootstep(int entnum, float volume, float attenuation)
+{
+    vec3_t org;
+
+    if (!weather_sfx.num_steps || !cl_snow || !cl_snow->value || !cl.bsp)
+        return false;
+
+    CL_GetEntitySoundOrigin(entnum, org);
+    weather_probes = max(weather_probes, 1);
+    const weather_column_t *col = find_column(org[0], org[1], org[2]);
+    if (!col || col->state != COLUMN_SKY || org[2] - col->ground_z > 48)
+        return false;
+
+    int n = Q_rand_uniform(weather_sfx.num_steps);
+    if (n == weather_sfx.last_step && weather_sfx.num_steps > 1)
+        n = (n + 1) % weather_sfx.num_steps;
+    weather_sfx.last_step = n;
+
+    S_StartSound(NULL, entnum, CHAN_FOOTSTEP, weather_sfx.steps[n], volume, attenuation, 0);
+    return true;
+}
+
+static qhandle_t register_optional(const char *name)
+{
+    if (!FS_FileExists(va("sound/%s", name)))
+        return 0;
+    return S_RegisterSound(name);
+}
+
+/*
+==============
+CL_RegisterWeatherSounds
+
+Called while sounds are registered for a map.
+==============
+*/
+void CL_RegisterWeatherSounds(void)
+{
+    memset(&weather_sfx, 0, sizeof(weather_sfx));
+    weather_sfx.wind = register_optional("weather/snow_wind.wav");
+    weather_sfx.ambience = register_optional("weather/snow_ambience.wav");
+    for (int i = 0; i < WEATHER_GUSTS; i++)
+        if ((weather_sfx.gusts[weather_sfx.num_gusts] = register_optional(va("weather/wind_gust%d.wav", i + 1))))
+            weather_sfx.num_gusts++;
+    for (int i = 0; i < WEATHER_STEPS; i++)
+        if ((weather_sfx.steps[weather_sfx.num_steps] = register_optional(va("weather/snow_step%d.wav", i + 1))))
+            weather_sfx.num_steps++;
+}
+
 /*
 ==============
 CL_ClearWeather
@@ -249,6 +385,9 @@ void CL_ClearWeather(void)
     memset(weather_columns, 0, sizeof(weather_columns));
     memset(snowflakes, 0, sizeof(snowflakes));
     weather_wind_timer = 0;
+    weather_exposure = 0;
+    weather_gust_timer = 4;
+    stop_sounds();
 }
 
 static void cl_snow_changed(cvar_t *self)
@@ -260,4 +399,5 @@ void CL_InitWeather(void)
 {
     cl_snow = Cvar_Get("cl_snow", "0", CVAR_ARCHIVE);
     cl_snow->changed = cl_snow_changed;
+    cl_snow_volume = Cvar_Get("cl_snow_volume", "1", CVAR_ARCHIVE);
 }

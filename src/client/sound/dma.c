@@ -762,6 +762,38 @@ static void AddLoopSounds(void)
     }
 }
 
+static void DMA_AddLocalLoops(void)
+{
+    if (!S_LocalLoopsActive())
+        return;
+
+    for (int i = 0; i < S_MAX_LOCAL_LOOPS; i++) {
+        const local_loop_t *loop = &s_local_loops[i];
+        sfx_t *sfx;
+        sfxcache_t *sc;
+        channel_t *ch;
+
+        if (!loop->sfx || loop->volume <= 0)
+            continue;
+        sfx = S_SfxForHandle(loop->sfx);
+        if (!sfx || !(sc = sfx->cache))
+            continue;
+
+        ch = S_PickChannel(0, 0);
+        if (!ch)
+            return;
+
+        ch->leftvol = ch->rightvol = loop->volume;
+        ch->master_vol = loop->volume;
+        ch->dist_mult = 0;
+        ch->entnum = S_LOCAL_LOOP_ENTNUM(i);
+        ch->autosound = true;   // remove next frame
+        ch->sfx = sfx;
+        ch->pos = s_paintedtime % sc->length;
+        ch->end = s_paintedtime + sc->length - ch->pos;
+    }
+}
+
 static int DMA_GetTime(void)
 {
     static int      buffers;
@@ -811,6 +843,7 @@ static void DMA_Update(void)
 
     // add loopsounds
     AddLoopSounds();
+    DMA_AddLocalLoops();
 
 #if USE_DEBUG
     if (s_show->integer) {

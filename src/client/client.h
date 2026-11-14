@@ -785,6 +785,8 @@ void CL_AddEntities(void);
 void CL_InitWeather(void);
 void CL_ClearWeather(void);
 void CL_AddWeather(void);
+void CL_RegisterWeatherSounds(void);
+bool CL_SnowFootstep(int entnum, float volume, float attenuation);
 void CL_InitSkinTints(void);
 void CL_CalcViewValues(void);
 

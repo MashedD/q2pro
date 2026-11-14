@@ -8,7 +8,9 @@ All notable changes to this fork are documented here. The format follows
 
 ### Added
 
-- `cl_snow` makes it snow on any map, only where the sky is above.
+- `cl_snow` makes it snow on any map, only where the sky is above, with
+  optional wind, gust and footstep sounds from `sound/weather/`
+  (`cl_snow_volume`).
 
 ### Fixed
 

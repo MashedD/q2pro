@@ -189,4 +189,17 @@ sfxcache_t *S_LoadSound(sfx_t *s);
 channel_t *S_PickChannel(int entnum, int entchannel);
 void S_IssuePlaysound(playsound_t *ps);
 int S_BuildSoundList(int *sounds);
+
+typedef struct {
+    qhandle_t   sfx;
+    float       volume;
+} local_loop_t;
+
+extern local_loop_t s_local_loops[S_MAX_LOCAL_LOOPS];
+
+// Channels of local loops use these entity numbers, so they can be found
+// again; dist_mult 0 makes them full volume and positionless.
+#define S_LOCAL_LOOP_ENTNUM(slot)   (-2 - (slot))
+
+bool S_LocalLoopsActive(void);
 void S_SpatializeOrigin(const vec3_t origin, float master_vol, float dist_mult, float *left_vol, float *right_vol, bool stereo);

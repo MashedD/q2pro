@@ -153,6 +153,9 @@ void CL_PlayFootstepSfx(int step_id, int entnum, float volume, float attenuation
     if (!cl_num_footsteps)
         return; // should not really happen
 
+    if (step_id == -1 && CL_SnowFootstep(entnum, volume, attenuation))
+        return;
+
     if (step_id == -1)
         step_id = CL_FindFootstepSurface(entnum);
 

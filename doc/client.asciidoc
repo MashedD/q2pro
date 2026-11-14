@@ -236,6 +236,16 @@ cl_snow::
     water. Snow is drawn by the client, so it shows in both renderers and is
     not seen by other players. Default value is 0 (disabled).
 
+    Snow can have sounds, which the game doesn't include: they are played when
+    these files exist in ‘sound/weather/’: ‘snow_wind.wav’, a wind loop that is
+    loud under open sky and faint indoors; ‘snow_ambience.wav’, a soft loop
+    heard under open sky; ‘wind_gust1.wav’ and ‘wind_gust2.wav’, occasional
+    gusts; and ‘snow_step1.wav’ to ‘snow_step3.wav’, footsteps on ground under
+    open sky, used instead of the surface's own footsteps.
+
+cl_snow_volume::
+    Volume of the snow sounds, from 0 to 1. Default value is 1.
+
 cl_railcore_glow::
     Adds a soft, wider additive glow around the rail core and turns its
     center paler, from 0 to 1. Only affects the core of the alternative rail
