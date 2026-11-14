@@ -59,8 +59,13 @@ void GL_SampleLightPoint(vec3_t color)
         temp[1] = w1 * b1[1] + w2 * b2[1] + w3 * b3[1] + w4 * b4[1];
         temp[2] = w1 * b1[2] + w2 * b2[2] + w3 * b3[2] + w4 * b4[2];
 
-        style = LIGHT_STYLE(surf->styles[i]);
-        VectorMA(color, style->white, temp, color);
+        // no styles before the first frame of a map is drawn
+        if (glr.fd.lightstyles) {
+            style = LIGHT_STYLE(surf->styles[i]);
+            VectorMA(color, style->white, temp, color);
+        } else {
+            VectorAdd(color, temp, color);
+        }
 
         lightmap += size;
     }
@@ -97,8 +102,8 @@ static bool GL_LightGridPoint(const lightgrid_t *grid, const vec3_t start, vec3_
         VectorClear(samples[i]);
 
         for (j = 0; j < grid->numstyles && s->style != 255; j++, s++) {
-            const lightstyle_t *style = LIGHT_STYLE(s->style);
-            VectorMA(samples[i], style->white, s->rgb, samples[i]);
+            float white = glr.fd.lightstyles ? (LIGHT_STYLE(s->style))->white : 1;
+            VectorMA(samples[i], white, s->rgb, samples[i]);
         }
 
         // count non-occluded samples
