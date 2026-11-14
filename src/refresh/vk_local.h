@@ -640,6 +640,7 @@ typedef struct {
     VkPipeline ssr_pipeline;
     VkPipeline ssr_resolve_pipeline;
     VkPipeline color3d_pipeline;
+    VkPipeline snow_pipeline;
     VkPipeline line3d_pipeline;
     VkPipeline debug_line_pipeline;
     VkPipeline debug_text_pipeline;
@@ -1066,6 +1067,7 @@ bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write, bool blend
                               VkCompareOp depth_compare, bool depth_bias_enable,
                               float depth_bias_constant, float depth_bias_slope,
                               VkPipelineDepthStencilStateCreateInfo *stencil_state);
+bool vk_create_snow_pipeline(VkPipeline *pipeline);
 bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
                                 bool depth_write, bool blend, bool additive,
                                 VkPrimitiveTopology topology);

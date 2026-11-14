@@ -581,12 +581,14 @@ bool vk_create_ssr_pipeline(void)
     return result == VK_SUCCESS;
 }
 
-bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
-                                       bool depth_write, bool blend, bool additive,
-                                       VkPrimitiveTopology topology)
+// growth: also feed vk_vertex_t.normal as location 2, for vk_snow.vert
+static bool vk_create_color3d_pipeline_ex(VkPipeline *pipeline, bool depth_test,
+                                          bool depth_write, bool blend, bool additive,
+                                          VkPrimitiveTopology topology,
+                                          const uint32_t *vert_spv, size_t vert_size,
+                                          bool growth)
 {
-    VkShaderModule vert = vk_create_shader_module(vk_color3d_vert_spv,
-                                                  sizeof(vk_color3d_vert_spv));
+    VkShaderModule vert = vk_create_shader_module(vert_spv, vert_size);
     if (!vert)
         return false;
 
@@ -629,12 +631,18 @@ bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
             .format = VK_FORMAT_R32G32B32A32_SFLOAT,
             .offset = offsetof(vk_vertex_t, color),
         },
+        {
+            .location = 2,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, normal),
+        },
     };
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount = 1,
         .pVertexBindingDescriptions = &binding,
-        .vertexAttributeDescriptionCount = q_countof(attributes),
+        .vertexAttributeDescriptionCount = growth ? 3 : 2,
         .pVertexAttributeDescriptions = attributes,
     };
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
@@ -728,6 +736,24 @@ bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
         return vk_fail_result("vkCreateGraphicsPipelines", result);
 
     return true;
+}
+
+bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
+                                bool depth_write, bool blend, bool additive,
+                                VkPrimitiveTopology topology)
+{
+    return vk_create_color3d_pipeline_ex(pipeline, depth_test, depth_write,
+                                         blend, additive, topology,
+                                         vk_color3d_vert_spv,
+                                         sizeof(vk_color3d_vert_spv), false);
+}
+
+bool vk_create_snow_pipeline(VkPipeline *pipeline)
+{
+    return vk_create_color3d_pipeline_ex(pipeline, true, true, false, false,
+                                         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+                                         vk_snow_vert_spv,
+                                         sizeof(vk_snow_vert_spv), true);
 }
 
 bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,

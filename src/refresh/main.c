@@ -1520,7 +1520,7 @@ void R_ModeChanged(int width, int height, int flags)
 }
 
 // Snow cover isn't drawn by the OpenGL renderer yet.
-void GLR_SetSnowCover(const vec3_t *positions, const color_t *colors,
-                      int num_vertices, const uint32_t *indices, int num_indices)
+void GLR_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
+                      const uint32_t *indices, int num_indices)
 {
 }

@@ -30,9 +30,8 @@ typedef struct refresh_backend_s {
 
     void (*render_frame)(const refdef_t *fd);
     void (*light_point)(const vec3_t origin, vec3_t light);
-    void (*set_snow_cover)(const vec3_t *positions, const color_t *colors,
-                           int num_vertices, const uint32_t *indices,
-                           int num_indices);
+    void (*set_snow_cover)(const r_snow_vertex_t *vertices, int num_vertices,
+                           const uint32_t *indices, int num_indices);
 
     void (*clear_color)(void);
     void (*set_alpha)(float alpha);
@@ -267,11 +266,10 @@ void R_LightPoint(const vec3_t origin, vec3_t light)
     active_backend()->light_point(origin, light);
 }
 
-void R_SetSnowCover(const vec3_t *positions, const color_t *colors,
-                    int num_vertices, const uint32_t *indices, int num_indices)
+void R_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
+                    const uint32_t *indices, int num_indices)
 {
-    active_backend()->set_snow_cover(positions, colors, num_vertices,
-                                     indices, num_indices);
+    active_backend()->set_snow_cover(vertices, num_vertices, indices, num_indices);
 }
 
 void R_ClearColor(void)

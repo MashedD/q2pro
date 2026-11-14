@@ -10,19 +10,21 @@ the Free Software Foundation; either version 2 of the License, or
 //
 // weather.c -- client-side snow
 //
-// Snow only falls where the sky is above. The map is probed in columns of
-// WEATHER_CELL units: from the viewer's height, a trace upwards must reach
-// a sky surface; a second trace from there downwards finds the ground.
-// Columns are cached per height band and probed lazily, a few per frame.
-// Flakes live in their own pool, drift with a slowly changing wind and are
-// respawned at the sky when they reach the ground of their column.
+// When a map is loaded, upward-facing world faces are sampled on a
+// world-aligned grid of COVER_GRID units, and each point traces upwards to
+// find whether the sky is above it and how high. Snow only falls there:
+// flakes start below the sky above a random open point near the viewer and
+// vanish at its floor, so every open floor gets snow whatever level the
+// viewer is on, without tracing while playing.
 //
-// Snow cover (cl_snow_cover) is a heightfield mesh on upward-facing world
-// faces under open sky, on a world-aligned grid of COVER_GRID units so that
-// neighbouring faces share points. Coverage is blurred so that drifts taper
-// at their edges and sink below the floor there; heights follow a smooth
-// noise. The mesh grows from nothing to full depth over cl_snow_cover_time
-// and is drawn by the renderer (R_SetSnowCover).
+// Snow cover (cl_snow_cover) is a heightfield mesh over the same points.
+// Coverage is blurred so that drifts taper at their edges and sink below the
+// floor there; heights follow a smooth noise. Each point grows on its own
+// schedule, the most open spots first, as the renderer is told how far the
+// snow has come (refdef_t.snow_amount); the mesh itself is sent once.
+//
+// Small columns probed from the viewer's height, a few per frame, tell how
+// open the sky is around the viewer, for the sound volumes and footsteps.
 //
 // Sounds are optional files in sound/weather/: a wind loop and a soft snow
 // ambience whose volume follows how much open sky is around the viewer,
@@ -71,27 +73,44 @@ static cvar_t   *cl_snow_cover_time;
 #define COVER_HASH          65536   // grid column hash, power of two
 #define COVER_MAX_SAMPLES   200000
 
+#define SPAWN_BUCKET        256     // flake spawn index cell
+#define SPAWN_HASH          4096    // power of two
+
 typedef struct {
     vec3_t  org;        // on the surface
     int     x, y;       // grid coordinates
     int     next;       // next sample in the same hash chain
+    float   sky_z;      // height of the sky above, if open
+    bool    open;       // the sky is above
     float   cover;      // 0 bare .. 1 fully under open sky, blurred
     float   noise;      // 0..1
-    float   height;     // at full depth, may be negative at the edges
-    color_t color;
 } cover_sample_t;
+
+typedef struct {
+    int     bx, by;     // bucket coordinates
+    int     first, count;   // in cover.spawn_points
+} spawn_bucket_t;
 
 static struct {
     cover_sample_t  *samples;
     int             num_samples;
     int             *hash;          // first sample per grid column
+    bool            built;
+
+    // open points sorted by spawn bucket, and the buckets near the viewer
+    int             *spawn_points;
+    int             num_spawn_points;
+    spawn_bucket_t  spawn_buckets[SPAWN_HASH];
+    int             *candidates;
+    int             num_candidates;
+    int             max_candidates;
+    int             viewer_bx, viewer_by;
+    bool            have_candidates;
+
+    r_snow_vertex_t *vertices;      // snow cover mesh
     uint32_t        *indices;
     int             num_indices;
-    vec3_t          *positions;
-    color_t         *colors;
-    bool            built;
-    bool            dirty;          // resend to the renderer
-    float           sent_amount;    // growth last sent
+    bool            dirty;          // send to the renderer
     int             start_time;     // cl.time when the map started
 } cover;
 
@@ -116,7 +135,8 @@ static void update_sounds(float amount, float dt);
 static void stop_sounds(void);
 static void cover_free(void);
 static void cover_build(void);
-static void cover_update(void);
+static float cover_amount(void);
+static void update_candidates(const vec3_t view);
 
 static weather_column_t weather_columns[WEATHER_HASH];
 static snowflake_t      snowflakes[WEATHER_MAX_FLAKES];
@@ -202,24 +222,23 @@ static const weather_column_t *find_column(float x, float y, float z)
 
 static bool spawn_flake(snowflake_t *f, const vec3_t view, bool anywhere)
 {
-    for (int tries = 0; tries < 8; tries++) {
-        float ang = frand() * 2 * M_PIf;
-        float r = sqrtf(frand()) * WEATHER_RADIUS;
-        float x = view[0] + cosf(ang) * r;
-        float y = view[1] + sinf(ang) * r;
-        const weather_column_t *col = find_column(x, y, view[2]);
+    for (int tries = 0; tries < 8 && cover.num_candidates; tries++) {
+        const cover_sample_t *s = &cover.samples[cover.candidates[Q_rand_uniform(cover.num_candidates)]];
+        float x = s->org[0] + crand() * COVER_GRID * 0.5f;
+        float y = s->org[1] + crand() * COVER_GRID * 0.5f;
+        float dx = x - view[0], dy = y - view[1];
 
-        if (!col || col->state != COLUMN_SKY)
+        if (dx * dx + dy * dy > WEATHER_RADIUS * WEATHER_RADIUS)
             continue;
 
-        float top = min(col->sky_z, view[2] + WEATHER_HEIGHT);
-        if (top <= col->ground_z)
+        float top = min(s->sky_z - 2, view[2] + WEATHER_HEIGHT);
+        if (top <= s->org[2])
             continue;
 
         f->org[0] = x;
         f->org[1] = y;
-        f->org[2] = anywhere ? col->ground_z + frand() * (top - col->ground_z) : top - frand() * 16;
-        f->ground_z = col->ground_z;
+        f->org[2] = anywhere ? s->org[2] + frand() * (top - s->org[2]) : top - frand() * 16;
+        f->ground_z = s->org[2];
         f->fall = 60 + frand() * 40;
         f->phase = frand() * 2 * M_PIf;
         f->size = 0.8f + frand() * 0.7f;
@@ -263,23 +282,26 @@ void CL_AddWeather(void)
     int count;
     particle_t p;
 
+    cl.refdef.snow_amount = 0;
+
     if (!amount || !cl.bsp || cls.state != ca_active) {
         stop_sounds();
-        if (cover.sent_amount || cover.built) {
-            R_SetSnowCover(NULL, NULL, 0, NULL, 0);
+        if (cover.built) {
+            R_SetSnowCover(NULL, 0, NULL, 0);
             cover_free();
         }
         return;
     }
 
-    if (cl_snow_cover->value > 0) {
-        if (!cover.built)
-            cover_build();
-        cover_update();
-    } else if (cover.built) {
-        R_SetSnowCover(NULL, NULL, 0, NULL, 0);
-        cover_free();
+    if (!cover.built)
+        cover_build();
+    if (cover.dirty) {
+        R_SetSnowCover(cover.vertices, cover.num_samples, cover.indices, cover.num_indices);
+        cover.dirty = false;
     }
+    if (cover.num_indices)
+        cl.refdef.snow_amount = cover_amount();
+    update_candidates(view);
 
     weather_probes = WEATHER_PROBES;
     update_wind(dt);
@@ -466,7 +488,8 @@ static float cover_noise(float x, float y)
     return (v[0] * (1 - tx) + v[1] * tx) * (1 - ty) + (v[2] * (1 - tx) + v[3] * tx) * ty;
 }
 
-static bool cover_exposed(const vec3_t org)
+// Whether the sky is above a point on a floor, and how high.
+static bool cover_exposed(const vec3_t org, float *sky_z)
 {
     static const vec3_t zero = { 0, 0, 0 };
     trace_t tr;
@@ -475,10 +498,11 @@ static bool cover_exposed(const vec3_t org)
     VectorSet(start, org[0], org[1], org[2] + 1);
     VectorSet(end, org[0], org[1], org[2] + 8192);
     CM_BoxTrace(&tr, start, end, zero, zero, cl.bsp->nodes, MASK_SOLID, cl.csr.extended);
+    *sky_z = tr.endpos[2];
     return !tr.startsolid && tr.fraction < 1.0f && tr.surface && (tr.surface->flags & SURF_SKY);
 }
 
-static void cover_add_face(const mface_t *face)
+static void cover_add_face(const mface_t *face, bool liquid)
 {
     vec3_t pts[64], normal;
     int n = min(face->numsurfedges, (int)q_countof(pts));
@@ -534,7 +558,8 @@ static void cover_add_face(const mface_t *face)
             VectorSet(s->org, x, y, z);
             s->x = gx;
             s->y = gy;
-            s->cover = cover_exposed(s->org);
+            s->open = cover_exposed(s->org, &s->sky_z);
+            s->cover = s->open && !liquid;
             s->noise = cover_noise(x, y);
             unsigned h = cover_hash(gx, gy);
             s->next = cover.hash[h];
@@ -547,55 +572,119 @@ static void cover_free(void)
 {
     Z_Freep(&cover.samples);
     Z_Freep(&cover.hash);
+    Z_Freep(&cover.spawn_points);
+    Z_Freep(&cover.candidates);
+    Z_Freep(&cover.vertices);
     Z_Freep(&cover.indices);
-    Z_Freep(&cover.positions);
-    Z_Freep(&cover.colors);
     memset(&cover, 0, sizeof(cover));
 }
 
-static void cover_build(void)
+static unsigned spawn_hash(int bx, int by)
 {
-#if USE_DEBUG
-    unsigned start = Sys_Milliseconds();
-#endif
-    float depth = Cvar_ClampValue(cl_snow_cover, 0, 32);
+    return ((unsigned)bx * 73856093u ^ (unsigned)by * 19349663u) & (SPAWN_HASH - 1);
+}
 
-    cover_free();
-    cover.built = true;
-    cover.start_time = cl.time;
+static spawn_bucket_t *spawn_bucket(int bx, int by, bool create)
+{
+    unsigned h = spawn_hash(bx, by);
 
-    cover.samples = Z_Malloc(sizeof(*cover.samples) * COVER_MAX_SAMPLES);
-    cover.hash = Z_Malloc(sizeof(*cover.hash) * COVER_HASH);
-    memset(cover.hash, 0xff, sizeof(*cover.hash) * COVER_HASH);
-
-    // The world's faces are those of no inline model (doors, platforms and
-    // the like move, so they get no snow); the loader leaves model 0's own
-    // face range empty.
-    byte *inline_face = Z_Mallocz(cl.bsp->numfaces);
-    for (int i = 1; i < cl.bsp->nummodels; i++) {
-        const mmodel_t *mod = &cl.bsp->models[i];
-        for (int j = 0; j < mod->numfaces; j++)
-            inline_face[mod->firstface - cl.bsp->faces + j] = 1;
+    for (int i = 0; i < SPAWN_HASH; i++) {
+        spawn_bucket_t *b = &cover.spawn_buckets[(h + i) & (SPAWN_HASH - 1)];
+        if (!b->count && !create)
+            return NULL;
+        if (!b->count) {
+            b->bx = bx;
+            b->by = by;
+            return b;
+        }
+        if (b->bx == bx && b->by == by)
+            return b;
     }
-    for (int i = 0; i < cl.bsp->numfaces; i++) {
-        const mface_t *face = &cl.bsp->faces[i];
-        if (inline_face[i])
-            continue;
-        if (face->texinfo->c.flags & (SURF_SKY | SURF_WARP | SURF_TRANS33 | SURF_TRANS66 | SURF_NODRAW))
-            continue;
-        cover_add_face(face);
-    }
-    Z_Free(inline_face);
+    return NULL;
+}
 
-#if USE_DEBUG
-    int exposed = 0;
-    for (int i = 0; i < cover.num_samples; i++)
-        exposed += cover.samples[i].cover > 0;
-    Com_DPrintf("Snow cover: %d grid points, %d under open sky\n",
-                cover.num_samples, exposed);
-#endif
-    if (!cover.num_samples)
+static int spawn_bucket_coord(float v)
+{
+    return (int)floorf(v / SPAWN_BUCKET);
+}
+
+// Sorts the open points by spawn bucket, so the points near the viewer can
+// be gathered quickly.
+static void build_spawn_index(void)
+{
+    int *filled = Z_Mallocz(sizeof(int) * SPAWN_HASH);
+    int num = 0;
+
+    for (int i = 0; i < cover.num_samples; i++) {
+        const cover_sample_t *s = &cover.samples[i];
+        if (!s->open)
+            continue;
+        spawn_bucket_t *b = spawn_bucket(spawn_bucket_coord(s->org[0]),
+                                         spawn_bucket_coord(s->org[1]), true);
+        if (!b)
+            continue;   // index full
+        b->count++;
+        num++;
+    }
+
+    cover.spawn_points = Z_Malloc(sizeof(int) * max(num, 1));
+    int first = 0;
+    for (int i = 0; i < SPAWN_HASH; i++) {
+        spawn_bucket_t *b = &cover.spawn_buckets[i];
+        b->first = first;
+        first += b->count;
+    }
+    for (int i = 0; i < cover.num_samples; i++) {
+        const cover_sample_t *s = &cover.samples[i];
+        if (!s->open)
+            continue;
+        spawn_bucket_t *b = spawn_bucket(spawn_bucket_coord(s->org[0]),
+                                         spawn_bucket_coord(s->org[1]), false);
+        if (!b)
+            continue;
+        int slot = b - cover.spawn_buckets;
+        cover.spawn_points[b->first + filled[slot]++] = i;
+    }
+    cover.num_spawn_points = num;
+    Z_Free(filled);
+}
+
+// Gathers the open points within reach whenever the viewer enters another
+// spawn bucket.
+static void update_candidates(const vec3_t view)
+{
+    int vbx = spawn_bucket_coord(view[0]);
+    int vby = spawn_bucket_coord(view[1]);
+    int reach = WEATHER_RADIUS / SPAWN_BUCKET + 1;
+
+    if (cover.have_candidates && vbx == cover.viewer_bx && vby == cover.viewer_by)
         return;
+
+    cover.num_candidates = 0;
+    for (int by = vby - reach; by <= vby + reach; by++) {
+        for (int bx = vbx - reach; bx <= vbx + reach; bx++) {
+            const spawn_bucket_t *b = spawn_bucket(bx, by, false);
+            if (!b)
+                continue;
+            if (cover.num_candidates + b->count > cover.max_candidates) {
+                cover.max_candidates = cover.num_candidates + b->count + 1024;
+                cover.candidates = Z_Realloc(cover.candidates,
+                                             sizeof(int) * cover.max_candidates);
+            }
+            memcpy(cover.candidates + cover.num_candidates,
+                   cover.spawn_points + b->first, sizeof(int) * b->count);
+            cover.num_candidates += b->count;
+        }
+    }
+
+    cover.viewer_bx = vbx;
+    cover.viewer_by = vby;
+    cover.have_candidates = true;
+}
+
+static void build_mesh(float depth)
+{
+    float *height = Z_Malloc(sizeof(float) * cover.num_samples);
 
     // blur coverage twice over the 3x3 neighbourhood; missing neighbours are
     // bare ground, so drifts taper towards walls and roofs
@@ -618,12 +707,12 @@ static void cover_build(void)
     Z_Free(tmp);
 
     for (int i = 0; i < cover.num_samples; i++) {
-        cover_sample_t *s = &cover.samples[i];
+        const cover_sample_t *s = &cover.samples[i];
         // zero height where the blurred coverage is 0.6, so the visible edge
         // of a drift is a smooth contour well inside the jagged outline of
         // the grid, which stays under the floor
         float f = Q_clipf((s->cover - 0.6f) / 0.4f, -1.25f, 1.0f);
-        s->height = depth * (0.3f + 0.7f * s->noise) * f;
+        height[i] = depth * (0.3f + 0.7f * s->noise) * f;
     }
 
     // two triangles per grid square that has any snow
@@ -636,8 +725,7 @@ static void cover_build(void)
 
         if (r < 0 || u < 0 || d < 0)
             continue;
-        if (s->cover <= 0 && cover.samples[r].cover <= 0 &&
-            cover.samples[u].cover <= 0 && cover.samples[d].cover <= 0)
+        if (height[i] <= 0 && height[r] <= 0 && height[u] <= 0 && height[d] <= 0)
             continue;
 
         uint32_t *idx = &cover.indices[cover.num_indices];
@@ -646,23 +734,23 @@ static void cover_build(void)
         cover.num_indices += 6;
     }
 
-    // lighting and shading are fixed; only heights change as snow grows
-    cover.positions = Z_Malloc(sizeof(vec3_t) * cover.num_samples);
-    cover.colors = Z_Malloc(sizeof(color_t) * cover.num_samples);
+    cover.vertices = Z_Malloc(sizeof(*cover.vertices) * cover.num_samples);
     for (int i = 0; i < cover.num_samples; i++) {
-        cover_sample_t *s = &cover.samples[i];
+        const cover_sample_t *s = &cover.samples[i];
+        r_snow_vertex_t *v = &cover.vertices[i];
         float hx = 0, hy = 0;
         int r = cover_find(s->x + 1, s->y, s->org[2], 16);
         int l = cover_find(s->x - 1, s->y, s->org[2], 16);
         int u = cover_find(s->x, s->y + 1, s->org[2], 16);
         int b = cover_find(s->x, s->y - 1, s->org[2], 16);
-        if (r >= 0 && l >= 0) hx = (cover.samples[r].height - cover.samples[l].height) / (2 * COVER_GRID);
-        if (u >= 0 && b >= 0) hy = (cover.samples[u].height - cover.samples[b].height) / (2 * COVER_GRID);
+        if (r >= 0 && l >= 0) hx = (height[r] - height[l]) / (2 * COVER_GRID);
+        if (u >= 0 && b >= 0) hy = (height[u] - height[b]) / (2 * COVER_GRID);
         float nz = 1.0f / sqrtf(1 + hx * hx + hy * hy);
         // light from above and from one side shapes the drifts
         float shade = 0.5f + 0.5f * nz + 0.6f * (hx - hy) * nz;
         // thinner snow near its edges catches less light, so drifts look round
-        shade *= 0.72f + 0.28f * Q_clipf((s->cover - 0.6f) / 0.4f, 0, 1);
+        float inner = Q_clipf((s->cover - 0.6f) / 0.4f, 0, 1);
+        shade *= 0.72f + 0.28f * inner;
 
         vec3_t pos, light;
         VectorSet(pos, s->org[0], s->org[1], s->org[2] + 16);
@@ -673,45 +761,81 @@ static void cover_build(void)
         float level = 0.35f + 0.9f * min(luma, 1.2f);
         float sparkle = 0.9f + 0.1f * cover_noise(s->org[0] * 7.3f, s->org[1] * 7.3f);
         float k = shade * sparkle * level * 255;
-        vec3_t tint;
-        for (int c = 0; c < 3; c++)
-            tint[c] = 0.75f + 0.25f * (luma > 0.001f ? light[c] / luma : 1.0f);
-        s->color.u8[0] = Q_clip(tint[0] * 0.94f * k, 0, 255);
-        s->color.u8[1] = Q_clip(tint[1] * 0.96f * k, 0, 255);
-        s->color.u8[2] = Q_clip(tint[2] * 1.00f * k, 0, 255);
-        s->color.u8[3] = 255;
-        cover.colors[i] = s->color;
+        for (int c = 0; c < 3; c++) {
+            static const float albedo[3] = { 0.94f, 0.96f, 1.0f };
+            float tint = 0.75f + 0.25f * (luma > 0.001f ? light[c] / luma : 1.0f);
+            v->color.u8[c] = Q_clip(tint * albedo[c] * k, 0, 255);
+        }
+        v->color.u8[3] = 255;
+
+        // the most open spots start first and the snow spreads outwards
+        // from them, with noise so it doesn't grow in rings
+        float patch = cover_noise(s->org[0] * 0.6f + 517, s->org[1] * 0.6f - 233);
+        v->start = Q_clipf(0.55f * (1 - inner) + 0.3f * patch, 0, 0.85f);
+        v->length = max(min(0.25f + 0.2f * s->noise, 1 - v->start), 0.05f);
+        v->height = height[i];
+        VectorCopy(s->org, v->origin);
     }
 
-#if USE_DEBUG
-    Com_DPrintf("Snow cover: %d points, %d triangles, %u ms\n",
-                cover.num_samples, cover.num_indices / 3, Sys_Milliseconds() - start);
-#endif
-    cover.dirty = true;
+    Z_Free(height);
 }
 
-// Sends the mesh at the current growth when it changed enough to see.
-static void cover_update(void)
+static void cover_build(void)
+{
+#if USE_DEBUG
+    unsigned start = Sys_Milliseconds();
+#endif
+    float depth = Cvar_ClampValue(cl_snow_cover, 0, 32);
+
+    cover_free();
+    cover.built = true;
+    cover.start_time = cl.time;
+
+    cover.samples = Z_Malloc(sizeof(*cover.samples) * COVER_MAX_SAMPLES);
+    cover.hash = Z_Malloc(sizeof(*cover.hash) * COVER_HASH);
+    memset(cover.hash, 0xff, sizeof(*cover.hash) * COVER_HASH);
+
+    // The world's faces are those of no inline model (doors, platforms and
+    // the like move, so they get no snow); the loader leaves model 0's own
+    // face range empty. Flakes also fall onto liquids, but snow doesn't
+    // settle there.
+    byte *inline_face = Z_Mallocz(cl.bsp->numfaces);
+    for (int i = 1; i < cl.bsp->nummodels; i++) {
+        const mmodel_t *mod = &cl.bsp->models[i];
+        for (int j = 0; j < mod->numfaces; j++)
+            inline_face[mod->firstface - cl.bsp->faces + j] = 1;
+    }
+    for (int i = 0; i < cl.bsp->numfaces; i++) {
+        const mface_t *face = &cl.bsp->faces[i];
+        int flags = face->texinfo->c.flags;
+        if (inline_face[i] || (flags & (SURF_SKY | SURF_NODRAW)))
+            continue;
+        if ((flags & (SURF_TRANS33 | SURF_TRANS66)) && !(flags & SURF_WARP))
+            continue;   // glass
+        cover_add_face(face, flags & SURF_WARP);
+    }
+    Z_Free(inline_face);
+
+    build_spawn_index();
+    if (depth > 0 && cover.num_samples)
+        build_mesh(depth);
+
+#if USE_DEBUG
+    Com_DPrintf("Snow: %d grid points, %d open, %d cover triangles, %u ms\n",
+                cover.num_samples, cover.num_spawn_points, cover.num_indices / 3,
+                Sys_Milliseconds() - start);
+#endif
+    cover.dirty = cover.num_indices > 0;
+}
+
+// How far the snow cover has grown since the map started, 0..1.
+static float cover_amount(void)
 {
     float time = Cvar_ClampValue(cl_snow_cover_time, 0, 3600);
-    float amount = time ? Q_clipf((cl.time - cover.start_time) / (time * 1000.0f), 0, 1) : 1;
 
-    if (!cover.num_indices)
-        return;
-    if (!cover.dirty && fabsf(amount - cover.sent_amount) < 0.02f)
-        return;
-
-    for (int i = 0; i < cover.num_samples; i++) {
-        const cover_sample_t *s = &cover.samples[i];
-        // half a unit below the floor where there is no snow yet
-        VectorSet(cover.positions[i], s->org[0], s->org[1],
-                  s->org[2] + s->height * amount - 0.5f);
-    }
-
-    R_SetSnowCover(cover.positions, cover.colors, cover.num_samples,
-                   cover.indices, cover.num_indices);
-    cover.sent_amount = amount;
-    cover.dirty = false;
+    if (!time)
+        return 1;
+    return Q_clipf((cl.time - cover.start_time) / (time * 1000.0f), 0.001f, 1);
 }
 
 /*
@@ -723,7 +847,7 @@ The renderer forgets the snow cover when it restarts; send it again.
 */
 void CL_WeatherRefreshChanged(void)
 {
-    cover.dirty = true;
+    cover.dirty = cover.num_indices > 0;
 }
 
 /*
@@ -738,7 +862,7 @@ void CL_ClearWeather(void)
     memset(weather_columns, 0, sizeof(weather_columns));
     memset(snowflakes, 0, sizeof(snowflakes));
     if (cover.built && cls.ref_initialized)
-        R_SetSnowCover(NULL, NULL, 0, NULL, 0);
+        R_SetSnowCover(NULL, 0, NULL, 0);
     cover_free();
     weather_wind_timer = 0;
     weather_exposure = 0;
