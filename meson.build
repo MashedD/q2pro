@@ -362,7 +362,7 @@ if vulkan.found()
                     'vk_ssr.vert', 'vk_ssr.frag', 'vk_ssr_resolve.frag',
                     'vk_scene.frag',
                     'vk_color3d.vert', 'vk_color3d.frag',
-                    'vk_snow.vert', 'vk_snow.frag',
+                    'vk_snow.vert', 'vk_snow.frag', 'vk_snow_full.frag',
                     'vk_world.vert', 'vk_world.frag', 'vk_world_alpha.frag',
                     'vk_world_lit.vert', 'vk_world_lit.frag',
                     'vk_world_lit_alpha.frag',

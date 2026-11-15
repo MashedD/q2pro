@@ -750,13 +750,15 @@ bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
                                          sizeof(vk_color3d_frag_spv), false);
 }
 
-bool vk_create_snow_pipeline(VkPipeline *pipeline)
+// full: for snow that has fully grown, which needs no pixels left out
+bool vk_create_snow_pipeline(VkPipeline *pipeline, bool full)
 {
     return vk_create_color3d_pipeline_ex(pipeline, true, true, false, false,
                                          VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
                                          vk_snow_vert_spv,
                                          sizeof(vk_snow_vert_spv),
-                                         vk_snow_frag_spv,
+                                         full ? vk_snow_full_frag_spv : vk_snow_frag_spv,
+                                         full ? sizeof(vk_snow_full_frag_spv) :
                                          sizeof(vk_snow_frag_spv), true);
 }
 

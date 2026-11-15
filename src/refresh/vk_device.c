@@ -1107,6 +1107,11 @@ void vk_destroy_swapchain(void)
         vk.snow_pipeline = VK_NULL_HANDLE;
     }
 
+    if (vk.snow_full_pipeline) {
+        vk.DestroyPipeline(vk.device, vk.snow_full_pipeline, NULL);
+        vk.snow_full_pipeline = VK_NULL_HANDLE;
+    }
+
     if (vk.line3d_pipeline) {
         vk.DestroyPipeline(vk.device, vk.line3d_pipeline, NULL);
         vk.line3d_pipeline = VK_NULL_HANDLE;
@@ -2113,7 +2118,8 @@ bool vk_create_swapchain(int width, int height)
                                        false) ||
         !vk_create_color3d_pipeline(&vk.color3d_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE,
                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
-        !vk_create_snow_pipeline(&vk.snow_pipeline) ||
+        !vk_create_snow_pipeline(&vk.snow_pipeline, false) ||
+        !vk_create_snow_pipeline(&vk.snow_full_pipeline, true) ||
         !vk_create_color3d_pipeline(&vk.line3d_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE,
                                     VK_PRIMITIVE_TOPOLOGY_LINE_LIST) ||
         !vk_create_color3d_pipeline(&vk.debug_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE,

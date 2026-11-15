@@ -344,10 +344,19 @@ void CL_AddWeather(void)
             }
         }
 
+        // flakes behind the viewer can't be seen
+        vec3_t d;
+        VectorSubtract(f->org, view, d);
+        if (DotProduct(d, cl.v_forward) < -16)
+            continue;
+
         // distant flakes fade, so snow doesn't hide the far side of an area
-        float dist = hypotf(f->org[0] - view[0], f->org[1] - view[1]);
-        float fade = Q_clipf((dist - WEATHER_FADE) / (WEATHER_RADIUS - WEATHER_FADE), 0, 1);
-        p.alpha = 0.9f * (1 - 0.8f * fade);
+        float dist2 = d[0] * d[0] + d[1] * d[1];
+        p.alpha = 0.9f;
+        if (dist2 > WEATHER_FADE * WEATHER_FADE) {
+            float fade = (sqrtf(dist2) - WEATHER_FADE) / (WEATHER_RADIUS - WEATHER_FADE);
+            p.alpha *= 1 - 0.8f * min(fade, 1.0f);
+        }
 
         VectorCopy(f->org, p.origin);
         p.scale = f->size;
