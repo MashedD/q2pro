@@ -304,6 +304,7 @@ extern cvar_t *gl_md5_distance;
 extern cvar_t *gl_damageblend_frac;
 extern cvar_t *gl_waterwarp;
 extern cvar_t *gl_bloom;
+extern cvar_t *gl_drawworld;
 extern cvar_t *gl_bloom_lamps;
 extern cvar_t *r_lava_glowmaps;
 
@@ -608,6 +609,7 @@ void GL_LoadWorld(const char *name);
 #define GLS_BLOOM_ONLY          BIT_ULL(35)
 #define GLS_SKINTINT            BIT_ULL(36)
 #define GLS_BLOOM_LAMP_STRONG   BIT_ULL(37)
+#define GLS_SNOW                BIT_ULL(38)
 
 #define GLS_BLUR_GAUSS          BIT_ULL(32)
 #define GLS_BLUR_BOX            BIT_ULL(33)
@@ -627,7 +629,7 @@ void GL_LoadWorld(const char *name);
                                  GLS_LIGHTMAP_ENABLE | GLS_WARP_ENABLE | GLS_INTENSITY_ENABLE | \
                                  GLS_GLOWMAP_ENABLE | GLS_SKY_MASK | GLS_DEFAULT_FLARE | GLS_MESH_MASK | \
                                  GLS_FOG_MASK | GLS_BLOOM_MASK | GLS_BLUR_MASK | GLS_INTENSITY_2D | \
-                                 GLS_SKINTINT)
+                                 GLS_SKINTINT | GLS_SNOW)
 #define GLS_UNIFORM_MASK        (GLS_WARP_ENABLE | GLS_LIGHTMAP_ENABLE | GLS_INTENSITY_ENABLE | \
                                  GLS_SKY_MASK | GLS_FOG_MASK | GLS_BLUR_MASK | GLS_INTENSITY_2D | \
                                  GLS_SKINTINT)
@@ -978,6 +980,13 @@ extern tesselator_t tess;
 
 void GL_Flush2D(void);
 void GL_DrawParticles(void);
+
+/*
+ * snow_gl.c
+ *
+ */
+void GL_DrawSnowCover(void);
+void GL_FreeSnowCover(void);
 void GL_DrawBeams(void);
 void GL_DrawFlares(void);
 

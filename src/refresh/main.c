@@ -845,6 +845,8 @@ void R_RenderFrame(const refdef_t *fd)
 
     GL_DrawEntities(glr.ents.opaque);
 
+    GL_DrawSnowCover();
+
     GL_DrawEntities(glr.ents.alpha_back);
 
     GL_DrawAlphaFaces();
@@ -1519,13 +1521,4 @@ void R_ModeChanged(int width, int height, int flags)
     r_config.flags = flags;
 }
 
-// Snow cover isn't drawn by the OpenGL renderer yet.
-void GLR_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
-                      const uint32_t *indices, int num_indices)
-{
-}
 
-void GLR_AddSnowCrater(const int *vertices, const float *strength, int count,
-                       float time)
-{
-}

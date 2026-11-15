@@ -12,7 +12,7 @@ All notable changes to this fork are documented here. The format follows
   optional wind, gust and footstep sounds from `sound/weather/`
   (`cl_snow_volume`), and snow that settles into drifts on floors and ledges
   under open sky over a few minutes (`cl_snow_cover`, `cl_snow_cover_time`;
-  Vulkan only so far). Explosions blow craters into it, which fill in
+  not with OpenGL ES). Explosions blow craters into it, which fill in
   again (`cl_snow_craters`).
 
 ### Fixed
