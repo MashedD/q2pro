@@ -257,8 +257,15 @@ cl_snow_cover::
 
 cl_snow_cover_time::
     Seconds it takes the snow cover to reach its full depth after a map
-    loads, from 0 to 3600; 0 covers everything at once. The snow starts in
-    the most open spots and spreads from there. Default value is 300.
+    loads, from 0 to 3600; 0 covers everything at once. The snow starts as
+    a dusting, a little earlier in the most open spots, and thickens.
+    Default value is 300.
+
+cl_snow_craters::
+    Rocket, grenade and other explosions blow the snow cover away around
+    them, where the explosion can reach, and the crater fills in again over
+    about a minute. Only you see them, like the rest of the snow. Default
+    value is 1 (enabled).
 
 cl_railcore_glow::
     Adds a soft, wider additive glow around the rail core and turns its

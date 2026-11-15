@@ -27,6 +27,8 @@ void VKR_RenderFrame(const refdef_t *fd);
 void VKR_LightPoint(const vec3_t origin, vec3_t light);
 void VKR_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
                       const uint32_t *indices, int num_indices);
+void VKR_AddSnowCrater(const int *vertices, const float *strength, int count,
+                       float time);
 void VKR_ClearColor(void);
 void VKR_SetAlpha(float alpha);
 void VKR_SetColor(uint32_t color);

@@ -355,6 +355,12 @@ typedef struct {
 } vk_color3d_push_t;
 
 typedef struct {
+    mat4_t mvp;
+    float color[4];     // rgb tint, a = snow amount
+    float craters[4];   // time, seconds for a crater to fill again
+} vk_snow_push_t;
+
+typedef struct {
     image_t *image;
     vk_texture_t faces[6];
 } vk_cubemap_t;

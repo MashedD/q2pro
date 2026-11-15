@@ -287,6 +287,11 @@ typedef struct {
 void    R_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
                        const uint32_t *indices, int num_indices);
 
+// Blows snow away from the given vertices of the current snow cover, each
+// by a strength from 0 to 1, at refdef_t.time; it slowly grows back.
+void    R_AddSnowCrater(const int *vertices, const float *strength, int count,
+                        float time);
+
 void    R_ClearColor(void);
 void    R_SetAlpha(float clpha);
 void    R_SetColor(uint32_t color);

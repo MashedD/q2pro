@@ -581,7 +581,8 @@ bool vk_create_ssr_pipeline(void)
     return result == VK_SUCCESS;
 }
 
-// growth: also feed vk_vertex_t.normal as location 2, for vk_snow.vert
+// growth: also feed vk_vertex_t.normal as location 2 and the snow craters of
+// binding 1 as location 3, for vk_snow.vert
 static bool vk_create_color3d_pipeline_ex(VkPipeline *pipeline, bool depth_test,
                                           bool depth_write, bool blend, bool additive,
                                           VkPrimitiveTopology topology,
@@ -613,10 +614,18 @@ static bool vk_create_color3d_pipeline_ex(VkPipeline *pipeline, bool depth_test,
             .pName = "main",
         },
     };
-    VkVertexInputBindingDescription binding = {
-        .binding = 0,
-        .stride = sizeof(vk_vertex_t),
-        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    VkVertexInputBindingDescription bindings[] = {
+        {
+            .binding = 0,
+            .stride = sizeof(vk_vertex_t),
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        },
+        {
+            // snow craters: time and strength per vertex (vk_snow.c)
+            .binding = 1,
+            .stride = sizeof(float) * 2,
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        },
     };
     VkVertexInputAttributeDescription attributes[] = {
         {
@@ -637,12 +646,18 @@ static bool vk_create_color3d_pipeline_ex(VkPipeline *pipeline, bool depth_test,
             .format = VK_FORMAT_R32G32B32_SFLOAT,
             .offset = offsetof(vk_vertex_t, normal),
         },
+        {
+            .location = 3,
+            .binding = 1,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .offset = 0,
+        },
     };
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount = 1,
-        .pVertexBindingDescriptions = &binding,
-        .vertexAttributeDescriptionCount = growth ? 3 : 2,
+        .vertexBindingDescriptionCount = growth ? 2 : 1,
+        .pVertexBindingDescriptions = bindings,
+        .vertexAttributeDescriptionCount = growth ? 4 : 2,
         .pVertexAttributeDescriptions = attributes,
     };
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {

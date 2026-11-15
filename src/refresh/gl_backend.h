@@ -24,6 +24,8 @@ void GLR_RenderFrame(const refdef_t *fd);
 void GLR_LightPoint(const vec3_t origin, vec3_t light);
 void GLR_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
                       const uint32_t *indices, int num_indices);
+void GLR_AddSnowCrater(const int *vertices, const float *strength, int count,
+                       float time);
 void GLR_ClearColor(void);
 void GLR_SetAlpha(float alpha);
 void GLR_SetColor(uint32_t color);

@@ -851,7 +851,8 @@ bool vk_create_frame_resources(void)
     VkPushConstantRange push_range = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
-        .size = max(max(max(max(max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
+        .size = max(max(max(max(max(max(sizeof(vk_draw_push_t), sizeof(vk_color3d_push_t)),
+                                    sizeof(vk_snow_push_t)),
                                 sizeof(vk_world_push_t)), sizeof(vk_world_lit_push_t)),
                             sizeof(vk_alias_push_t)),
                     sizeof(vk_alias_shadow_push_t)),

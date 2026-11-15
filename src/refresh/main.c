@@ -1524,3 +1524,8 @@ void GLR_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
                       const uint32_t *indices, int num_indices)
 {
 }
+
+void GLR_AddSnowCrater(const int *vertices, const float *strength, int count,
+                       float time)
+{
+}

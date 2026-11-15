@@ -69,6 +69,7 @@ static cvar_t   *cl_snow;
 static cvar_t   *cl_snow_volume;
 static cvar_t   *cl_snow_cover;
 static cvar_t   *cl_snow_cover_time;
+static cvar_t   *cl_snow_craters;
 
 #define COVER_GRID          12
 #define COVER_HASH          65536   // grid column hash, power of two
@@ -1190,4 +1191,56 @@ void CL_InitWeather(void)
     cl_snow_cover = Cvar_Get("cl_snow_cover", "6", CVAR_ARCHIVE);
     cl_snow_cover->changed = cl_snow_changed;
     cl_snow_cover_time = Cvar_Get("cl_snow_cover_time", "300", CVAR_ARCHIVE);
+    cl_snow_craters = Cvar_Get("cl_snow_craters", "1", CVAR_ARCHIVE);
+}
+
+#define MAX_CRATER_VERTICES 4096
+
+/*
+==============
+CL_SnowExplosion
+
+Blows the snow cover away around an explosion: every vertex within radius
+that the explosion can see, most strongly at the centre.
+==============
+*/
+void CL_SnowExplosion(const vec3_t origin, float radius)
+{
+    static const vec3_t zero = { 0, 0, 0 };
+    static int verts[MAX_CRATER_VERTICES];
+    static float strength[MAX_CRATER_VERTICES];
+    int count = 0;
+
+    if (!cover.num_indices || !cl_snow->value || !cl_snow_craters->integer || !cl.bsp)
+        return;
+
+    for (int i = 0; i < cover.num_vertices && count < MAX_CRATER_VERTICES; i++) {
+        const r_snow_vertex_t *v = &cover.vertices[i];
+        vec3_t d;
+        VectorSubtract(v->origin, origin, d);
+        float dist2 = DotProduct(d, d);
+        if (dist2 >= radius * radius)
+            continue;
+
+        // not through walls and floors; skirt bottoms share their top's
+        // position, so the trace starts above the floor for both
+        trace_t tr;
+        vec3_t point;
+        VectorCopy(v->origin, point);
+        point[2] += 4;
+        CM_BoxTrace(&tr, origin, point, zero, zero, cl.bsp->nodes, MASK_SOLID,
+                    cl.csr.extended);
+        if (tr.fraction < 1.0f && !tr.startsolid)
+            continue;
+
+        // noise keeps the crater from being a circle
+        float wobble = 0.6f + 0.8f * cover_noise(v->origin[0] * 3 + origin[0],
+                                                 v->origin[1] * 3 + origin[1]);
+        verts[count] = i;
+        strength[count] = min((1 - dist2 / (radius * radius)) * wobble, 1.0f);
+        count++;
+    }
+
+    if (count)
+        R_AddSnowCrater(verts, strength, count, cl.time * 0.001f);
 }

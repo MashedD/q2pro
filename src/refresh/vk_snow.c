@@ -12,12 +12,17 @@ the Free Software Foundation; either version 2 of the License, or
 // sorted into blocks of SNOW_BLOCK units, and only blocks in view are drawn:
 // inside the view frustum, with a BSP leaf that the world marked visible
 // from the viewer's PVS this frame.
+//
+// Explosions blow snow away (R_AddSnowCrater): a host-visible buffer holds
+// the time and strength of the last crater at each vertex, as a second
+// vertex stream, so a crater needs no upload of the mesh.
 
 #include "vk_local.h"
 
 #if USE_VULKAN
 
 #define SNOW_BLOCK      256
+#define SNOW_REFILL     60      // seconds for a crater to fill in again
 
 typedef struct {
     int     bx, by;
@@ -32,6 +37,68 @@ static snow_block_t *snow_blocks;
 static int          num_snow_blocks;
 static int          *snow_leafs;    // world leaf numbers per block
 static int          num_snow_leafs;
+
+static struct {
+    VkBuffer        buffer;
+    VkDeviceMemory  memory;
+    float           *mapped;        // time, strength per vertex
+    int             num_vertices;
+    float           last_time;      // of the last crater
+} snow_craters;
+
+static void free_craters(void)
+{
+    if (snow_craters.mapped)
+        vk.UnmapMemory(vk.device, snow_craters.memory);
+    if (snow_craters.buffer)
+        vk.DestroyBuffer(vk.device, snow_craters.buffer, NULL);
+    if (snow_craters.memory)
+        vk.FreeMemory(vk.device, snow_craters.memory, NULL);
+    memset(&snow_craters, 0, sizeof(snow_craters));
+}
+
+static bool create_craters(int num_vertices)
+{
+    VkDeviceSize size = sizeof(float) * 2 * num_vertices;
+    void *mapped;
+
+    if (!vk_create_buffer(size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          &snow_craters.buffer, &snow_craters.memory))
+        return false;
+    VkResult result = vk.MapMemory(vk.device, snow_craters.memory, 0, size, 0, &mapped);
+    if (result != VK_SUCCESS)
+        return vk_fail_result("vkMapMemory", result);
+
+    snow_craters.mapped = mapped;
+    snow_craters.num_vertices = num_vertices;
+    snow_craters.last_time = -SNOW_REFILL;
+    for (int i = 0; i < num_vertices; i++) {
+        snow_craters.mapped[i * 2 + 0] = -SNOW_REFILL;
+        snow_craters.mapped[i * 2 + 1] = 0;
+    }
+    return true;
+}
+
+void VKR_AddSnowCrater(const int *vertices, const float *strength, int count,
+                       float time)
+{
+    if (!snow_craters.mapped)
+        return;
+
+    for (int i = 0; i < count; i++) {
+        int v = vertices[i];
+        if (v < 0 || v >= snow_craters.num_vertices)
+            continue;
+        // what is left of an earlier crater here
+        float *c = &snow_craters.mapped[v * 2];
+        float refill = Q_clipf((time - c[0]) / SNOW_REFILL, 0, 1);
+        c[1] = max(Q_clipf(strength[i], 0, 1), c[1] * (1 - refill));
+        c[0] = time;
+    }
+    snow_craters.last_time = time;
+}
 
 static int snow_block_coord(float v)
 {
@@ -165,7 +232,8 @@ void VKR_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
     }
 
     uint32_t *sorted = sort_into_blocks(vertices, indices, num_indices);
-    if (!vk_upload_mesh(&vk.snow_cover, verts, num_vertices, sorted, num_indices)) {
+    if (!vk_upload_mesh(&vk.snow_cover, verts, num_vertices, sorted, num_indices) ||
+        !create_craters(num_vertices)) {
         Com_WPrintf("Couldn't upload the snow cover\n");
         vk_free_snow_cover();
     }
@@ -176,25 +244,31 @@ void VKR_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
 void vk_draw_snow_cover(const refdef_t *fd)
 {
     VkCommandBuffer cmd = vk.command_buffers[vk.current_image];
-    vk_color3d_push_t push;
+    vk_snow_push_t push;
     mat4_t mvp;
 
     if (!vk.snow_cover.index_count || !vk.snow_cover.vertices.buffer ||
-        !vk.snow_pipeline || !vk.snow_full_pipeline || fd->snow_amount <= 0 ||
+        !vk.snow_pipeline || !vk.snow_full_pipeline || !snow_craters.buffer ||
+        fd->snow_amount <= 0 ||
         (fd->rdflags & RDF_NOWORLDMODEL))
         return;
 
     vk_world_mvp(mvp, fd);
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     Vector4Set(push.color, 1.0f, 1.0f, 1.0f, fd->snow_amount);
+    Vector4Set(push.craters, fd->time, SNOW_REFILL, 0.0f, 0.0f);
 
-    VkBuffer buffers[] = { vk.snow_cover.vertices.buffer };
-    VkDeviceSize offsets[] = { 0 };
+    VkBuffer buffers[] = { vk.snow_cover.vertices.buffer, snow_craters.buffer };
+    VkDeviceSize offsets[] = { 0, 0 };
 
-    // once all of it has grown, no pixels are left out
+    // once all of it has grown and no crater is filling in, no pixels are
+    // left out
+    bool full = fd->snow_amount >= 1 &&
+        (fd->time < snow_craters.last_time ||
+         fd->time - snow_craters.last_time > SNOW_REFILL);
     vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                     fd->snow_amount >= 1 ? vk.snow_full_pipeline : vk.snow_pipeline);
-    vk_bind_vertex_buffers(cmd, 0, 1, buffers, offsets);
+                     full ? vk.snow_full_pipeline : vk.snow_pipeline);
+    vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
     vk_bind_index_buffer(cmd, vk.snow_cover.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
     vk_push_constants(cmd, sizeof(push), &push);
 
@@ -237,6 +311,7 @@ void vk_draw_snow_cover(const refdef_t *fd)
 void vk_free_snow_cover(void)
 {
     vk_destroy_mesh(&vk.snow_cover);
+    free_craters();
     Z_Freep(&snow_blocks);
     num_snow_blocks = 0;
     Z_Freep(&snow_leafs);
