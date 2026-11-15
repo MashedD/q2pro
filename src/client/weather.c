@@ -514,14 +514,23 @@ static float cover_noise(float x, float y)
 static bool cover_exposed(const vec3_t org, float *sky_z)
 {
     static const vec3_t zero = { 0, 0, 0 };
+    static const float nudges[][2] = { { 0, 0 }, { 2, 0 }, { -2, 0 }, { 0, 2 }, { 0, -2 } };
     trace_t tr;
     vec3_t start, end;
 
-    VectorSet(start, org[0], org[1], org[2] + 1);
-    VectorSet(end, org[0], org[1], org[2] + 8192);
-    CM_BoxTrace(&tr, start, end, zero, zero, cl.bsp->nodes, MASK_SOLID, cl.csr.extended);
-    *sky_z = tr.endpos[2];
-    return !tr.startsolid && tr.fraction < 1.0f && tr.surface && (tr.surface->flags & SURF_SKY);
+    for (int i = 0; i < q_countof(nudges); i++) {
+        VectorSet(start, org[0] + nudges[i][0], org[1] + nudges[i][1], org[2] + 1);
+        VectorSet(end, start[0], start[1], org[2] + 8192);
+        CM_BoxTrace(&tr, start, end, zero, zero, cl.bsp->nodes, MASK_SOLID, cl.csr.extended);
+        *sky_z = tr.endpos[2];
+        if (!tr.startsolid && tr.fraction < 1.0f && tr.surface && (tr.surface->flags & SURF_SKY))
+            return true;
+        // A point right at the foot of a wall can graze it on the way up;
+        // try again a little away from it. A ceiling above is a real roof.
+        if (!tr.startsolid && tr.fraction < 1.0f && tr.plane.normal[2] < -0.7f)
+            return false;
+    }
+    return false;
 }
 
 static void cover_add_face(const mface_t *face, bool liquid)
@@ -858,6 +867,7 @@ static void build_mesh(float depth)
 {
     float *height = Z_Malloc(sizeof(float) * cover.num_samples);
     float *bank = Z_Mallocz(sizeof(float) * cover.num_samples);
+    bool *ledge = Z_Mallocz(sizeof(bool) * cover.num_samples);
     vec2_t *shift = Z_Mallocz(sizeof(vec2_t) * cover.num_samples);
     float (*strip)[2][2] = Z_Mallocz(sizeof(*strip) * cover.num_samples);
     byte *strip_axes = Z_Mallocz(cover.num_samples);
@@ -877,6 +887,8 @@ static void build_mesh(float depth)
             edge_type_t type = probe_edge(s, d, &extent[d]);
             if (type == EDGE_WALL)
                 bank[i] = 1;
+            else if (type == EDGE_DROP)
+                ledge[i] = true;
             // keep the side of the snow a unit away from the wall or the
             // face below the drop, even for a point right on the edge, so
             // the two never fight for depth
@@ -934,6 +946,10 @@ static void build_mesh(float depth)
         height[i] = depth * (0.3f + 0.7f * s->noise) * f;
         if (f > 0)
             height[i] += depth * 0.6f * bank[i] * f;
+        // snow on a narrow ledge or at the edge of a drop is thin otherwise
+        // where the noise is low, and hard to see from below
+        if (f > 0 && (ledge[i] || strip_axes[i]))
+            height[i] = max(height[i], depth * 0.7f * f);
     }
 
     // two triangles per grid square that has any snow, or one where a wall
@@ -1065,6 +1081,7 @@ static void build_mesh(float depth)
     Z_Free(strip_axes);
     Z_Free(strip);
     Z_Free(shift);
+    Z_Free(ledge);
     Z_Free(bank);
     Z_Free(height);
 }
