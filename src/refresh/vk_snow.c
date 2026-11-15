@@ -1,42 +1,17 @@
-/*
-Copyright (C) 2026
-
-This program is free software; you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation; either version 2 of the License, or
-(at your option) any later version.
-*/
-
 // Vulkan snow cover: a lit, colored mesh built by the client (weather.c)
-// and drawn after the opaque world with the color3d pipeline. Triangles are
-// sorted into blocks of SNOW_BLOCK units, and only blocks in view are drawn:
-// inside the view frustum, with a BSP leaf that the world marked visible
-// from the viewer's PVS this frame.
+// and drawn after the opaque world with its own pipelines; vk_snow.vert grows
+// it. Only the blocks in view are drawn (snow.c).
 //
 // Explosions blow snow away (R_AddSnowCrater): a host-visible buffer holds
 // the time and strength of the last crater at each vertex, as a second
 // vertex stream, so a crater needs no upload of the mesh.
 
 #include "vk_local.h"
+#include "snow.h"
 
 #if USE_VULKAN
 
-#define SNOW_BLOCK      256
-#define SNOW_REFILL     60      // seconds for a crater to fill in again
-
-typedef struct {
-    int     bx, by;
-    vec3_t  bounds[2];
-    uint32_t first_index;
-    uint32_t num_indices;
-    int     first_leaf;     // in snow_leafs, -1 for none known
-    int     num_leafs;
-} snow_block_t;
-
-static snow_block_t *snow_blocks;
-static int          num_snow_blocks;
-static int          *snow_leafs;    // world leaf numbers per block
-static int          num_snow_leafs;
+static snow_blocks_t   snow_blocks;
 
 static struct {
     VkBuffer        buffer;
@@ -74,10 +49,7 @@ static bool create_craters(int num_vertices)
     snow_craters.mapped = mapped;
     snow_craters.num_vertices = num_vertices;
     snow_craters.last_time = -SNOW_REFILL;
-    for (int i = 0; i < num_vertices; i++) {
-        snow_craters.mapped[i * 2 + 0] = -SNOW_REFILL;
-        snow_craters.mapped[i * 2 + 1] = 0;
-    }
+    R_InitSnowCraters(snow_craters.mapped, num_vertices);
     return true;
 }
 
@@ -87,121 +59,9 @@ void VKR_AddSnowCrater(const int *vertices, const float *strength, int count,
     if (!snow_craters.mapped)
         return;
 
-    for (int i = 0; i < count; i++) {
-        int v = vertices[i];
-        if (v < 0 || v >= snow_craters.num_vertices)
-            continue;
-        // what is left of an earlier crater here
-        float *c = &snow_craters.mapped[v * 2];
-        float refill = Q_clipf((time - c[0]) / SNOW_REFILL, 0, 1);
-        c[1] = max(Q_clipf(strength[i], 0, 1), c[1] * (1 - refill));
-        c[0] = time;
-    }
+    R_AddSnowCraters(snow_craters.mapped, snow_craters.num_vertices,
+                     vertices, strength, count, time);
     snow_craters.last_time = time;
-}
-
-static int snow_block_coord(float v)
-{
-    return (int)floorf(v / SNOW_BLOCK);
-}
-
-static int compare_tri_blocks(const void *p1, const void *p2)
-{
-    const int *a = p1, *b = p2;
-    return a[0] - b[0];
-}
-
-// Reorders the triangles by block and records each block's range and bounds.
-static uint32_t *sort_into_blocks(const r_snow_vertex_t *vertices,
-                                  const uint32_t *indices, int num_indices)
-{
-    int num_tris = num_indices / 3;
-    int (*keys)[2] = R_Malloc(sizeof(*keys) * num_tris);
-
-    snow_blocks = R_Malloc(sizeof(*snow_blocks) * max(num_tris, 1));
-    num_snow_blocks = 0;
-    for (int i = 0; i < num_tris; i++) {
-        const float *a = vertices[indices[i * 3 + 0]].origin;
-        const float *b = vertices[indices[i * 3 + 1]].origin;
-        const float *c = vertices[indices[i * 3 + 2]].origin;
-        int bx = snow_block_coord((a[0] + b[0] + c[0]) / 3);
-        int by = snow_block_coord((a[1] + b[1] + c[1]) / 3);
-        int k;
-
-        for (k = 0; k < num_snow_blocks; k++)
-            if (snow_blocks[k].bx == bx && snow_blocks[k].by == by)
-                break;
-        if (k == num_snow_blocks) {
-            snow_block_t *blk = &snow_blocks[num_snow_blocks++];
-            blk->bx = bx;
-            blk->by = by;
-            ClearBounds(blk->bounds[0], blk->bounds[1]);
-            blk->num_indices = 0;
-        }
-        keys[i][0] = k;
-        keys[i][1] = i;
-    }
-    qsort(keys, num_tris, sizeof(*keys), compare_tri_blocks);
-
-    uint32_t *sorted = R_Malloc(sizeof(*sorted) * num_indices);
-    for (int i = 0; i < num_tris; i++) {
-        snow_block_t *blk = &snow_blocks[keys[i][0]];
-        const uint32_t *t = &indices[keys[i][1] * 3];
-
-        if (!blk->num_indices)
-            blk->first_index = i * 3;
-        blk->num_indices += 3;
-        for (int j = 0; j < 3; j++) {
-            const r_snow_vertex_t *v = &vertices[t[j]];
-            vec3_t lo, hi;
-            VectorCopy(v->origin, lo);
-            VectorCopy(v->origin, hi);
-            lo[2] -= 2;
-            hi[2] += max(v->height, 1);
-            AddPointToBounds(lo, blk->bounds[0], blk->bounds[1]);
-            AddPointToBounds(hi, blk->bounds[0], blk->bounds[1]);
-            sorted[i * 3 + j] = t[j];
-        }
-    }
-
-    Z_Free(keys);
-
-    // the leaves the snow of each block lies in
-    const bsp_t *bsp = vk.world.cache;
-    if (bsp && bsp->nodes && bsp->leafs && bsp->numleafs > 0) {
-        int *marked = R_Malloc(sizeof(int) * bsp->numleafs);
-        memset(marked, 0xff, sizeof(int) * bsp->numleafs);
-        int max_leafs = 1024;
-        snow_leafs = R_Malloc(sizeof(int) * max_leafs);
-        num_snow_leafs = 0;
-
-        for (int b = 0; b < num_snow_blocks; b++) {
-            snow_block_t *blk = &snow_blocks[b];
-            blk->first_leaf = num_snow_leafs;
-            for (uint32_t i = 0; i < blk->num_indices; i++) {
-                vec3_t point;
-                VectorCopy(vertices[sorted[blk->first_index + i]].origin, point);
-                point[2] += 4;
-                const mleaf_t *leaf = BSP_PointLeaf(bsp->nodes, point);
-                int n = leaf - bsp->leafs;
-                if (n < 0 || n >= bsp->numleafs || marked[n] == b)
-                    continue;
-                marked[n] = b;
-                if (num_snow_leafs == max_leafs) {
-                    max_leafs *= 2;
-                    snow_leafs = Z_Realloc(snow_leafs, sizeof(int) * max_leafs);
-                }
-                snow_leafs[num_snow_leafs++] = n;
-            }
-            blk->num_leafs = num_snow_leafs - blk->first_leaf;
-        }
-        Z_Free(marked);
-    } else {
-        for (int b = 0; b < num_snow_blocks; b++)
-            snow_blocks[b].first_leaf = -1;
-    }
-
-    return sorted;
 }
 
 void VKR_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
@@ -231,7 +91,8 @@ void VKR_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
         VectorSet(v->normal, in->height, in->start, in->length);
     }
 
-    uint32_t *sorted = sort_into_blocks(vertices, indices, num_indices);
+    uint32_t *sorted = R_SortSnowBlocks(&snow_blocks, vk.world.cache, vertices,
+                                        indices, num_indices);
     if (!vk_upload_mesh(&vk.snow_cover, verts, num_vertices, sorted, num_indices) ||
         !create_craters(num_vertices)) {
         Com_WPrintf("Couldn't upload the snow cover\n");
@@ -274,22 +135,12 @@ void vk_draw_snow_cover(const refdef_t *fd)
 
     // draw the blocks in view, joining neighbouring ranges into one draw
     uint32_t first = 0, count = 0;
-    for (int i = 0; i <= num_snow_blocks; i++) {
+    for (int i = 0; i <= snow_blocks.num_blocks; i++) {
         bool visible = false;
-        if (i < num_snow_blocks) {
-            const snow_block_t *blk = &snow_blocks[i];
-            visible = true;
-            for (int j = 0; j < 4 && visible; j++)
-                if (BoxOnPlaneSide(blk->bounds[0], blk->bounds[1],
-                                   &vk.world.frustum[j]) == BOX_BEHIND)
-                    visible = false;
-            if (visible && blk->first_leaf >= 0 && vk.world.cache) {
-                visible = false;
-                for (int j = 0; j < blk->num_leafs && !visible; j++) {
-                    const mleaf_t *leaf = &vk.world.cache->leafs[snow_leafs[blk->first_leaf + j]];
-                    visible = leaf->visframe == vk.world.visframe;
-                }
-            }
+        if (i < snow_blocks.num_blocks) {
+            const snow_block_t *blk = &snow_blocks.blocks[i];
+            visible = R_SnowBlockVisible(&snow_blocks, i, vk.world.cache,
+                                         vk.world.frustum, vk.world.visframe);
             if (visible && count && blk->first_index == first + count) {
                 count += blk->num_indices;
                 continue;
@@ -302,8 +153,8 @@ void vk_draw_snow_cover(const refdef_t *fd)
         }
         count = 0;
         if (visible) {
-            first = snow_blocks[i].first_index;
-            count = snow_blocks[i].num_indices;
+            first = snow_blocks.blocks[i].first_index;
+            count = snow_blocks.blocks[i].num_indices;
         }
     }
 }
@@ -312,10 +163,7 @@ void vk_free_snow_cover(void)
 {
     vk_destroy_mesh(&vk.snow_cover);
     free_craters();
-    Z_Freep(&snow_blocks);
-    num_snow_blocks = 0;
-    Z_Freep(&snow_leafs);
-    num_snow_leafs = 0;
+    R_FreeSnowBlocks(&snow_blocks);
 }
 
 #endif // USE_VULKAN

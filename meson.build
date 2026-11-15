@@ -91,6 +91,7 @@ refresh_src = [
   'src/refresh/qgl.c',
   'src/refresh/shader.c',
   'src/refresh/sky.c',
+  'src/refresh/snow.c',
   'src/refresh/state.c',
   'src/refresh/surf.c',
   'src/refresh/tess.c',
