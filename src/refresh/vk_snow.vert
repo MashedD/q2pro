@@ -16,6 +16,7 @@ layout(push_constant) uniform Push {
     mat4 mvp;
     vec4 color;     // rgb tint, a = snow amount 0..1
     vec4 craters;   // x = time, y = seconds for a crater to fill again
+    vec4 fog;       // used by the fragment shaders
 } pc;
 
 layout(location = 0) in vec3 in_position;

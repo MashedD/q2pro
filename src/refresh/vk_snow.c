@@ -118,6 +118,7 @@ void vk_draw_snow_cover(const refdef_t *fd)
     memcpy(push.mvp, mvp, sizeof(push.mvp));
     Vector4Set(push.color, 1.0f, 1.0f, 1.0f, fd->snow_amount);
     Vector4Set(push.craters, fd->time, SNOW_REFILL, 0.0f, 0.0f);
+    vk_fog_params(fd, push.fog);
 
     VkBuffer buffers[] = { vk.snow_cover.vertices.buffer, snow_craters.buffer };
     VkDeviceSize offsets[] = { 0, 0 };

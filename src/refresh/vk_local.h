@@ -358,6 +358,7 @@ typedef struct {
     mat4_t mvp;
     float color[4];     // rgb tint, a = snow amount
     float craters[4];   // time, seconds for a crater to fill again
+    float fog[4];       // as for the world, from vk_fog_params()
 } vk_snow_push_t;
 
 typedef struct {

@@ -11,6 +11,25 @@ layout(location = 2) in vec2 v_xy;
 layout(location = 0) out vec4 out_color;
 layout(location = 1) out vec4 out_bloom;
 
+// Same layout as vk_snow_push_t.
+layout(push_constant) uniform Push {
+    mat4 mvp;
+    vec4 color;
+    vec4 craters;
+    vec4 fog;       // rgb color, a density; the same as for the world
+} pc;
+
+vec3 apply_fog(vec3 color)
+{
+    if (pc.fog.a < 0.0)
+        return mix(color, pc.fog.rgb, -pc.fog.a);
+    if (pc.fog.a > 0.0) {
+        float d = pc.fog.a * gl_FragCoord.z / gl_FragCoord.w;
+        return mix(color, pc.fog.rgb, 1.0 - exp(-(d * d)));
+    }
+    return color;
+}
+
 float hash(vec2 p)
 {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -33,5 +52,6 @@ void main()
         discard;
     // the thin snow just behind the edge lets the floor show through a bit
     out_color = vec4(v_color.rgb * (0.82 + 0.18 * clamp(front * 6.0, 0.0, 1.0)), 1.0);
+    out_color.rgb = apply_fog(out_color.rgb);
     out_bloom = out_color;
 }
