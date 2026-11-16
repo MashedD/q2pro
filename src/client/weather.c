@@ -525,6 +525,26 @@ static bool cover_exposed(const vec3_t org, float *sky_z)
     return false;
 }
 
+static bool cover_add_sample(float x, float y, float z, int gx, int gy, bool liquid)
+{
+    if (cover_find(gx, gy, z, 2) >= 0)
+        return true;    // shared with a neighbouring face
+    if (cover.num_samples >= COVER_MAX_SAMPLES)
+        return false;
+
+    cover_sample_t *s = &cover.samples[cover.num_samples];
+    VectorSet(s->org, x, y, z);
+    s->x = gx;
+    s->y = gy;
+    s->open = cover_exposed(s->org, &s->sky_z);
+    s->cover = s->open && !liquid;
+    s->noise = cover_noise(x, y);
+    unsigned h = cover_hash(gx, gy);
+    s->next = cover.hash[h];
+    cover.hash[h] = cover.num_samples++;
+    return true;
+}
+
 static void cover_add_face(const mface_t *face, bool liquid)
 {
     vec3_t pts[64], normal;
@@ -556,6 +576,7 @@ static void cover_add_face(const mface_t *face, bool liquid)
         area += a[0] * b[1] - b[0] * a[1];
     }
     float sign = area >= 0 ? 1 : -1;
+    int added = 0;
 
     for (int gx = (int)ceilf(mins[0] / COVER_GRID); gx * COVER_GRID <= maxs[0]; gx++) {
         for (int gy = (int)ceilf(mins[1] / COVER_GRID); gy * COVER_GRID <= maxs[1]; gy++) {
@@ -572,22 +593,43 @@ static void cover_add_face(const mface_t *face, bool liquid)
                 continue;
 
             float z = (dist - normal[0] * x - normal[1] * y) / normal[2];
-            if (cover_find(gx, gy, z, 2) >= 0)
-                continue;   // shared with a neighbouring face
-            if (cover.num_samples >= COVER_MAX_SAMPLES)
+            if (!cover_add_sample(x, y, z, gx, gy, liquid))
                 return;
-
-            cover_sample_t *s = &cover.samples[cover.num_samples];
-            VectorSet(s->org, x, y, z);
-            s->x = gx;
-            s->y = gy;
-            s->open = cover_exposed(s->org, &s->sky_z);
-            s->cover = s->open && !liquid;
-            s->noise = cover_noise(x, y);
-            unsigned h = cover_hash(gx, gy);
-            s->next = cover.hash[h];
-            cover.hash[h] = cover.num_samples++;
+            added++;
         }
+    }
+    if (added)
+        return;
+
+    // A face narrower than the grid, such as a ledge or the top of a thin
+    // wall, can fall between its points all along. Put points along its
+    // middle instead, at grid steps along its length; each takes the grid
+    // column it lies in, so the mesh joins them into a strip.
+    int l = maxs[0] - mins[0] >= maxs[1] - mins[1] ? 0 : 1;
+    int w = !l;
+    for (int g = (int)ceilf(mins[l] / COVER_GRID); g * COVER_GRID <= maxs[l]; g++) {
+        float c = g * COVER_GRID, lo = 1e9f, hi = -1e9f;
+
+        for (int i = 0; i < n; i++) {
+            const float *a = pts[i], *b = pts[(i + 1) % n];
+            if ((a[l] - c) * (b[l] - c) > 0 || a[l] == b[l])
+                continue;
+            float v = a[w] + (c - a[l]) / (b[l] - a[l]) * (b[w] - a[w]);
+            lo = min(lo, v);
+            hi = max(hi, v);
+        }
+        if (hi - lo < 2)
+            continue;   // too thin to hold snow
+
+        float p[2];
+        p[l] = c;
+        p[w] = (lo + hi) * 0.5f;
+        int gp[2];
+        gp[l] = g;
+        gp[w] = (int)floorf(p[w] / COVER_GRID + 0.5f);
+        float z = (dist - normal[0] * p[0] - normal[1] * p[1]) / normal[2];
+        if (!cover_add_sample(p[0], p[1], z, gp[0], gp[1], liquid))
+            return;
     }
 }
 
@@ -935,7 +977,12 @@ static void build_mesh(float depth)
         // of a drift is a smooth contour well inside the jagged outline of
         // the grid, which stays under the floor
         float f = Q_clipf((s->cover - 0.6f) / 0.4f, -1.25f, 1.0f);
-        height[i] = depth * (0.3f + 0.7f * s->noise) * f;
+        // broad drifts, mounds and small bumps: from a fifth of the depth
+        // to almost twice it
+        float drift = cover_noise(s->org[0] * 0.375f - 311, s->org[1] * 0.375f + 173);
+        float bump = cover_noise(s->org[0] * 3 + 91, s->org[1] * 3 - 47);
+        float n = 0.45f * drift + 0.35f * s->noise + 0.2f * bump;
+        height[i] = depth * (0.2f + 1.6f * powf(n, 1.3f)) * f;
         if (f > 0)
             height[i] += depth * 0.6f * bank[i] * f;
         // snow on a narrow ledge or at the edge of a drop is thin otherwise
@@ -1001,7 +1048,7 @@ static void build_mesh(float depth)
         if (u >= 0 && b >= 0) hy = (height[u] - height[b]) / (2 * COVER_GRID);
         float nz = 1.0f / sqrtf(1 + hx * hx + hy * hy);
         // light from above and from one side shapes the drifts
-        float shade = 0.5f + 0.5f * nz + 0.6f * (hx - hy) * nz;
+        float shade = 0.5f + 0.5f * nz + 1.5f * (hx - hy) * nz;
         // thinner snow near its edges catches less light, so drifts look round
         float inner = Q_clipf((s->cover - 0.6f) / 0.4f, 0, 1);
         shade *= 0.72f + 0.28f * inner;
