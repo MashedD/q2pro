@@ -12,7 +12,9 @@
 // Coverage is blurred so that drifts taper at their edges and sink below the
 // floor there; heights follow a smooth noise. Each point grows on its own
 // schedule, the most open spots first, as the renderer is told how far the
-// snow has come (refdef_t.snow_amount); the mesh itself is sent once.
+// snow has come (refdef_t.snow_amount); the mesh itself is sent once. Each
+// map has a prevailing wind: snow piles up against the walls it blows into
+// and its drifts are ridges across it, and the flakes drift with it.
 //
 // Small columns probed from the viewer's height, a few per frame, tell how
 // open the sky is around the viewer, for the sound volumes and footsteps.
@@ -138,6 +140,7 @@ static int      weather_probes;     // probes left this frame
 static float    weather_wind[2];
 static float    weather_wind_target[2];
 static float    weather_wind_timer;
+static vec2_t   weather_prevailing;     // unit direction the wind blows to
 
 static unsigned column_hash(int x, int y, int band)
 {
@@ -244,12 +247,24 @@ static bool spawn_flake(snowflake_t *f, const vec3_t view, bool anywhere)
     return false;
 }
 
+// Each map has a prevailing wind, the same for every player, from its name.
+// It shapes the drifts of the snow cover, and the flakes drift with it.
+static void set_prevailing_wind(void)
+{
+    float ang = DEG2RAD(Com_HashString(cl.mapname, 360));
+
+    weather_prevailing[0] = cosf(ang);
+    weather_prevailing[1] = sinf(ang);
+}
+
+// Gusts: the wind turns a little either way from the prevailing direction
+// and changes strength every few seconds.
 static void update_wind(float dt)
 {
     weather_wind_timer -= dt;
     if (weather_wind_timer <= 0) {
-        float ang = frand() * 2 * M_PIf;
-        float speed = 10 + frand() * 30;
+        float ang = atan2f(weather_prevailing[1], weather_prevailing[0]) + crand() * 0.45f;
+        float speed = 12 + frand() * 36;
         weather_wind_target[0] = cosf(ang) * speed;
         weather_wind_target[1] = sinf(ang) * speed;
         weather_wind_timer = 6 + frand() * 8;
@@ -919,8 +934,13 @@ static void build_mesh(float depth)
             if (!missing[d])
                 continue;
             edge_type_t type = probe_edge(s, d, &extent[d]);
-            if (type == EDGE_WALL)
-                bank[i] = 1;
+            if (type == EDGE_WALL) {
+                // the wind piles snow up against the walls it blows into,
+                // and leaves some in the shelter of those it comes over
+                float dot = edge_dirs[d][0] * weather_prevailing[0] +
+                            edge_dirs[d][1] * weather_prevailing[1];
+                bank[i] = max(bank[i], 0.5f + 0.9f * max(dot, 0.0f) + 0.4f * max(-dot, 0.0f));
+            }
             else if (type == EDGE_DROP)
                 ledge[i] = true;
             // keep the side of the snow a unit away from the wall or the
@@ -969,7 +989,24 @@ static void build_mesh(float depth)
             cover.samples[i].cover = tmp[i];
     }
     Z_Free(tmp);
-    memcpy(bank, height, sizeof(float) * cover.num_samples);
+
+    // drifts against a wall slope away from it, along the wind: upwind from
+    // a wall the wind blows into, downwind in the shelter of one
+    for (int i = 0; i < cover.num_samples; i++) {
+        const cover_sample_t *s = &cover.samples[i];
+        float tail = height[i];
+        for (int k = 1; k <= 3; k++) {
+            int dx = (int)roundf(weather_prevailing[0] * k);
+            int dy = (int)roundf(weather_prevailing[1] * k);
+            int j = cover_find(s->x + dx, s->y + dy, s->org[2], 16 * k);
+            if (j >= 0)
+                tail = max(tail, height[j] * (1 - 0.25f * k));
+            j = cover_find(s->x - dx, s->y - dy, s->org[2], 16 * k);
+            if (j >= 0 && k < 3)
+                tail = max(tail, height[j] * (0.8f - 0.3f * k));
+        }
+        bank[i] = tail;
+    }
 
     for (int i = 0; i < cover.num_samples; i++) {
         const cover_sample_t *s = &cover.samples[i];
@@ -978,8 +1015,10 @@ static void build_mesh(float depth)
         // the grid, which stays under the floor
         float f = Q_clipf((s->cover - 0.6f) / 0.4f, -1.25f, 1.0f);
         // broad drifts, mounds and small bumps: from a fifth of the depth
-        // to almost twice it
-        float drift = cover_noise(s->org[0] * 0.375f - 311, s->org[1] * 0.375f + 173);
+        // to almost twice it; the drifts are ridges across the wind
+        float u = s->org[0] * weather_prevailing[0] + s->org[1] * weather_prevailing[1];
+        float w = s->org[1] * weather_prevailing[0] - s->org[0] * weather_prevailing[1];
+        float drift = cover_noise(u * 0.6f - 311, w * 0.25f + 173);
         float bump = cover_noise(s->org[0] * 3 + 91, s->org[1] * 3 - 47);
         float n = 0.45f * drift + 0.35f * s->noise + 0.2f * bump;
         height[i] = depth * (0.2f + 1.6f * powf(n, 1.3f)) * f;
@@ -1135,6 +1174,7 @@ static void cover_build(void)
     cover_free();
     cover.built = true;
     cover.start_time = cl.time;
+    set_prevailing_wind();
 
     cover.samples = Z_Malloc(sizeof(*cover.samples) * COVER_MAX_SAMPLES);
     cover.hash = Z_Malloc(sizeof(*cover.hash) * COVER_HASH);
