@@ -12,8 +12,6 @@
 #include "gl.h"
 #include "snow.h"
 
-#if !USE_GLES   // needs 32-bit indices
-
 #define SNOW_UPLOAD_INTERVAL    0.25f
 
 typedef struct {
@@ -59,8 +57,10 @@ void GLR_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
 {
     GL_FreeSnowCover();
 
+    // the mesh needs 32-bit indices, which OpenGL ES 1 and 2 may not have
     if (num_vertices <= 0 || num_indices <= 0 || !vertices || !indices ||
-        !qglGenBuffers || !gl_static.world.cache)
+        !qglGenBuffers || !gl_static.world.cache ||
+        !(gl_config.caps & QGL_CAP_ELEMENT_INDEX_UINT))
         return;
 
     snow.vertices = R_Malloc(sizeof(*snow.vertices) * num_vertices);
@@ -224,26 +224,3 @@ void GL_DrawSnowCover(void)
     memcpy(gls.u_block.m_sky, saved_sky, sizeof(saved_sky));
     gls.u_block_dirty = true;
 }
-
-#else
-
-void GL_FreeSnowCover(void)
-{
-}
-
-// OpenGL ES has only 16-bit indices here, too few for the snow cover.
-void GLR_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
-                      const uint32_t *indices, int num_indices)
-{
-}
-
-void GLR_AddSnowCrater(const int *vertices, const float *strength, int count,
-                       float time)
-{
-}
-
-void GL_DrawSnowCover(void)
-{
-}
-
-#endif

@@ -252,8 +252,9 @@ cl_snow_cover::
     While it snows, snow settles on floors, steps and ledges under open sky,
     right up to their edges, and grows into rounded drifts that bank up
     against walls, up to this depth in units (0 to 32; 0 turns it off).
-    Moving brush models such as doors and platforms stay clear. OpenGL ES
-    doesn't draw the snow cover. Default value is 6.
+    Moving brush models such as doors and platforms stay clear. OpenGL ES 1
+    draws the snow cover only where the GPU supports 32-bit indices
+    (‘GL_OES_element_index_uint’). Default value is 6.
 
 cl_snow_cover_time::
     Seconds it takes the snow cover to reach its full depth after a map
