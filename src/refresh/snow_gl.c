@@ -152,7 +152,7 @@ void GL_DrawSnowCover(void)
     }
 
     // the client doesn't keep a consistent winding
-    glStateBits_t bits = GLS_CULL_DISABLE | glr.fog_bits;
+    glStateBits_t bits = GLS_CULL_DISABLE | GLS_SHADE_SMOOTH | glr.fog_bits;
     glArrayBits_t arrays = GLA_VERTEX | GLA_TC | GLA_COLOR;
     if (gl_static.use_shaders && (growing || refilling)) {
         bits |= GLS_SNOW;
