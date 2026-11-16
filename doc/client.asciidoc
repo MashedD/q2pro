@@ -233,8 +233,8 @@ cl_snow::
     Makes it snow on any map, from 0 (off) to 4 (heavy); 1 is light snow
     with few flakes, which hides little and costs little. Flakes only fall
     where the sky is above: under roofs and ceilings it stays dry. They drift
-    with a slowly changing wind, fade with distance so they hide little, and
-    disappear when they reach the ground or water. Snow is drawn by the
+    in gusts with the map's prevailing wind, fade with distance so they hide
+    little, and disappear when they land, or melt just above lava. Snow is drawn by the
     client, so it shows in both renderers and is not seen by other players.
     Default value is 0 (disabled).
 
@@ -252,9 +252,13 @@ cl_snow_volume::
 
 cl_snow_cover::
     While it snows, snow settles on floors, steps and ledges under open sky,
-    right up to their edges, and grows into rounded drifts that bank up
-    against walls, up to this depth in units (0 to 32; 0 turns it off).
-    Moving brush models such as doors and platforms stay clear. OpenGL ES 1
+    right up to their edges, and grows into rounded drifts, up to this depth
+    in units (0 to 32; 0 turns it off). The map's prevailing wind piles it
+    up against the walls it blows into and shapes the drifts into ridges
+    across it. Dynamic lights such as rockets and muzzle flashes light it,
+    and with Vulkan ray tracing walls between them and the snow cast
+    shadows. Moving brush models such as doors and platforms stay clear, as
+    does the ground near lava and the bottom of pools. OpenGL ES 1
     draws the snow cover only where the GPU supports 32-bit indices
     (‘GL_OES_element_index_uint’). Default value is 6.
 
