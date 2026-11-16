@@ -228,7 +228,12 @@ static const weather_column_t *find_column(float x, float y, float z)
     return col;
 }
 
-static bool spawn_flake(snowflake_t *f, const vec3_t view, bool anywhere)
+// Picks where a falling flake or drop starts: above a random open point
+// near the viewer, below the sky, at most WEATHER_HEIGHT above the viewer.
+// With anywhere, it starts at any height down to the ground, so that a new
+// area is already full of them; otherwise at the top. Returns the cover
+// sample it falls onto, or -1 if no place was found.
+static int spawn_point(const vec3_t view, bool anywhere, vec3_t org)
 {
     for (int tries = 0; tries < 8 && cover.num_candidates; tries++) {
         int sample = cover.candidates[Q_rand_uniform(cover.num_candidates)];
@@ -244,20 +249,30 @@ static bool spawn_flake(snowflake_t *f, const vec3_t view, bool anywhere)
         if (top <= s->org[2])
             continue;
 
-        f->org[0] = x;
-        f->org[1] = y;
-        f->org[2] = anywhere ? s->org[2] + frand() * (top - s->org[2]) : top - frand() * 16;
-        f->ground_z = s->org[2] + (s->lava ? LAVA_MELT : 0);
-        f->sample = sample;
-        f->fall = 60 + frand() * 40;
-        f->phase = frand() * 2 * M_PIf;
-        f->size = 0.8f + frand() * 0.7f;
-        f->active = true;
-        return true;
+        org[0] = x;
+        org[1] = y;
+        org[2] = anywhere ? s->org[2] + frand() * (top - s->org[2]) : top - frand() * 16;
+        return sample;
     }
 
-    f->active = false;
-    return false;
+    return -1;
+}
+
+static bool spawn_flake(snowflake_t *f, const vec3_t view, bool anywhere)
+{
+    int sample = spawn_point(view, anywhere, f->org);
+
+    f->active = sample >= 0;
+    if (!f->active)
+        return false;
+
+    const cover_sample_t *s = &cover.samples[sample];
+    f->ground_z = s->org[2] + (s->lava ? LAVA_MELT : 0);
+    f->sample = sample;
+    f->fall = 60 + frand() * 40;
+    f->phase = frand() * 2 * M_PIf;
+    f->size = 0.8f + frand() * 0.7f;
+    return true;
 }
 
 // Each map has a prevailing wind, the same for every player, from its name.
