@@ -389,6 +389,7 @@ if vulkan.found()
   foreach snow_shader : [
     ['vk_snow_frag_spv.h', [], false],
     ['vk_snow_full_frag_spv.h', ['-DSNOW_FULL=1'], false],
+    ['vk_puddle_frag_spv.h', ['-DPUDDLE=1'], false],
     ['vk_snow_rt_frag_spv.h', ['-DSNOW_RT=1'], true],
     ['vk_snow_full_rt_frag_spv.h', ['-DSNOW_FULL=1', '-DSNOW_RT=1'], true],
   ]

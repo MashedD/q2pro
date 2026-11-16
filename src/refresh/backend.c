@@ -30,7 +30,8 @@ typedef struct refresh_backend_s {
 
     void (*render_frame)(const refdef_t *fd);
     void (*light_point)(const vec3_t origin, vec3_t light);
-    void (*set_snow_cover)(const r_snow_vertex_t *vertices, int num_vertices,
+    void (*set_snow_cover)(r_cover_kind_t kind,
+                           const r_snow_vertex_t *vertices, int num_vertices,
                            const uint32_t *indices, int num_indices);
     void (*add_snow_crater)(const int *vertices, const float *strength,
                             int count, float time);
@@ -270,10 +271,11 @@ void R_LightPoint(const vec3_t origin, vec3_t light)
     active_backend()->light_point(origin, light);
 }
 
-void R_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
+void R_SetSnowCover(r_cover_kind_t kind,
+                    const r_snow_vertex_t *vertices, int num_vertices,
                     const uint32_t *indices, int num_indices)
 {
-    active_backend()->set_snow_cover(vertices, num_vertices, indices, num_indices);
+    active_backend()->set_snow_cover(kind, vertices, num_vertices, indices, num_indices);
 }
 
 void R_AddSnowCrater(const int *vertices, const float *strength, int count,

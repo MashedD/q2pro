@@ -184,6 +184,53 @@ static void vk_append_particle_quad(uint32_t *vertex_count,
     }
 }
 
+// Streaks (refdef_t.streaks), such as rain: a quad along each, facing the
+// viewer, with the round particle texture stretched over it, so it is soft
+// at its sides and ends. Like particles, they widen with distance. The same
+// as GL_DrawStreaks.
+static uint32_t vk_append_streaks(const refdef_t *fd, const vec3_t viewaxis[3],
+                                  uint32_t vertex_count)
+{
+    for (int i = 0; fd->streaks && i < fd->num_streaks &&
+         vertex_count + 6 <= VK_MAX_PARTICLE_VERTICES; i++) {
+        const r_streak_t *s = &fd->streaks[i];
+        vec3_t dir, mid, to_view, side, corners[4];
+
+        VectorSubtract(s->end, s->start, dir);
+        VectorAvg(s->start, s->end, mid);
+        VectorSubtract(mid, fd->vieworg, to_view);
+        CrossProduct(dir, to_view, side);
+        if (VectorNormalize(side) < 0.001f)
+            continue;
+
+        float dist = DotProduct(to_view, viewaxis[0]);
+        float width = s->width * (dist > 20.0f ? 1.0f + dist * 0.004f : 1.0f);
+        VectorScale(side, width, side);
+        VectorSubtract(s->start, side, corners[0]);
+        VectorAdd(s->start, side, corners[1]);
+        VectorSubtract(s->end, side, corners[2]);
+        VectorAdd(s->end, side, corners[3]);
+
+        float rgba[4] = {
+            s->rgba.u8[0] / 255.0f, s->rgba.u8[1] / 255.0f,
+            s->rgba.u8[2] / 255.0f, s->rgba.u8[3] / 255.0f,
+        };
+        static const int order[6] = { 0, 2, 1, 1, 2, 3 };
+        static const float uv[4][2] = {
+            { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 0.0f, 1.0f }, { 1.0f, 1.0f },
+        };
+        for (int j = 0; j < 6; j++) {
+            int k = order[j];
+            vk_vertex_t *v = &vk.particle_batch[vertex_count++];
+            VectorCopy(corners[k], v->position);
+            v->uv[0] = uv[k][0];
+            v->uv[1] = uv[k][1];
+            Vector4Copy(rgba, v->color);
+        }
+    }
+    return vertex_count;
+}
+
 #if USE_VULKAN_RAYTRACING
 static bool vk_append_effect_segment(uint32_t *vertex_count,
                                      const vec3_t start, const vec3_t end,
@@ -2374,6 +2421,8 @@ void vk_draw_particles(const refdef_t *fd)
         vk_append_particle_quad(&vertex_count, particle->origin,
                                 scale * VK_PARTICLE_SCALE, rgba, viewaxis);
     }
+
+    vertex_count = vk_append_streaks(fd, viewaxis, vertex_count);
 
     uint32_t particle_vertex_count = vertex_count;
     vertex_count = vk_append_dust_motes(fd, viewaxis, vertex_count);

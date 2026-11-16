@@ -789,6 +789,17 @@ bool vk_create_snow_pipeline(VkPipeline *pipeline, bool full, bool rt)
                                          frag, frag_size, true);
 }
 
+// rain puddles: blended, and leave the depth buffer to what is under them
+bool vk_create_puddle_pipeline(VkPipeline *pipeline)
+{
+    return vk_create_color3d_pipeline_ex(pipeline, true, false, true, false,
+                                         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+                                         vk_snow_vert_spv,
+                                         sizeof(vk_snow_vert_spv),
+                                         vk_puddle_frag_spv,
+                                         sizeof(vk_puddle_frag_spv), true);
+}
+
 bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,
                                      bool depth_write, bool blend,
                                      bool alpha_test, bool additive,

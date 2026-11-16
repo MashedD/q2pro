@@ -345,7 +345,7 @@ static void write_vertex_shader(sizebuf_t *buf, glStateBits_t bits)
         GLSL(out vec4 v_color;)
     }
 
-    if (bits & (GLS_FOG_HEIGHT | GLS_SNOW_LIGHTS))
+    if (bits & (GLS_FOG_HEIGHT | GLS_SNOW_LIGHTS | GLS_PUDDLE))
         GLSL(out vec3 v_world_pos;)
 
     GLSF("void main() {\n");
@@ -365,7 +365,7 @@ static void write_vertex_shader(sizebuf_t *buf, glStateBits_t bits)
     if (!(bits & GLS_TEXTURE_REPLACE))
         GLSL(v_color = a_color;)
 
-    if (bits & (GLS_FOG_HEIGHT | GLS_SNOW_LIGHTS))
+    if (bits & (GLS_FOG_HEIGHT | GLS_SNOW_LIGHTS | GLS_PUDDLE))
         GLSL(v_world_pos = (m_model * a_pos).xyz;)
 
     GLSL(gl_Position = m_vp * a_pos;)
@@ -524,6 +524,24 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
                            mix(snow_hash(i + vec2(0.0, 1.0)), snow_hash(i + vec2(1.0, 1.0)), f.x), f.y);
             }
         )
+        // rings where raindrops hit a puddle, like vk_snow.frag
+        if (bits & GLS_PUDDLE)
+            GLSL(
+                float snow_ripples(vec2 p, float t) {
+                    vec2 cell = floor(p / 10.0);
+                    float total = 0.0;
+                    for (int y = -1; y <= 1; y++) {
+                        for (int x = -1; x <= 1; x++) {
+                            vec2 c = cell + vec2(x, y);
+                            vec2 center = (c + vec2(snow_hash(c + 3.1), snow_hash(c + 7.7))) * 10.0;
+                            float phase = fract(t * 0.9 + snow_hash(c));
+                            float ring = abs(length(p - center) - phase * 4.5);
+                            total += (1.0 - smoothstep(0.0, 0.4, ring)) * (1.0 - phase);
+                        }
+                    }
+                    return total;
+                }
+            )
     }
 
     if (bits & GLS_GLOWMAP_ENABLE)
@@ -542,7 +560,7 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
         GLSL(out vec4 o_bloom;)
     }
 
-    if (bits & (GLS_FOG_HEIGHT | GLS_SNOW_LIGHTS))
+    if (bits & (GLS_FOG_HEIGHT | GLS_SNOW_LIGHTS | GLS_PUDDLE))
         GLSL(in vec3 v_world_pos;)
 
     if (bits & GLS_BLUR_GAUSS)
@@ -581,9 +599,10 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
     // leave out the snow that hasn't grown yet, along a ragged line, and
     // darken the thin snow just behind it a little, like vk_snow.frag
     if (bits & GLS_SNOW) {
+        GLSL(float snow_front;)
         GLSL({
             float snow_n = snow_noise(v_tc / 14.0) * 0.65 + snow_noise(v_tc / 5.0) * 0.35;
-            float snow_front = v_lmtc.x + (snow_n - 0.5) * 0.3;
+            snow_front = v_lmtc.x + (snow_n - 0.5) * 0.3;
             if (snow_front < 0.0)
                 discard;
             diffuse.rgb *= 0.82 + 0.18 * clamp(snow_front * 6.0, 0.0, 1.0);
@@ -635,6 +654,31 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
     if (!(bits & GLS_TEXTURE_REPLACE))
         GLSL(diffuse *= v_color;)
 
+    if (bits & GLS_SNOW_LIGHTS)
+        GLSL(float snow_light_scale = 0.7;)
+
+    // rain puddles (snow_gl.c), like vk_snow.frag: dark water that shows
+    // more of the sky's light at grazing angles, with rings where raindrops
+    // hit; v_color is the light there, m_sky[0][3].x how hard it rains
+    if (bits & GLS_PUDDLE) {
+        GLSL({
+            vec3 eye = normalize(u_vieworg.xyz - v_world_pos);
+            float fresnel = 0.25 + 0.75 * pow(1.0 - clamp(eye.z, 0.0, 1.0), 4.0);
+            vec3 sky = u_fog_color.a > 0.0 ? u_fog_color.rgb : vec3(0.5, 0.55, 0.62);
+            vec3 lit = 0.55 + 0.45 * v_color.rgb;
+            float rings = snow_ripples(v_tc, u_time) * m_sky[0][3].x;
+            // the texture is white; its alpha keeps the sampler in use
+            float tex = diffuse.a;
+            diffuse.rgb = mix(vec3(0.02) * v_color.rgb, sky * lit, fresnel) * tex;
+            diffuse.rgb += rings * 0.25 * lit;
+            diffuse.a = clamp(0.55 + 0.4 * fresnel + rings * 0.15, 0.0, 0.95) *
+                        clamp(snow_front * 4.0, 0.0, 1.0) * tex;
+        )
+        if (bits & GLS_SNOW_LIGHTS)
+            GLSL(snow_light_scale = 0.5 * (0.3 + fresnel);)
+        GLSL(})
+    }
+
     // dynamic lights on the snow cover (snow_gl.c), like vk_snow.frag:
     // m_sky[0] holds their origins and reach, m_sky[1] their colors
     if (bits & GLS_SNOW_LIGHTS) {
@@ -647,7 +691,7 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
                 float dist = length(d);
                 float falloff = max(1.0 - dist / reach, 0.0);
                 float facing = clamp(0.55 + 0.45 * d.z / max(dist, 1.0), 0.2, 1.0);
-                diffuse.rgb += 0.7 * m_sky[1][i].rgb * (m_sky[1][i].w * falloff * facing);
+                diffuse.rgb += snow_light_scale * m_sky[1][i].rgb * (m_sky[1][i].w * falloff * facing);
             }
         )
     }

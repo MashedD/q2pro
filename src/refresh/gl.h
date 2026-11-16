@@ -611,6 +611,7 @@ void GL_LoadWorld(const char *name);
 #define GLS_BLOOM_LAMP_STRONG   BIT_ULL(37)
 #define GLS_SNOW                BIT_ULL(38)
 #define GLS_SNOW_LIGHTS         BIT_ULL(39)
+#define GLS_PUDDLE              BIT_ULL(40)
 
 #define GLS_BLUR_GAUSS          BIT_ULL(32)
 #define GLS_BLUR_BOX            BIT_ULL(33)
@@ -630,10 +631,10 @@ void GL_LoadWorld(const char *name);
                                  GLS_LIGHTMAP_ENABLE | GLS_WARP_ENABLE | GLS_INTENSITY_ENABLE | \
                                  GLS_GLOWMAP_ENABLE | GLS_SKY_MASK | GLS_DEFAULT_FLARE | GLS_MESH_MASK | \
                                  GLS_FOG_MASK | GLS_BLOOM_MASK | GLS_BLUR_MASK | GLS_INTENSITY_2D | \
-                                 GLS_SKINTINT | GLS_SNOW | GLS_SNOW_LIGHTS)
+                                 GLS_SKINTINT | GLS_SNOW | GLS_SNOW_LIGHTS | GLS_PUDDLE)
 #define GLS_UNIFORM_MASK        (GLS_WARP_ENABLE | GLS_LIGHTMAP_ENABLE | GLS_INTENSITY_ENABLE | \
                                  GLS_SKY_MASK | GLS_FOG_MASK | GLS_BLUR_MASK | GLS_INTENSITY_2D | \
-                                 GLS_SKINTINT | GLS_SNOW_LIGHTS)
+                                 GLS_SKINTINT | GLS_SNOW_LIGHTS | GLS_PUDDLE)
 #define GLS_SCROLL_MASK         (GLS_SCROLL_ENABLE | GLS_SCROLL_X | GLS_SCROLL_Y | GLS_SCROLL_FLIP | GLS_SCROLL_SLOW)
 
 typedef enum {
@@ -981,6 +982,7 @@ extern tesselator_t tess;
 
 void GL_Flush2D(void);
 void GL_DrawParticles(void);
+void GL_DrawStreaks(void);
 
 /*
  * snow_gl.c
