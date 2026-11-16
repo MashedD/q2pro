@@ -294,6 +294,22 @@ cl_rain_puddles::
     you look across it, with rings where raindrops hit. With OpenGL they
     need the GLSL backend (‘gl_shaders 1’). Default value is 1 (enabled).
 
+cl_thunder::
+    While it rains, makes it a thunderstorm: about every half minute, more
+    often in heavier rain, lightning flashes and thunder follows, after
+    a second or less when it strikes close and up to five seconds when it is
+    far away. The flash is brighter under open sky, where it also lights the
+    ground around you, and the thunder is louder (‘cl_rain_volume’). Only
+    you see and hear it, at random times. Default value is 0 (disabled).
+
+    Unless these files exist in ‘sound/weather/’, the client makes the
+    thunder from noise: ‘thunder1.wav’ and ‘thunder2.wav’ for strikes close
+    by, ‘thunder_far1.wav’ and ‘thunder_far2.wav’ for distant ones.
+
+cl_thunder_flash::
+    Brightness of the lightning flashes, from 0 (none, thunder only) to 1.
+    Set it to 0 if flashing light bothers you. Default value is 0.5.
+
 cl_railcore_glow::
     Adds a soft, wider additive glow around the rail core and turns its
     center paler, from 0 to 1. Only affects the core of the alternative rail

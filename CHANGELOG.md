@@ -20,6 +20,9 @@ All notable changes to this fork are documented here. The format follows
   splash where they land, with a rain sound made from noise or your own
   (`cl_rain_volume`), and puddles that fill over two minutes and ripple
   (`cl_rain_puddles`).
+- `cl_thunder` turns rain into a thunderstorm, with lightning flashes
+  (`cl_thunder_flash`, 0 for none) and thunder that follows after a delay
+  that tells how far away it struck.
 
 ### Fixed
 

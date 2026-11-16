@@ -1,7 +1,7 @@
 // synth.c -- weather sounds made in code
 //
-// The game has no wind or rain sounds, and sounds from elsewhere can't be
-// shipped without a license. Sounds registered as "#synth:weather/...", which no
+// The game has no wind, rain or thunder sounds, and sounds from elsewhere
+// can't be shipped without a license. Sounds registered as "#synth:weather/...", which no
 // file can be named, are synthesized from filtered noise when they are
 // loaded instead: the weather code (weather.c) uses them when no file of
 // its own is found.
@@ -122,6 +122,46 @@ static void synth_rain(float *out, int count, int n, synth_rng_t *r)
     }
 }
 
+// Thunder: a crack when it's close, then a long rumble that rolls in
+// several swells.
+static void synth_thunder(float *out, int count, synth_rng_t *r, bool near)
+{
+    float brown = 0, lo = 0, crack_lo = 0;
+    float a_lo = synth_lp(near ? 170 : 95), a_crack = synth_lp(2500);
+    float bumps[7][3];
+    int num_bumps = 4 + (int)(synth_frand(r) * 3);
+
+    for (int b = 0; b < num_bumps; b++) {
+        bumps[b][0] = (near ? 0.15f : 0.5f) + synth_frand(r) * (near ? 3.0f : 3.5f);
+        bumps[b][1] = 0.25f + synth_frand(r) * 0.9f;
+        bumps[b][2] = 0.4f + synth_frand(r) * 0.6f;
+    }
+
+    for (int i = 0; i < count; i++) {
+        float t = (float)i / SYNTH_RATE;
+        float w = synth_white(r);
+        brown = brown * 0.995f + w * 0.1f;
+        lo += a_lo * (brown - lo);
+
+        float env = 0;
+        for (int b = 0; b < num_bumps; b++) {
+            float x = (t - bumps[b][0]) / bumps[b][1];
+            env += bumps[b][2] * expf(-x * x);
+        }
+        float onset = near ? min(t / 0.05f, 1.0f) : min(t / 0.6f, 1.0f);
+        float v = lo * env * onset * expf(-t / (near ? 2.4f : 2.0f));
+
+        if (near) {
+            // the crack: bright noise that dies within a fraction of a
+            // second, with a second, smaller one just after
+            crack_lo += a_crack * (w - crack_lo);
+            float c = expf(-t / 0.05f) + 0.5f * (t > 0.09f ? expf(-(t - 0.09f) / 0.07f) : 0);
+            v += (w - crack_lo * 0.5f) * c * 0.35f;
+        }
+        out[i] = v;
+    }
+}
+
 static void synth_normalize(float *buf, int n, float peak)
 {
     float m = 0;
@@ -163,6 +203,10 @@ bool S_SynthesizeSound(const char *name)
         { "weather/wind.wav",          8, true,  0, 0.55f },
         { "weather/gust.wav",          3, false, 1, 0.6f },
         { "weather/rain.wav",          6, true,  2, 0.6f },
+        { "weather/thunder1.wav",      6, false, 3, 0.95f },
+        { "weather/thunder2.wav",      6, false, 3, 0.95f },
+        { "weather/thunder_far1.wav",  6, false, 4, 0.8f },
+        { "weather/thunder_far2.wav",  6, false, 4, 0.8f },
     };
     int i;
 
@@ -181,6 +225,8 @@ bool S_SynthesizeSound(const char *name)
     case 0: synth_wind(buf, count, n, &rng, false); break;
     case 1: synth_wind(buf, count, n, &rng, true); break;
     case 2: synth_rain(buf, count, n, &rng); break;
+    case 3: synth_thunder(buf, count, &rng, true); break;
+    case 4: synth_thunder(buf, count, &rng, false); break;
     }
     if (sounds[i].loop)
         synth_close_loop(buf, n, count);
