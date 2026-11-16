@@ -2406,16 +2406,21 @@ static void vk_log_perf_spike(void)
     if (!frames++)
         avg_frame = frame;
 
-    if (frames > 60 && frame > 2 * avg_frame && frame > avg_frame + 4000)
-        Com_Printf("VK spike at %.1fs: frame=%.1fms (usual %.1fms) gpu=%.1fms wait=%.1fms "
-                   "acq=%.1fms rec=%.1fms sub=%.1fms pres=%.1fms draws=%i tris=%i "
-                   "dlights=%i parts=%i ents=%i\n",
-                   vk.fd.time, frame / 1000, avg_frame / 1000, vk.gpu_frame_usec / 1000.0f,
-                   vk.wait_usec / 1000.0f, vk.acquire_usec / 1000.0f,
-                   vk.record_usec / 1000.0f, vk.submit_usec / 1000.0f,
-                   vk.present_usec / 1000.0f,
-                   c.batchesDrawn + c.batchesDrawn2D, c.trisDrawn,
-                   vk.fd.num_dlights, vk.fd.num_particles, vk.fd.num_entities);
+    if (frames > 60 && frame > 2 * avg_frame && frame > avg_frame + 4000) {
+        // what the renderer's own steps don't account for was lost
+        // elsewhere: in the client, the game, the network or the system
+        float renderer = vk.wait_usec + vk.acquire_usec + vk.record_usec +
+                         vk.submit_usec + vk.present_usec;
+        Com_Printf("VK spike %.1fs: %.1f ms (usual %.1f), outside %.1f, pres %.1f, "
+                   "wait %.1f, rec %.1f, gpu %.1f, acq %.1f, sub %.1f, "
+                   "dl %i, part %i, ent %i, tris %i\n",
+                   vk.fd.time, frame / 1000, avg_frame / 1000,
+                   max(frame - renderer, 0.0f) / 1000, vk.present_usec / 1000.0f,
+                   vk.wait_usec / 1000.0f, vk.record_usec / 1000.0f,
+                   vk.gpu_frame_usec / 1000.0f, vk.acquire_usec / 1000.0f,
+                   vk.submit_usec / 1000.0f, vk.fd.num_dlights,
+                   vk.fd.num_particles, vk.fd.num_entities, c.trisDrawn);
+    }
 
     // the usual frame, over about the last hundred; a spike moves it little
     avg_frame += (frame - avg_frame) * 0.01f;
