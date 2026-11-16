@@ -6,16 +6,18 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-16
+
 ### Added
 
 - `cl_snow` makes it snow on any map, only where the sky is above, with a
   wind and gusts made from noise, or sounds of your own from
-  `sound/weather/` (`cl_snow_volume`), and snow that settles into drifts on floors and ledges
-  under open sky over a few minutes (`cl_snow_cover`, `cl_snow_cover_time`).
-  Each map has a prevailing wind that shapes the drifts, dynamic lights
-  light the snow (with shadows under Vulkan ray tracing), and it doesn't
-  settle near lava. Explosions blow craters into it, which fill in again
-  (`cl_snow_craters`).
+  `sound/weather/` (`cl_snow_volume`), and snow that settles into drifts
+  on floors and ledges under open sky over a few minutes (`cl_snow_cover`,
+  `cl_snow_cover_time`). Each map has a prevailing wind that shapes the
+  drifts, dynamic lights light the snow (with shadows under Vulkan ray
+  tracing), and it doesn't settle near lava. Explosions blow craters into
+  it, which fill in again (`cl_snow_craters`).
 - `cl_rain` makes it rain on any map in the same way, as streaks that
   splash where they land, with a rain sound made from noise or your own
   (`cl_rain_volume`), and puddles that fill over two minutes and ripple
@@ -23,6 +25,9 @@ All notable changes to this fork are documented here. The format follows
 - `cl_thunder` turns rain into a thunderstorm, with lightning flashes
   (`cl_thunder_flash`, 0 for none) and thunder that follows after a delay
   that tells how far away it struck.
+- `vk_perf_stats 2` prints each frame that took much longer than usual,
+  with where the time went (outside the renderer, presenting, waiting for
+  the GPU, recording), to find what causes stutter.
 
 ### Fixed
 
@@ -238,7 +243,8 @@ All new options are off or keep upstream's behaviour by default.
 - A game library without the executable permission is reported with the
   `chmod` command that fixes it, instead of only "Permission denied".
 
-[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/MashedD/q2pro/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/MashedD/q2pro/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/MashedD/q2pro/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/MashedD/q2pro/compare/v1.2.0...v1.2.1
