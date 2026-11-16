@@ -910,8 +910,14 @@ vk_bloom_downsample::
     glow. Default value is 4.
 
 vk_perf_stats::
-    When set, prints a line per second with the present mode, frames in flight
-    and the number of draws, batches and binds per category. Default value is 0.
+    1 prints a line per second with the present mode, frames in flight and
+    the number of draws, batches and binds per category. 2 instead prints
+    each frame that took much longer than usual (twice as long and at least
+    4 ms more), to find what causes stutter: the time lost outside the
+    renderer (in the client, the game, the network or the system), then the
+    time spent presenting, waiting for the GPU, recording, on the GPU,
+    acquiring and submitting, and the number of dynamic lights, particles,
+    entities and triangles. Default value is 0.
 
 vk_raytracing::
     Enables ray-traced lighting and effects on top of the normal Vulkan
