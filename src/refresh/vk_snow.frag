@@ -86,9 +86,13 @@ vec3 dynamic_light(vec3 position)
         if (falloff <= 0.0)
             continue;
 #ifdef SNOW_RT
-        // the snow isn't in the acceleration structure; start a little
-        // above it, so the floor under thin snow doesn't shadow it
-        if (in_shadow(position + vec3(0.0, 0.0, 1.0), pc.dlight_origins[i].xyz))
+        // Rays are costly over a screen full of snow: only the strongest
+        // light (the first) casts shadows, and only where it lights the snow
+        // noticeably, as in the world's shaders. The snow isn't in the
+        // acceleration structure; the ray starts a little above it, so the
+        // floor under thin snow doesn't shadow it.
+        if (i == 0 && pc.dlight_colors[i].w * falloff > 0.08 &&
+            in_shadow(position + vec3(0.0, 0.0, 1.0), pc.dlight_origins[i].xyz))
             continue;
 #endif
         float facing = clamp(0.55 + 0.45 * d.z / max(dist, 1.0), 0.2, 1.0);
