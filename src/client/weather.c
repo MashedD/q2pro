@@ -575,13 +575,18 @@ static float cover_noise(float x, float y)
     return (v[0] * (1 - tx) + v[1] * tx) * (1 - ty) + (v[2] * (1 - tx) + v[3] * tx) * ty;
 }
 
-// Whether the sky is above a point on a floor, and how high.
+// Whether the sky is above a point on a floor, and how high. The floor of a
+// pool isn't: snow settles on the liquid's surface instead.
 static bool cover_exposed(const vec3_t org, float *sky_z)
 {
     static const vec3_t zero = { 0, 0, 0 };
     static const float nudges[][2] = { { 0, 0 }, { 2, 0 }, { -2, 0 }, { 0, 2 }, { 0, -2 } };
     trace_t tr;
     vec3_t start, end;
+
+    VectorSet(start, org[0], org[1], org[2] + 2);
+    if (CM_PointContents(start, cl.bsp->nodes, cl.csr.extended) & MASK_WATER)
+        return false;
 
     for (int i = 0; i < q_countof(nudges); i++) {
         VectorSet(start, org[0] + nudges[i][0], org[1] + nudges[i][1], org[2] + 1);
