@@ -2388,10 +2388,47 @@ static void vk_draw_stats(void)
 }
 #endif
 
+// vk_perf_stats 2: prints frames that took much longer than the frames
+// before them, with where the time went, to find what causes stutter. A
+// frame whose own times are small spent its time outside the renderer:
+// in the client, the game, the network or the system.
+static void vk_log_perf_spike(void)
+{
+    static float avg_frame;
+    static int frames;
+    float frame = vk.fd.frametime * 1000000.0f;
+
+    // start over after loading, or anything else that stops the game
+    if (frame <= 0 || frame > 1000000.0f) {
+        frames = 0;
+        return;
+    }
+    if (!frames++)
+        avg_frame = frame;
+
+    if (frames > 60 && frame > 2 * avg_frame && frame > avg_frame + 4000)
+        Com_Printf("VK spike at %.1fs: frame=%.1fms (usual %.1fms) gpu=%.1fms wait=%.1fms "
+                   "acq=%.1fms rec=%.1fms sub=%.1fms pres=%.1fms draws=%i tris=%i "
+                   "dlights=%i parts=%i ents=%i\n",
+                   vk.fd.time, frame / 1000, avg_frame / 1000, vk.gpu_frame_usec / 1000.0f,
+                   vk.wait_usec / 1000.0f, vk.acquire_usec / 1000.0f,
+                   vk.record_usec / 1000.0f, vk.submit_usec / 1000.0f,
+                   vk.present_usec / 1000.0f,
+                   c.batchesDrawn + c.batchesDrawn2D, c.trisDrawn,
+                   vk.fd.num_dlights, vk.fd.num_particles, vk.fd.num_entities);
+
+    // the usual frame, over about the last hundred; a spike moves it little
+    avg_frame += (frame - avg_frame) * 0.01f;
+}
+
 static void vk_log_perf_stats(void)
 {
     if (!vk_perf_stats || !vk_perf_stats->integer || !vk.fd_valid)
         return;
+    if (vk_perf_stats->integer == 2) {
+        vk_log_perf_spike();
+        return;
+    }
     if (vk.fd.time < vk.perf_stats_time + 1.0f)
         return;
 
