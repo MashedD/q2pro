@@ -21,7 +21,9 @@
 // open the sky is around the viewer, for the sound volumes and footsteps.
 //
 // Rain (cl_rain) falls from the same open points as snow, much faster, as
-// streaks that splash where they land and ripple on liquids.
+// streaks that splash where they land and ripple on liquids. In a storm
+// (cl_thunder), lightning flashes now and then, and thunder follows after a
+// delay that tells how far away it struck.
 //
 // Sounds are optional files in sound/weather/: a wind loop and a soft snow
 // ambience whose volume follows how much open sky is around the viewer,
@@ -81,6 +83,8 @@ static cvar_t   *cl_snow_craters;
 static cvar_t   *cl_rain;
 static cvar_t   *cl_rain_volume;
 static cvar_t   *cl_rain_puddles;
+static cvar_t   *cl_thunder;
+static cvar_t   *cl_thunder_flash;
 
 #define COVER_GRID          12
 #define COVER_HASH          65536   // grid column hash, power of two
@@ -142,12 +146,14 @@ static struct {
 
 #define WEATHER_STEPS   3
 #define WEATHER_GUSTS   2
+#define WEATHER_THUNDER 2       // of each, near and far
 
 static struct {
     qhandle_t   wind;
     qhandle_t   ambience;
     qhandle_t   rain;
     qhandle_t   gusts[WEATHER_GUSTS];
+    qhandle_t   thunder[2][WEATHER_THUNDER];    // near, far
     qhandle_t   steps[WEATHER_STEPS];
     int         num_gusts;
     int         num_steps;
@@ -156,6 +162,20 @@ static struct {
 
 static float    weather_exposure;   // 0 indoors .. 1 under open sky
 static float    weather_gust_timer;
+
+#define FLASH_PULSES    3
+
+// The lightning strike in progress: a flash of up to FLASH_PULSES flickers,
+// and its thunder, which follows after a delay.
+static struct {
+    float   next;           // seconds until the next strike
+    float   time;           // seconds since this one
+    float   pulses[FLASH_PULSES][2];    // when, how bright
+    float   strength;       // 0..1, less for a distant strike
+    float   delay;          // until the thunder
+    bool    near;
+    bool    heard;
+} storm;
 
 static void update_exposure(const vec3_t view, float dt);
 static void update_sounds(float snow, float rain, float dt);
@@ -548,6 +568,92 @@ static void add_drops(float amount, const vec3_t view, float dt, float cover_gro
     }
 }
 
+static void start_strike(float rain)
+{
+    storm.near = frand() < 0.3f;
+    storm.time = 0;
+    storm.heard = false;
+    storm.strength = storm.near ? 1 : 0.35f + frand() * 0.25f;
+    // sound covers a kilometre in about three seconds; this is shorter
+    storm.delay = storm.near ? 0.2f + frand() * 0.6f : 1.5f + frand() * 3.5f;
+
+    // a bright flash, often a flicker or two after it
+    float t = 0;
+    for (int i = 0; i < FLASH_PULSES; i++) {
+        storm.pulses[i][0] = t;
+        storm.pulses[i][1] = i == 0 || frand() < 0.6f ? 1 - i * 0.25f : 0;
+        t += 0.06f + frand() * 0.12f;
+    }
+
+    // the heavier the rain, the more often it strikes
+    storm.next = (12 + frand() * 30) / sqrtf(max(rain, 0.5f));
+}
+
+// How bright the lightning is now, 0..1.
+static float strike_flash(void)
+{
+    float flash = 0;
+
+    for (int i = 0; i < FLASH_PULSES; i++) {
+        float t = storm.time - storm.pulses[i][0];
+        if (t < 0 || !storm.pulses[i][1])
+            continue;
+        float rise = min(t / 0.015f, 1.0f);
+        flash = max(flash, storm.pulses[i][1] * rise * expf(-t / 0.07f));
+    }
+    return flash * storm.strength;
+}
+
+// Lightning while it rains: the screen flashes, more under open sky, a
+// strong light from above lights the ground around the viewer when outside,
+// and thunder follows.
+static void update_storm(float rain, float dt, const vec3_t view)
+{
+    if (!cl_thunder->integer) {
+        storm.next = max(storm.next, 5.0f);
+        return;
+    }
+
+    storm.next -= dt;
+    if (storm.next <= 0)
+        start_strike(rain);
+    storm.time += dt;
+
+    if (!storm.heard && storm.time >= storm.delay && storm.strength > 0) {
+        int kind = !storm.near;
+        int n = Q_rand_uniform(WEATHER_THUNDER);
+        float volume = Cvar_ClampValue(cl_rain_volume, 0, 1) *
+                       (storm.near ? 1 : 0.7f) * (0.5f + 0.5f * weather_exposure);
+        storm.heard = true;
+        if (weather_sfx.thunder[kind][n] && volume > 0)
+            S_StartSound(NULL, cl.frame.clientNum + 1, CHAN_AUTO,
+                         weather_sfx.thunder[kind][n], volume, ATTN_NONE, 0);
+    }
+
+    float flash = strike_flash() * Cvar_ClampValue(cl_thunder_flash, 0, 1);
+    if (flash <= 0.001f)
+        return;
+
+    // wash the view towards a cold white, over whatever blend it has
+    float *blend = cl.refdef.screen_blend;
+    float a = flash * 0.35f * (0.25f + 0.75f * weather_exposure);
+    float out = a + blend[3] * (1 - a);
+    if (out > 0) {
+        static const vec3_t white = { 0.8f, 0.85f, 1.0f };
+        for (int i = 0; i < 3; i++)
+            blend[i] = (white[i] * a + blend[i] * blend[3] * (1 - a)) / out;
+        blend[3] = out;
+    }
+
+    // light the ground from above, under the sky over the viewer
+    weather_probes = max(weather_probes, 1);
+    const weather_column_t *col = find_column(view[0], view[1], view[2]);
+    if (col && col->state == COLUMN_SKY) {
+        vec3_t org = { view[0], view[1], min(view[2] + 200, col->sky_z - 8) };
+        V_AddLight(org, 300 + 500 * flash, 0.75f * flash, 0.8f * flash, 0.95f * flash);
+    }
+}
+
 /*
 ==============
 CL_AddWeather
@@ -596,8 +702,10 @@ void CL_AddWeather(void)
 
     if (snow)
         add_flakes(snow, view, dt, cover_grown);
-    if (rain)
+    if (rain) {
         add_drops(rain, view, dt, cover_grown);
+        update_storm(rain, dt, view);
+    }
 }
 
 // Fraction of the columns around the viewer that have sky above, from those
@@ -716,6 +824,17 @@ void CL_RegisterWeatherSounds(void)
     weather_sfx.rain = register_optional("weather/rain.wav");
     if (!weather_sfx.rain)
         weather_sfx.rain = S_RegisterSound("#synth:weather/rain.wav");
+
+    // thunder, near and far, from files or made in code
+    for (int i = 0; i < WEATHER_THUNDER; i++) {
+        for (int far = 0; far < 2; far++) {
+            char name[MAX_QPATH], synth[MAX_QPATH];
+            Q_snprintf(name, sizeof(name), "weather/thunder%s%d.wav", far ? "_far" : "", i + 1);
+            Q_snprintf(synth, sizeof(synth), "#synth:%s", name);
+            if (!(weather_sfx.thunder[far][i] = register_optional(name)))
+                weather_sfx.thunder[far][i] = S_RegisterSound(synth);
+        }
+    }
     for (int i = 0; i < WEATHER_STEPS; i++)
         if ((weather_sfx.steps[weather_sfx.num_steps] = register_optional(va("weather/snow_step%d.wav", i + 1))))
             weather_sfx.num_steps++;
@@ -1648,6 +1767,8 @@ void CL_ClearWeather(void)
     weather_wind_timer = 0;
     weather_exposure = 0;
     weather_gust_timer = 4;
+    memset(&storm, 0, sizeof(storm));
+    storm.next = 8 + frand() * 10;
     stop_sounds();
 }
 
@@ -1670,6 +1791,8 @@ void CL_InitWeather(void)
     cl_rain_volume = Cvar_Get("cl_rain_volume", "1", CVAR_ARCHIVE);
     cl_rain_puddles = Cvar_Get("cl_rain_puddles", "1", CVAR_ARCHIVE);
     cl_rain_puddles->changed = cl_weather_changed;
+    cl_thunder = Cvar_Get("cl_thunder", "0", CVAR_ARCHIVE);
+    cl_thunder_flash = Cvar_Get("cl_thunder_flash", "0.5", CVAR_ARCHIVE);
 }
 
 #define MAX_CRATER_VERTICES 4096
