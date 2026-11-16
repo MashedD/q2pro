@@ -981,6 +981,7 @@ extern tesselator_t tess;
 
 void GL_Flush2D(void);
 void GL_DrawParticles(void);
+void GL_DrawStreaks(void);
 
 /*
  * snow_gl.c

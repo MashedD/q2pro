@@ -24,6 +24,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define MAX_DLIGHTS     64
 #define MAX_ENTITIES    2048
 #define MAX_PARTICLES   8192
+#define MAX_STREAKS     4096
 #define MAX_LIGHTSTYLES 256
 
 #define POWERSUIT_SCALE     4.0f
@@ -129,6 +130,14 @@ typedef struct {
     color_t rgba;
 } particle_t;
 
+// A thin, soft line drawn with the particle texture stretched along it,
+// such as a falling raindrop.
+typedef struct {
+    vec3_t  start, end;
+    float   width;              // half width, in units
+    color_t rgba;
+} r_streak_t;
+
 typedef struct {
     float   white;              // highest of RGB
 } lightstyle_t;
@@ -159,6 +168,9 @@ typedef struct {
 
     int         num_particles;
     particle_t  *particles;
+
+    int         num_streaks;
+    r_streak_t  *streaks;
 
     float       snow_amount;        // growth of the snow cover, 0..1
 } refdef_t;

@@ -135,6 +135,75 @@ void GL_DrawParticles(void)
     } while (total);
 }
 
+// Streaks (refdef_t.streaks), such as rain: a quad along each, facing the
+// viewer, with the round particle texture stretched over it, so it is soft
+// at its sides and ends. Like particles, they widen with distance.
+void GL_DrawStreaks(void)
+{
+    const r_streak_t *s = glr.fd.streaks;
+    int total = glr.fd.num_streaks;
+
+    if (!total || !s)
+        return;
+
+    GL_LoadMatrix(glr.viewmatrix);
+    GL_LoadUniforms();
+    GL_BindArrays(VA_EFFECT);
+
+    glStateBits_t bits = (gl_partstyle->integer ? GLS_BLEND_ADD : GLS_BLEND_BLEND) |
+        GLS_DEPTHMASK_FALSE | GLS_CULL_DISABLE | glr.fog_bits;
+
+    do {
+        GL_BindTexture(TMU_TEXTURE, TEXNUM_PARTICLE);
+        GL_StateBits(bits);
+        GL_ArrayBits(GLA_VERTEX | GLA_TC | GLA_COLOR);
+
+        int count = min(total, TESS_MAX_VERTICES / 6);
+        int numverts = 0;
+        vec_t *dst = tess.vertices;
+        total -= count;
+
+        for (; count; count--, s++) {
+            vec3_t dir, mid, to_view, side, corners[4];
+
+            VectorSubtract(s->end, s->start, dir);
+            VectorAvg(s->start, s->end, mid);
+            VectorSubtract(mid, glr.fd.vieworg, to_view);
+            CrossProduct(dir, to_view, side);
+            if (VectorNormalize(side) < 0.001f)
+                continue;
+
+            float dist = DotProduct(to_view, glr.viewaxis[0]);
+            float width = s->width * (dist > 20 ? 1 + dist * 0.004f : 1);
+            VectorScale(side, width, side);
+            VectorSubtract(s->start, side, corners[0]);
+            VectorAdd(s->start, side, corners[1]);
+            VectorSubtract(s->end, side, corners[2]);
+            VectorAdd(s->end, side, corners[3]);
+
+            static const int order[6] = { 0, 2, 1, 1, 2, 3 };
+            static const float tc[4][2] = { { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 } };
+            for (int j = 0; j < 6; j++) {
+                int k = order[j];
+                VectorCopy(corners[k], dst);
+                dst[3] = tc[k][0];
+                dst[4] = tc[k][1];
+                WN32(dst + 5, s->rgba.u32);
+                dst += 6;
+            }
+            numverts += 6;
+        }
+        if (!numverts)
+            continue;
+
+        GL_LockArrays(numverts);
+        qglDrawArrays(GL_TRIANGLES, 0, numverts);
+        if (gl_showtris->integer & SHOWTRIS_FX)
+            GL_DrawOutlines(numverts, 0, NULL);
+        GL_UnlockArrays();
+    } while (total);
+}
+
 static void GL_FlushBeamSegments(bool additive)
 {
     if (!tess.numindices)
