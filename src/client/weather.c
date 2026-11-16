@@ -23,7 +23,8 @@
 // Sounds are optional files in sound/weather/: a wind loop and a soft snow
 // ambience whose volume follows how much open sky is around the viewer,
 // occasional gusts, and footsteps on ground under open sky. The game has no
-// such sounds; without the files snow is silent.
+// such sounds; without the files, the wind and gusts are synthesized
+// (sound/synth.c) and the rest is silent.
 //
 
 #include "client.h"
@@ -530,6 +531,12 @@ void CL_RegisterWeatherSounds(void)
     for (int i = 0; i < WEATHER_GUSTS; i++)
         if ((weather_sfx.gusts[weather_sfx.num_gusts] = register_optional(va("weather/wind_gust%d.wav", i + 1))))
             weather_sfx.num_gusts++;
+
+    // without files of their own, wind and gusts are made in code (synth.c)
+    if (!weather_sfx.wind)
+        weather_sfx.wind = S_RegisterSound("#synth:weather/wind.wav");
+    if (!weather_sfx.num_gusts && (weather_sfx.gusts[0] = S_RegisterSound("#synth:weather/gust.wav")))
+        weather_sfx.num_gusts = 1;
     for (int i = 0; i < WEATHER_STEPS; i++)
         if ((weather_sfx.steps[weather_sfx.num_steps] = register_optional(va("weather/snow_step%d.wav", i + 1))))
             weather_sfx.num_steps++;

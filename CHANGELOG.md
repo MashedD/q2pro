@@ -8,9 +8,9 @@ All notable changes to this fork are documented here. The format follows
 
 ### Added
 
-- `cl_snow` makes it snow on any map, only where the sky is above, with
-  optional wind, gust and footstep sounds from `sound/weather/`
-  (`cl_snow_volume`), and snow that settles into drifts on floors and ledges
+- `cl_snow` makes it snow on any map, only where the sky is above, with a
+  wind and gusts made from noise, or sounds of your own from
+  `sound/weather/` (`cl_snow_volume`), and snow that settles into drifts on floors and ledges
   under open sky over a few minutes (`cl_snow_cover`, `cl_snow_cover_time`).
   Each map has a prevailing wind that shapes the drifts, dynamic lights
   light the snow (with shadows under Vulkan ray tracing), and it doesn't

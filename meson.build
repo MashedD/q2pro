@@ -54,6 +54,7 @@ client_src = [
   'src/client/screen.c',
   'src/client/sound/main.c',
   'src/client/sound/mem.c',
+  'src/client/sound/synth.c',
   'src/client/tent.c',
   'src/client/view.c',
   'src/client/weather.c',

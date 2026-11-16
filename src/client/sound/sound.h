@@ -89,6 +89,8 @@ typedef struct {
 #endif
 } channel_t;
 
+#define FORMAT_PCM  1
+
 typedef struct {
     char        *name;
     int         format;
@@ -186,6 +188,7 @@ extern cvar_t       *s_underwater_gain_hf;
 
 sfx_t *S_SfxForHandle(qhandle_t hSfx);
 sfxcache_t *S_LoadSound(sfx_t *s);
+bool S_SynthesizeSound(const char *name);
 channel_t *S_PickChannel(int entnum, int entchannel);
 void S_IssuePlaysound(playsound_t *ps);
 int S_BuildSoundList(int *sounds);
