@@ -359,6 +359,8 @@ typedef struct {
     float color[4];     // rgb tint, a = snow amount
     float craters[4];   // time, seconds for a crater to fill again
     float fog[4];       // as for the world, from vk_fog_params()
+    float dlight_origins[3][4];     // snow_lights_t, SNOW_MAX_LIGHTS
+    float dlight_colors[3][4];
 } vk_snow_push_t;
 
 typedef struct {
@@ -649,6 +651,7 @@ typedef struct {
     VkPipeline color3d_pipeline;
     VkPipeline snow_pipeline;
     VkPipeline snow_full_pipeline;
+    VkPipeline snow_rt_pipelines[2];    // growing, full; with ray tracing
     VkPipeline line3d_pipeline;
     VkPipeline debug_line_pipeline;
     VkPipeline debug_text_pipeline;
@@ -1075,7 +1078,7 @@ bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write, bool blend
                               VkCompareOp depth_compare, bool depth_bias_enable,
                               float depth_bias_constant, float depth_bias_slope,
                               VkPipelineDepthStencilStateCreateInfo *stencil_state);
-bool vk_create_snow_pipeline(VkPipeline *pipeline, bool full);
+bool vk_create_snow_pipeline(VkPipeline *pipeline, bool full, bool rt);
 bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
                                 bool depth_write, bool blend, bool additive,
                                 VkPrimitiveTopology topology);

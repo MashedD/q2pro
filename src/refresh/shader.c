@@ -345,7 +345,7 @@ static void write_vertex_shader(sizebuf_t *buf, glStateBits_t bits)
         GLSL(out vec4 v_color;)
     }
 
-    if (bits & GLS_FOG_HEIGHT)
+    if (bits & (GLS_FOG_HEIGHT | GLS_SNOW_LIGHTS))
         GLSL(out vec3 v_world_pos;)
 
     GLSF("void main() {\n");
@@ -365,7 +365,7 @@ static void write_vertex_shader(sizebuf_t *buf, glStateBits_t bits)
     if (!(bits & GLS_TEXTURE_REPLACE))
         GLSL(v_color = a_color;)
 
-    if (bits & GLS_FOG_HEIGHT)
+    if (bits & (GLS_FOG_HEIGHT | GLS_SNOW_LIGHTS))
         GLSL(v_world_pos = (m_model * a_pos).xyz;)
 
     GLSL(gl_Position = m_vp * a_pos;)
@@ -542,7 +542,7 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
         GLSL(out vec4 o_bloom;)
     }
 
-    if (bits & GLS_FOG_HEIGHT)
+    if (bits & (GLS_FOG_HEIGHT | GLS_SNOW_LIGHTS))
         GLSL(in vec3 v_world_pos;)
 
     if (bits & GLS_BLUR_GAUSS)
@@ -634,6 +634,23 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
 
     if (!(bits & GLS_TEXTURE_REPLACE))
         GLSL(diffuse *= v_color;)
+
+    // dynamic lights on the snow cover (snow_gl.c), like vk_snow.frag:
+    // m_sky[0] holds their origins and reach, m_sky[1] their colors
+    if (bits & GLS_SNOW_LIGHTS) {
+        GLSL(
+            for (int i = 0; i < 3; i++) {
+                float reach = m_sky[0][i].w;
+                if (reach <= 0.0)
+                    break;
+                vec3 d = m_sky[0][i].xyz - v_world_pos;
+                float dist = length(d);
+                float falloff = max(1.0 - dist / reach, 0.0);
+                float facing = clamp(0.55 + 0.45 * d.z / max(dist, 1.0), 0.2, 1.0);
+                diffuse.rgb += 0.7 * m_sky[1][i].rgb * (m_sky[1][i].w * falloff * facing);
+            }
+        )
+    }
 
     if (bits & GLS_SKINTINT) {
         GLSL(

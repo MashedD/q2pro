@@ -5,11 +5,18 @@
 // Explosions blow snow away (R_AddSnowCrater): a host-visible buffer holds
 // the time and strength of the last crater at each vertex, as a second
 // vertex stream, so a crater needs no upload of the mesh.
+//
+// Dynamic lights are added by the fragment shaders, up to SNOW_MAX_LIGHTS
+// per draw, as push constants; with ray tracing, they cast shadows.
 
 #include "vk_local.h"
 #include "snow.h"
 
 #if USE_VULKAN
+
+typedef char vk_snow_push_lights_check[
+    sizeof(((vk_snow_push_t *)0)->dlight_origins) ==
+    sizeof(((snow_lights_t *)0)->origins) ? 1 : -1];
 
 static snow_blocks_t   snow_blocks;
 
@@ -128,26 +135,50 @@ void vk_draw_snow_cover(const refdef_t *fd)
     bool full = fd->snow_amount >= 1 &&
         (fd->time < snow_craters.last_time ||
          fd->time - snow_craters.last_time > SNOW_REFILL);
-    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                     full ? vk.snow_full_pipeline : vk.snow_pipeline);
+    VkPipeline pipeline = full ? vk.snow_full_pipeline : vk.snow_pipeline;
+#if USE_VULKAN_RAYTRACING
+    // with ray tracing, dynamic lights cast shadows on the snow
+    if (vk.raytracing_active && vk.rt_descriptor_set && vk.rt_tlas.handle &&
+        vk.snow_rt_pipelines[full]) {
+        pipeline = vk.snow_rt_pipelines[full];
+        vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 vk.rect_pipeline_layout, 1, 1,
+                                 &vk.rt_descriptor_set, 0, NULL);
+    }
+#endif
+    vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vk_bind_vertex_buffers(cmd, 0, 2, buffers, offsets);
     vk_bind_index_buffer(cmd, vk.snow_cover.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vk_push_constants(cmd, sizeof(push), &push);
 
-    // draw the blocks in view, joining neighbouring ranges into one draw
+    // draw the blocks in view, joining neighbouring ranges that the same
+    // dynamic lights reach into one draw
+    bool lights = vk_dynamic_lights_enabled() && fd->dlights;
+    snow_lights_t run_lights, blk_lights;
     uint32_t first = 0, count = 0;
+    memset(&run_lights, 0, sizeof(run_lights));
     for (int i = 0; i <= snow_blocks.num_blocks; i++) {
         bool visible = false;
         if (i < snow_blocks.num_blocks) {
             const snow_block_t *blk = &snow_blocks.blocks[i];
             visible = R_SnowBlockVisible(&snow_blocks, i, vk.world.cache,
                                          vk.world.frustum, vk.world.visframe);
-            if (visible && count && blk->first_index == first + count) {
+            if (visible) {
+                if (lights)
+                    R_SnowBlockLights(&snow_blocks, i, fd->dlights,
+                                      fd->num_dlights, &blk_lights);
+                else
+                    memset(&blk_lights, 0, sizeof(blk_lights));
+            }
+            if (visible && count && blk->first_index == first + count &&
+                !memcmp(&blk_lights, &run_lights, sizeof(run_lights))) {
                 count += blk->num_indices;
                 continue;
             }
         }
         if (count) {
+            memcpy(push.dlight_origins, run_lights.origins, sizeof(push.dlight_origins));
+            memcpy(push.dlight_colors, run_lights.colors, sizeof(push.dlight_colors));
+            vk_push_constants(cmd, sizeof(push), &push);
             vk.CmdDrawIndexed(cmd, count, 1, first, 0, 0);
             c.trisDrawn += count / 3;
             vk_count_batch3d();
@@ -156,6 +187,7 @@ void vk_draw_snow_cover(const refdef_t *fd)
         if (visible) {
             first = snow_blocks.blocks[i].first_index;
             count = snow_blocks.blocks[i].num_indices;
+            run_lights = blk_lights;
         }
     }
 }

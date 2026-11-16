@@ -4,6 +4,11 @@
 // SNOW_BLOCK units, and only blocks in view: inside the view frustum, with a
 // BSP leaf that the world pass marked visible from the viewer's PVS. Both
 // keep the time and strength of the last explosion crater at each vertex.
+//
+// The snow's light is worked out by the client when the map loads, so
+// dynamic lights are added by the renderers' snow shaders: a few per draw,
+// picked for each block, and blocks are only drawn together when they share
+// them.
 
 #include "gl.h"
 #include "snow.h"
@@ -134,6 +139,52 @@ bool R_SnowBlockVisible(const snow_blocks_t *sb, int block, const bsp_t *bsp,
         if (bsp->leafs[sb->leafs[blk->first_leaf + i]].visframe == visframe)
             return true;
     return false;
+}
+
+void R_SnowBlockLights(const snow_blocks_t *sb, int block,
+                       const dlight_t *dlights, int num_dlights,
+                       snow_lights_t *out)
+{
+    const snow_block_t *blk = &sb->blocks[block];
+    float scores[SNOW_MAX_LIGHTS];
+
+    memset(out, 0, sizeof(*out));
+    for (int i = 0; i < num_dlights; i++) {
+        const dlight_t *light = &dlights[i];
+        float reach = light->intensity - DLIGHT_CUTOFF;
+        float dist2 = 0;
+
+        if (reach <= 0)
+            continue;
+        for (int j = 0; j < 3; j++) {
+            float d = max(blk->bounds[0][j] - light->origin[j],
+                          light->origin[j] - blk->bounds[1][j]);
+            if (d > 0)
+                dist2 += d * d;
+        }
+        if (dist2 >= reach * reach)
+            continue;
+
+        // the brightest light on the nearest snow first
+        float score = reach - sqrtf(dist2);
+        int slot = out->num_lights;
+        while (slot > 0 && score > scores[slot - 1]) {
+            if (slot < SNOW_MAX_LIGHTS) {
+                scores[slot] = scores[slot - 1];
+                Vector4Copy(out->origins[slot - 1], out->origins[slot]);
+                Vector4Copy(out->colors[slot - 1], out->colors[slot]);
+            }
+            slot--;
+        }
+        if (slot >= SNOW_MAX_LIGHTS)
+            continue;
+        scores[slot] = score;
+        VectorCopy(light->origin, out->origins[slot]);
+        out->origins[slot][3] = reach;
+        VectorCopy(light->color, out->colors[slot]);
+        out->colors[slot][3] = light->intensity / 255;
+        out->num_lights = min(out->num_lights + 1, SNOW_MAX_LIGHTS);
+    }
 }
 
 // Craters hold two floats per vertex: the time of the last crater there and

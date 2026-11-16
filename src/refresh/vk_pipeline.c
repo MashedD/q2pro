@@ -766,15 +766,27 @@ bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
 }
 
 // full: for snow that has fully grown, which needs no pixels left out
-bool vk_create_snow_pipeline(VkPipeline *pipeline, bool full)
+// rt: dynamic lights cast shadows, with ray queries
+bool vk_create_snow_pipeline(VkPipeline *pipeline, bool full, bool rt)
 {
+    const uint32_t *frag = full ? vk_snow_full_frag_spv : vk_snow_frag_spv;
+    size_t frag_size = full ? sizeof(vk_snow_full_frag_spv) : sizeof(vk_snow_frag_spv);
+
+#if USE_VULKAN_RAYTRACING
+    if (rt) {
+        frag = full ? vk_snow_full_rt_frag_spv : vk_snow_rt_frag_spv;
+        frag_size = full ? sizeof(vk_snow_full_rt_frag_spv) : sizeof(vk_snow_rt_frag_spv);
+    }
+#else
+    if (rt)
+        return false;
+#endif
+
     return vk_create_color3d_pipeline_ex(pipeline, true, true, false, false,
                                          VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
                                          vk_snow_vert_spv,
                                          sizeof(vk_snow_vert_spv),
-                                         full ? vk_snow_full_frag_spv : vk_snow_frag_spv,
-                                         full ? sizeof(vk_snow_full_frag_spv) :
-                                         sizeof(vk_snow_frag_spv), true);
+                                         frag, frag_size, true);
 }
 
 bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,

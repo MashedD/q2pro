@@ -109,6 +109,12 @@ static const uint32_t vk_rt_ao_bake_frag_spv[] =
 static const uint32_t vk_world_lit_rt_frag_spv[] =
 #include "vk_world_lit_rt_frag_spv.h"
 ;
+static const uint32_t vk_snow_rt_frag_spv[] =
+#include "vk_snow_rt_frag_spv.h"
+;
+static const uint32_t vk_snow_full_rt_frag_spv[] =
+#include "vk_snow_full_rt_frag_spv.h"
+;
 static const uint32_t vk_world_pixel_rt_frag_spv[] =
 #include "vk_world_pixel_rt_frag_spv.h"
 ;

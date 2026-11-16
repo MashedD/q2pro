@@ -1113,6 +1113,13 @@ void vk_destroy_swapchain(void)
         vk.snow_full_pipeline = VK_NULL_HANDLE;
     }
 
+    for (int i = 0; i < 2; i++) {
+        if (vk.snow_rt_pipelines[i]) {
+            vk.DestroyPipeline(vk.device, vk.snow_rt_pipelines[i], NULL);
+            vk.snow_rt_pipelines[i] = VK_NULL_HANDLE;
+        }
+    }
+
     if (vk.line3d_pipeline) {
         vk.DestroyPipeline(vk.device, vk.line3d_pipeline, NULL);
         vk.line3d_pipeline = VK_NULL_HANDLE;
@@ -2119,8 +2126,8 @@ bool vk_create_swapchain(int width, int height)
                                        false) ||
         !vk_create_color3d_pipeline(&vk.color3d_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE,
                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) ||
-        !vk_create_snow_pipeline(&vk.snow_pipeline, false) ||
-        !vk_create_snow_pipeline(&vk.snow_full_pipeline, true) ||
+        !vk_create_snow_pipeline(&vk.snow_pipeline, false, false) ||
+        !vk_create_snow_pipeline(&vk.snow_full_pipeline, true, false) ||
         !vk_create_color3d_pipeline(&vk.line3d_pipeline, VK_TRUE, VK_TRUE, VK_FALSE, VK_FALSE,
                                     VK_PRIMITIVE_TOPOLOGY_LINE_LIST) ||
         !vk_create_color3d_pipeline(&vk.debug_line_pipeline, VK_FALSE, VK_FALSE, VK_TRUE, VK_FALSE,
@@ -2191,6 +2198,14 @@ bool vk_create_swapchain(int width, int height)
     }
 
 #if USE_VULKAN_RAYTRACING
+    // snow with shadows from dynamic lights; without, the snow is drawn
+    // with the pipelines above
+    if (vk.raytracing_active &&
+        (!vk_create_snow_pipeline(&vk.snow_rt_pipelines[0], false, true) ||
+         !vk_create_snow_pipeline(&vk.snow_rt_pipelines[1], true, true)))
+        Com_WPrintf("Couldn't create Vulkan RT snow pipelines: %s; the snow cover gets no shadows\n",
+                    Com_GetLastError());
+
     vk.raytracing_pixel_ready = false;
     if (vk.raytracing_active) {
         bool rt_ok =

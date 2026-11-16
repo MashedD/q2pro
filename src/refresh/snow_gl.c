@@ -6,7 +6,8 @@
 // growing or a crater is filling in, and not at all once it has settled.
 // With GLSL, GLS_SNOW makes the fragment shader leave out what hasn't grown
 // yet along a noisy line, like vk_snow.frag; the legacy renderer just keeps
-// those points under the floor.
+// those points under the floor. Dynamic lights are added by the shader
+// too (GLS_SNOW_LIGHTS), up to SNOW_MAX_LIGHTS per draw.
 
 #include "gl.h"
 #include "snow.h"
@@ -160,30 +161,54 @@ void GL_DrawSnowCover(void)
     if (glr.framebuffer_bound && gl_bloom->integer)
         bits |= GLS_BLOOM_GENERATE;
 
+    // the mesh is in world space, whatever entity was drawn last; the sky
+    // matrices hold the dynamic lights, and are put back afterwards
+    mat4_t saved_sky[2];
+    memcpy(saved_sky, gls.u_block.m_sky, sizeof(saved_sky));
+    memcpy(gls.u_block.m_model, gl_identity, sizeof(gls.u_block.m_model));
+    bool lights = gl_static.use_shaders && glr.fd.num_dlights && glr.fd.dlights;
+
     GL_LoadMatrix(glr.viewmatrix);
     GL_BindTexture(TMU_TEXTURE, TEXNUM_WHITE);
-    GL_StateBits(bits);
     GL_BindArrays(VA_NONE);
     GL_BindBuffer(GL_ARRAY_BUFFER, snow.buffers[0]);
     gl_backend->array_pointers(snow_arrays, NULL);
     GL_ArrayBits(arrays);
     GL_BindBuffer(GL_ELEMENT_ARRAY_BUFFER, snow.buffers[1]);
-    GL_LoadUniforms();
 
-    // draw the blocks in view, joining neighbouring ranges into one draw
+    // draw the blocks in view, joining neighbouring ranges that the same
+    // dynamic lights reach into one draw
+    snow_lights_t run_lights, blk_lights;
     uint32_t first = 0, count = 0;
+    memset(&run_lights, 0, sizeof(run_lights));
     for (int i = 0; i <= snow.blocks.num_blocks; i++) {
         bool visible = false;
         if (i < snow.blocks.num_blocks) {
             const snow_block_t *blk = &snow.blocks.blocks[i];
             visible = R_SnowBlockVisible(&snow.blocks, i, gl_static.world.cache,
                                          glr.frustumPlanes, (int)glr.visframe);
-            if (visible && count && blk->first_index == first + count) {
+            if (visible) {
+                if (lights)
+                    R_SnowBlockLights(&snow.blocks, i, glr.fd.dlights,
+                                      glr.fd.num_dlights, &blk_lights);
+                else
+                    memset(&blk_lights, 0, sizeof(blk_lights));
+            }
+            if (visible && count && blk->first_index == first + count &&
+                !memcmp(&blk_lights, &run_lights, sizeof(run_lights))) {
                 count += blk->num_indices;
                 continue;
             }
         }
         if (count) {
+            memset(gls.u_block.m_sky, 0, sizeof(gls.u_block.m_sky));
+            for (int j = 0; j < run_lights.num_lights; j++) {
+                Vector4Copy(run_lights.origins[j], &gls.u_block.m_sky[0][j * 4]);
+                Vector4Copy(run_lights.colors[j], &gls.u_block.m_sky[1][j * 4]);
+            }
+            gls.u_block_dirty = true;
+            GL_StateBits(bits | (run_lights.num_lights ? GLS_SNOW_LIGHTS : 0));
+            GL_LoadUniforms();
             qglDrawElements(GL_TRIANGLES, count, GL_UNSIGNED_INT,
                             VBO_OFS(first * sizeof(uint32_t)));
             c.trisDrawn += count / 3;
@@ -192,8 +217,12 @@ void GL_DrawSnowCover(void)
         if (visible) {
             first = snow.blocks.blocks[i].first_index;
             count = snow.blocks.blocks[i].num_indices;
+            run_lights = blk_lights;
         }
     }
+
+    memcpy(gls.u_block.m_sky, saved_sky, sizeof(saved_sky));
+    gls.u_block_dirty = true;
 }
 
 #else

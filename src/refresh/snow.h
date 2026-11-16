@@ -4,6 +4,7 @@
 
 #define SNOW_BLOCK      256     // size of a culling block, in units
 #define SNOW_REFILL     60      // seconds for a crater to fill in again
+#define SNOW_MAX_LIGHTS 3       // dynamic lights per draw
 
 typedef struct {
     int         bx, by;
@@ -27,6 +28,18 @@ uint32_t *R_SortSnowBlocks(snow_blocks_t *sb, const bsp_t *bsp,
 void R_FreeSnowBlocks(snow_blocks_t *sb);
 bool R_SnowBlockVisible(const snow_blocks_t *sb, int block, const bsp_t *bsp,
                         const cplane_t *frustum, int visframe);
+
+// The dynamic lights reaching a block, the strongest first, in the form both
+// renderers' shaders take.
+typedef struct {
+    int     num_lights;
+    vec4_t  origins[SNOW_MAX_LIGHTS];   // xyz, w = reach
+    vec4_t  colors[SNOW_MAX_LIGHTS];    // rgb, w = brightness
+} snow_lights_t;
+
+void R_SnowBlockLights(const snow_blocks_t *sb, int block,
+                       const dlight_t *dlights, int num_dlights,
+                       snow_lights_t *out);
 
 void R_InitSnowCraters(float *craters, int num_vertices);
 void R_AddSnowCraters(float *craters, int num_vertices, const int *vertices,

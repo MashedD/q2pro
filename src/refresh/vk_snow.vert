@@ -16,7 +16,9 @@ layout(push_constant) uniform Push {
     mat4 mvp;
     vec4 color;     // rgb tint, a = snow amount 0..1
     vec4 craters;   // x = time, y = seconds for a crater to fill again
-    vec4 fog;       // used by the fragment shaders
+    vec4 fog;       // the rest is used by the fragment shaders
+    vec4 dlight_origins[3];
+    vec4 dlight_colors[3];
 } pc;
 
 layout(location = 0) in vec3 in_position;
@@ -26,6 +28,7 @@ layout(location = 3) in vec2 in_crater;
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out float v_front;
 layout(location = 2) out vec2 v_xy;
+layout(location = 3) out vec3 v_position;
 
 void main()
 {
@@ -44,4 +47,5 @@ void main()
     v_color = vec4(in_color.rgb * pc.color.rgb, 1.0);
     v_front = front;
     v_xy = in_position.xy;
+    v_position = position;
 }
