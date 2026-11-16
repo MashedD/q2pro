@@ -1,5 +1,5 @@
 //
-// weather.c -- client-side snow
+// weather.c -- client-side snow and rain
 //
 // When a map is loaded, upward-facing world faces are sampled on a
 // world-aligned grid of COVER_GRID units, and each point traces upwards to
@@ -20,11 +20,14 @@
 // Small columns probed from the viewer's height, a few per frame, tell how
 // open the sky is around the viewer, for the sound volumes and footsteps.
 //
+// Rain (cl_rain) falls from the same open points as snow, much faster, as
+// streaks that splash where they land and ripple on liquids.
+//
 // Sounds are optional files in sound/weather/: a wind loop and a soft snow
 // ambience whose volume follows how much open sky is around the viewer,
 // occasional gusts, and footsteps on ground under open sky. The game has no
-// such sounds; without the files, the wind and gusts are synthesized
-// (sound/synth.c) and the rest is silent.
+// such sounds; without the files, the wind, gusts and rain are synthesized
+// (sound/synth.c) and the rest is silent. The rain has a loop of its own.
 //
 
 #include "client.h"
@@ -33,6 +36,7 @@
 #define WEATHER_BAND        256     // viewer height band of a cached column
 #define WEATHER_HASH        16384   // column cache size, power of two
 #define WEATHER_MAX_FLAKES  4096
+#define WEATHER_MAX_DROPS   3072
 #define WEATHER_RADIUS      768     // flakes are kept within this of the viewer
 #define WEATHER_FADE        320     // and fade out from this distance
 #define WEATHER_HEIGHT      384     // and at most this far above it
@@ -61,11 +65,21 @@ typedef struct {
     bool    active;
 } snowflake_t;
 
+typedef struct {
+    vec3_t  org;
+    float   ground_z;
+    float   fall;       // units per second
+    int     sample;     // cover sample it falls onto
+    bool    active;
+} raindrop_t;
+
 static cvar_t   *cl_snow;
 static cvar_t   *cl_snow_volume;
 static cvar_t   *cl_snow_cover;
 static cvar_t   *cl_snow_cover_time;
 static cvar_t   *cl_snow_craters;
+static cvar_t   *cl_rain;
+static cvar_t   *cl_rain_volume;
 
 #define COVER_GRID          12
 #define COVER_HASH          65536   // grid column hash, power of two
@@ -76,6 +90,7 @@ static cvar_t   *cl_snow_craters;
 #define LAVA_MELT           24      // and flakes melt this far above it
 
 #define PUFF_DISTANCE       320     // flakes landing this close puff up
+#define SPLASH_DISTANCE     400     // drops landing this close splash
 
 #define SPAWN_BUCKET        256     // flake spawn index cell
 #define SPAWN_HASH          4096    // power of two
@@ -127,6 +142,7 @@ static struct {
 static struct {
     qhandle_t   wind;
     qhandle_t   ambience;
+    qhandle_t   rain;
     qhandle_t   gusts[WEATHER_GUSTS];
     qhandle_t   steps[WEATHER_STEPS];
     int         num_gusts;
@@ -138,7 +154,7 @@ static float    weather_exposure;   // 0 indoors .. 1 under open sky
 static float    weather_gust_timer;
 
 static void update_exposure(const vec3_t view, float dt);
-static void update_sounds(float amount, float dt);
+static void update_sounds(float snow, float rain, float dt);
 static void stop_sounds(void);
 static void cover_free(void);
 static void cover_build(void);
@@ -147,6 +163,7 @@ static void update_candidates(const vec3_t view);
 
 static weather_column_t weather_columns[WEATHER_HASH];
 static snowflake_t      snowflakes[WEATHER_MAX_FLAKES];
+static raindrop_t       raindrops[WEATHER_MAX_DROPS];
 static int      weather_probes;     // probes left this frame
 static float    weather_wind[2];
 static float    weather_wind_target[2];
@@ -275,6 +292,21 @@ static bool spawn_flake(snowflake_t *f, const vec3_t view, bool anywhere)
     return true;
 }
 
+static bool spawn_drop(raindrop_t *d, const vec3_t view, bool anywhere)
+{
+    int sample = spawn_point(view, anywhere, d->org);
+
+    d->active = sample >= 0;
+    if (!d->active)
+        return false;
+
+    const cover_sample_t *s = &cover.samples[sample];
+    d->ground_z = s->org[2] + (s->lava ? LAVA_MELT : 0);
+    d->sample = sample;
+    d->fall = 560 + frand() * 140;
+    return true;
+}
+
 // Each map has a prevailing wind, the same for every player, from its name.
 // It shapes the drifts of the snow cover, and the flakes drift with it.
 static void set_prevailing_wind(void)
@@ -347,51 +379,57 @@ static void land_flake(const snowflake_t *f, const vec3_t view)
     }
 }
 
-/*
-==============
-CL_AddWeather
-
-Moves the flakes and adds them to the refresh as particles.
-==============
-*/
-void CL_AddWeather(void)
+// A drop that lands close to the viewer splashes: a few droplets that
+// jump up from the ground, or a ring spreading on a liquid.
+static void land_drop(const raindrop_t *d, const vec3_t view, const vec3_t vel)
 {
-    float amount = Cvar_ClampValue(cl_snow, 0, 4);
-    float dt = min(cls.frametime, 0.1f);
-    const float *view = cl.refdef.vieworg;
+    const cover_sample_t *s = &cover.samples[d->sample];
+    vec3_t delta;
+
+    if (s->lava)
+        return;     // it hisses away above the lava
+    VectorSubtract(d->org, view, delta);
+    if (DotProduct(delta, delta) > SPLASH_DISTANCE * SPLASH_DISTANCE ||
+        DotProduct(delta, cl.v_forward) < 0 || frand() > 0.6f)
+        return;
+
+    int count = s->liquid ? 6 : 2 + (Q_rand() & 1);
+    for (int i = 0; i < count; i++) {
+        cparticle_t *p = CL_AllocParticle();
+        if (!p)
+            return;
+        p->time = cl.time;
+        p->color = -1;
+        p->rgba.u8[0] = 200;
+        p->rgba.u8[1] = 210;
+        p->rgba.u8[2] = 225;
+        p->rgba.u8[3] = 255;
+        VectorCopy(d->org, p->org);
+        p->org[2] += 0.5f;
+        p->scale = 0.4f;
+        if (s->liquid) {
+            float ang = (i + frand() * 0.5f) * (2 * M_PIf / count);
+            VectorSet(p->vel, cosf(ang) * 30, sinf(ang) * 30, 0);
+            VectorClear(p->accel);
+            p->alpha = 0.3f;
+            p->alphavel = -1.0f / 0.35f;
+        } else {
+            VectorSet(p->vel, crand() * 25 + vel[0] * 0.05f,
+                      crand() * 25 + vel[1] * 0.05f, 30 + frand() * 35);
+            VectorSet(p->accel, 0, 0, -400);
+            p->alpha = 0.4f;
+            p->alphavel = -1.0f / (0.2f + frand() * 0.1f);
+        }
+    }
+}
+
+static void add_flakes(float amount, const vec3_t view, float dt, float cover_grown)
+{
     float t = cl.time * 0.001f;
-    int count;
     particle_t p;
 
-    cl.refdef.snow_amount = 0;
-
-    if (!amount || !cl.bsp || cls.state != ca_active) {
-        stop_sounds();
-        if (cover.built) {
-            R_SetSnowCover(NULL, 0, NULL, 0);
-            cover_free();
-        }
-        return;
-    }
-
-    if (!cover.built)
-        cover_build();
-    if (cover.dirty) {
-        R_SetSnowCover(cover.vertices, cover.num_vertices, cover.indices, cover.num_indices);
-        cover.dirty = false;
-    }
-    if (cover.num_indices)
-        cl.refdef.snow_amount = cover_amount();
-    float cover_grown = cl.refdef.snow_amount;
-    update_candidates(view);
-
-    weather_probes = WEATHER_PROBES;
-    update_wind(dt);
-    update_exposure(view, dt);
-    update_sounds(amount, dt);
-
     // light snow is sparse, so it hides little and costs little
-    count = min((int)(400 * amount * sqrtf(amount)), WEATHER_MAX_FLAKES);
+    int count = min((int)(400 * amount * sqrtf(amount)), WEATHER_MAX_FLAKES);
 
     memset(&p, 0, sizeof(p));
     p.color = -1;
@@ -445,6 +483,111 @@ void CL_AddWeather(void)
     }
 }
 
+static void add_drops(float amount, const vec3_t view, float dt, float cover_grown)
+{
+    // the wind slants the rain a little
+    vec3_t vel = { weather_wind[0] * 3, weather_wind[1] * 3, 0 };
+    r_streak_t streak;
+
+    int count = min((int)(500 * amount * powf(amount, 0.25f)), WEATHER_MAX_DROPS);
+
+    for (int i = 0; i < count; i++) {
+        raindrop_t *r = &raindrops[i];
+
+        vel[2] = -r->fall;
+        if (!r->active) {
+            if (!spawn_drop(r, view, true))
+                continue;
+        } else {
+            VectorMA(r->org, dt, vel, r->org);
+
+            float dx = r->org[0] - view[0];
+            float dy = r->org[1] - view[1];
+            if (dx * dx + dy * dy > WEATHER_RADIUS * WEATHER_RADIUS) {
+                if (!spawn_drop(r, view, true))
+                    continue;
+            } else if (r->org[2] <= r->ground_z + cover_top(r->sample, cover_grown)) {
+                r->org[2] = r->ground_z + cover_top(r->sample, cover_grown);
+                land_drop(r, view, vel);
+                if (!spawn_drop(r, view, false))
+                    continue;
+            }
+        }
+
+        vec3_t d;
+        VectorSubtract(r->org, view, d);
+        if (DotProduct(d, cl.v_forward) < -32)
+            continue;
+
+        // like snow, distant rain fades
+        float dist2 = d[0] * d[0] + d[1] * d[1];
+        float alpha = 0.3f;
+        if (dist2 > WEATHER_FADE * WEATHER_FADE) {
+            float fade = (sqrtf(dist2) - WEATHER_FADE) / (WEATHER_RADIUS - WEATHER_FADE);
+            alpha *= 1 - 0.8f * min(fade, 1.0f);
+        }
+
+        // a streak as long as the drop falls in about a thirtieth of a
+        // second, ending at the drop
+        vel[2] = -r->fall;
+        VectorCopy(r->org, streak.end);
+        VectorMA(r->org, -0.035f, vel, streak.start);
+        streak.width = 0.35f;
+        streak.rgba.u8[0] = 190;
+        streak.rgba.u8[1] = 200;
+        streak.rgba.u8[2] = 215;
+        streak.rgba.u8[3] = alpha * 255;
+        V_AddStreak(&streak);
+    }
+}
+
+/*
+==============
+CL_AddWeather
+
+Moves the flakes and drops and adds them to the refresh.
+==============
+*/
+void CL_AddWeather(void)
+{
+    float snow = Cvar_ClampValue(cl_snow, 0, 4);
+    float rain = Cvar_ClampValue(cl_rain, 0, 4);
+    float dt = min(cls.frametime, 0.1f);
+    const float *view = cl.refdef.vieworg;
+
+    cl.refdef.snow_amount = 0;
+
+    if ((!snow && !rain) || !cl.bsp || cls.state != ca_active) {
+        stop_sounds();
+        if (cover.built) {
+            R_SetSnowCover(NULL, 0, NULL, 0);
+            cover_free();
+        }
+        return;
+    }
+
+    if (!cover.built)
+        cover_build();
+    if (cover.dirty) {
+        R_SetSnowCover(cover.vertices, cover.num_vertices, cover.indices, cover.num_indices);
+        cover.dirty = false;
+    }
+    if (cover.num_indices)
+        cl.refdef.snow_amount = cover_amount();
+    float cover_grown = cl.refdef.snow_amount;
+    update_candidates(view);
+
+    weather_probes = WEATHER_PROBES;
+    update_wind(dt);
+    update_exposure(view, dt);
+    update_sounds(snow, rain, dt);
+
+    if (snow)
+        add_flakes(snow, view, dt, cover_grown);
+    if (rain)
+        add_drops(rain, view, dt, cover_grown);
+}
+
 // Fraction of the columns around the viewer that have sky above, from those
 // already probed; changes are smoothed over a second or two.
 static void update_exposure(const vec3_t view, float dt)
@@ -470,13 +613,18 @@ static void update_exposure(const vec3_t view, float dt)
     weather_exposure += (target - weather_exposure) * min(dt * 1.5f, 1.0f);
 }
 
-static void update_sounds(float amount, float dt)
+static void update_sounds(float snow, float rain, float dt)
 {
-    float volume = Cvar_ClampValue(cl_snow_volume, 0, 1) * min(amount, 1.0f);
+    float snow_volume = Cvar_ClampValue(cl_snow_volume, 0, 1) * min(snow, 1.0f);
+    float rain_volume = Cvar_ClampValue(cl_rain_volume, 0, 1) * min(rain, 1.0f);
+    // the wind blows in the rain too, less loudly than the rain itself
+    float volume = max(snow_volume, rain_volume * 0.5f);
 
-    // wind stays faintly audible indoors, like through windows
+    // wind stays faintly audible indoors, like through windows, and rain
+    // drums on the roof
     S_SetLocalLoop(0, weather_sfx.wind, volume * (0.12f + 0.55f * weather_exposure));
-    S_SetLocalLoop(1, weather_sfx.ambience, volume * 0.35f * weather_exposure);
+    S_SetLocalLoop(1, weather_sfx.ambience, snow_volume * 0.35f * weather_exposure);
+    S_SetLocalLoop(2, weather_sfx.rain, rain_volume * (0.15f + 0.7f * weather_exposure));
 
     weather_gust_timer -= dt;
     if (weather_gust_timer <= 0) {
@@ -492,6 +640,7 @@ static void stop_sounds(void)
 {
     S_SetLocalLoop(0, 0, 0);
     S_SetLocalLoop(1, 0, 0);
+    S_SetLocalLoop(2, 0, 0);
 }
 
 /*
@@ -552,6 +701,9 @@ void CL_RegisterWeatherSounds(void)
         weather_sfx.wind = S_RegisterSound("#synth:weather/wind.wav");
     if (!weather_sfx.num_gusts && (weather_sfx.gusts[0] = S_RegisterSound("#synth:weather/gust.wav")))
         weather_sfx.num_gusts = 1;
+    weather_sfx.rain = register_optional("weather/rain.wav");
+    if (!weather_sfx.rain)
+        weather_sfx.rain = S_RegisterSound("#synth:weather/rain.wav");
     for (int i = 0; i < WEATHER_STEPS; i++)
         if ((weather_sfx.steps[weather_sfx.num_steps] = register_optional(va("weather/snow_step%d.wav", i + 1))))
             weather_sfx.num_steps++;
@@ -1301,7 +1453,8 @@ static void cover_build(void)
 #if USE_DEBUG
     unsigned start = Sys_Milliseconds();
 #endif
-    float depth = Cvar_ClampValue(cl_snow_cover, 0, 32);
+    // without snow, the points are only for rain to fall on
+    float depth = cl_snow->value ? Cvar_ClampValue(cl_snow_cover, 0, 32) : 0;
 
     cover_free();
     cover.built = true;
@@ -1382,6 +1535,7 @@ void CL_ClearWeather(void)
 {
     memset(weather_columns, 0, sizeof(weather_columns));
     memset(snowflakes, 0, sizeof(snowflakes));
+    memset(raindrops, 0, sizeof(raindrops));
     if (cover.built && cls.ref_initialized)
         R_SetSnowCover(NULL, 0, NULL, 0);
     cover_free();
@@ -1391,7 +1545,7 @@ void CL_ClearWeather(void)
     stop_sounds();
 }
 
-static void cl_snow_changed(cvar_t *self)
+static void cl_weather_changed(cvar_t *self)
 {
     CL_ClearWeather();
 }
@@ -1399,12 +1553,15 @@ static void cl_snow_changed(cvar_t *self)
 void CL_InitWeather(void)
 {
     cl_snow = Cvar_Get("cl_snow", "0", CVAR_ARCHIVE);
-    cl_snow->changed = cl_snow_changed;
+    cl_snow->changed = cl_weather_changed;
     cl_snow_volume = Cvar_Get("cl_snow_volume", "1", CVAR_ARCHIVE);
     cl_snow_cover = Cvar_Get("cl_snow_cover", "6", CVAR_ARCHIVE);
-    cl_snow_cover->changed = cl_snow_changed;
+    cl_snow_cover->changed = cl_weather_changed;
     cl_snow_cover_time = Cvar_Get("cl_snow_cover_time", "300", CVAR_ARCHIVE);
     cl_snow_craters = Cvar_Get("cl_snow_craters", "1", CVAR_ARCHIVE);
+    cl_rain = Cvar_Get("cl_rain", "0", CVAR_ARCHIVE);
+    cl_rain->changed = cl_weather_changed;
+    cl_rain_volume = Cvar_Get("cl_rain_volume", "1", CVAR_ARCHIVE);
 }
 
 #define MAX_CRATER_VERTICES 4096

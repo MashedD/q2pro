@@ -1,7 +1,7 @@
 // synth.c -- weather sounds made in code
 //
-// The game has no wind sounds, and sounds from elsewhere can't be shipped
-// without a license. Sounds registered as "#synth:weather/...", which no
+// The game has no wind or rain sounds, and sounds from elsewhere can't be
+// shipped without a license. Sounds registered as "#synth:weather/...", which no
 // file can be named, are synthesized from filtered noise when they are
 // loaded instead: the weather code (weather.c) uses them when no file of
 // its own is found.
@@ -24,6 +24,11 @@ static float synth_white(synth_rng_t *r)
     r->seed ^= r->seed >> 17;
     r->seed ^= r->seed << 5;
     return (r->seed & 0xffffff) / (float)0x800000 - 1;
+}
+
+static float synth_frand(synth_rng_t *r)
+{
+    return (synth_white(r) + 1) * 0.5f;
 }
 
 // one-pole low pass coefficient for a cutoff in Hz
@@ -85,6 +90,38 @@ static void synth_wind(float *out, int count, int n, synth_rng_t *r, bool gust)
     }
 }
 
+// Rain: a hiss and many drops, each a short ping of noise at its own pitch.
+// Drops past the end wrap around to the start.
+static void synth_rain(float *out, int count, int n, synth_rng_t *r)
+{
+    float lo = 0, lo2 = 0;
+    float a_lo = synth_lp(1200), a_lo2 = synth_lp(6500);
+
+    for (int i = 0; i < count; i++) {
+        float w = synth_white(r);
+        lo += a_lo * (w - lo);
+        float high = w - lo;
+        lo2 += a_lo2 * (high - lo2);
+        float swell = 0.85f + 0.15f * synth_loop_phase(i, n, 2, 0.4f);
+        out[i] = lo2 * 0.22f * swell;
+    }
+
+    int drops = 260 * n / SYNTH_RATE;
+    for (int d = 0; d < drops; d++) {
+        int start = (int)(synth_frand(r) * n);
+        int len = (int)((0.004f + 0.012f * synth_frand(r)) * SYNTH_RATE);
+        float hz = 1400 + 4200 * synth_frand(r);
+        // a few loud drops among many faint ones
+        float loud = 0.04f + 0.4f * powf(synth_frand(r), 4);
+        synth_svf_t svf = { 0 };
+        for (int j = 0; j < len; j++) {
+            float env = expf(-5.0f * j / len);
+            float v = synth_bandpass(&svf, synth_white(r), hz, 0.25f);
+            out[(start + j) % n] += v * env * loud;
+        }
+    }
+}
+
 static void synth_normalize(float *buf, int n, float peak)
 {
     float m = 0;
@@ -125,6 +162,7 @@ bool S_SynthesizeSound(const char *name)
     } sounds[] = {
         { "weather/wind.wav",          8, true,  0, 0.55f },
         { "weather/gust.wav",          3, false, 1, 0.6f },
+        { "weather/rain.wav",          6, true,  2, 0.6f },
     };
     int i;
 
@@ -142,6 +180,7 @@ bool S_SynthesizeSound(const char *name)
     switch (sounds[i].kind) {
     case 0: synth_wind(buf, count, n, &rng, false); break;
     case 1: synth_wind(buf, count, n, &rng, true); break;
+    case 2: synth_rain(buf, count, n, &rng); break;
     }
     if (sounds[i].loop)
         synth_close_loop(buf, n, count);

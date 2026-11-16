@@ -16,6 +16,9 @@ All notable changes to this fork are documented here. The format follows
   light the snow (with shadows under Vulkan ray tracing), and it doesn't
   settle near lava. Explosions blow craters into it, which fill in again
   (`cl_snow_craters`).
+- `cl_rain` makes it rain on any map in the same way, as streaks that
+  splash where they land, with a rain sound made from noise or your own
+  (`cl_rain_volume`).
 
 ### Fixed
 

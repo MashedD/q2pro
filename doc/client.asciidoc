@@ -274,6 +274,20 @@ cl_snow_craters::
     about a minute. Only you see them, like the rest of the snow. Default
     value is 1 (enabled).
 
+cl_rain::
+    Makes it rain on any map, from 0 (off) to 4 (downpour), like ‘cl_snow’:
+    only where the sky is above, slanted a little by the map's prevailing
+    wind, fading with distance. Drops splash where they land close to you
+    and ripple on water. Rain and snow can fall together. Only you see it.
+    Default value is 0 (disabled).
+
+    Rain is heard as a loop that is loud under open sky and faint indoors,
+    with the wind behind it. Unless ‘sound/weather/rain.wav’ exists, the
+    client makes the rain from noise, as it does the wind (see ‘cl_snow’).
+
+cl_rain_volume::
+    Volume of the rain, from 0 (silent) to 1. Default value is 1.
+
 cl_railcore_glow::
     Adds a soft, wider additive glow around the rail core and turns its
     center paler, from 0 to 1. Only affects the core of the alternative rail
