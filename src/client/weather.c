@@ -14,7 +14,8 @@
 // schedule, the most open spots first, as the renderer is told how far the
 // snow has come (refdef_t.snow_amount); the mesh itself is sent once. Each
 // map has a prevailing wind: snow piles up against the walls it blows into
-// and its drifts are ridges across it, and the flakes drift with it.
+// and its drifts are ridges across it, and the flakes drift with it. No
+// snow settles near lava, and flakes melt above it.
 //
 // Small columns probed from the viewer's height, a few per frame, tell how
 // open the sky is around the viewer, for the sound volumes and footsteps.
@@ -55,6 +56,7 @@ typedef struct {
     float   fall;       // units per second
     float   phase;      // sway phase
     float   size;       // particle scale
+    int     sample;     // cover sample it falls onto
     bool    active;
 } snowflake_t;
 
@@ -68,6 +70,12 @@ static cvar_t   *cl_snow_craters;
 #define COVER_HASH          65536   // grid column hash, power of two
 #define COVER_MAX_SAMPLES   200000
 
+#define LAVA_HEAT           48      // no snow settles this close to lava
+#define LAVA_HEAT_UP        112     // or this far above it
+#define LAVA_MELT           24      // and flakes melt this far above it
+
+#define PUFF_DISTANCE       320     // flakes landing this close puff up
+
 #define SPAWN_BUCKET        256     // flake spawn index cell
 #define SPAWN_HASH          4096    // power of two
 
@@ -77,6 +85,8 @@ typedef struct {
     int     next;       // next sample in the same hash chain
     float   sky_z;      // height of the sky above, if open
     bool    open;       // the sky is above
+    bool    liquid;
+    bool    lava;
     float   cover;      // 0 bare .. 1 fully under open sky, blurred
     float   noise;      // 0..1
 } cover_sample_t;
@@ -220,7 +230,8 @@ static const weather_column_t *find_column(float x, float y, float z)
 static bool spawn_flake(snowflake_t *f, const vec3_t view, bool anywhere)
 {
     for (int tries = 0; tries < 8 && cover.num_candidates; tries++) {
-        const cover_sample_t *s = &cover.samples[cover.candidates[Q_rand_uniform(cover.num_candidates)]];
+        int sample = cover.candidates[Q_rand_uniform(cover.num_candidates)];
+        const cover_sample_t *s = &cover.samples[sample];
         float x = s->org[0] + crand() * COVER_GRID * 0.5f;
         float y = s->org[1] + crand() * COVER_GRID * 0.5f;
         float dx = x - view[0], dy = y - view[1];
@@ -235,7 +246,8 @@ static bool spawn_flake(snowflake_t *f, const vec3_t view, bool anywhere)
         f->org[0] = x;
         f->org[1] = y;
         f->org[2] = anywhere ? s->org[2] + frand() * (top - s->org[2]) : top - frand() * 16;
-        f->ground_z = s->org[2];
+        f->ground_z = s->org[2] + (s->lava ? LAVA_MELT : 0);
+        f->sample = sample;
         f->fall = 60 + frand() * 40;
         f->phase = frand() * 2 * M_PIf;
         f->size = 0.8f + frand() * 0.7f;
@@ -275,6 +287,50 @@ static void update_wind(float dt)
     weather_wind[1] += (weather_wind_target[1] - weather_wind[1]) * k;
 }
 
+// How high the snow cover stands at a sample, as far as it has grown, so
+// flakes land on it instead of sinking in. Craters are left out.
+static float cover_top(int sample, float amount)
+{
+    if (!cover.num_indices || sample < 0 || sample >= cover.num_vertices)
+        return 0;
+
+    const r_snow_vertex_t *v = &cover.vertices[sample];
+    if (v->height <= 0)
+        return 0;
+    float g = Q_clipf((amount - v->start) / max(v->length, 0.001f), 0, 1);
+    return v->height * g * g * (3 - 2 * g);
+}
+
+// A flake that lands close to the viewer throws up a tiny puff of powder.
+static void land_flake(const snowflake_t *f, const vec3_t view)
+{
+    const cover_sample_t *s = &cover.samples[f->sample];
+    vec3_t d;
+
+    if (s->liquid)
+        return;
+    VectorSubtract(f->org, view, d);
+    if (DotProduct(d, d) > PUFF_DISTANCE * PUFF_DISTANCE || DotProduct(d, cl.v_forward) < 0)
+        return;
+
+    for (int i = 0; i < 2; i++) {
+        cparticle_t *p = CL_AllocParticle();
+        if (!p)
+            return;
+        p->time = cl.time;
+        p->color = -1;
+        p->rgba.u32 = U32_WHITE;
+        VectorCopy(f->org, p->org);
+        p->vel[0] = crand() * 12 + weather_wind[0] * 0.3f;
+        p->vel[1] = crand() * 12 + weather_wind[1] * 0.3f;
+        p->vel[2] = 6 + frand() * 10;
+        VectorSet(p->accel, 0, 0, -20);
+        p->scale = 0.5f;
+        p->alpha = 0.45f;
+        p->alphavel = -1.0f / (0.3f + frand() * 0.2f);
+    }
+}
+
 /*
 ==============
 CL_AddWeather
@@ -310,6 +366,7 @@ void CL_AddWeather(void)
     }
     if (cover.num_indices)
         cl.refdef.snow_amount = cover_amount();
+    float cover_grown = cl.refdef.snow_amount;
     update_candidates(view);
 
     weather_probes = WEATHER_PROBES;
@@ -345,7 +402,8 @@ void CL_AddWeather(void)
             if (dx * dx + dy * dy > WEATHER_RADIUS * WEATHER_RADIUS) {
                 if (!spawn_flake(f, view, true))
                     continue;
-            } else if (f->org[2] <= f->ground_z) {
+            } else if (f->org[2] <= f->ground_z + cover_top(f->sample, cover_grown)) {
+                land_flake(f, view);
                 if (!spawn_flake(f, view, false))
                     continue;
             }
@@ -540,7 +598,8 @@ static bool cover_exposed(const vec3_t org, float *sky_z)
     return false;
 }
 
-static bool cover_add_sample(float x, float y, float z, int gx, int gy, bool liquid)
+static bool cover_add_sample(float x, float y, float z, int gx, int gy,
+                             bool liquid, bool lava)
 {
     if (cover_find(gx, gy, z, 2) >= 0)
         return true;    // shared with a neighbouring face
@@ -552,6 +611,8 @@ static bool cover_add_sample(float x, float y, float z, int gx, int gy, bool liq
     s->x = gx;
     s->y = gy;
     s->open = cover_exposed(s->org, &s->sky_z);
+    s->liquid = liquid;
+    s->lava = lava;
     s->cover = s->open && !liquid;
     s->noise = cover_noise(x, y);
     unsigned h = cover_hash(gx, gy);
@@ -593,6 +654,17 @@ static void cover_add_face(const mface_t *face, bool liquid)
     float sign = area >= 0 ? 1 : -1;
     int added = 0;
 
+    // what lies under a liquid's surface, in the middle of the face
+    bool lava = false;
+    if (liquid) {
+        vec3_t mid = { 0, 0, 0 };
+        for (int i = 0; i < n; i++)
+            VectorAdd(mid, pts[i], mid);
+        VectorScale(mid, 1.0f / n, mid);
+        VectorMA(mid, -2, normal, mid);
+        lava = CM_PointContents(mid, cl.bsp->nodes, cl.csr.extended) & CONTENTS_LAVA;
+    }
+
     for (int gx = (int)ceilf(mins[0] / COVER_GRID); gx * COVER_GRID <= maxs[0]; gx++) {
         for (int gy = (int)ceilf(mins[1] / COVER_GRID); gy * COVER_GRID <= maxs[1]; gy++) {
             float x = gx * COVER_GRID, y = gy * COVER_GRID;
@@ -608,7 +680,7 @@ static void cover_add_face(const mface_t *face, bool liquid)
                 continue;
 
             float z = (dist - normal[0] * x - normal[1] * y) / normal[2];
-            if (!cover_add_sample(x, y, z, gx, gy, liquid))
+            if (!cover_add_sample(x, y, z, gx, gy, liquid, lava))
                 return;
             added++;
         }
@@ -643,7 +715,7 @@ static void cover_add_face(const mface_t *face, bool liquid)
         gp[l] = g;
         gp[w] = (int)floorf(p[w] / COVER_GRID + 0.5f);
         float z = (dist - normal[0] * p[0] - normal[1] * p[1]) / normal[2];
-        if (!cover_add_sample(p[0], p[1], z, gp[0], gp[1], liquid))
+        if (!cover_add_sample(p[0], p[1], z, gp[0], gp[1], liquid, lava))
             return;
     }
 }
@@ -673,7 +745,7 @@ static void cover_fill_holes(void)
             const cover_sample_t *o = &cover.samples[n[j]];
             z += o->org[2] * 0.25f;
             open &= o->open;
-            liquid |= o->open && !o->cover;
+            liquid |= o->liquid;
         }
 
         vec3_t p = { x * COVER_GRID, y * COVER_GRID, z + 4 };
@@ -687,12 +759,45 @@ static void cover_fill_holes(void)
         f->x = x;
         f->y = y;
         f->open = open && cover_exposed(f->org, &f->sky_z);
+        f->liquid = liquid;
+        f->lava = false;
         f->cover = f->open && !liquid;
         f->noise = cover_noise(p[0], p[1]);
         unsigned h = cover_hash(x, y);
         f->next = cover.hash[h];
         cover.hash[h] = cover.num_samples++;
     }
+}
+
+// Lava is hot: no snow settles near it.
+static int cover_melt_near_lava(void)
+{
+    int reach = LAVA_HEAT / COVER_GRID;
+    int melted = 0;
+
+    for (int i = 0; i < cover.num_samples; i++) {
+        const cover_sample_t *s = &cover.samples[i];
+        if (!s->lava)
+            continue;
+        for (int dy = -reach; dy <= reach; dy++) {
+            for (int dx = -reach; dx <= reach; dx++) {
+                if (dx * dx + dy * dy > reach * reach)
+                    continue;
+                // heat rises: it reaches higher than it spreads
+                for (int j = cover.hash[cover_hash(s->x + dx, s->y + dy)]; j >= 0;
+                     j = cover.samples[j].next) {
+                    cover_sample_t *o = &cover.samples[j];
+                    float dz = o->org[2] - s->org[2];
+                    if (o->x == s->x + dx && o->y == s->y + dy &&
+                        dz > -8 && dz < LAVA_HEAT_UP && o->cover) {
+                        o->cover = 0;
+                        melted++;
+                    }
+                }
+            }
+        }
+    }
+    return melted;
 }
 
 static void cover_free(void)
@@ -1201,15 +1306,18 @@ static void cover_build(void)
     }
     Z_Free(inline_face);
     cover_fill_holes();
+    int melted = cover_melt_near_lava();
 
     build_spawn_index();
     if (depth > 0 && cover.num_samples)
         build_mesh(depth);
 
 #if USE_DEBUG
-    Com_DPrintf("Snow: %d grid points, %d open, %d cover triangles, %u ms\n",
-                cover.num_samples, cover.num_spawn_points, cover.num_indices / 3,
+    Com_DPrintf("Snow: %d grid points, %d open, %d melted by lava, %d cover triangles, %u ms\n",
+                cover.num_samples, cover.num_spawn_points, melted, cover.num_indices / 3,
                 Sys_Milliseconds() - start);
+#else
+    (void)melted;
 #endif
     cover.dirty = cover.num_indices > 0;
 }
