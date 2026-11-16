@@ -8,6 +8,9 @@
 // yet along a noisy line, like vk_snow.frag; the legacy renderer just keeps
 // those points under the floor. Dynamic lights are added by the shader
 // too (GLS_SNOW_LIGHTS), up to SNOW_MAX_LIGHTS per draw.
+//
+// Rain puddles (R_COVER_PUDDLES) are the same kind of mesh, drawn blended by
+// the GLS_PUDDLE shader; the legacy renderer leaves them out.
 
 #include "gl.h"
 #include "snow.h"
@@ -38,6 +41,7 @@ static struct {
     float           last_amount;    // at the last upload
     float           last_upload;
     float           last_crater;
+    r_cover_kind_t  kind;
     bool            dirty;
 } snow;
 
@@ -52,15 +56,18 @@ void GL_FreeSnowCover(void)
     memset(&snow, 0, sizeof(snow));
 }
 
-void GLR_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
+void GLR_SetSnowCover(r_cover_kind_t kind,
+                      const r_snow_vertex_t *vertices, int num_vertices,
                       const uint32_t *indices, int num_indices)
 {
     GL_FreeSnowCover();
 
-    // the mesh needs 32-bit indices, which OpenGL ES 1 and 2 may not have
+    // the mesh needs 32-bit indices, which OpenGL ES 1 and 2 may not have,
+    // and puddles need shaders
     if (num_vertices <= 0 || num_indices <= 0 || !vertices || !indices ||
         !qglGenBuffers || !gl_static.world.cache ||
-        !(gl_config.caps & QGL_CAP_ELEMENT_INDEX_UINT))
+        !(gl_config.caps & QGL_CAP_ELEMENT_INDEX_UINT) ||
+        (kind == R_COVER_PUDDLES && !gl_static.use_shaders))
         return;
 
     snow.vertices = R_Malloc(sizeof(*snow.vertices) * num_vertices);
@@ -81,6 +88,7 @@ void GLR_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
     qglBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(*sorted) * num_indices, sorted, GL_STATIC_DRAW);
     Z_Free(sorted);
 
+    snow.kind = kind;
     snow.dirty = true;
 }
 
@@ -158,8 +166,13 @@ void GL_DrawSnowCover(void)
         bits |= GLS_SNOW;
         arrays |= GLA_LMTC;
     }
-    if (glr.framebuffer_bound && gl_bloom->integer)
+    if (snow.kind == R_COVER_PUDDLES) {
+        // translucent, always with their soft edges
+        bits |= GLS_SNOW | GLS_PUDDLE | GLS_BLEND_BLEND | GLS_DEPTHMASK_FALSE;
+        arrays |= GLA_LMTC;
+    } else if (glr.framebuffer_bound && gl_bloom->integer) {
         bits |= GLS_BLOOM_GENERATE;
+    }
 
     // the mesh is in world space, whatever entity was drawn last; the sky
     // matrices hold the dynamic lights, and are put back afterwards
@@ -206,6 +219,7 @@ void GL_DrawSnowCover(void)
                 Vector4Copy(run_lights.origins[j], &gls.u_block.m_sky[0][j * 4]);
                 Vector4Copy(run_lights.colors[j], &gls.u_block.m_sky[1][j * 4]);
             }
+            gls.u_block.m_sky[0][12] = glr.fd.rain_amount;
             gls.u_block_dirty = true;
             GL_StateBits(bits | (run_lights.num_lights ? GLS_SNOW_LIGHTS : 0));
             GL_LoadUniforms();

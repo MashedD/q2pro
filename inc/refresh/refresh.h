@@ -173,6 +173,7 @@ typedef struct {
     r_streak_t  *streaks;
 
     float       snow_amount;        // growth of the snow cover, 0..1
+    float       rain_amount;        // how hard it rains, for puddle ripples
 } refdef_t;
 
 enum {
@@ -287,7 +288,13 @@ void    R_LightPoint(const vec3_t origin, vec3_t light);
 // space whose points grow on their own schedule as refdef_t.snow_amount goes
 // from 0 to 1 (see r_snow_vertex_t). Replaces the previous mesh;
 // num_vertices 0 removes it. The renderer drops it when a map is loaded or
-// the renderer restarts.
+// the renderer restarts. The same kind of mesh can be rain puddles instead:
+// translucent, glossy and rippling, drawn after the opaque world.
+typedef enum {
+    R_COVER_SNOW,
+    R_COVER_PUDDLES,
+} r_cover_kind_t;
+
 typedef struct {
     vec3_t  origin;     // on the floor
     float   height;     // full height above the floor, may be negative
@@ -296,7 +303,8 @@ typedef struct {
     color_t color;
 } r_snow_vertex_t;
 
-void    R_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
+void    R_SetSnowCover(r_cover_kind_t kind,
+                       const r_snow_vertex_t *vertices, int num_vertices,
                        const uint32_t *indices, int num_indices);
 
 // Blows snow away from the given vertices of the current snow cover, each

@@ -11,6 +11,9 @@
 //   is left out, so the depth test can run before this shader.
 // - SNOW_RT, with ray tracing: dynamic lights cast shadows, with a ray
 //   towards each light through the world's acceleration structure.
+// - PUDDLE, for rain puddles (R_COVER_PUDDLES), blended: dark water that
+//   shows more of the sky's light at grazing angles, with rings where
+//   raindrops hit. v_color is the light at the puddle.
 
 #ifdef SNOW_RT
 #extension GL_EXT_ray_query : require
@@ -35,6 +38,7 @@ layout(push_constant) uniform Push {
     vec4 fog;       // rgb color, a density; the same as for the world
     vec4 dlight_origins[3];     // xyz, w = reach; 0 for none
     vec4 dlight_colors[3];      // rgb, w = brightness
+    vec4 view;      // xyz viewer position, w = rain strength for ripples
 } pc;
 
 #ifdef SNOW_RT
@@ -109,6 +113,49 @@ float noise(vec2 p)
 }
 #endif
 
+#ifdef PUDDLE
+// Rings spreading from where raindrops hit, a few units across: one drop
+// per cell of a grid, at its own place and time.
+float ripples(vec2 p, float t)
+{
+    vec2 cell = floor(p / 10.0);
+    float total = 0.0;
+    for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+            vec2 c = cell + vec2(x, y);
+            vec2 center = (c + vec2(hash(c + 3.1), hash(c + 7.7))) * 10.0;
+            float phase = fract(t * 0.9 + hash(c));
+            float ring = abs(length(p - center) - phase * 4.5);
+            total += (1.0 - smoothstep(0.0, 0.4, ring)) * (1.0 - phase);
+        }
+    }
+    return total;
+}
+
+void main()
+{
+    float n = noise(v_xy / 14.0) * 0.65 + noise(v_xy / 5.0) * 0.35;
+    float front = v_front + (n - 0.5) * 0.3;
+    if (front < 0.0)
+        discard;
+
+    // the sky's reflection depends less on the light where the puddle is
+    vec3 eye = normalize(pc.view.xyz - v_position);
+    float fresnel = 0.25 + 0.75 * pow(1.0 - clamp(eye.z, 0.0, 1.0), 4.0);
+    vec3 sky = pc.fog.a != 0.0 ? pc.fog.rgb : vec3(0.5, 0.55, 0.62);
+    vec3 lit = 0.55 + 0.45 * v_color.rgb;
+    float rings = ripples(v_xy, pc.craters.x) * pc.view.w;
+
+    vec3 color = mix(vec3(0.02) * v_color.rgb, sky * lit, fresnel);
+    color += rings * 0.25 * lit;
+    color += 0.5 * (0.3 + fresnel) * dynamic_light(v_position);
+    float alpha = clamp(0.55 + 0.4 * fresnel + rings * 0.15, 0.0, 0.95);
+    // shallow at its edges, and while filling
+    alpha *= clamp(front * 4.0, 0.0, 1.0);
+    out_color = vec4(apply_fog(color), alpha);
+    out_bloom = vec4(0.0);
+}
+#else
 void main()
 {
 #ifdef SNOW_FULL
@@ -125,3 +172,4 @@ void main()
     out_color.rgb = apply_fog(out_color.rgb);
     out_bloom = out_color;
 }
+#endif

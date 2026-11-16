@@ -288,6 +288,12 @@ cl_rain::
 cl_rain_volume::
     Volume of the rain, from 0 (silent) to 1. Default value is 1.
 
+cl_rain_puddles::
+    While it rains without snow, puddles fill in over two minutes on level
+    floors under open sky: dark water that shows more of the sky the lower
+    you look across it, with rings where raindrops hit. With OpenGL they
+    need the GLSL backend (‘gl_shaders 1’). Default value is 1 (enabled).
+
 cl_railcore_glow::
     Adds a soft, wider additive glow around the rail core and turns its
     center paler, from 0 to 1. Only affects the core of the alternative rail

@@ -19,6 +19,7 @@ layout(push_constant) uniform Push {
     vec4 fog;       // the rest is used by the fragment shaders
     vec4 dlight_origins[3];
     vec4 dlight_colors[3];
+    vec4 view;
 } pc;
 
 layout(location = 0) in vec3 in_position;

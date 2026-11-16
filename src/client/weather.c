@@ -80,6 +80,7 @@ static cvar_t   *cl_snow_cover_time;
 static cvar_t   *cl_snow_craters;
 static cvar_t   *cl_rain;
 static cvar_t   *cl_rain_volume;
+static cvar_t   *cl_rain_puddles;
 
 #define COVER_GRID          12
 #define COVER_HASH          65536   // grid column hash, power of two
@@ -91,6 +92,8 @@ static cvar_t   *cl_rain_volume;
 
 #define PUFF_DISTANCE       320     // flakes landing this close puff up
 #define SPLASH_DISTANCE     400     // drops landing this close splash
+#define PUDDLE_TIME         120   // seconds for puddles to fill
+#define PUDDLE_SHARE        0.36f   // of the noise range that is puddle
 
 #define SPAWN_BUCKET        256     // flake spawn index cell
 #define SPAWN_HASH          4096    // power of two
@@ -132,6 +135,7 @@ static struct {
     int             num_vertices;
     uint32_t        *indices;
     int             num_indices;
+    r_cover_kind_t  kind;           // snow, or rain puddles
     bool            dirty;          // send to the renderer
     int             start_time;     // cl.time when the map started
 } cover;
@@ -380,11 +384,14 @@ static void land_flake(const snowflake_t *f, const vec3_t view)
 }
 
 // A drop that lands close to the viewer splashes: a few droplets that
-// jump up from the ground, or a ring spreading on a liquid.
-static void land_drop(const raindrop_t *d, const vec3_t view, const vec3_t vel)
+// jump up from the ground, or a ring spreading on a liquid or a puddle.
+static void land_drop(const raindrop_t *d, const vec3_t view, const vec3_t vel,
+                      float cover_grown)
 {
     const cover_sample_t *s = &cover.samples[d->sample];
     vec3_t delta;
+    bool liquid = s->liquid || (cover.kind == R_COVER_PUDDLES &&
+                                cover_top(d->sample, cover_grown) > 0.5f);
 
     if (s->lava)
         return;     // it hisses away above the lava
@@ -393,7 +400,7 @@ static void land_drop(const raindrop_t *d, const vec3_t view, const vec3_t vel)
         DotProduct(delta, cl.v_forward) < 0 || frand() > 0.6f)
         return;
 
-    int count = s->liquid ? 6 : 2 + (Q_rand() & 1);
+    int count = liquid ? 6 : 2 + (Q_rand() & 1);
     for (int i = 0; i < count; i++) {
         cparticle_t *p = CL_AllocParticle();
         if (!p)
@@ -407,7 +414,7 @@ static void land_drop(const raindrop_t *d, const vec3_t view, const vec3_t vel)
         VectorCopy(d->org, p->org);
         p->org[2] += 0.5f;
         p->scale = 0.4f;
-        if (s->liquid) {
+        if (liquid) {
             float ang = (i + frand() * 0.5f) * (2 * M_PIf / count);
             VectorSet(p->vel, cosf(ang) * 30, sinf(ang) * 30, 0);
             VectorClear(p->accel);
@@ -508,7 +515,7 @@ static void add_drops(float amount, const vec3_t view, float dt, float cover_gro
                     continue;
             } else if (r->org[2] <= r->ground_z + cover_top(r->sample, cover_grown)) {
                 r->org[2] = r->ground_z + cover_top(r->sample, cover_grown);
-                land_drop(r, view, vel);
+                land_drop(r, view, vel, cover_grown);
                 if (!spawn_drop(r, view, false))
                     continue;
             }
@@ -556,11 +563,12 @@ void CL_AddWeather(void)
     const float *view = cl.refdef.vieworg;
 
     cl.refdef.snow_amount = 0;
+    cl.refdef.rain_amount = 0;
 
     if ((!snow && !rain) || !cl.bsp || cls.state != ca_active) {
         stop_sounds();
         if (cover.built) {
-            R_SetSnowCover(NULL, 0, NULL, 0);
+            R_SetSnowCover(R_COVER_SNOW, NULL, 0, NULL, 0);
             cover_free();
         }
         return;
@@ -569,12 +577,14 @@ void CL_AddWeather(void)
     if (!cover.built)
         cover_build();
     if (cover.dirty) {
-        R_SetSnowCover(cover.vertices, cover.num_vertices, cover.indices, cover.num_indices);
+        R_SetSnowCover(cover.kind, cover.vertices, cover.num_vertices, cover.indices, cover.num_indices);
         cover.dirty = false;
     }
     if (cover.num_indices)
         cl.refdef.snow_amount = cover_amount();
     float cover_grown = cl.refdef.snow_amount;
+    // heavier rain ripples puddles more
+    cl.refdef.rain_amount = min(rain, 2.0f) * 0.7f;
     update_candidates(view);
 
     weather_probes = WEATHER_PROBES;
@@ -1448,13 +1458,89 @@ static void build_mesh(float depth)
     Z_Free(height);
 }
 
+// Rain puddles: a flat layer a little above level floors under open sky.
+// Where puddles are comes from noise: its lowest spots fill first and the
+// water spreads from them as refdef_t.snow_amount goes from 0 to 1, along
+// the same ragged growth front as snow, so the edges are smooth curves and
+// not the grid's. Their color is the light there.
+static void build_puddles(void)
+{
+    float *start = Z_Malloc(sizeof(float) * cover.num_samples);
+    bool *level = Z_Malloc(sizeof(bool) * cover.num_samples);
+
+    for (int i = 0; i < cover.num_samples; i++) {
+        const cover_sample_t *s = &cover.samples[i];
+
+        // water runs off steep slopes and steps
+        level[i] = s->cover > 0;
+        for (int d = 0; d < 4 && level[i]; d++) {
+            int j = cover_find(s->x + edge_dirs[d][0], s->y + edge_dirs[d][1], s->org[2], 16);
+            if (j >= 0 && fabsf(cover.samples[j].org[2] - s->org[2]) > 2.5f)
+                level[i] = false;
+        }
+
+        // the noise's lowest spots fill first; the water reaches the
+        // PUDDLE_SHARE contour when the puddles are full
+        float n = 0.55f * cover_noise(s->org[0] * 0.7f + 71, s->org[1] * 0.7f - 29) +
+                  0.45f * s->noise;
+        start[i] = (n - 0.2f) / (PUDDLE_SHARE - 0.2f);
+        // never filled where the water runs off, but the edge still cuts
+        // smoothly across the squares around it
+        if (!level[i])
+            start[i] = 2;
+    }
+
+    cover.indices = Z_Malloc(sizeof(uint32_t) * 6 * cover.num_samples);
+    for (int i = 0; i < cover.num_samples; i++) {
+        const cover_sample_t *s = &cover.samples[i];
+        int r = cover_find(s->x + 1, s->y, s->org[2], 16);
+        int u = cover_find(s->x, s->y + 1, s->org[2], 16);
+        int d = cover_find(s->x + 1, s->y + 1, s->org[2], 16);
+
+        if (r < 0 || u < 0 || d < 0)
+            continue;
+        // squares the water never reaches, with room for the ragged edge
+        if (start[i] > 1.1f && start[r] > 1.1f && start[u] > 1.1f && start[d] > 1.1f)
+            continue;
+        add_triangle(i, r, d);
+        add_triangle(i, d, u);
+    }
+
+    cover.vertices = Z_Malloc(sizeof(*cover.vertices) * cover.num_samples);
+    for (int i = 0; i < cover.num_samples; i++) {
+        const cover_sample_t *s = &cover.samples[i];
+        r_snow_vertex_t *v = &cover.vertices[i];
+        vec3_t pos, light;
+
+        VectorSet(pos, s->org[0], s->org[1], s->org[2] + 16);
+        R_LightPoint(pos, light);
+        float luma = light[0] * 0.2126f + light[1] * 0.7152f + light[2] * 0.0722f;
+        float bright = 0.25f + 0.9f * min(luma, 1.2f);
+        for (int c = 0; c < 3; c++) {
+            float tint = 0.6f + 0.4f * (luma > 0.001f ? light[c] / luma : 1.0f);
+            v->color.u8[c] = Q_clip(tint * bright * 200, 0, 255);
+        }
+        v->color.u8[3] = 255;
+
+        VectorCopy(s->org, v->origin);
+        v->height = 0.75f;
+        v->start = start[i];
+        v->length = 0.25f;
+    }
+    cover.num_vertices = cover.num_samples;
+
+    Z_Free(level);
+    Z_Free(start);
+}
+
 static void cover_build(void)
 {
 #if USE_DEBUG
     unsigned start = Sys_Milliseconds();
 #endif
-    // without snow, the points are only for rain to fall on
+    // without snow, the points are for rain to fall on and its puddles
     float depth = cl_snow->value ? Cvar_ClampValue(cl_snow_cover, 0, 32) : 0;
+    bool puddles = !cl_snow->value && cl_rain->value && cl_rain_puddles->integer;
 
     cover_free();
     cover.built = true;
@@ -1489,8 +1575,13 @@ static void cover_build(void)
     int melted = cover_melt_near_lava();
 
     build_spawn_index();
-    if (depth > 0 && cover.num_samples)
+    cover.kind = R_COVER_SNOW;
+    if (depth > 0 && cover.num_samples) {
         build_mesh(depth);
+    } else if (puddles && cover.num_samples) {
+        cover.kind = R_COVER_PUDDLES;
+        build_puddles();
+    }
 
 #if USE_DEBUG
     Com_DPrintf("Snow: %d grid points, %d open, %d melted by lava, %d cover triangles, %u ms\n",
@@ -1502,10 +1593,12 @@ static void cover_build(void)
     cover.dirty = cover.num_indices > 0;
 }
 
-// How far the snow cover has grown since the map started, 0..1.
+// How far the snow cover has grown, or the puddles have filled, since the
+// map started, 0..1.
 static float cover_amount(void)
 {
-    float time = Cvar_ClampValue(cl_snow_cover_time, 0, 3600);
+    float time = cover.kind == R_COVER_PUDDLES ? PUDDLE_TIME :
+                 Cvar_ClampValue(cl_snow_cover_time, 0, 3600);
 
     if (!time)
         return 1;
@@ -1537,7 +1630,7 @@ void CL_ClearWeather(void)
     memset(snowflakes, 0, sizeof(snowflakes));
     memset(raindrops, 0, sizeof(raindrops));
     if (cover.built && cls.ref_initialized)
-        R_SetSnowCover(NULL, 0, NULL, 0);
+        R_SetSnowCover(R_COVER_SNOW, NULL, 0, NULL, 0);
     cover_free();
     weather_wind_timer = 0;
     weather_exposure = 0;
@@ -1562,6 +1655,8 @@ void CL_InitWeather(void)
     cl_rain = Cvar_Get("cl_rain", "0", CVAR_ARCHIVE);
     cl_rain->changed = cl_weather_changed;
     cl_rain_volume = Cvar_Get("cl_rain_volume", "1", CVAR_ARCHIVE);
+    cl_rain_puddles = Cvar_Get("cl_rain_puddles", "1", CVAR_ARCHIVE);
+    cl_rain_puddles->changed = cl_weather_changed;
 }
 
 #define MAX_CRATER_VERTICES 4096
@@ -1581,7 +1676,8 @@ void CL_SnowExplosion(const vec3_t origin, float radius)
     static float strength[MAX_CRATER_VERTICES];
     int count = 0;
 
-    if (!cover.num_indices || !cl_snow->value || !cl_snow_craters->integer || !cl.bsp)
+    if (!cover.num_indices || cover.kind != R_COVER_SNOW || !cl_snow->value ||
+        !cl_snow_craters->integer || !cl.bsp)
         return;
 
     for (int i = 0; i < cover.num_vertices && count < MAX_CRATER_VERTICES; i++) {

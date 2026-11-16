@@ -19,6 +19,7 @@ typedef char vk_snow_push_lights_check[
     sizeof(((snow_lights_t *)0)->origins) ? 1 : -1];
 
 static snow_blocks_t   snow_blocks;
+static r_cover_kind_t  snow_kind;
 
 static struct {
     VkBuffer        buffer;
@@ -71,7 +72,8 @@ void VKR_AddSnowCrater(const int *vertices, const float *strength, int count,
     snow_craters.last_time = time;
 }
 
-void VKR_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
+void VKR_SetSnowCover(r_cover_kind_t kind,
+                      const r_snow_vertex_t *vertices, int num_vertices,
                       const uint32_t *indices, int num_indices)
 {
     vk_vertex_t *verts;
@@ -82,6 +84,7 @@ void VKR_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
 
     if (num_vertices <= 0 || num_indices <= 0 || !vertices || !indices)
         return;
+    snow_kind = kind;
 
     // growth goes into the normal, which vk_snow.vert reads as location 2
     verts = R_Malloc(sizeof(*verts) * num_vertices);
@@ -116,7 +119,8 @@ void vk_draw_snow_cover(const refdef_t *fd)
     mat4_t mvp;
 
     if (!vk.snow_cover.index_count || !vk.snow_cover.vertices.buffer ||
-        !vk.snow_pipeline || !vk.snow_full_pipeline || !snow_craters.buffer ||
+        !vk.snow_pipeline || !vk.snow_full_pipeline || !vk.puddle_pipeline ||
+        !snow_craters.buffer ||
         fd->snow_amount <= 0 ||
         (fd->rdflags & RDF_NOWORLDMODEL))
         return;
@@ -126,6 +130,8 @@ void vk_draw_snow_cover(const refdef_t *fd)
     Vector4Set(push.color, 1.0f, 1.0f, 1.0f, fd->snow_amount);
     Vector4Set(push.craters, fd->time, SNOW_REFILL, 0.0f, 0.0f);
     vk_fog_params(fd, push.fog);
+    VectorCopy(fd->vieworg, push.view);
+    push.view[3] = fd->rain_amount;
 
     VkBuffer buffers[] = { vk.snow_cover.vertices.buffer, snow_craters.buffer };
     VkDeviceSize offsets[] = { 0, 0 };
@@ -136,9 +142,11 @@ void vk_draw_snow_cover(const refdef_t *fd)
         (fd->time < snow_craters.last_time ||
          fd->time - snow_craters.last_time > SNOW_REFILL);
     VkPipeline pipeline = full ? vk.snow_full_pipeline : vk.snow_pipeline;
+    if (snow_kind == R_COVER_PUDDLES)
+        pipeline = vk.puddle_pipeline;
 #if USE_VULKAN_RAYTRACING
     // with ray tracing, dynamic lights cast shadows on the snow
-    if (vk.raytracing_active && vk.rt_descriptor_set && vk.rt_tlas.handle &&
+    else if (vk.raytracing_active && vk.rt_descriptor_set && vk.rt_tlas.handle &&
         vk.snow_rt_pipelines[full]) {
         pipeline = vk.snow_rt_pipelines[full];
         vk.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
