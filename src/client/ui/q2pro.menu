@@ -341,6 +341,33 @@ begin effects
         none red green yellow blue cyan magenta white
     blank
     action --align "railgun trail setup..." pushmenu railtrail
+    action --align "weather setup..." pushmenu weather
+end
+
+begin weather
+    title "Weather Setup"
+    pairs --status "Snow falls where the sky is above. Only you see it" \
+        "snow" cl_snow "off" 0 "light" 1 "moderate" 2 "heavy" 3 "blizzard" 4
+    pairs --status "Depth of the snow that settles on floors and ledges under open sky" \
+        "snow cover" cl_snow_cover "off" 0 "thin" 3 "normal" 6 "deep" 12 "very deep" 24
+    pairs --status "How long the snow cover takes to reach its full depth after a map loads" \
+        "snow cover growth" cl_snow_cover_time "instant" 0 "1 minute" 60 \
+        "5 minutes" 300 "10 minutes" 600 "20 minutes" 1200
+    toggle --status "Explosions blow the snow cover away; it fills in again over a minute" \
+        "snow craters" cl_snow_craters
+    range --status "Volume of the wind while it snows" \
+        "snow volume" cl_snow_volume 0 1
+    blank
+    pairs --status "Rain falls where the sky is above. Only you see it" \
+        "rain" cl_rain "off" 0 "light" 1 "moderate" 2 "heavy" 3 "downpour" 4
+    toggle --status "Puddles fill on level floors while it rains without snow. Shaders backend only" \
+        "puddles" cl_rain_puddles
+    range --status "Volume of the rain and the thunder" \
+        "rain volume" cl_rain_volume 0 1
+    toggle --status "Lightning and thunder while it rains" \
+        "thunderstorm" cl_thunder
+    range --status "Brightness of the lightning flashes. 0 if flashing light bothers you" \
+        "lightning flash" cl_thunder_flash 0 1 0.1
 end
 
 begin crosshair

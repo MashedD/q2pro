@@ -6,6 +6,11 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The effects menu has a "weather setup" page for snow, rain and
+  thunderstorms.
+
 ## [1.4.0] - 2026-11-16
 
 ### Added
