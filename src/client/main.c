@@ -695,6 +695,7 @@ CL_ClearState
 */
 void CL_ClearState(void)
 {
+    CL_ClearWeather();
     S_StopAllSounds();
     SCR_StopCinematic();
     SCR_ClearCenterPrints();
@@ -2749,6 +2750,7 @@ static void CL_InitLocal(void)
     CL_InitAscii();
     CL_InitEffects();
     CL_InitTEnts();
+    CL_InitWeather();
     CL_InitDownloads();
     CL_GTV_Init();
 

@@ -229,6 +229,51 @@ cl_railcore_color::
 cl_railcore_width::
     Width of the rail core beam. Default value is 3.
 
+cl_snow::
+    Makes it snow on any map, from 0 (off) to 4 (heavy); 1 is light snow
+    with few flakes, which hides little and costs little. Flakes only fall
+    where the sky is above: under roofs and ceilings it stays dry. They drift
+    in gusts with the map's prevailing wind, fade with distance so they hide
+    little, and disappear when they land, or melt just above lava. Snow is drawn by the
+    client, so it shows in both renderers and is not seen by other players.
+    Default value is 0 (disabled).
+
+    Snow has a wind that is loud under open sky and faint indoors, with
+    occasional gusts. The game has no such sounds, so they are made by the
+    client from noise, unless these files exist in ‘sound/weather/’:
+    ‘snow_wind.wav’, the wind loop; ‘wind_gust1.wav’ and ‘wind_gust2.wav’,
+    the gusts; ‘snow_ambience.wav’, a soft loop heard under open sky; and
+    ‘snow_step1.wav’ to ‘snow_step3.wav’, footsteps on ground under open sky,
+    used instead of the surface's own footsteps. The last two have no
+    replacement made by the client.
+
+cl_snow_volume::
+    Volume of the snow sounds, from 0 (silent) to 1. Default value is 1.
+
+cl_snow_cover::
+    While it snows, snow settles on floors, steps and ledges under open sky,
+    right up to their edges, and grows into rounded drifts, up to this depth
+    in units (0 to 32; 0 turns it off). The map's prevailing wind piles it
+    up against the walls it blows into and shapes the drifts into ridges
+    across it. Dynamic lights such as rockets and muzzle flashes light it,
+    and with Vulkan ray tracing walls between them and the snow cast
+    shadows. Moving brush models such as doors and platforms stay clear, as
+    does the ground near lava and the bottom of pools. OpenGL ES 1
+    draws the snow cover only where the GPU supports 32-bit indices
+    (‘GL_OES_element_index_uint’). Default value is 6.
+
+cl_snow_cover_time::
+    Seconds it takes the snow cover to reach its full depth after a map
+    loads, from 0 to 3600; 0 covers everything at once. The snow starts as
+    a dusting, a little earlier in the most open spots, and thickens.
+    Default value is 300.
+
+cl_snow_craters::
+    Rocket, grenade and other explosions blow the snow cover away around
+    them, where the explosion can reach, and the crater fills in again over
+    about a minute. Only you see them, like the rest of the snow. Default
+    value is 1 (enabled).
+
 cl_railcore_glow::
     Adds a soft, wider additive glow around the rail core and turns its
     center paler, from 0 to 1. Only affects the core of the alternative rail

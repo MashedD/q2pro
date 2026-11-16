@@ -603,6 +603,64 @@ static void AL_AddLoopSounds(void)
     }
 }
 
+static void AL_AddLocalLoops(void)
+{
+    if (!S_LocalLoopsActive())
+        return;
+
+    for (int i = 0; i < S_MAX_LOCAL_LOOPS; i++) {
+        const local_loop_t *loop = &s_local_loops[i];
+        sfx_t *sfx;
+        sfxcache_t *sc;
+        channel_t *ch;
+
+        if (!loop->sfx || loop->volume <= 0)
+            continue;
+        sfx = S_SfxForHandle(loop->sfx);
+        if (!sfx || !(sc = sfx->cache))
+            continue;
+
+        ch = AL_FindLoopingSound(S_LOCAL_LOOP_ENTNUM(i), sfx);
+        if (ch) {
+            qalSourcef(ch->srcnum, AL_GAIN, loop->volume);
+            ch->master_vol = loop->volume;
+            ch->autoframe = s_framecount;
+            ch->end = s_paintedtime + sc->length;
+            continue;
+        }
+
+        ch = S_PickChannel(0, 0);
+        if (!ch)
+            return;
+
+        ch->srcnum = s_srcnums[ch - s_channels];
+        qalGetError();
+        qalSourcei(ch->srcnum, AL_BUFFER, sc->bufnum);
+        qalSourcei(ch->srcnum, AL_LOOPING, AL_TRUE);
+        qalSourcei(ch->srcnum, AL_SOURCE_RELATIVE, AL_TRUE);
+        if (s_source_spatialize) {
+            qalSourcei(ch->srcnum, AL_SOURCE_SPATIALIZE_SOFT, AL_FALSE);
+        }
+        qalSource3f(ch->srcnum, AL_POSITION, 0.0f, 0.0f, 0.0f);
+        qalSourcef(ch->srcnum, AL_ROLLOFF_FACTOR, 0.0f);
+        qalSourcef(ch->srcnum, AL_GAIN, loop->volume);
+
+        ch->autosound = true;   // remove when no longer refreshed
+        ch->autoframe = s_framecount;
+        ch->fullvolume = true;
+        ch->sfx = sfx;
+        ch->entnum = S_LOCAL_LOOP_ENTNUM(i);
+        ch->master_vol = loop->volume;
+        ch->dist_mult = 0;
+        ch->end = s_paintedtime + sc->length;
+
+        qalSourcePlay(ch->srcnum);
+        if (qalGetError() != AL_NO_ERROR) {
+            AL_StopChannel(ch);
+        }
+    }
+}
+
 #define MAX_STREAM_BUFFERS  32
 
 static void AL_StreamUpdate(void)
@@ -786,6 +844,7 @@ static void AL_Update(void)
     } else {
         AL_AddLoopSounds();
     }
+    AL_AddLocalLoops();
 
     AL_IssuePlaysounds();
 

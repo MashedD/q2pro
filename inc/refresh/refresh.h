@@ -159,6 +159,8 @@ typedef struct {
 
     int         num_particles;
     particle_t  *particles;
+
+    float       snow_amount;        // growth of the snow cover, 0..1
 } refdef_t;
 
 enum {
@@ -268,6 +270,27 @@ void    R_EndRegistration(void);
 
 void    R_RenderFrame(const refdef_t *fd);
 void    R_LightPoint(const vec3_t origin, vec3_t light);
+
+// Snow cover drawn with the opaque world: lit, colored triangles in world
+// space whose points grow on their own schedule as refdef_t.snow_amount goes
+// from 0 to 1 (see r_snow_vertex_t). Replaces the previous mesh;
+// num_vertices 0 removes it. The renderer drops it when a map is loaded or
+// the renderer restarts.
+typedef struct {
+    vec3_t  origin;     // on the floor
+    float   height;     // full height above the floor, may be negative
+    float   start;      // snow amount at which this point starts to grow
+    float   length;     // and how much more it takes to reach full height
+    color_t color;
+} r_snow_vertex_t;
+
+void    R_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
+                       const uint32_t *indices, int num_indices);
+
+// Blows snow away from the given vertices of the current snow cover, each
+// by a strength from 0 to 1, at refdef_t.time; it slowly grows back.
+void    R_AddSnowCrater(const int *vertices, const float *strength, int count,
+                        float time);
 
 void    R_ClearColor(void);
 void    R_SetAlpha(float clpha);

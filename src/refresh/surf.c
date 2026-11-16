@@ -990,6 +990,7 @@ void GL_FreeWorld(void)
     if (!gl_static.world.cache)
         return;
 
+    GL_FreeSnowCover();
     BSP_Free(gl_static.world.cache);
     Z_Free(gl_static.world.vertices);
     GL_DeleteBuffers(1, &gl_static.world.buffer);

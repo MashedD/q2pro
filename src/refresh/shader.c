@@ -335,7 +335,7 @@ static void write_vertex_shader(sizebuf_t *buf, glStateBits_t bits)
         GLSL(out vec2 v_tc;)
     }
 
-    if (bits & GLS_LIGHTMAP_ENABLE) {
+    if (bits & (GLS_LIGHTMAP_ENABLE | GLS_SNOW)) {
         GLSL(in vec2 a_lmtc;)
         GLSL(out vec2 v_lmtc;)
     }
@@ -345,7 +345,7 @@ static void write_vertex_shader(sizebuf_t *buf, glStateBits_t bits)
         GLSL(out vec4 v_color;)
     }
 
-    if (bits & GLS_FOG_HEIGHT)
+    if (bits & (GLS_FOG_HEIGHT | GLS_SNOW_LIGHTS))
         GLSL(out vec3 v_world_pos;)
 
     GLSF("void main() {\n");
@@ -359,13 +359,13 @@ static void write_vertex_shader(sizebuf_t *buf, glStateBits_t bits)
         GLSL(v_tc = a_tc;)
     }
 
-    if (bits & GLS_LIGHTMAP_ENABLE)
+    if (bits & (GLS_LIGHTMAP_ENABLE | GLS_SNOW))
         GLSL(v_lmtc = a_lmtc;)
 
     if (!(bits & GLS_TEXTURE_REPLACE))
         GLSL(v_color = a_color;)
 
-    if (bits & GLS_FOG_HEIGHT)
+    if (bits & (GLS_FOG_HEIGHT | GLS_SNOW_LIGHTS))
         GLSL(v_world_pos = (m_model * a_pos).xyz;)
 
     GLSL(gl_Position = m_vp * a_pos;)
@@ -508,6 +508,22 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
     if (bits & GLS_LIGHTMAP_ENABLE) {
         GLSL(uniform sampler2D u_lightmap;)
         GLSL(in vec2 v_lmtc;)
+    } else if (bits & GLS_SNOW) {
+        // snow cover (snow_gl.c): v_lmtc.x is how far the snow has come,
+        // v_tc the world position, for value noise along its edge
+        GLSL(in vec2 v_lmtc;)
+        GLSL(
+            float snow_hash(vec2 p) {
+                return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+            }
+            float snow_noise(vec2 p) {
+                vec2 i = floor(p);
+                vec2 f = fract(p);
+                f = f * f * (3.0 - 2.0 * f);
+                return mix(mix(snow_hash(i), snow_hash(i + vec2(1.0, 0.0)), f.x),
+                           mix(snow_hash(i + vec2(0.0, 1.0)), snow_hash(i + vec2(1.0, 1.0)), f.x), f.y);
+            }
+        )
     }
 
     if (bits & GLS_GLOWMAP_ENABLE)
@@ -526,7 +542,7 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
         GLSL(out vec4 o_bloom;)
     }
 
-    if (bits & GLS_FOG_HEIGHT)
+    if (bits & (GLS_FOG_HEIGHT | GLS_SNOW_LIGHTS))
         GLSL(in vec3 v_world_pos;)
 
     if (bits & GLS_BLUR_GAUSS)
@@ -561,6 +577,18 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
 
     if (bits & GLS_ALPHATEST_ENABLE)
         GLSL(if (diffuse.a <= 0.666) discard;)
+
+    // leave out the snow that hasn't grown yet, along a ragged line, and
+    // darken the thin snow just behind it a little, like vk_snow.frag
+    if (bits & GLS_SNOW) {
+        GLSL({
+            float snow_n = snow_noise(v_tc / 14.0) * 0.65 + snow_noise(v_tc / 5.0) * 0.35;
+            float snow_front = v_lmtc.x + (snow_n - 0.5) * 0.3;
+            if (snow_front < 0.0)
+                discard;
+            diffuse.rgb *= 0.82 + 0.18 * clamp(snow_front * 6.0, 0.0, 1.0);
+        })
+    }
 
     // Skin tints that recolor the texture, like a recolored skin would be:
     // a gradient from the dark color along luminance^gamma, before lighting.
@@ -606,6 +634,23 @@ static void write_fragment_shader(sizebuf_t *buf, glStateBits_t bits)
 
     if (!(bits & GLS_TEXTURE_REPLACE))
         GLSL(diffuse *= v_color;)
+
+    // dynamic lights on the snow cover (snow_gl.c), like vk_snow.frag:
+    // m_sky[0] holds their origins and reach, m_sky[1] their colors
+    if (bits & GLS_SNOW_LIGHTS) {
+        GLSL(
+            for (int i = 0; i < 3; i++) {
+                float reach = m_sky[0][i].w;
+                if (reach <= 0.0)
+                    break;
+                vec3 d = m_sky[0][i].xyz - v_world_pos;
+                float dist = length(d);
+                float falloff = max(1.0 - dist / reach, 0.0);
+                float facing = clamp(0.55 + 0.45 * d.z / max(dist, 1.0), 0.2, 1.0);
+                diffuse.rgb += 0.7 * m_sky[1][i].rgb * (m_sky[1][i].w * falloff * facing);
+            }
+        )
+    }
 
     if (bits & GLS_SKINTINT) {
         GLSL(
@@ -797,7 +842,7 @@ static GLuint create_and_use_program(glStateBits_t bits)
         qglBindAttribLocation(program, VERT_ATTR_POS, "a_pos");
         if (!(bits & GLS_SKY_MASK))
             qglBindAttribLocation(program, VERT_ATTR_TC, "a_tc");
-        if (bits & GLS_LIGHTMAP_ENABLE)
+        if (bits & (GLS_LIGHTMAP_ENABLE | GLS_SNOW))
             qglBindAttribLocation(program, VERT_ATTR_LMTC, "a_lmtc");
         if (!(bits & GLS_TEXTURE_REPLACE))
             qglBindAttribLocation(program, VERT_ATTR_COLOR, "a_color");

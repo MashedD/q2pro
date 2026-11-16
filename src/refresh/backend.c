@@ -30,6 +30,10 @@ typedef struct refresh_backend_s {
 
     void (*render_frame)(const refdef_t *fd);
     void (*light_point)(const vec3_t origin, vec3_t light);
+    void (*set_snow_cover)(const r_snow_vertex_t *vertices, int num_vertices,
+                           const uint32_t *indices, int num_indices);
+    void (*add_snow_crater)(const int *vertices, const float *strength,
+                            int count, float time);
 
     void (*clear_color)(void);
     void (*set_alpha)(float alpha);
@@ -76,6 +80,8 @@ static const refresh_backend_t gl_backend = {
     .end_registration = GLR_EndRegistration,
     .render_frame = GLR_RenderFrame,
     .light_point = GLR_LightPoint,
+    .set_snow_cover = GLR_SetSnowCover,
+    .add_snow_crater = GLR_AddSnowCrater,
     .clear_color = GLR_ClearColor,
     .set_alpha = GLR_SetAlpha,
     .set_color = GLR_SetColor,
@@ -118,6 +124,8 @@ static const refresh_backend_t vk_backend = {
     .end_registration = VKR_EndRegistration,
     .render_frame = VKR_RenderFrame,
     .light_point = VKR_LightPoint,
+    .set_snow_cover = VKR_SetSnowCover,
+    .add_snow_crater = VKR_AddSnowCrater,
     .clear_color = VKR_ClearColor,
     .set_alpha = VKR_SetAlpha,
     .set_color = VKR_SetColor,
@@ -260,6 +268,18 @@ void R_RenderFrame(const refdef_t *fd)
 void R_LightPoint(const vec3_t origin, vec3_t light)
 {
     active_backend()->light_point(origin, light);
+}
+
+void R_SetSnowCover(const r_snow_vertex_t *vertices, int num_vertices,
+                    const uint32_t *indices, int num_indices)
+{
+    active_backend()->set_snow_cover(vertices, num_vertices, indices, num_indices);
+}
+
+void R_AddSnowCrater(const int *vertices, const float *strength, int count,
+                     float time)
+{
+    active_backend()->add_snow_crater(vertices, strength, count, time);
 }
 
 void R_ClearColor(void)

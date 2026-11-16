@@ -581,17 +581,20 @@ bool vk_create_ssr_pipeline(void)
     return result == VK_SUCCESS;
 }
 
-bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
-                                       bool depth_write, bool blend, bool additive,
-                                       VkPrimitiveTopology topology)
+// growth: also feed vk_vertex_t.normal as location 2 and the snow craters of
+// binding 1 as location 3, for vk_snow.vert
+static bool vk_create_color3d_pipeline_ex(VkPipeline *pipeline, bool depth_test,
+                                          bool depth_write, bool blend, bool additive,
+                                          VkPrimitiveTopology topology,
+                                          const uint32_t *vert_spv, size_t vert_size,
+                                          const uint32_t *frag_spv, size_t frag_size,
+                                          bool growth)
 {
-    VkShaderModule vert = vk_create_shader_module(vk_color3d_vert_spv,
-                                                  sizeof(vk_color3d_vert_spv));
+    VkShaderModule vert = vk_create_shader_module(vert_spv, vert_size);
     if (!vert)
         return false;
 
-    VkShaderModule frag = vk_create_shader_module(vk_color3d_frag_spv,
-                                                  sizeof(vk_color3d_frag_spv));
+    VkShaderModule frag = vk_create_shader_module(frag_spv, frag_size);
     if (!frag) {
         vk.DestroyShaderModule(vk.device, vert, NULL);
         return false;
@@ -611,10 +614,18 @@ bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
             .pName = "main",
         },
     };
-    VkVertexInputBindingDescription binding = {
-        .binding = 0,
-        .stride = sizeof(vk_vertex_t),
-        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    VkVertexInputBindingDescription bindings[] = {
+        {
+            .binding = 0,
+            .stride = sizeof(vk_vertex_t),
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        },
+        {
+            // snow craters: time and strength per vertex (vk_snow.c)
+            .binding = 1,
+            .stride = sizeof(float) * 2,
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        },
     };
     VkVertexInputAttributeDescription attributes[] = {
         {
@@ -629,12 +640,24 @@ bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
             .format = VK_FORMAT_R32G32B32A32_SFLOAT,
             .offset = offsetof(vk_vertex_t, color),
         },
+        {
+            .location = 2,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(vk_vertex_t, normal),
+        },
+        {
+            .location = 3,
+            .binding = 1,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .offset = 0,
+        },
     };
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount = 1,
-        .pVertexBindingDescriptions = &binding,
-        .vertexAttributeDescriptionCount = q_countof(attributes),
+        .vertexBindingDescriptionCount = growth ? 2 : 1,
+        .pVertexBindingDescriptions = bindings,
+        .vertexAttributeDescriptionCount = growth ? 4 : 2,
         .pVertexAttributeDescriptions = attributes,
     };
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
@@ -728,6 +751,42 @@ bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
         return vk_fail_result("vkCreateGraphicsPipelines", result);
 
     return true;
+}
+
+bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
+                                bool depth_write, bool blend, bool additive,
+                                VkPrimitiveTopology topology)
+{
+    return vk_create_color3d_pipeline_ex(pipeline, depth_test, depth_write,
+                                         blend, additive, topology,
+                                         vk_color3d_vert_spv,
+                                         sizeof(vk_color3d_vert_spv),
+                                         vk_color3d_frag_spv,
+                                         sizeof(vk_color3d_frag_spv), false);
+}
+
+// full: for snow that has fully grown, which needs no pixels left out
+// rt: dynamic lights cast shadows, with ray queries
+bool vk_create_snow_pipeline(VkPipeline *pipeline, bool full, bool rt)
+{
+    const uint32_t *frag = full ? vk_snow_full_frag_spv : vk_snow_frag_spv;
+    size_t frag_size = full ? sizeof(vk_snow_full_frag_spv) : sizeof(vk_snow_frag_spv);
+
+#if USE_VULKAN_RAYTRACING
+    if (rt) {
+        frag = full ? vk_snow_full_rt_frag_spv : vk_snow_rt_frag_spv;
+        frag_size = full ? sizeof(vk_snow_full_rt_frag_spv) : sizeof(vk_snow_rt_frag_spv);
+    }
+#else
+    if (rt)
+        return false;
+#endif
+
+    return vk_create_color3d_pipeline_ex(pipeline, true, true, false, false,
+                                         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+                                         vk_snow_vert_spv,
+                                         sizeof(vk_snow_vert_spv),
+                                         frag, frag_size, true);
 }
 
 bool vk_create_world_pipeline(VkPipeline *pipeline, bool depth_test,

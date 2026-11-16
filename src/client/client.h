@@ -780,6 +780,15 @@ bool CL_SeekDemoMessage(void);
 
 void CL_DeltaFrame(void);
 void CL_AddEntities(void);
+
+// weather.c
+void CL_InitWeather(void);
+void CL_ClearWeather(void);
+void CL_AddWeather(void);
+void CL_RegisterWeatherSounds(void);
+void CL_WeatherRefreshChanged(void);
+bool CL_SnowFootstep(int entnum, float volume, float attenuation);
+void CL_SnowExplosion(const vec3_t origin, float radius);
 void CL_InitSkinTints(void);
 void CL_CalcViewValues(void);
 

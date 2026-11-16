@@ -54,8 +54,10 @@ client_src = [
   'src/client/screen.c',
   'src/client/sound/main.c',
   'src/client/sound/mem.c',
+  'src/client/sound/synth.c',
   'src/client/tent.c',
   'src/client/view.c',
+  'src/client/weather.c',
   'src/common/async.c',
   'src/server/commands.c',
   'src/server/entities.c',
@@ -90,6 +92,8 @@ refresh_src = [
   'src/refresh/qgl.c',
   'src/refresh/shader.c',
   'src/refresh/sky.c',
+  'src/refresh/snow.c',
+  'src/refresh/snow_gl.c',
   'src/refresh/state.c',
   'src/refresh/surf.c',
   'src/refresh/tess.c',
@@ -361,6 +365,7 @@ if vulkan.found()
                     'vk_ssr.vert', 'vk_ssr.frag', 'vk_ssr_resolve.frag',
                     'vk_scene.frag',
                     'vk_color3d.vert', 'vk_color3d.frag',
+                    'vk_snow.vert',
                     'vk_world.vert', 'vk_world.frag', 'vk_world_alpha.frag',
                     'vk_world_lit.vert', 'vk_world_lit.frag',
                     'vk_world_lit_alpha.frag',
@@ -377,6 +382,25 @@ if vulkan.found()
       output: shader.underscorify() + '_spv.h',
       command: [find_program('python3'), files('src/refresh/vk_shader.py'),
                 glslc, '@INPUT@', '@OUTPUT@'],
+    )
+  endforeach
+  # Variants of the snow cover's fragment shader: [output, defines, needs
+  # ray tracing]. Ray queries need SPIR-V for Vulkan 1.2.
+  foreach snow_shader : [
+    ['vk_snow_frag_spv.h', [], false],
+    ['vk_snow_full_frag_spv.h', ['-DSNOW_FULL=1'], false],
+    ['vk_snow_rt_frag_spv.h', ['-DSNOW_RT=1'], true],
+    ['vk_snow_full_rt_frag_spv.h', ['-DSNOW_FULL=1', '-DSNOW_RT=1'], true],
+  ]
+    if snow_shader[2] and config.get('USE_VULKAN_RAYTRACING', 0) == 0
+      continue
+    endif
+    vk_shader_headers += custom_target(snow_shader[0].underscorify(),
+      input: 'src/refresh/vk_snow.frag',
+      output: snow_shader[0],
+      command: [find_program('python3'), files('src/refresh/vk_shader.py'),
+                glslc, '@INPUT@', '@OUTPUT@'] +
+               (snow_shader[2] ? ['--target-env=vulkan1.2'] : []) + snow_shader[1],
     )
   endforeach
   if config.get('USE_VULKAN_RAYTRACING', 0) != 0
@@ -410,6 +434,7 @@ if vulkan.found()
   endif
   common_deps += vulkan.partial_dependency(compile_args: true, includes: true)
   refresh_src += ['src/refresh/vk_backend.c', vk_shader_headers]
+  refresh_src += ['src/refresh/vk_snow.c']
   refresh_src += ['src/refresh/vk_device.c']
   refresh_src += ['src/refresh/vk_rt.c']
   refresh_src += ['src/refresh/vk_world_load.c']

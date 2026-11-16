@@ -2378,6 +2378,7 @@ void CL_AddEntities(void)
     CL_AddPacketEntities();
     CL_AddTEnts();
     CL_AddParticles();
+    CL_AddWeather();
     CL_AddDLights();
     CL_AddLightStyles();
     LOC_AddLocationsToScene();

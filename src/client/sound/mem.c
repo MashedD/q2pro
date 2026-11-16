@@ -20,8 +20,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "sound.h"
 #include "common/intreadwrite.h"
 
-#define FORMAT_PCM  1
-
 wavinfo_t s_info;
 
 /*
@@ -496,6 +494,21 @@ sfxcache_t *S_LoadSound(sfx_t *s)
         name = s->truename;
     else
         name = s->name;
+
+// made in code (synth.c)
+    if (!strncmp(name, "synth:", 6)) {
+        memset(&s_info, 0, sizeof(s_info));
+        s_info.name = name;
+        if (!S_SynthesizeSound(name + 6)) {
+            s->error = Q_ERR(ENOENT);
+            return NULL;
+        }
+        sc = s_api->upload_sfx(s);
+        Z_Free(s_info.data);
+        if (!sc)
+            Com_EPrintf("Couldn't load %s: %s\n", name, Com_GetLastError());
+        return sc;
+    }
 
     len = FS_LoadFile(name, (void **)&data);
     if (!data) {

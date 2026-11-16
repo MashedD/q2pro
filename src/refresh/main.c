@@ -845,6 +845,8 @@ void R_RenderFrame(const refdef_t *fd)
 
     GL_DrawEntities(glr.ents.opaque);
 
+    GL_DrawSnowCover();
+
     GL_DrawEntities(glr.ents.alpha_back);
 
     GL_DrawAlphaFaces();
@@ -1518,3 +1520,5 @@ void R_ModeChanged(int width, int height, int flags)
     r_config.height = height;
     r_config.flags = flags;
 }
+
+

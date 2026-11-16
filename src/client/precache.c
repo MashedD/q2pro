@@ -199,6 +199,7 @@ void CL_RegisterSounds(void)
 
     S_BeginRegistration();
     CL_RegisterTEntSounds();
+    CL_RegisterWeatherSounds();
     for (i = 1; i < cl.csr.max_sounds; i++) {
         s = cl.configstrings[cl.csr.sounds + i];
         if (!s[0])
@@ -399,6 +400,7 @@ void CL_PrepRefresh(void)
 
     // the renderer can now free unneeded stuff
     R_EndRegistration();
+    CL_WeatherRefreshChanged();
 
     // clear any lines of console text
     Con_ClearNotify_f();

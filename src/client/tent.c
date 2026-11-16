@@ -153,6 +153,9 @@ void CL_PlayFootstepSfx(int step_id, int entnum, float volume, float attenuation
     if (!cl_num_footsteps)
         return; // should not really happen
 
+    if (step_id == -1 && CL_SnowFootstep(entnum, volume, attenuation))
+        return;
+
     if (step_id == -1)
         step_id = CL_FindFootstepSurface(entnum);
 
@@ -1708,10 +1711,12 @@ void CL_ParseTEnt(void)
         if (cl_dlight_hacks->integer & DLHACK_SMALLER_EXPLOSION)
             ex->light = 200;
 
-        if (te.type == TE_GRENADE_EXPLOSION_WATER)
+        if (te.type == TE_GRENADE_EXPLOSION_WATER) {
             S_StartSound(te.pos1, 0, 0, cl_sfx_watrexp, 1, ATTN_NORM, 0);
-        else
+        } else {
             S_StartSound(te.pos1, 0, 0, cl_sfx_grenexp, 1, ATTN_NORM, 0);
+            CL_SnowExplosion(te.pos1, 64);
+        }
         break;
 
     case TE_EXPLOSION2:
@@ -1723,6 +1728,7 @@ void CL_ParseTEnt(void)
             ex->light = 0;
         CL_ExplosionParticles(te.pos1);
         S_StartSound(te.pos1, 0, 0, cl_sfx_grenexp, 1, ATTN_NORM, 0);
+        CL_SnowExplosion(te.pos1, 64);
         break;
 
     case TE_ROCKET_EXPLOSION:
@@ -1737,10 +1743,12 @@ void CL_ParseTEnt(void)
         if (cl_dlight_hacks->integer & DLHACK_SMALLER_EXPLOSION)
             ex->light = 200;
 
-        if (te.type == TE_ROCKET_EXPLOSION_WATER)
+        if (te.type == TE_ROCKET_EXPLOSION_WATER) {
             S_StartSound(te.pos1, 0, 0, cl_sfx_watrexp, 1, ATTN_NORM, 0);
-        else
+        } else {
             S_StartSound(te.pos1, 0, 0, cl_sfx_rockexp, 1, ATTN_NORM, 0);
+            CL_SnowExplosion(te.pos1, 64);
+        }
         break;
 
     case TE_EXPLOSION1:
@@ -1751,6 +1759,7 @@ void CL_ParseTEnt(void)
             ex->light = 0;
         CL_ExplosionParticles(te.pos1);
         S_StartSound(te.pos1, 0, 0, cl_sfx_rockexp, 1, ATTN_NORM, 0);
+        CL_SnowExplosion(te.pos1, 64);
         break;
 
     case TE_EXPLOSION1_NP:
@@ -1763,6 +1772,7 @@ void CL_ParseTEnt(void)
         ex->ent.model = cl_mod_explo4;
         ex->ent.scale = 2.0f;
         S_StartSound(te.pos1, 0, 0, cl_sfx_rockexp, 1, ATTN_NORM, 0);
+        CL_SnowExplosion(te.pos1, 112);
         break;
 
     case TE_BFG_EXPLOSION:
@@ -1772,6 +1782,7 @@ void CL_ParseTEnt(void)
 
     case TE_BFG_BIGEXPLOSION:
         CL_BFGExplosionParticles(te.pos1);
+        CL_SnowExplosion(te.pos1, 112);
         CL_RTEnergyCollapse(te.pos1, RT_ENERGY_BFG_CORE);
         break;
 

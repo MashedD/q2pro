@@ -355,6 +355,15 @@ typedef struct {
 } vk_color3d_push_t;
 
 typedef struct {
+    mat4_t mvp;
+    float color[4];     // rgb tint, a = snow amount
+    float craters[4];   // time, seconds for a crater to fill again
+    float fog[4];       // as for the world, from vk_fog_params()
+    float dlight_origins[3][4];     // snow_lights_t, SNOW_MAX_LIGHTS
+    float dlight_colors[3][4];
+} vk_snow_push_t;
+
+typedef struct {
     image_t *image;
     vk_texture_t faces[6];
 } vk_cubemap_t;
@@ -640,6 +649,9 @@ typedef struct {
     VkPipeline ssr_pipeline;
     VkPipeline ssr_resolve_pipeline;
     VkPipeline color3d_pipeline;
+    VkPipeline snow_pipeline;
+    VkPipeline snow_full_pipeline;
+    VkPipeline snow_rt_pipelines[2];    // growing, full; with ray tracing
     VkPipeline line3d_pipeline;
     VkPipeline debug_line_pipeline;
     VkPipeline debug_text_pipeline;
@@ -806,6 +818,7 @@ typedef struct {
     VkBuffer bound_index_buffer;
     VkDeviceSize bound_index_offset;
     VkIndexType bound_index_type;
+    vk_mesh_t snow_cover;   // R_SetSnowCover()
 } vk_state_t;
 
 // Entity passes, in drawing order; see vk_entity_in_pass().
@@ -1009,6 +1022,7 @@ void vk_transition_scene(VkCommandBuffer cmd, VkImageLayout new_layout,
                          VkPipelineStageFlags dst_stage);
 void vk_unmap_world_batch_indices(void);
 void vk_view_matrix(mat4_t matrix, const refdef_t *fd);
+void vk_world_mvp(mat4_t out, const refdef_t *fd);
 #if USE_MD5
 extern cvar_t *vk_md5_load;
 #endif
@@ -1064,6 +1078,7 @@ bool vk_create_alias_pipeline(VkPipeline *pipeline, bool depth_write, bool blend
                               VkCompareOp depth_compare, bool depth_bias_enable,
                               float depth_bias_constant, float depth_bias_slope,
                               VkPipelineDepthStencilStateCreateInfo *stencil_state);
+bool vk_create_snow_pipeline(VkPipeline *pipeline, bool full, bool rt);
 bool vk_create_color3d_pipeline(VkPipeline *pipeline, bool depth_test,
                                 bool depth_write, bool blend, bool additive,
                                 VkPrimitiveTopology topology);
@@ -1121,6 +1136,10 @@ bool vk_build_mesh_blas(vk_acceleration_structure_t *as,
                         const vk_buffer_t *indices, uint32_t index_count);
 void vk_destroy_acceleration_structure(vk_acceleration_structure_t *as);
 #endif
+
+// vk_snow.c
+void vk_draw_snow_cover(const refdef_t *fd);
+void vk_free_snow_cover(void);
 
 // vk_texture.c
 VkSampler vk_sampler_for_pic_flags(imageflags_t flags);
