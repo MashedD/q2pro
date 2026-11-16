@@ -682,6 +682,8 @@ void CL_AddWeather(void)
 
     if (!cover.built)
         cover_build();
+    if (cover.start_time < 0)
+        cover.start_time = cl.time;
     if (cover.dirty) {
         R_SetSnowCover(cover.kind, cover.vertices, cover.num_vertices, cover.indices, cover.num_indices);
         cover.dirty = false;
@@ -1663,7 +1665,7 @@ static void cover_build(void)
 
     cover_free();
     cover.built = true;
-    cover.start_time = cl.time;
+    cover.start_time = -1;      // set on the first frame of the map
     set_prevailing_wind();
 
     cover.samples = Z_Malloc(sizeof(*cover.samples) * COVER_MAX_SAMPLES);
@@ -1728,12 +1730,23 @@ static float cover_amount(void)
 ==============
 CL_WeatherRefreshChanged
 
-The renderer forgets the snow cover when it restarts; send it again.
+Called when a map's refresh data is loaded, and when the renderer
+restarts, which forgets the snow cover; send it again.
 ==============
 */
 void CL_WeatherRefreshChanged(void)
 {
+    // Build the snow cover or puddles while the map loads: it takes up to
+    // a few hundred milliseconds, a hitch on the map's first frame.
+    if (!cover.built && cl.bsp && cls.state >= ca_loading &&
+        (Cvar_ClampValue(cl_snow, 0, 4) || Cvar_ClampValue(cl_rain, 0, 4)))
+        cover_build();
     cover.dirty = cover.num_indices > 0;
+    if (cover.dirty && cls.ref_initialized) {
+        R_SetSnowCover(cover.kind, cover.vertices, cover.num_vertices,
+                       cover.indices, cover.num_indices);
+        cover.dirty = false;
+    }
 }
 
 /*

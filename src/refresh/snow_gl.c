@@ -134,7 +134,10 @@ static void update_vertices(float amount, float time)
         out->front[1] = 0;
     }
 
+    // a new buffer, instead of overwriting the one the GPU may still be
+    // drawing from, which can make the driver wait for it
     GL_BindBuffer(GL_ARRAY_BUFFER, snow.buffers[0]);
+    qglBufferData(GL_ARRAY_BUFFER, sizeof(*snow.upload) * snow.num_vertices, NULL, GL_DYNAMIC_DRAW);
     qglBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(*snow.upload) * snow.num_vertices, snow.upload);
 }
 
