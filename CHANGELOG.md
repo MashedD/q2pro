@@ -6,6 +6,8 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-11-17
+
 ### Added
 
 - More optional weather sounds from `sound/weather/`: footsteps in deep
@@ -257,7 +259,8 @@ All new options are off or keep upstream's behaviour by default.
 - A game library without the executable permission is reported with the
   `chmod` command that fixes it, instead of only "Permission denied".
 
-[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.4.2...HEAD
+[1.4.2]: https://github.com/MashedD/q2pro/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/MashedD/q2pro/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/MashedD/q2pro/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/MashedD/q2pro/compare/v1.2.2...v1.3.0
