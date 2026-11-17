@@ -27,9 +27,12 @@
 //
 // Sounds are optional files in sound/weather/: a wind loop and a soft snow
 // ambience whose volume follows how much open sky is around the viewer,
-// occasional gusts, and footsteps on ground under open sky. The game has no
-// such sounds; without the files, the wind, gusts and rain are synthesized
-// (sound/synth.c) and the rest is silent. The rain has a loop of its own.
+// occasional gusts, footsteps on ground under open sky (in snow, deep snow,
+// puddles or the wet), rain loops for light, normal and heavy rain and for
+// rain heard from under water, a storm wind, thunder, and splashes, drops
+// and hisses where rain or snow lands close by. The game has no such
+// sounds; without the files, the wind, gusts, rain and thunder are
+// synthesized (sound/synth.c) and the rest is silent.
 //
 
 #include "client.h"
@@ -96,6 +99,7 @@ static cvar_t   *cl_thunder_flash;
 
 #define PUFF_DISTANCE       320     // flakes landing this close puff up
 #define SPLASH_DISTANCE     400     // drops landing this close splash
+#define SPLASH_HEARD        300     // and are heard this close
 #define PUDDLE_TIME         120   // seconds for puddles to fill
 #define PUDDLE_SHARE        0.36f   // of the noise range that is puddle
 
@@ -144,21 +148,41 @@ static struct {
     int             start_time;     // cl.time when the map started
 } cover;
 
-#define WEATHER_STEPS   3
 #define WEATHER_GUSTS   2
 #define WEATHER_THUNDER 2       // of each, near and far
+#define WEATHER_VARIANTS 3      // most files of one optional sound
+
+// Optional sounds with numbered variants, such as snow_step1.wav to
+// snow_step3.wav; one is picked at random, not the same twice in a row.
+typedef struct {
+    qhandle_t   sfx[WEATHER_VARIANTS];
+    int         num;
+    int         last;
+} weather_set_t;
 
 static struct {
     qhandle_t   wind;
     qhandle_t   ambience;
     qhandle_t   rain;
+    qhandle_t   rain_light;     // optional loops for light and heavy rain
+    qhandle_t   rain_heavy;
+    qhandle_t   storm_wind;     // the wind in a thunderstorm
+    qhandle_t   rain_underwater;    // rain on the surface, heard from below
     qhandle_t   gusts[WEATHER_GUSTS];
     qhandle_t   thunder[2][WEATHER_THUNDER];    // near, far
-    qhandle_t   steps[WEATHER_STEPS];
     int         num_gusts;
-    int         num_steps;
-    int         last_step;
+    weather_set_t   snow_steps;
+    weather_set_t   snow_deep_steps;
+    weather_set_t   puddle_steps;
+    weather_set_t   wet_steps;
+    weather_set_t   splashes;   // drops hitting the ground close by
+    weather_set_t   drops;      // and water or puddles
+    weather_set_t   hisses;     // and lava
+    unsigned    next_splash;    // cls.realtime, to keep them sparse
+    unsigned    next_hiss;
 } weather_sfx;
+
+static float    weather_grown;      // refdef_t.snow_amount this frame
 
 static float    weather_exposure;   // 0 indoors .. 1 under open sky
 static float    weather_gust_timer;
@@ -179,6 +203,9 @@ static struct {
 
 static void update_exposure(const vec3_t view, float dt);
 static void update_sounds(float snow, float rain, float dt);
+static void play_landing(weather_set_t *set, unsigned *next, unsigned interval,
+                         const vec3_t org, float volume);
+static int cover_find(int x, int y, float z, float max_dz);
 static void stop_sounds(void);
 static void cover_free(void);
 static void cover_build(void);
@@ -379,9 +406,12 @@ static void land_flake(const snowflake_t *f, const vec3_t view)
     const cover_sample_t *s = &cover.samples[f->sample];
     vec3_t d;
 
+    VectorSubtract(f->org, view, d);
+    if (s->lava && DotProduct(d, d) < SPLASH_HEARD * SPLASH_HEARD)
+        play_landing(&weather_sfx.hisses, &weather_sfx.next_hiss, 1500, f->org,
+                     Cvar_ClampValue(cl_snow_volume, 0, 1) * 0.4f);
     if (s->liquid)
         return;
-    VectorSubtract(f->org, view, d);
     if (DotProduct(d, d) > PUFF_DISTANCE * PUFF_DISTANCE || DotProduct(d, cl.v_forward) < 0)
         return;
 
@@ -413,9 +443,22 @@ static void land_drop(const raindrop_t *d, const vec3_t view, const vec3_t vel,
     bool liquid = s->liquid || (cover.kind == R_COVER_PUDDLES &&
                                 cover_top(d->sample, cover_grown) > 0.5f);
 
+    VectorSubtract(d->org, view, delta);
+
+    // heard close by: a splash on the ground, a drop on water or a puddle,
+    // a hiss above lava
+    if (DotProduct(delta, delta) < SPLASH_HEARD * SPLASH_HEARD) {
+        float volume = Cvar_ClampValue(cl_rain_volume, 0, 1) * 0.3f;
+        if (s->lava)
+            play_landing(&weather_sfx.hisses, &weather_sfx.next_hiss, 1000, d->org, volume * 1.5f);
+        else if (liquid)
+            play_landing(&weather_sfx.drops, &weather_sfx.next_splash, 150, d->org, volume);
+        else
+            play_landing(&weather_sfx.splashes, &weather_sfx.next_splash, 150, d->org, volume);
+    }
+
     if (s->lava)
         return;     // it hisses away above the lava
-    VectorSubtract(d->org, view, delta);
     if (DotProduct(delta, delta) > SPLASH_DISTANCE * SPLASH_DISTANCE ||
         DotProduct(delta, cl.v_forward) < 0 || frand() > 0.6f)
         return;
@@ -691,6 +734,7 @@ void CL_AddWeather(void)
     if (cover.num_indices)
         cl.refdef.snow_amount = cover_amount();
     float cover_grown = cl.refdef.snow_amount;
+    weather_grown = cover_grown;
     // heavier rain ripples puddles more
     cl.refdef.rain_amount = min(rain, 2.0f) * 0.7f;
     update_candidates(view);
@@ -740,11 +784,30 @@ static void update_sounds(float snow, float rain, float dt)
     // the wind blows in the rain too, less loudly than the rain itself
     float volume = max(snow_volume, rain_volume * 0.5f);
 
+    // a storm has its own wind, and light and heavy rain their own loops
+    qhandle_t wind = weather_sfx.wind;
+    if (rain && cl_thunder->integer && weather_sfx.storm_wind)
+        wind = weather_sfx.storm_wind;
+    qhandle_t rain_loop = weather_sfx.rain;
+    if (rain <= 1 && weather_sfx.rain_light)
+        rain_loop = weather_sfx.rain_light;
+    else if (rain >= 3 && weather_sfx.rain_heavy)
+        rain_loop = weather_sfx.rain_heavy;
+
+    // under water, the rain is heard on the surface above, if that sound
+    // exists, instead of all around
+    bool underwater = false;
+    if (rain && weather_sfx.rain_underwater)
+        underwater = CM_PointContents(cl.refdef.vieworg, cl.bsp->nodes,
+                                      cl.csr.extended) & MASK_WATER;
+
     // wind stays faintly audible indoors, like through windows, and rain
     // drums on the roof
-    S_SetLocalLoop(0, weather_sfx.wind, volume * (0.12f + 0.55f * weather_exposure));
+    S_SetLocalLoop(0, wind, volume * (0.12f + 0.55f * weather_exposure));
     S_SetLocalLoop(1, weather_sfx.ambience, snow_volume * 0.35f * weather_exposure);
-    S_SetLocalLoop(2, weather_sfx.rain, rain_volume * (0.15f + 0.7f * weather_exposure));
+    S_SetLocalLoop(2, rain_loop, underwater ? 0 : rain_volume * (0.15f + 0.7f * weather_exposure));
+    S_SetLocalLoop(3, weather_sfx.rain_underwater,
+                   underwater ? rain_volume * (0.3f + 0.5f * weather_exposure) : 0);
 
     weather_gust_timer -= dt;
     if (weather_gust_timer <= 0) {
@@ -758,24 +821,49 @@ static void update_sounds(float snow, float rain, float dt)
 
 static void stop_sounds(void)
 {
-    S_SetLocalLoop(0, 0, 0);
-    S_SetLocalLoop(1, 0, 0);
-    S_SetLocalLoop(2, 0, 0);
+    for (int i = 0; i < 4; i++)
+        S_SetLocalLoop(i, 0, 0);
+}
+
+static qhandle_t pick_sound(weather_set_t *set)
+{
+    if (!set->num)
+        return 0;
+    int n = Q_rand_uniform(set->num);
+    if (n == set->last && set->num > 1)
+        n = (n + 1) % set->num;
+    set->last = n;
+    return set->sfx[n];
+}
+
+// A sound where a drop or flake lands close to the viewer, at most every
+// interval milliseconds, so a downpour doesn't become a roar of them.
+static void play_landing(weather_set_t *set, unsigned *next, unsigned interval,
+                         const vec3_t org, float volume)
+{
+    if (!set->num || cls.realtime < *next || volume <= 0)
+        return;
+    *next = cls.realtime + interval / 2 + Q_rand_uniform(interval);
+    S_StartSound(org, 0, CHAN_AUTO, pick_sound(set), volume, ATTN_STATIC, 0);
 }
 
 /*
 ==============
-CL_SnowFootstep
+CL_WeatherFootstep
 
-Plays a snow step instead of the surface's own when an entity walks on
-ground under open sky while it snows. Returns false to keep the normal step.
+Plays a step for the weather instead of the surface's own, when an entity
+walks on ground under open sky: in snow (deep snow when the cover is
+thick), in a puddle, or on ground wet with rain. Returns false to keep the
+normal step.
 ==============
 */
-bool CL_SnowFootstep(int entnum, float volume, float attenuation)
+bool CL_WeatherFootstep(int entnum, float volume, float attenuation)
 {
+    float snow = cl_snow ? Cvar_ClampValue(cl_snow, 0, 4) : 0;
+    float rain = cl_rain ? Cvar_ClampValue(cl_rain, 0, 4) : 0;
     vec3_t org;
 
-    if (!weather_sfx.num_steps || !cl_snow || !cl_snow->value || !cl.bsp)
+    if ((!snow && !rain) || !cl.bsp)
         return false;
 
     CL_GetEntitySoundOrigin(entnum, org);
@@ -784,12 +872,30 @@ bool CL_SnowFootstep(int entnum, float volume, float attenuation)
     if (!col || col->state != COLUMN_SKY || org[2] - col->ground_z > 48)
         return false;
 
-    int n = Q_rand_uniform(weather_sfx.num_steps);
-    if (n == weather_sfx.last_step && weather_sfx.num_steps > 1)
-        n = (n + 1) % weather_sfx.num_steps;
-    weather_sfx.last_step = n;
+    // the cover point under the feet: a step sounds from 24 units above
+    // them for a model, and from eye level for the viewer's own
+    float top = 0;
+    if (cover.num_indices) {
+        int i = cover_find((int)floorf(org[0] / COVER_GRID + 0.5f),
+                           (int)floorf(org[1] / COVER_GRID + 0.5f), org[2] - 40, 32);
+        if (i >= 0)
+            top = cover_top(i, weather_grown);
+    }
 
-    S_StartSound(NULL, entnum, CHAN_FOOTSTEP, weather_sfx.steps[n], volume, attenuation, 0);
+    weather_set_t *set = NULL;
+    if (snow) {
+        set = &weather_sfx.snow_steps;
+        if (cover.kind == R_COVER_SNOW && top >= 4 && weather_sfx.snow_deep_steps.num)
+            set = &weather_sfx.snow_deep_steps;
+    } else if (cover.kind == R_COVER_PUDDLES && top > 0.5f && weather_sfx.puddle_steps.num) {
+        set = &weather_sfx.puddle_steps;
+    } else {
+        set = &weather_sfx.wet_steps;
+    }
+    if (!set->num)
+        return false;
+
+    S_StartSound(NULL, entnum, CHAN_FOOTSTEP, pick_sound(set), volume, attenuation, 0);
     return true;
 }
 
@@ -798,6 +904,19 @@ static qhandle_t register_optional(const char *name)
     if (!FS_FileExists(va("sound/%s", name)))
         return 0;
     return S_RegisterSound(name);
+}
+
+// weather/<base>1.wav, <base>2.wav and so on, as many as exist in a row
+static void register_set(weather_set_t *set, const char *base)
+{
+    memset(set, 0, sizeof(*set));
+    for (int i = 0; i < WEATHER_VARIANTS; i++) {
+        char name[MAX_QPATH];
+        Q_snprintf(name, sizeof(name), "weather/%s%d.wav", base, i + 1);
+        if (!(set->sfx[set->num] = register_optional(name)))
+            break;
+        set->num++;
+    }
 }
 
 /*
@@ -835,9 +954,18 @@ void CL_RegisterWeatherSounds(void)
                 weather_sfx.thunder[far][i] = S_RegisterSound(synth);
         }
     }
-    for (int i = 0; i < WEATHER_STEPS; i++)
-        if ((weather_sfx.steps[weather_sfx.num_steps] = register_optional(va("weather/snow_step%d.wav", i + 1))))
-            weather_sfx.num_steps++;
+
+    register_set(&weather_sfx.snow_steps, "snow_step");
+    register_set(&weather_sfx.snow_deep_steps, "snow_step_deep");
+    register_set(&weather_sfx.puddle_steps, "puddle_step");
+    register_set(&weather_sfx.wet_steps, "wet_step");
+    register_set(&weather_sfx.splashes, "rain_splash");
+    register_set(&weather_sfx.drops, "rain_drop");
+    register_set(&weather_sfx.hisses, "steam_hiss");
+    weather_sfx.rain_light = register_optional("weather/rain_light.wav");
+    weather_sfx.rain_heavy = register_optional("weather/rain_heavy.wav");
+    weather_sfx.storm_wind = register_optional("weather/storm_wind.wav");
+    weather_sfx.rain_underwater = register_optional("weather/rain_underwater.wav");
 }
 
 static unsigned cover_hash(int x, int y)
