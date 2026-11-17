@@ -6,6 +6,13 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- More optional weather sounds from `sound/weather/`: footsteps in deep
+  snow, in puddles and on wet ground, loops for light and heavy rain, rain
+  heard from under water, a storm wind, and splashes, drops and steam
+  hisses where rain and snow land close by.
+
 ## [1.4.1] - 2026-11-16
 
 ### Added

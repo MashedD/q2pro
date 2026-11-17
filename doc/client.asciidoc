@@ -242,10 +242,12 @@ cl_snow::
     occasional gusts. The game has no such sounds, so they are made by the
     client from noise, unless these files exist in ‘sound/weather/’:
     ‘snow_wind.wav’, the wind loop; ‘wind_gust1.wav’ and ‘wind_gust2.wav’,
-    the gusts; ‘snow_ambience.wav’, a soft loop heard under open sky; and
+    the gusts; ‘snow_ambience.wav’, a soft loop heard under open sky;
     ‘snow_step1.wav’ to ‘snow_step3.wav’, footsteps on ground under open sky,
-    used instead of the surface's own footsteps. The last two have no
-    replacement made by the client.
+    used instead of the surface's own footsteps, and ‘snow_step_deep1.wav’ to
+    ‘snow_step_deep3.wav’ for snow cover 4 units deep or more; and
+    ‘steam_hiss1.wav’ to ‘steam_hiss3.wav’, flakes melting above lava close
+    by. Only the wind and gusts have a replacement made by the client.
 
 cl_snow_volume::
     Volume of the snow sounds, from 0 (silent) to 1. Default value is 1.
@@ -284,6 +286,15 @@ cl_rain::
     Rain is heard as a loop that is loud under open sky and faint indoors,
     with the wind behind it. Unless ‘sound/weather/rain.wav’ exists, the
     client makes the rain from noise, as it does the wind (see ‘cl_snow’).
+    These files in ‘sound/weather/’ are used when they exist, with no
+    replacement: ‘rain_light.wav’ and ‘rain_heavy.wav’, loops for ‘cl_rain’ 1
+    or less and 3 or more; ‘rain_underwater.wav’, the rain heard while you
+    are under water; ‘storm_wind.wav’, the wind in a thunderstorm;
+    ‘puddle_step1.wav’ to ‘puddle_step3.wav’ and ‘wet_step1.wav’ to
+    ‘wet_step3.wav’, footsteps in puddles and on wet ground under open sky;
+    and, for drops landing close by, ‘rain_splash1.wav’ to ‘rain_splash3.wav’
+    on the ground, ‘rain_drop1.wav’ to ‘rain_drop3.wav’ on water and puddles
+    and ‘steam_hiss1.wav’ to ‘steam_hiss3.wav’ above lava.
 
 cl_rain_volume::
     Volume of the rain, from 0 (silent) to 1. Default value is 1.
