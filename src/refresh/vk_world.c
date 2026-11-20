@@ -1168,6 +1168,11 @@ void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     if (fd)
                         VectorCopy(fd->vieworg, push.dlight);
                     push.dlight[3] = fd ? fd->time : 0.0f;
+                    // Grouped faces have no dynamic lights. Clear those of
+                    // the last face drawn on its own, which the shaders
+                    // that light per pixel would apply to the whole group.
+                    memset(push.dlight_origins, 0, sizeof(push.dlight_origins));
+                    memset(push.dlight_colors, 0, sizeof(push.dlight_colors));
                     push.intensity = vk_texture_intensity();
                     push.desaturation = vk_world_face_desaturation(face->face);
                     group_glow = pixel_world &&
