@@ -607,6 +607,7 @@ static void add_drops(float amount, const vec3_t view, float dt, float cover_gro
         streak.rgba.u8[1] = 200;
         streak.rgba.u8[2] = 215;
         streak.rgba.u8[3] = alpha * 255;
+        streak.additive = false;
         V_AddStreak(&streak);
     }
 }

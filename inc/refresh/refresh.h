@@ -136,6 +136,7 @@ typedef struct {
     vec3_t  start, end;
     float   width;              // half width, in units
     color_t rgba;
+    bool    additive;           // glows: blended additively, whatever gl_partstyle
 } r_streak_t;
 
 typedef struct {
