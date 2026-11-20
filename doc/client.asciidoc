@@ -217,6 +217,12 @@ cl_railtrail_type::
       - 0 — use original effect
       - 1 — use alternative effect, draw rail core only
       - 2 — use alternative effect, draw rail core and spiral
+      - 3 — use alternative effect, draw rail core and an energy bolt: a
+        coil of glowing rings that shoots out from the muzzle, widens and
+        fades, with lightning crackling around it and sparks thrown off along
+        the beam and where it hits. For the look of a white-hot beam in a
+        cyan coil, set ‘cl_railcore_color’ and ‘cl_railspiral_color’ to cyan
+        and ‘cl_railcore_glow’ to 1.
 
 NOTE: Rail trail variables listed below apply to the alternative effect only.
 
@@ -324,13 +330,19 @@ cl_thunder_flash::
 cl_railcore_glow::
     Adds a soft, wider additive glow around the rail core and turns its
     center paler, from 0 to 1. Only affects the core of the alternative rail
-    trail (‘cl_railtrail_type’ 1 or 2). Default value is 0 (plain core).
+    trail (‘cl_railtrail_type’ 1, 2 or 3). Default value is 0 (plain core).
 
 cl_railspiral_color::
-    Color of the rail spiral. Default value is "blue".
+    Color of the rail spiral, and of the rings and lightning of the energy
+    bolt (‘cl_railtrail_type’ 3). Default value is "blue".
 
 cl_railspiral_radius::
     Radius of the rail spiral. Default value is 3.
+
+cl_railring_radius::
+    Radius of the rings of the energy bolt (‘cl_railtrail_type’ 3), from 1
+    to 64. They widen by about half as they fade, and start small at the
+    muzzle so they stay out of your face. Default value is 8.
 
 cl_disable_particles::
     Disables rendering of particles for the following effects. This variable is

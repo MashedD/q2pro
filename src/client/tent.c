@@ -1250,6 +1250,292 @@ static void CL_RailSpiral(void)
     }
 }
 
+/*
+Rail trail type 3, an energy bolt: around the core runs a coil of glowing,
+slightly tilted rings that shoot out from the muzzle, widen and fade, with
+lightning crackling between them and sparks thrown off. The rings and arcs are
+redrawn every frame as additive streaks, so they look the same in both
+renderers. Their shapes come from a hash of the bolt, the ring and the time,
+so the crackle changes at a steady rate whatever the frame rate.
+*/
+
+#define MAX_RAIL_BOLTS          16
+#define RAIL_BOLT_SPEED         10.0f   // units per millisecond the coil grows out
+#define RAIL_RING_SPACING       18.0f   // units between rings
+#define RAIL_RING_MAX           256     // rings in one bolt; longer bolts space them out
+#define RAIL_RING_RAMP          64.0f   // rings grow to full size over this distance from the muzzle
+#define RAIL_FLICKER_MS         40      // arcs and ring jitter change shape this often
+#define RAIL_STREAK_BUDGET      2400    // streaks for all bolts in one frame
+
+typedef struct {
+    vec3_t      start, dir, right, up;
+    float       len, radius;
+    int         starttime, lifetime;
+    uint32_t    seed;
+    color_t     color;
+} rail_bolt_t;
+
+static rail_bolt_t  cl_railbolts[MAX_RAIL_BOLTS];
+static cvar_t       *cl_railring_radius;
+
+static uint32_t rail_hash(uint32_t x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352d;
+    x ^= x >> 15;
+    x *= 0x846ca68b;
+    x ^= x >> 16;
+    return x;
+}
+
+// next value in 0..1 from a hashed sequence
+static float rail_rand(uint32_t *state)
+{
+    *state = rail_hash(*state + 0x9e3779b9);
+    return (*state >> 8) * 0x1p-24f;
+}
+
+static color_t rail_whiten(color_t c, float f)
+{
+    for (int i = 0; i < 3; i++)
+        c.u8[i] = Q_rint(c.u8[i] + (255 - c.u8[i]) * f);
+    return c;
+}
+
+static void rail_streak(const vec3_t a, const vec3_t b, float width,
+                        color_t color, float alpha, int *budget)
+{
+    r_streak_t s;
+
+    if (*budget <= 0 || alpha <= 0.004f)
+        return;
+    (*budget)--;
+
+    VectorCopy(a, s.start);
+    VectorCopy(b, s.end);
+    s.width = width;
+    s.rgba = color;
+    s.rgba.u8[3] = Q_rint(color.u8[3] * min(alpha, 1.0f));
+    s.additive = true;
+    V_AddStreak(&s);
+}
+
+static void CL_ClearRailBolts(void)
+{
+    memset(cl_railbolts, 0, sizeof(cl_railbolts));
+}
+
+// Point on ring 'ring' of the bolt at angle 'a': a circle around the beam,
+// sheared along it so it tilts towards angle 'tilt_at'.
+static void rail_ring_point(const rail_bolt_t *b, const vec3_t center,
+                            float radius, float a, float tilt, float tilt_at,
+                            vec3_t out)
+{
+    float c = cosf(a), s = sinf(a);
+
+    VectorMA(center, radius * c, b->right, out);
+    VectorMA(out, radius * s, b->up, out);
+    VectorMA(out, tilt * radius * cosf(a - tilt_at), b->dir, out);
+}
+
+static void CL_RailBoltSparks(const rail_bolt_t *b)
+{
+    color_t hot = rail_whiten(b->color, 0.5f);
+    int count = Q_clip(b->len / 20, 8, 160);
+
+    // thrown off the rings along the beam
+    for (int i = 0; i < count; i++) {
+        cparticle_t *p = CL_AllocParticle();
+        if (!p)
+            return;
+
+        float d = frand() * b->len;
+        float a = frand() * 2 * M_PIf;
+        vec3_t radial;
+        VectorScale(b->right, cosf(a), radial);
+        VectorMA(radial, sinf(a), b->up, radial);
+
+        float r = b->radius * min(d / RAIL_RING_RAMP, 1.0f);
+        float speed = 30 + frand() * 70;
+        p->time = cl.time;
+        VectorMA(b->start, d, b->dir, p->org);
+        VectorMA(p->org, r, radial, p->org);
+        VectorScale(radial, speed, p->vel);
+        VectorMA(p->vel, crand() * 30, b->dir, p->vel);
+        p->vel[2] += 20;
+        VectorSet(p->accel, 0, 0, -PARTICLE_GRAVITY * 2);
+        p->color = -1;
+        p->rgba = (Q_rand() & 3) ? hot : rail_whiten(b->color, 0.9f);
+        p->scale = 0.5f;
+        p->alpha = 1.0f;
+        p->alphavel = -1.0f / (0.35f + frand() * 0.5f);
+    }
+
+    // a burst where it hits
+    vec3_t end;
+    VectorMA(b->start, b->len, b->dir, end);
+    for (int i = 0; i < 32; i++) {
+        cparticle_t *p = CL_AllocParticle();
+        if (!p)
+            return;
+
+        p->time = cl.time;
+        VectorCopy(end, p->org);
+        for (int j = 0; j < 3; j++)
+            p->vel[j] = crand() * 140 - b->dir[j] * 60;
+        p->vel[2] += 40;
+        VectorSet(p->accel, 0, 0, -PARTICLE_GRAVITY * 2);
+        p->color = -1;
+        p->rgba = hot;
+        p->scale = 0.6f;
+        p->alpha = 1.0f;
+        p->alphavel = -1.0f / (0.3f + frand() * 0.4f);
+    }
+}
+
+static void CL_RailBolt(void)
+{
+    rail_bolt_t *b, *oldest = NULL;
+    int i;
+
+    for (i = 0, b = cl_railbolts; i < MAX_RAIL_BOLTS; i++, b++) {
+        if (cl.time - b->starttime >= b->lifetime)
+            break;
+        if (!oldest || b->starttime < oldest->starttime)
+            oldest = b;
+    }
+    if (i == MAX_RAIL_BOLTS)
+        b = oldest;
+
+    VectorCopy(te.pos1, b->start);
+    VectorSubtract(te.pos2, te.pos1, b->dir);
+    b->len = VectorNormalize(b->dir);
+    if (b->len < 1) {
+        b->lifetime = 0;
+        return;
+    }
+    MakeNormalVectors(b->dir, b->right, b->up);
+    b->radius = Cvar_ClampValue(cl_railring_radius, 1, 64);
+    b->starttime = cl.time;
+    b->lifetime = max(cl_railtrail_time->integer, 100);
+    b->seed = Q_rand();
+    b->color = railspiral_color;
+
+    CL_RailBoltSparks(b);
+}
+
+static void CL_AddRailBolt(const rail_bolt_t *b, int *budget)
+{
+    int age = cl.time - b->starttime;
+    int slot = cl.time / RAIL_FLICKER_MS;
+    float life = b->lifetime;
+
+    int rings = min((int)(b->len / RAIL_RING_SPACING), RAIL_RING_MAX);
+    if (rings < 1)
+        return;
+    float spacing = b->len / rings;
+
+    color_t glow = b->color;
+    color_t line = rail_whiten(b->color, 0.45f);
+    color_t spark = rail_whiten(b->color, 0.8f);
+
+    for (int i = 1; i <= rings; i++) {
+        float d = (i - 0.5f) * spacing + (i == 1 ? spacing * 0.5f : 0);
+        float ring_age = age - d / RAIL_BOLT_SPEED;
+        if (ring_age < 0)
+            break;      // the coil hasn't reached this far yet
+        float frac = ring_age / life;
+        if (frac >= 1)
+            continue;
+
+        uint32_t rs = b->seed ^ rail_hash(i);
+        float tilt = 0.15f + rail_rand(&rs) * 0.35f;
+        float tilt_at = rail_rand(&rs) * 2 * M_PIf;
+        float spin = (rail_rand(&rs) - 0.5f) * 6.0f;
+        float phase = rail_rand(&rs) * 2 * M_PIf + spin * ring_age * 0.001f;
+
+        // pops out in the first few frames, then slowly widens as it fades
+        float pop = min(ring_age / 60.0f, 1.0f);
+        float ramp = min(d / RAIL_RING_RAMP, 1.0f);
+        float radius = b->radius * ramp * (0.5f + 0.5f * pop + 0.6f * frac);
+        float fade = 1 - frac;
+        float alpha = fade * fade * (1 + 0.8f * max(0.0f, 1 - ring_age / 120.0f));
+
+        vec3_t center, to_view;
+        VectorMA(b->start, d, b->dir, center);
+        VectorSubtract(center, cl.refdef.vieworg, to_view);
+        float dist = VectorLength(to_view);
+        int segs = dist < 384 ? 16 : dist < 1024 ? 10 : 6;
+        if (*budget < segs * 2)
+            return;
+
+        // the ring wavers a little, as if crackling
+        vec3_t pts[16];
+        uint32_t js = rs ^ rail_hash(slot + i * 7919);
+        for (int k = 0; k < segs; k++) {
+            float a = phase + k * (2 * M_PIf / segs);
+            float jitter = (rail_rand(&js) - 0.5f) * 0.22f;
+            rail_ring_point(b, center, radius * (1 + jitter), a, tilt, tilt_at, pts[k]);
+        }
+        for (int k = 0; k < segs; k++) {
+            const float *p0 = pts[k], *p1 = pts[(k + 1) % segs];
+            rail_streak(p0, p1, 2.4f, glow, alpha * 0.35f, budget);
+            rail_streak(p0, p1, 0.7f, line, alpha, budget);
+        }
+    }
+
+    // Lightning: short jagged arcs around the coil, reshaped every flicker,
+    // dying out before the rings do.
+    float arc_fade = 1 - age / (life * 0.7f);
+    if (arc_fade <= 0)
+        return;
+
+    float reach = min(age * RAIL_BOLT_SPEED, b->len);
+    int arcs = Q_clip(reach / 40, 3, 48);
+    uint32_t as = b->seed ^ rail_hash(slot * 31 + 17);
+    for (int i = 0; i < arcs && *budget > 0; i++) {
+        float d = rail_rand(&as) * reach;
+        float ramp = min(d / RAIL_RING_RAMP, 1.0f);
+        if (ramp < 0.3f || rail_rand(&as) > arc_fade + 0.2f)
+            continue;
+
+        float a = rail_rand(&as) * 2 * M_PIf;
+        float r = b->radius * ramp * (0.6f + rail_rand(&as) * 0.7f);
+        int steps = 3 + (int)(rail_rand(&as) * 4);
+        float da = (rail_rand(&as) < 0.5f ? -1 : 1) * (0.25f + rail_rand(&as) * 0.3f);
+        float alpha = arc_fade * (0.6f + rail_rand(&as) * 0.6f);
+
+        vec3_t prev, cur;
+        VectorMA(b->start, d, b->dir, prev);
+        VectorMA(prev, r * cosf(a), b->right, prev);
+        VectorMA(prev, r * sinf(a), b->up, prev);
+        for (int k = 0; k < steps; k++) {
+            a += da * (0.5f + rail_rand(&as));
+            r *= 0.85f + rail_rand(&as) * 0.35f;
+            d += (rail_rand(&as) - 0.5f) * 14;
+            VectorMA(b->start, d, b->dir, cur);
+            VectorMA(cur, r * cosf(a), b->right, cur);
+            VectorMA(cur, r * sinf(a), b->up, cur);
+            rail_streak(prev, cur, 1.6f, glow, alpha * 0.4f, budget);
+            rail_streak(prev, cur, 0.45f, spark, alpha, budget);
+            VectorCopy(cur, prev);
+        }
+    }
+}
+
+static void CL_AddRailBolts(void)
+{
+    int budget = RAIL_STREAK_BUDGET;
+    rail_bolt_t *b;
+    int i;
+
+    for (i = 0, b = cl_railbolts; i < MAX_RAIL_BOLTS; i++, b++) {
+        if (cl.time - b->starttime >= b->lifetime || cl.time < b->starttime)
+            continue;
+        CL_AddRailBolt(b, &budget);
+    }
+}
+
 static void CL_RailTrail(void)
 {
     if (!cl_railtrail_type->integer && te.type != TE_RAILTRAIL2) {
@@ -1258,8 +1544,10 @@ static void CL_RailTrail(void)
         if (cl_railcore_width->integer > 0) {
             CL_RailCore();
         }
-        if (cl_railtrail_type->integer > 1) {
+        if (cl_railtrail_type->integer == 2) {
             CL_RailSpiral();
+        } else if (cl_railtrail_type->integer >= 3) {
+            CL_RailBolt();
         }
     }
 }
@@ -1998,6 +2286,7 @@ void CL_AddTEnts(void)
     CL_AddExplosions();
     CL_ProcessSustain();
     CL_AddLasers();
+    CL_AddRailBolts();
 }
 
 /*
@@ -2010,6 +2299,7 @@ void CL_ClearTEnts(void)
     CL_ClearBeams();
     CL_ClearExplosions();
     CL_ClearLasers();
+    CL_ClearRailBolts();
     CL_ClearSustains();
 }
 
@@ -2032,4 +2322,5 @@ void CL_InitTEnts(void)
     cl_railspiral_color->generator = Com_Color_g;
     cl_railspiral_color_changed(cl_railspiral_color);
     cl_railspiral_radius = Cvar_Get("cl_railspiral_radius", "3", 0);
+    cl_railring_radius = Cvar_Get("cl_railring_radius", "8", 0);
 }
