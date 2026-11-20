@@ -24,7 +24,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define MAX_DLIGHTS     64
 #define MAX_ENTITIES    2048
 #define MAX_PARTICLES   8192
-#define MAX_STREAKS     4096
+#define MAX_STREAKS     8192
 #define MAX_LIGHTSTYLES 256
 
 #define POWERSUIT_SCALE     4.0f

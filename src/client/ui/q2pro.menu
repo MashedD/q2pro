@@ -286,6 +286,8 @@ begin railtrail
         "spiral radius" cl_railspiral_radius 1 6 1
     range --status "Radius of the energy bolt's rings" \
         "ring radius" cl_railring_radius 4 24 1
+    range --status "How brightly the energy bolt lights its surroundings. 0 is no light" \
+        "bolt light" cl_railbolt_light 0 1 0.1
     strings --status "Color of the solid core" \
         "core color" cl_railcore_color \
         black red green yellow blue cyan magenta white
