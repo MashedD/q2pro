@@ -29,6 +29,20 @@ layout(location = 1) out vec4 out_bloom;
 
 layout(constant_id = 0) const bool fast_path = false;
 
+// How far along the face this point is from the light, as the OpenGL
+// renderer spreads dynamic light over a lightmap: how far the light is off
+// the face has already been taken off its brightness.
+float dlight_spread(vec3 origin)
+{
+    vec3 delta = origin - v_position;
+    vec3 n = cross(dFdx(v_position), dFdy(v_position));
+    float len = length(n);
+    if (len < 1e-8)
+        return length(delta);
+    n /= len;
+    return length(delta - dot(delta, n) * n);
+}
+
 vec3 dynamic_light()
 {
     if (fast_path)
@@ -38,7 +52,7 @@ vec3 dynamic_light()
         float range = pc.dlight_origins[i].w;
         if (range <= 0.0)
             break;
-        float falloff = max(1.0 - distance(v_position, pc.dlight_origins[i].xyz) / range,
+        float falloff = max(1.0 - dlight_spread(pc.dlight_origins[i].xyz) / range,
                             0.0);
         light += pc.dlight_colors[i].rgb * (pc.dlight_colors[i].w * falloff / 255.0);
     }

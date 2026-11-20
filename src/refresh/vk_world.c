@@ -288,24 +288,31 @@ static void vk_world_face_light_origin(const dlight_t *light, const entity_t *en
     vk_transform_to_entity_local(light->origin, ent, axis, origin);
 }
 
+// How brightly the light reaches the face, and how far along it, as the
+// OpenGL renderer works it out for a lightmap: 'rad' is its brightness at the
+// point of the face's plane nearest to it, and it fades out to nothing
+// 'minlight' units along the face from there. The shaders spread it over the
+// face the same way, so a face is lit wherever this finds it reached.
+static void vk_world_dynamic_light_reach(const dlight_t *light, float plane_dist,
+                                         float *rad, float *minlight)
+{
+    *rad = light->intensity - fabsf(plane_dist);
+    if (vk_dlight_falloff && vk_dlight_falloff->integer)
+        *minlight = *rad - DLIGHT_CUTOFF * 0.8f;
+    else
+        *minlight = *rad - DLIGHT_CUTOFF;
+}
+
 static float vk_world_dynamic_light_fraction(const dlight_t *light,
                                              const mface_t *face,
                                              const vec3_t origin,
                                              float plane_dist)
 {
-    float rad = light->intensity - fabsf(plane_dist);
-    float minlight, scale, dist;
+    float rad, minlight, dist;
 
-    if (rad < DLIGHT_CUTOFF)
+    vk_world_dynamic_light_reach(light, plane_dist, &rad, &minlight);
+    if (rad < DLIGHT_CUTOFF || minlight <= 0.0f)
         return 0.0f;
-
-    if (vk_dlight_falloff && vk_dlight_falloff->integer) {
-        minlight = rad - DLIGHT_CUTOFF * 0.8f;
-        scale = rad / minlight;
-    } else {
-        minlight = rad - DLIGHT_CUTOFF;
-        scale = 1.0f;
-    }
 
     vec3_t point;
     vec2_t local;
@@ -319,12 +326,16 @@ static float vk_world_dynamic_light_fraction(const dlight_t *light,
     t = Q_clipf(local[1], 0.0f, max(face->lm_height - 1, 0));
     sd = fabsf(local[0] - s) * face->lm_scale[0];
     td = fabsf(local[1] - t) * face->lm_scale[1];
-    dist = sd > td ? sd + td * 0.5f : td + sd * 0.5f;
+    // straight-line distance, as the shaders measure it, rather than the
+    // OpenGL renderer's octagonal one, which is a little longer: with that,
+    // faces the shaders would light could be left out, and the light would
+    // end in a straight line along their edges
+    dist = sqrtf(sd * sd + td * td);
 
     if (dist >= minlight)
         return 0.0f;
 
-    return rad - dist * scale;
+    return rad * (1.0f - dist / minlight);
 }
 
 static bool vk_afterglow_rt_active(void)
@@ -451,16 +462,17 @@ static int vk_world_insert_dynamic_light(const vk_world_face_t *face,
         (count >= VK_WORLD_MAX_DLIGHTS && f <= scores[slot]))
         return count;
 
+    float rad, minlight;
+    vk_world_dynamic_light_reach(light, plane_dist, &rad, &minlight);
+
     scores[slot] = f;
     if (origins) {
         VectorCopy(light_origin, origins[slot]);
-        origins[slot][3] = max(light->intensity - DLIGHT_CUTOFF *
-            ((vk_dlight_falloff && vk_dlight_falloff->integer) ? 0.8f : 1.0f),
-            0.0f);
+        origins[slot][3] = minlight;
     }
     if (colors) {
         VectorCopy(light->color, colors[slot]);
-        colors[slot][3] = afterglow ? -light->intensity : light->intensity;
+        colors[slot][3] = afterglow ? -rad : rad;
     }
     return count < VK_WORLD_MAX_DLIGHTS ? count + 1 : count;
 }

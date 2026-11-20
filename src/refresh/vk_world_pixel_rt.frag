@@ -326,7 +326,12 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
             break;
         vec3 delta = pc.dlight_origins[i].xyz - v_position;
         float distance_to_light = length(delta);
-        float falloff = max(1.0 - distance_to_light / range, 0.0);
+        // Spread over the face as the OpenGL renderer spreads dynamic light
+        // over a lightmap: how far the light is off the face has already
+        // been taken off its brightness.
+        float spread = length(delta -
+            dot(delta, geometric_normal) * geometric_normal);
+        float falloff = max(1.0 - spread / range, 0.0);
         vec3 oriented_normal = dot(geometric_normal, delta) >= 0.0 ?
             geometric_normal : -geometric_normal;
         if (falloff <= 0.0)
