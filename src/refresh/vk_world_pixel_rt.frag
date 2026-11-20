@@ -59,6 +59,15 @@ float trace_hit_distance(vec3 origin, vec3 direction, float max_distance)
     return rayQueryGetIntersectionTEXT(query, true);
 }
 
+// The light's own brightness, before the renderer took off how far it is
+// from this face, so that effects for bright lights switch on the same on
+// every face rather than face by face.
+float dlight_intensity(int i, vec3 normal)
+{
+    return abs(pc.dlight_colors[i].w) +
+        abs(dot(pc.dlight_origins[i].xyz - v_position, normal));
+}
+
 float dynamic_ray_bias(vec3 position)
 {
     float magnitude = max(abs(position.x),
@@ -356,7 +365,7 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
         light += radiance;
         if (cached_afterglow)
             afterglow += radiance;
-        if (!cached_afterglow && abs(pc.dlight_colors[i].w) >= 160.0 &&
+        if (!cached_afterglow && dlight_intensity(i, geometric_normal) >= 160.0 &&
             ripple_control > 0.001) {
             float phase = fract(distance_to_light * 0.0125 -
                                 pc.dlight.w * 1.25);
@@ -817,7 +826,7 @@ void main()
         float scattering_control = rt_light_scattering_control(pc.rt_params.x);
         if (scattering_control > 0.001) {
             fog_scatter = surface_lighting * scattering_control * 0.16;
-            if (abs(pc.dlight_colors[0].w) >= 160.0 &&
+            if (dlight_intensity(0, normal) >= 160.0 &&
                 pc.dlight_origins[0].w > 0.0) {
                 vec3 view_ray = normalize(pc.dlight.xyz - v_position);
                 vec3 light_ray = normalize(pc.dlight_origins[0].xyz -

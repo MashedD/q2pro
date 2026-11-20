@@ -431,12 +431,21 @@ void vk_update_afterglow(const refdef_t *fd)
     }
 }
 
+// Orders a face's lights the same way on every face: brightest first, and
+// among equal ones, as they come in the frame's list.
+static float vk_world_dynamic_light_key(const dlight_t *light, int index)
+{
+    return light->intensity - index * (1.0f / 1024);
+}
+
 static int vk_world_insert_dynamic_light(const vk_world_face_t *face,
                                          const dlight_t *light,
                                          bool afterglow,
                                          const entity_t *ent,
                                          const vec3_t axis[3], int count,
+                                         float key,
                                          float scores[VK_WORLD_MAX_DLIGHTS],
+                                         float keys[VK_WORLD_MAX_DLIGHTS],
                                          float origins[VK_WORLD_MAX_DLIGHTS][4],
                                          float colors[VK_WORLD_MAX_DLIGHTS][4])
 {
@@ -456,6 +465,7 @@ static int vk_world_insert_dynamic_light(const vk_world_face_t *face,
         if (colors)
             memcpy(colors[slot], colors[slot - 1], sizeof(colors[slot]));
         scores[slot] = scores[slot - 1];
+        keys[slot] = keys[slot - 1];
         slot--;
     }
     if (slot >= VK_WORLD_MAX_DLIGHTS ||
@@ -466,6 +476,7 @@ static int vk_world_insert_dynamic_light(const vk_world_face_t *face,
     vk_world_dynamic_light_reach(light, plane_dist, &rad, &minlight);
 
     scores[slot] = f;
+    keys[slot] = key;
     if (origins) {
         VectorCopy(light_origin, origins[slot]);
         origins[slot][3] = minlight;
@@ -484,6 +495,7 @@ static int vk_world_dynamic_lights(const vk_world_face_t *face,
                                    float colors[VK_WORLD_MAX_DLIGHTS][4])
 {
     float scores[VK_WORLD_MAX_DLIGHTS] = { 0.0f };
+    float keys[VK_WORLD_MAX_DLIGHTS] = { 0.0f };
     int count = 0;
 
     if (origins)
@@ -498,7 +510,8 @@ static int vk_world_dynamic_lights(const vk_world_face_t *face,
 
     for (int i = 0; i < fd->num_dlights && fd->dlights; i++)
         count = vk_world_insert_dynamic_light(face, &fd->dlights[i], false,
-            ent, axis, count, scores, origins, colors);
+            ent, axis, count, vk_world_dynamic_light_key(&fd->dlights[i], i),
+            scores, keys, origins, colors);
 
     float duration = vk_rt_afterglow ?
         Cvar_ClampValue(vk_rt_afterglow, 0.0f, 1.0f) : 0.0f;
@@ -516,7 +529,32 @@ static int vk_world_dynamic_lights(const vk_world_face_t *face,
             light.intensity = DLIGHT_CUTOFF +
                 max(light.intensity - DLIGHT_CUTOFF, 0.0f) * fade;
             count = vk_world_insert_dynamic_light(face, &light, true, ent,
-                axis, count, scores, origins, colors);
+                axis, count,
+                vk_world_dynamic_light_key(&light, MAX_DLIGHTS + i),
+                scores, keys, origins, colors);
+        }
+    }
+
+    // The faces' strongest lights are picked face by face, but the shaders
+    // treat the first one specially (softer ray traced shadows, light
+    // scattering), so give them the same order on every face: brightest
+    // first. Otherwise neighboring faces could treat the same light
+    // differently, leaving edges along the faces in its light.
+    if (origins && colors) {
+        for (int i = 1; i < count; i++) {
+            for (int j = i; j > 0 && keys[j] > keys[j - 1]; j--) {
+                float t = keys[j];
+                keys[j] = keys[j - 1];
+                keys[j - 1] = t;
+                for (int k = 0; k < 4; k++) {
+                    t = origins[j][k];
+                    origins[j][k] = origins[j - 1][k];
+                    origins[j - 1][k] = t;
+                    t = colors[j][k];
+                    colors[j][k] = colors[j - 1][k];
+                    colors[j - 1][k] = t;
+                }
+            }
         }
     }
 
