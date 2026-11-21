@@ -24,6 +24,23 @@ static float vk_world_face_alpha(const mface_t *face)
 
 #define VK_BACKFACE_EPSILON 0.01f
 
+// Binds the material map of a world texture for the ray tracing shader, or
+// the default one that marks it as having none.
+static void vk_bind_world_material(VkCommandBuffer cmd, bool ray_pixel,
+                                   unsigned texnum)
+{
+    if (!ray_pixel)
+        return;
+
+    const vk_texture_t *map = NULL;
+    if (texnum < MAX_RIMAGES && vk.material_texnum[texnum])
+        map = vk_texture_for_index(vk.material_texnum[texnum], false);
+    VkDescriptorSet set = map && map->descriptor_set ? map->descriptor_set :
+        vk.material_default_texture.descriptor_set;
+    if (set)
+        vk_bind_pixel_world_descriptor(cmd, 4, set);
+}
+
 static bool vk_world_face_backfacing(const mface_t *face, const vec3_t vieworg)
 {
     vec_t dot = PlaneDiffFast(vieworg, face->plane);
@@ -1137,6 +1154,7 @@ void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             vk_bind_pixel_world_descriptor(cmd, 0, texture->descriptor_set);
         else
             vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+        vk_bind_world_material(cmd, ray_pixel, batch->texture_index);
         uint32_t bound_texture_index = batch->texture_index;
 
         if (batch->first_face > vk.world.face_count ||
@@ -1169,6 +1187,7 @@ void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, group_pipeline); \
                 if (pixel_world) { \
                     vk_bind_pixel_world_descriptor(cmd, 0, texture->descriptor_set); \
+                    vk_bind_world_material(cmd, ray_pixel, batch->texture_index); \
                     vk_bind_pixel_world_descriptor(cmd, 1, \
                         vk.world.pixel_lightmap_texture.descriptor_set); \
                     if (group_glow && group_glow_texture) \
@@ -1345,6 +1364,7 @@ void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     vk_bind_pixel_world_descriptor(cmd, 0, texture->descriptor_set);
                 else
                     vk_bind_texture_descriptor(cmd, texture->descriptor_set);
+                vk_bind_world_material(cmd, ray_pixel, image->texnum);
                 bound_texture_index = image->texnum;
             }
 
@@ -1449,6 +1469,7 @@ void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                         vk_bind_pixel_world_descriptor(cmd, 0, texture->descriptor_set);
                         vk_bind_pixel_world_descriptor(cmd, 1,
                                                        vk.world.pixel_lightmap_texture.descriptor_set);
+                        vk_bind_world_material(cmd, ray_pixel, image->texnum);
                         bound_texture_index = image->texnum;
                     }
                 }

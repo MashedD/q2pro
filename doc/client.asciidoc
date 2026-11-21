@@ -1090,6 +1090,20 @@ materials/rt_reflections.mat::
     translucent surfaces never reflect. The release packages include a file
     for the original game's textures.
 
+vk_rt_materials::
+    Uses material maps for the relief and roughness of world surfaces with
+    ray tracing and ‘vk_pixel_lightmaps 2’. For a texture
+    `textures/<name>`, the map is `textures/<name>_n.png`: a tangent space
+    normal map in RGB (X along the texture's width, Y down its height, 128
+    flat) and a roughness shift in alpha, where 128 keeps the value from
+    ‘materials/rt_reflections.mat’, 0 is smoother and 255 rougher. The relief
+    shows under dynamic lights, glowing surfaces and highlights, and gently
+    under lightmaps, as if lit from above. Textures without a map, liquids
+    and alpha-tested surfaces keep the shader's own estimate from the
+    texture's brightness. Changing it reloads the textures. The tool
+    `tools/make-pbr-materials.py` makes such maps from a texture pack. No
+    maps are included. Default value is 0 (off).
+
 Liquids and atmosphere:
 
 vk_rt_liquids::

@@ -86,6 +86,7 @@ cvar_t *vk_rt_specular;
 cvar_t *vk_rt_liquids;
 cvar_t *vk_rt_bounce;
 cvar_t *vk_rt_caustics;
+cvar_t *vk_rt_materials;
 cvar_t *vk_rt_shadow_fringe;
 cvar_t *vk_rt_light_ripples;
 cvar_t *vk_rt_rail_impact;
@@ -2582,6 +2583,8 @@ bool VKR_Init(bool total)
     vk_rt_liquids = Cvar_Get("vk_rt_liquids", "0.65", CVAR_ARCHIVE);
     vk_rt_bounce = Cvar_Get("vk_rt_bounce", "0.65", CVAR_ARCHIVE);
     vk_rt_caustics = Cvar_Get("vk_rt_caustics", "0.65", CVAR_ARCHIVE);
+    vk_rt_materials = Cvar_Get("vk_rt_materials", "0",
+                               CVAR_ARCHIVE | CVAR_FILES);
     vk_rt_shadow_fringe = Cvar_Get("vk_rt_shadow_fringe", "0.6", CVAR_ARCHIVE);
     vk_rt_light_ripples = Cvar_Get("vk_rt_light_ripples", "0.6", CVAR_ARCHIVE);
     vk_rt_rail_impact = Cvar_Get("vk_rt_rail_impact", "0", CVAR_ARCHIVE);
@@ -2691,6 +2694,9 @@ bool VKR_Init(bool total)
     if (!vk_create_impact_texture())
         Com_WPrintf("Couldn't create Vulkan impact texture: %s\n",
                     Com_GetLastError());
+    if (!vk_create_material_default_texture())
+        Com_WPrintf("Couldn't create Vulkan material texture: %s\n",
+                    Com_GetLastError());
 
     r_registration_sequence = 1;
     IMG_Init();
@@ -2780,6 +2786,7 @@ void VKR_Shutdown(bool total)
     vk_destroy_texture_resource(&vk.particle_texture);
     vk_destroy_texture_resource(&vk.beam_texture);
     vk_destroy_texture_resource(&vk.shockwave_texture);
+    vk_destroy_texture_resource(&vk.material_default_texture);
     vk_destroy_texture_resource(&vk.impact_texture);
 
     vk_destroy_swapchain();

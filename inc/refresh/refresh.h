@@ -232,6 +232,7 @@ typedef enum {
     IF_DEFAULT_FLARE    = BIT(9),   // default flare hack
     IF_CUBEMAP          = BIT(10),  // cubemap (or part of it)
     IF_CLASSIC_SKY      = BIT(11),  // split in two halves
+    IF_MATERIAL         = BIT(12),  // material map: data, not color
 
     // these flags only affect R_RegisterImage() behavior,
     // and are not stored in image

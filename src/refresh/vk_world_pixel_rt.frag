@@ -36,6 +36,9 @@ layout(std430, set = 3, binding = 1) readonly buffer SurfaceLights {
     uint light_indices[];
 };
 layout(set = 3, binding = 2) uniform sampler2D rt_static_sampler;
+// Material map (vk_rt_materials): tangent space normal in RGB, roughness
+// shift in alpha. The default map has a zero normal, meaning none.
+layout(set = 4, binding = 0) uniform sampler2D material_sampler;
 
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in vec2 v_uv;
@@ -688,6 +691,13 @@ void main()
     float material_reflect = material.x;
     float material_roughness = material.y;
     vec4 material_texel = texture(tex_sampler, uv);
+    vec4 material_map = texture(material_sampler, uv);
+    // Texture axes in world space, for the material map's normals. Faces
+    // are flat, so these derivatives are the same over the whole face.
+    vec3 dp1 = dFdx(v_position);
+    vec3 dp2 = dFdy(v_position);
+    vec2 duv1 = dFdx(v_uv);
+    vec2 duv2 = dFdy(v_uv);
     vec3 lm = pc.lm_scale.x < 0.0 ? vec3(1.0) :
         texture(lm_sampler, v_lmuv).rgb;
     vec4 static_lighting = surface_info.z != 0u ?
@@ -716,6 +726,31 @@ void main()
 #endif
     vec3 shading_normal = material_bump_normal(v_position, normal,
         material_texel.rgb, material_reflect, material_roughness, bump_mask);
+    float material_relief = 1.0;
+    if (material_map.b > 0.25 && bump_mask > 0.5) {
+        vec3 tn = material_map.rgb * 2.0 - 1.0;
+        vec3 dp2perp = cross(dp2, normal);
+        vec3 dp1perp = cross(normal, dp1);
+        vec3 tangent = dp2perp * duv1.x + dp1perp * duv2.x;
+        vec3 bitangent = dp2perp * duv1.y + dp1perp * duv2.y;
+        float frame_scale = inversesqrt(max(max(dot(tangent, tangent),
+                                                dot(bitangent, bitangent)),
+                                            1e-20));
+        shading_normal = normalize((tangent * tn.x + bitangent * tn.y) *
+                                   frame_scale + normal * tn.z);
+        material_roughness = clamp(material_roughness +
+                                   (material_map.a - 0.5) * 0.8, 0.04, 1.0);
+
+        // Lightmaps have no direction, so let the relief show under them
+        // as if lit from above and slightly to one side. Only the tilt along
+        // the face counts, which averages out, so the face as a whole keeps
+        // its brightness.
+        const vec3 relief_light = normalize(vec3(0.3, 0.2, 1.0));
+        vec3 tilt = shading_normal - normal * dot(shading_normal, normal);
+        float facing = max(abs(dot(normal, relief_light)), 0.35);
+        material_relief = clamp(1.0 + 0.9 * dot(tilt, relief_light) / facing,
+                                0.55, 1.45);
+    }
     float lm_luma = dot(lm, vec3(0.2126, 0.7152, 0.0722));
     float ao_weight = mix(0.75, 1.0,
                           smoothstep(0.05, 0.35, lm_luma));
@@ -848,7 +883,7 @@ void main()
                     scattering_control * 0.30;
             }
         }
-        lm *= ao;
+        lm *= ao * material_relief;
         vec3 base_lighting = (lm + pc.scroll.www) * pc.color.rgb;
 
         // Keep the raster/lightmap result authoritative, then add localized,

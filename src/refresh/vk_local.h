@@ -771,6 +771,9 @@ typedef struct {
     vk_texture_t particle_texture;
     vk_texture_t beam_texture;
     vk_texture_t shockwave_texture;
+    vk_texture_t material_default_texture;
+    // material map texture for each world texture, 0 when it has none
+    uint16_t material_texnum[MAX_RIMAGES];
     vk_texture_t impact_texture;
     vk_mesh_t skybox;
     vk_mesh_t sprite_quad;
@@ -818,7 +821,7 @@ typedef struct {
     bool timestamp_valid[VK_MAX_FRAMES_IN_FLIGHT];
     VkPipeline bound_pipeline;
     VkDescriptorSet bound_texture_descriptor;
-    VkDescriptorSet bound_pixel_world_descriptors[4];
+    VkDescriptorSet bound_pixel_world_descriptors[5];
     VkBuffer bound_vertex_buffers[3];
     VkDeviceSize bound_vertex_offsets[3];
     VkBuffer bound_index_buffer;
@@ -899,6 +902,7 @@ extern cvar_t *vk_rt_ao;
 extern cvar_t *vk_rt_atmosphere;
 extern cvar_t *vk_rt_bounce;
 extern cvar_t *vk_rt_caustics;
+extern cvar_t *vk_rt_materials;
 extern cvar_t *vk_rt_debug;
 extern cvar_t *vk_rt_dust;
 extern cvar_t *vk_rt_dust_lighting;
@@ -1160,6 +1164,7 @@ bool vk_create_postprocess_sampler(VkSampler *sampler);
 bool vk_create_sampler(VkSampler *sampler);
 bool vk_create_shell_texture(void);
 bool vk_create_shockwave_texture(void);
+bool vk_create_material_default_texture(void);
 bool vk_create_sky_sampler(VkSampler *sampler);
 bool vk_upload_cubemap(image_t *image, const byte *pic);
 bool vk_upload_texture(image_t *image, byte *pic);

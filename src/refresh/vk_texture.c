@@ -66,6 +66,10 @@ static void vk_resample_texture(const byte *in, int inwidth, int inheight,
 static void vk_color_transform_texture(byte *pic, int width, int height,
                                        imagetype_t type, imageflags_t flags)
 {
+    // Material maps hold normals and roughness, not colors.
+    if (flags & IF_MATERIAL)
+        return;
+
     bool world = type == IT_WALL && !(flags & IF_TURBULENT);
     bool invert = world && vk_invert && vk_invert->integer;
     bool software_gamma = !(r_config.flags & QVF_GAMMARAMP);
@@ -306,7 +310,8 @@ static VkSampler vk_sampler_for_image(const image_t *image)
             return vk.nearest_sampler ? vk.nearest_sampler : vk.sampler;
     }
 
-    if (image->type == IT_WALL || image->type == IT_SKIN)
+    if (image->type == IT_WALL || image->type == IT_SKIN ||
+        (image->flags & IF_MATERIAL))
         return vk.sampler;
 
     return vk.postprocess_sampler ? vk.postprocess_sampler : vk.sampler;
@@ -712,7 +717,7 @@ bool vk_upload_texture(image_t *image, byte *pic)
     image->upload_height = scaled_height;
 
     bool mipmaps = image->type == IT_WALL || image->type == IT_SKIN ||
-                   upscale_level != 0;
+                   (image->flags & IF_MATERIAL) || upscale_level != 0;
     bool ok = vk_upload_texture_data(texture, scaled_width, scaled_height, scaled,
                                      mipmaps);
     if (scaled != pic)
@@ -1088,6 +1093,21 @@ bool vk_create_shockwave_texture(void)
 
     vk_update_texture_descriptor_with_sampler(&vk.shockwave_texture,
                                                vk.postprocess_sampler);
+    return true;
+}
+
+// Bound for world textures without a material map: a normal with zero
+// length tells the ray tracing shader that there is none.
+bool vk_create_material_default_texture(void)
+{
+    uint32_t pixel = MakeColor(128, 128, 0, 128);
+
+    if (!vk_upload_texture_data(&vk.material_default_texture, 1, 1, &pixel,
+                                false))
+        return false;
+
+    vk_update_texture_descriptor_with_sampler(&vk.material_default_texture,
+                                               vk.sampler);
     return true;
 }
 
