@@ -507,6 +507,11 @@ cl_hit_markers::
       - 0 — hit marker effects disabled
       - 1 — draw hit marker
       - 2 — draw hit marker and play hit sound
++
+The value is also sent to the server in the userinfo. Game modules can
+read it to send hit markers (‘TE_DAMAGE_DEALT’) only to clients with a
+non-zero value; clients without the key, such as older Q2PRO or R1Q2,
+drop the connection on that unknown temp entity.
 
 Sound Subsystem
 ~~~~~~~~~~~~~~~
