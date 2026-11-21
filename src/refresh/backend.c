@@ -11,6 +11,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include "common/common.h"
 #include "refresh/refresh.h"
 #include "gl_backend.h"
+#include "gl_device.h"
 #include "vk_backend.h"
 
 typedef struct refresh_backend_s {
@@ -204,10 +205,11 @@ bool R_Init(bool total)
 {
     cvar_t *vid_ref = Cvar_Get("vid_ref", "gl", CVAR_ARCHIVE | CVAR_REFRESH);
 
-    // The video menu lists Vulkan devices from this cvar. Register it here
-    // so the menu also works while OpenGL runs, and in builds without
-    // Vulkan, where it only offers "automatic".
-    Cvar_Get("vk_devicelist", "\"automatic\" \"\"", CVAR_ROM);
+    // The video menu lists GPUs from this cvar. Register it here so the
+    // menu also works while OpenGL runs, and in builds without Vulkan.
+    cvar_t *device_list = Cvar_Get("vk_devicelist", "\"automatic\" \"\"",
+                                   CVAR_ROM);
+    cvar_t *device = Cvar_Get("vk_device", "", CVAR_ARCHIVE | CVAR_REFRESH);
 
 #if USE_DEBUG
     Cmd_AddMacro("gl_viewcluster", R_ViewCluster_m);
@@ -219,6 +221,9 @@ bool R_Init(bool total)
         Com_Printf("No such renderer: %s, falling back to gl.\n", vid_ref->string);
         backend = &gl_backend;
     }
+
+    // OpenGL takes its GPU from the environment when it starts.
+    GL_SelectDevice(backend == &gl_backend, device, device_list);
 
     return backend->init(total);
 }

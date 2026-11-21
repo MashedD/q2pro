@@ -897,16 +897,25 @@ lighting, shadows, bloom, fog and the ‘gl_show*’ developer views, so switchi
 renderers keeps the look.
 
 vk_device::
-    Selects the GPU, either by its number in the device list printed when the
-    renderer starts, or by part of its name. Default value is empty (automatic):
-    follow the MESA_VK_DEVICE_SELECT and DRI_PRIME environment variables when
-    set, otherwise prefer the integrated GPU, which drives the display on
-    hybrid laptops, so frames don't have to be copied between GPUs. Changing it
-    restarts the renderer.
+    Selects the GPU, by its PCI vendor and device IDs in hexadecimal (such as
+    1002:743f, the form the video menu uses), by its number in the device list
+    printed when the Vulkan renderer starts, or by part of its name. Default
+    value is empty (automatic): Vulkan follows the MESA_VK_DEVICE_SELECT and
+    DRI_PRIME environment variables when set, otherwise prefers the integrated
+    GPU, which drives the display on hybrid laptops, so frames don't have to
+    be copied between GPUs. OpenGL uses the system's default GPU, or the one
+    DRI_PRIME names. Changing it restarts the renderer.
++
+The OpenGL renderer can select a GPU only on Linux with Mesa drivers: it
+sets DRI_PRIME to the GPU's PCI address before it starts. It understands
+the vendor:device form and part of a name from the PCI ID database, but not
+Vulkan's device numbers.
 
 vk_devicelist::
     Read-only list of the usable GPUs as label and value pairs, filled when the
-    Vulkan renderer starts. The video menu uses it.
+    renderer starts. The video menu uses it. Vulkan names the GPUs as its
+    driver does; OpenGL on Linux reads them from the system and the PCI ID
+    database. Elsewhere OpenGL only offers "automatic".
 
 vk_present_mode::
     How the Vulkan renderer hands finished frames to the display. Changing it

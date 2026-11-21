@@ -363,6 +363,13 @@ bool vk_pick_physical_device(void)
     for (const char *p = selector; numeric_selector && *p; p++)
         numeric_selector = *p >= '0' && *p <= '9';
     int selected_index = numeric_selector ? Q_atoi(selector) : -1;
+    // A PCI vendor:device pair, such as 1002:743f, which the menu uses so
+    // that OpenGL understands the same value.
+    unsigned pair_vendor = 0, pair_device = 0;
+    char pair_extra;
+    bool pair_selector = !numeric_selector &&
+        sscanf(selector, "%x:%x%c", &pair_vendor, &pair_device,
+               &pair_extra) == 2;
     int best_score = INT_MIN;
     bool requested_selected = false;
 
@@ -382,12 +389,31 @@ bool vk_pick_physical_device(void)
             if (*p == '"')
                 *p = '\'';
         }
-        Q_strlcat(device_list, va(" \"%s\" \"%u\"", props.deviceName, i),
-                  list_size);
+        // Two identical GPUs share a vendor:device pair, so those are
+        // listed by number.
+        bool unique = true;
+        for (uint32_t j = 0; j < count && unique; j++) {
+            VkPhysicalDeviceProperties other;
+            if (j == i)
+                continue;
+            vk.GetPhysicalDeviceProperties(devices[j], &other);
+            unique = other.vendorID != props.vendorID ||
+                other.deviceID != props.deviceID;
+        }
+        if (unique)
+            Q_strlcat(device_list, va(" \"%s\" \"%04x:%04x\"",
+                                      props.deviceName, props.vendorID,
+                                      props.deviceID), list_size);
+        else
+            Q_strlcat(device_list, va(" \"%s\" \"%u\"",
+                                      props.deviceName, i), list_size);
 
         bool requested = selector[0] &&
             ((numeric_selector && selected_index == (int)i) ||
-             (!numeric_selector && Q_stristr(props.deviceName, selector)));
+             (pair_selector && props.vendorID == pair_vendor &&
+              props.deviceID == pair_device) ||
+             (!numeric_selector && !pair_selector &&
+              Q_stristr(props.deviceName, selector)));
         if (!selector[0] && mesa_match)
             requested = props.vendorID == mesa_vendor &&
                 props.deviceID == mesa_device;
