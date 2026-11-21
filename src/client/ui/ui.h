@@ -314,6 +314,7 @@ extern uiStatic_t   uis;
 extern list_t       ui_menus;
 
 extern cvar_t       *ui_debug;
+extern cvar_t       *ui_cvar_names;
 
 void        UI_PushMenu(menuFrameWork_t *menu);
 void        UI_ForceMenuOff(void);

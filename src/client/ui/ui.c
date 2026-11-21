@@ -25,6 +25,7 @@ uiStatic_t    uis;
 LIST_DECL(ui_menus);
 
 cvar_t    *ui_debug;
+cvar_t    *ui_cvar_names;
 static cvar_t    *ui_open;
 static cvar_t    *ui_scale;
 
@@ -618,6 +619,8 @@ void UI_Init(void)
 
     ui_debug = Cvar_Get("ui_debug", "0", 0);
     ui_open = Cvar_Get("ui_open", "0", 0);
+    // menus are parsed when the UI starts, so a change reloads them
+    ui_cvar_names = Cvar_Get("ui_cvar_names", "0", CVAR_ARCHIVE | CVAR_FILES);
 
     UI_ModeChanged();
 
