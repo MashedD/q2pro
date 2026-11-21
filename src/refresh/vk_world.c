@@ -758,7 +758,8 @@ int vk_view_liquid_kind(const refdef_t *fd)
 #endif
 
 static void vk_world_rt_params(float *params, bool pixel_world,
-                               bool world_entity, const mface_t *face)
+                               bool world_entity,
+                               const vk_world_face_t *draw)
 {
     params[0] = 0.0f;
     params[1] = 0.0f;
@@ -769,7 +770,11 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         Cvar_ClampValue(vk_rt_specular, 0.0f, 1.0f) : 0.0f;
     float bounce = vk_rt_bounce ?
         Cvar_ClampValue(vk_rt_bounce, 0.0f, 1.0f) : 0.0f;
-    float caustics = world_entity && vk.view_liquid_kind && vk_rt_caustics ?
+    // Only faces in the water get caustics. Seen from below, the walls
+    // above the surface would otherwise ripple as though under water.
+    const mface_t *face = draw ? draw->face : NULL;
+    float caustics = world_entity && vk.view_liquid_kind && vk_rt_caustics &&
+        draw && draw->underwater ?
         Cvar_ClampValue(vk_rt_caustics, 0.0f, 1.0f) : 0.0f;
     float shadow_fringe = world_entity && vk_rt_shadow_fringe ?
         Cvar_ClampValue(vk_rt_shadow_fringe, 0.0f, 1.0f) : 0.0f;
@@ -847,7 +852,7 @@ static void vk_world_rt_params(float *params, bool pixel_world,
 #else
     (void)pixel_world;
     (void)world_entity;
-    (void)face;
+    (void)draw;
 #endif
 }
 
@@ -980,6 +985,7 @@ void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
         uint32_t group_tris = 0;
         bool group_active = false;
         bool group_glow = false;
+        bool group_underwater = false;
         VkPipeline group_pipeline = ray_pixel ? vk.pixel_world_rt_pipeline :
             (pixel_world ? vk.pixel_world_pipeline : pipeline);
         const vk_texture_t *group_glow_texture = NULL;
@@ -1105,7 +1111,12 @@ void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
             }
 
             if (can_group) {
+                // Caustics are set per group, so faces in and out of the
+                // water don't share one.
+                if (group_active && face->underwater != group_underwater)
+                    VK_FLUSH_WORLD_GROUP();
                 if (!group_active) {
+                    group_underwater = face->underwater;
                     group_count = 0;
                     group_faces = 0;
                     group_tris = 0;
@@ -1135,7 +1146,7 @@ void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                             (pixel_world ? vk.pixel_world_fast_pipeline : pipeline);
                     push.lm_scale[0] = pixel_world ? 1.0f : -1.0f;
                     push.lm_scale[1] = pixel_world ? 1.0f : -1.0f;
-                    vk_world_rt_params(push.rt_params, pixel_world, !ent, face->face);
+                    vk_world_rt_params(push.rt_params, pixel_world, !ent, face);
                 }
                 for (uint32_t k = 0; k < face->edge_count - 2; k++) {
                     vk.world.batch_index_data[group_count++] = face->first_vertex;
@@ -1219,7 +1230,7 @@ void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 push.lm_scale[0] = -1.0f;
                 push.lm_scale[1] = -1.0f;
             }
-            vk_world_rt_params(push.rt_params, pixel_world, !ent, face->face);
+            vk_world_rt_params(push.rt_params, pixel_world, !ent, face);
             if (pixel_world)
                 vk_push_pixel_world_constants(cmd, sizeof(push), &push);
             else

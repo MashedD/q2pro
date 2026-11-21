@@ -424,6 +424,25 @@ static bool vk_face_edges_are_valid(const bsp_t *bsp, const mface_t *face)
     return true;
 }
 
+// Tells whether the front side of a face lies in water. BSP leaves
+// split faces along the water's surface, so one point a unit in front of
+// the face's center decides for the whole face.
+static bool vk_world_face_underwater(const bsp_t *bsp, const mface_t *face,
+                                     const vec3_t center)
+{
+    if (!bsp || !bsp->nodes || !face || !face->plane)
+        return false;
+
+    vec3_t normal, point;
+    VectorCopy(face->plane->normal, normal);
+    if (face->drawflags & DSURF_PLANEBACK)
+        VectorNegate(normal, normal);
+    VectorMA(center, 1.0f, normal, point);
+
+    const mleaf_t *leaf = BSP_PointLeaf(bsp->nodes, point);
+    return leaf && (leaf->contents[0] & CONTENTS_WATER);
+}
+
 #if USE_VULKAN_RAYTRACING
 static float vk_polygon_area(const vk_vertex_t *vertices,
                              const vk_world_face_t *face)
@@ -1355,6 +1374,8 @@ static bool vk_build_world_mesh(bsp_t *bsp, const refdef_t *fd)
                 .first_index = first_index,
                 .index_count = face_index_count,
                 .center = { face->center[0], face->center[1], face->center[2] },
+                .underwater = vk_world_face_underwater(bsp, face->face,
+                                                       face->center),
             };
             world_batch->face_count++;
         }

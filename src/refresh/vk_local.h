@@ -165,6 +165,7 @@ typedef struct {
     vec3_t center;
     uint16_t pixel_lm_x, pixel_lm_y;
     uint16_t pixel_lm_w, pixel_lm_h;
+    bool underwater;    // front side faces a water leaf
 #if USE_VULKAN_RAYTRACING
     uint32_t rt_light_offset;
     uint8_t rt_light_count;
