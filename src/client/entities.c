@@ -2308,6 +2308,9 @@ void CL_CalcViewValues(void)
         LerpAngles(ops->viewangles, ps->viewangles, lerp, cl.refdef.viewangles);
     }
 
+    // where the player aims: kick is added to the view later, but not to shots
+    VectorCopy(cl.refdef.viewangles, cl.aim_angles);
+
     // interpolate blend
     if (cl.csr.extended && ops->blend[3])
         lerp_values(ops->blend, ps->blend, lerp, cl.refdef.screen_blend, 4);

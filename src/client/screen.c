@@ -2200,7 +2200,9 @@ static void SCR_ShotOffset(int *dx, int *dy)
     float side = info_hand->integer == 1 ? -8 :
         info_hand->integer == 2 ? 0 : 8;
 
-    AngleVectors(cl.predicted_angles, forward, right, NULL);
+    // The angles the view was built from, before kick: predicted in a game,
+    // interpolated from the recording in a demo, where prediction is off.
+    AngleVectors(cl.aim_angles, forward, right, NULL);
     VectorMA(cl.refdef.vieworg, 8, forward, start);
     VectorMA(start, side, right, start);
     start[2] -= 8;
