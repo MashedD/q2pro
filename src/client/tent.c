@@ -2493,7 +2493,10 @@ void CL_ClearTEnts(void)
 void CL_InitTEnts(void)
 {
     cl_muzzleflashes = Cvar_Get("cl_muzzleflashes", "1", 0);
-    cl_hit_markers = Cvar_Get("cl_hit_markers", "2", 0);
+    // In userinfo, so that game modules can send hit markers only to clients
+    // that handle them: older clients drop the connection on an unknown
+    // temp entity.
+    cl_hit_markers = Cvar_Get("cl_hit_markers", "2", CVAR_USERINFO);
     cl_railtrail_type = Cvar_Get("cl_railtrail_type", "0", 0);
     cl_railtrail_time = Cvar_Get("cl_railtrail_time", "1.0", 0);
     cl_railtrail_time->changed = cl_timeout_changed;
