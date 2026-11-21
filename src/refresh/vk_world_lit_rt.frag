@@ -186,13 +186,13 @@ vec3 underwater_caustics(vec3 position, vec3 normal, vec4 controls)
     vec3 axis = abs(normal);
     vec2 coord = axis.z >= axis.x && axis.z >= axis.y ? position.xy :
         (axis.x >= axis.y ? position.yz : position.xz);
-    vec2 p = coord * 0.045;
+    vec2 p = coord * 0.07;
     float time = pc.dlight.w;
     float wave0 = sin(dot(p, vec2(1.72, 1.13)) + time);
     float wave1 = sin(dot(p, vec2(-1.31, 1.91)) - time * 1.27);
     float wave2 = sin(dot(p, vec2(0.73, -2.08)) + time * 0.71);
     float ridge = 1.0 - abs((wave0 + wave1 + wave2) / 3.0);
-    float pattern = smoothstep(0.52, 0.88, ridge);
+    float pattern = smoothstep(0.62, 0.92, ridge);
     float orientation = 0.40 + 0.60 * axis.z;
     float distance_fade = 1.0 - smoothstep(512.0, 1152.0,
         distance(position, pc.dlight.xyz));
@@ -497,7 +497,11 @@ void main()
                                0.0, 1.0);
         vec3 raster_surface = out_color.rgb;
         const vec3 luma_weights = vec3(0.2126, 0.7152, 0.0722);
-        vec3 caustics = underwater_caustics(v_position, normal, controls);
+        // Caustics are light, so the surface's color takes them in.
+        // Adding them on top tinted dark texels blue and made textures
+        // look grainy.
+        vec3 caustics = underwater_caustics(v_position, normal, controls) *
+            material_texel.rgb * 3.0;
         float caustics_luma = dot(caustics, luma_weights);
         float caustics_cap = min(max(dot(raster_surface, luma_weights) * 0.22,
                                      0.015), 0.08);
