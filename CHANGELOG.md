@@ -6,6 +6,16 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-21
+
+### Added
+
+- `cl_hit_markers` is sent in the userinfo, so servers can send re-release
+  hit markers only to clients that show them. Older Q2PRO and R1Q2 dropped
+  the connection on their first hit when a server sent hit markers to
+  everyone. The OpenTDM, OpenFFA and 3zb2-zigflag forks use it from their
+  next releases, and can play `g_hit_sound` to other clients instead.
+
 ## [1.6.0] - 2026-11-21
 
 ### Added
@@ -326,7 +336,8 @@ All new options are off or keep upstream's behaviour by default.
 - A game library without the executable permission is reported with the
   `chmod` command that fixes it, instead of only "Permission denied".
 
-[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/MashedD/q2pro/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/MashedD/q2pro/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/MashedD/q2pro/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/MashedD/q2pro/compare/v1.4.2...v1.5.0
