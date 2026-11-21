@@ -807,7 +807,7 @@ static const image_t *GL_TextureAnimation(const mtexinfo_t *tex)
 
 static bool GL_IsLavaFace(const mface_t *surf)
 {
-    return strstr(surf->texinfo->name, "lava");
+    return strstr(surf->texinfo->name, "lava") != NULL;
 }
 
 static void GL_DrawFace(const mface_t *surf)
