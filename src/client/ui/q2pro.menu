@@ -178,6 +178,8 @@ begin rt_materials
         "specular highlights" vk_rt_specular 0 1 0.05
     range --status "Cool sheen on reflective materials" \
         "environment sheen" vk_rt_environment 0 1 0.05
+    toggle --status "Relief and roughness from textures/<name>_n.png maps; changing it reloads the map's textures" \
+        "material maps" vk_rt_materials
 end
 
 begin rt_atmosphere

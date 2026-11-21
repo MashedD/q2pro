@@ -214,6 +214,7 @@ bool vk_create_pixel_world_pipeline_layout(void)
         vk.texture_set_layout,
 #if USE_VULKAN_RAYTRACING
         vk.raytracing_active ? vk.rt_set_layout : vk.texture_set_layout,
+        vk.texture_set_layout,      // material map
 #endif
     };
     VkPushConstantRange push_range = {

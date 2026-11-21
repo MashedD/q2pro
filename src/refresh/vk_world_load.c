@@ -1769,9 +1769,33 @@ void vk_rebuild_world_lighting(void)
     vk_clear_world_lighting_modified();
 }
 
+// Loads textures/<name>_n for a world texture, the normal and roughness map
+// the ray tracing shader uses with vk_rt_materials. Liquids and textures
+// without one keep the shader's own estimate.
+static void vk_register_material_map(const mtexinfo_t *info)
+{
+    char buffer[MAX_QPATH];
+
+    if (!vk_rt_materials || !vk_rt_materials->integer ||
+        !vk.raytracing_active || info->image == R_NOTEXTURE ||
+        (info->c.flags & SURF_WARP))
+        return;
+
+    if (Q_concat(buffer, sizeof(buffer), "textures/", info->name,
+                 "_n.png") >= sizeof(buffer))
+        return;
+
+    const image_t *map = IMG_Find(buffer, IT_SPRITE, IF_MATERIAL);
+    if (map != R_NOTEXTURE && map->texnum &&
+        info->image->texnum < MAX_RIMAGES)
+        vk.material_texnum[info->image->texnum] = map->texnum;
+}
+
 static void vk_register_world_images(bsp_t *bsp)
 {
     char buffer[MAX_QPATH];
+
+    memset(vk.material_texnum, 0, sizeof(vk.material_texnum));
 
     if (!bsp || !bsp->texinfo)
         return;
@@ -1799,6 +1823,7 @@ static void vk_register_world_images(bsp_t *bsp)
             vk.world.texinfo_widths[i] = info->image->width;
             vk.world.texinfo_heights[i] = info->image->height;
         }
+        vk_register_material_map(info);
     }
 }
 
