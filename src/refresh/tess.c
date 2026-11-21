@@ -137,34 +137,29 @@ void GL_DrawParticles(void)
 
 // Streaks (refdef_t.streaks), such as rain: a quad along each, facing the
 // viewer, with the round particle texture stretched over it, so it is soft
-// at its sides and ends. Like particles, they widen with distance.
-void GL_DrawStreaks(void)
+// at its sides and ends. Like particles, they widen with distance. Additive
+// streaks are drawn in a pass of their own, after the others.
+static void GL_DrawStreakPass(bool additive)
 {
     const r_streak_t *s = glr.fd.streaks;
     int total = glr.fd.num_streaks;
 
-    if (!total || !s)
-        return;
-
-    GL_LoadMatrix(glr.viewmatrix);
-    GL_LoadUniforms();
-    GL_BindArrays(VA_EFFECT);
-
-    glStateBits_t bits = (gl_partstyle->integer ? GLS_BLEND_ADD : GLS_BLEND_BLEND) |
+    glStateBits_t bits = (additive || gl_partstyle->integer ? GLS_BLEND_ADD : GLS_BLEND_BLEND) |
         GLS_DEPTHMASK_FALSE | GLS_CULL_DISABLE | glr.fog_bits;
 
-    do {
+    while (total) {
         GL_BindTexture(TMU_TEXTURE, TEXNUM_PARTICLE);
         GL_StateBits(bits);
         GL_ArrayBits(GLA_VERTEX | GLA_TC | GLA_COLOR);
 
-        int count = min(total, TESS_MAX_VERTICES / 6);
         int numverts = 0;
         vec_t *dst = tess.vertices;
-        total -= count;
 
-        for (; count; count--, s++) {
+        for (; total && numverts + 6 <= TESS_MAX_VERTICES; total--, s++) {
             vec3_t dir, mid, to_view, side, corners[4];
+
+            if (s->additive != additive)
+                continue;
 
             VectorSubtract(s->end, s->start, dir);
             VectorAvg(s->start, s->end, mid);
@@ -201,7 +196,20 @@ void GL_DrawStreaks(void)
         if (gl_showtris->integer & SHOWTRIS_FX)
             GL_DrawOutlines(numverts, 0, NULL);
         GL_UnlockArrays();
-    } while (total);
+    }
+}
+
+void GL_DrawStreaks(void)
+{
+    if (!glr.fd.num_streaks || !glr.fd.streaks)
+        return;
+
+    GL_LoadMatrix(glr.viewmatrix);
+    GL_LoadUniforms();
+    GL_BindArrays(VA_EFFECT);
+
+    GL_DrawStreakPass(false);
+    GL_DrawStreakPass(true);
 }
 
 static void GL_FlushBeamSegments(bool additive)

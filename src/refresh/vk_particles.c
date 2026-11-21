@@ -187,14 +187,18 @@ static void vk_append_particle_quad(uint32_t *vertex_count,
 // Streaks (refdef_t.streaks), such as rain: a quad along each, facing the
 // viewer, with the round particle texture stretched over it, so it is soft
 // at its sides and ends. Like particles, they widen with distance. The same
-// as GL_DrawStreaks.
+// as GL_DrawStreaks; additive streaks are appended in a call of their own, so
+// they can be drawn with the additive pipeline.
 static uint32_t vk_append_streaks(const refdef_t *fd, const vec3_t viewaxis[3],
-                                  uint32_t vertex_count)
+                                  uint32_t vertex_count, bool additive)
 {
     for (int i = 0; fd->streaks && i < fd->num_streaks &&
          vertex_count + 6 <= VK_MAX_PARTICLE_VERTICES; i++) {
         const r_streak_t *s = &fd->streaks[i];
         vec3_t dir, mid, to_view, side, corners[4];
+
+        if (s->additive != additive)
+            continue;
 
         VectorSubtract(s->end, s->start, dir);
         VectorAvg(s->start, s->end, mid);
@@ -2422,9 +2426,11 @@ void vk_draw_particles(const refdef_t *fd)
                                 scale * VK_PARTICLE_SCALE, rgba, viewaxis);
     }
 
-    vertex_count = vk_append_streaks(fd, viewaxis, vertex_count);
+    vertex_count = vk_append_streaks(fd, viewaxis, vertex_count, false);
 
     uint32_t particle_vertex_count = vertex_count;
+    vertex_count = vk_append_streaks(fd, viewaxis, vertex_count, true);
+    uint32_t glow_streak_vertex_count = vertex_count;
     vertex_count = vk_append_dust_motes(fd, viewaxis, vertex_count);
     vertex_count = vk_append_landing_dust(fd, viewaxis, vertex_count);
     uint32_t dust_vertex_count = vertex_count;
@@ -2466,12 +2472,21 @@ void vk_draw_particles(const refdef_t *fd)
         c.trisDrawn += particle_vertex_count / 3;
         vk_count_batch3d();
     }
-    if (dust_vertex_count > particle_vertex_count) {
+    if (glow_streak_vertex_count > particle_vertex_count) {
+        vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                         vk.particle_add_pipeline ?
+                            vk.particle_add_pipeline : pipeline);
+        vk.CmdDraw(cmd, glow_streak_vertex_count - particle_vertex_count, 1,
+                   particle_vertex_count, 0);
+        c.trisDrawn += (glow_streak_vertex_count - particle_vertex_count) / 3;
+        vk_count_batch3d();
+    }
+    if (dust_vertex_count > glow_streak_vertex_count) {
         vk_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                          vk.sprite_pipeline);
-        vk.CmdDraw(cmd, dust_vertex_count - particle_vertex_count, 1,
-                   particle_vertex_count, 0);
-        c.trisDrawn += (dust_vertex_count - particle_vertex_count) / 3;
+        vk.CmdDraw(cmd, dust_vertex_count - glow_streak_vertex_count, 1,
+                   glow_streak_vertex_count, 0);
+        c.trisDrawn += (dust_vertex_count - glow_streak_vertex_count) / 3;
         vk_count_batch3d();
     }
     if (shockwave_first_vertex > dust_vertex_count) {

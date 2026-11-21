@@ -273,9 +273,9 @@ end
 
 begin railtrail
     title "Railgun Trail Setup"
-    values --status "Default is the original effect. The others draw a solid core, optionally with a spiral" \
+    values --status "Default is the original effect. The others draw a solid core, with a spiral or an energy bolt of rings and lightning" \
         "rail trail type" cl_railtrail_type \
-        "default" "core only" "core and spiral"
+        "default" "core only" "core and spiral" "energy bolt"
     range --status "How long the trail stays visible, in seconds" \
         "rail trail duration" cl_railtrail_time 0.1 3.0 0.1
     range --status "Width of the solid core" \
@@ -284,10 +284,14 @@ begin railtrail
         "core glow" cl_railcore_glow 0 1 0.05
     range --status "Radius of the spiral" \
         "spiral radius" cl_railspiral_radius 1 6 1
+    range --status "Radius of the energy bolt's rings" \
+        "ring radius" cl_railring_radius 4 24 1
+    range --status "How brightly the energy bolt lights its surroundings. 0 is no light" \
+        "bolt light" cl_railbolt_light 0 1 0.1
     strings --status "Color of the solid core" \
         "core color" cl_railcore_color \
         black red green yellow blue cyan magenta white
-    strings --status "Color of the spiral" \
+    strings --status "Color of the spiral, and of the energy bolt's rings and lightning" \
         "spiral color" cl_railspiral_color \
         black red green yellow blue cyan magenta white
 end
