@@ -795,6 +795,7 @@ typedef struct {
     refdef_t fd;
     bool fd_valid;
     int view_liquid_kind;
+    float view_water_top;   // height of the water's surface above the view
     vk_rt_afterglow_light_t afterglow_lights[VK_RT_AFTERGLOW_LIGHTS];
     uint32_t afterglow_frame;
     float afterglow_time;
@@ -1189,6 +1190,7 @@ float vk_glowmap_intensity(void);
 float vk_lightstyle_value(const refdef_t *fd, byte style);
 float vk_texture_intensity(void);
 int vk_view_liquid_kind(const refdef_t *fd);
+float vk_view_water_top(const refdef_t *fd);
 int vk_world_liquid_kind(const mface_t *face);
 void vk_draw_bmodel(const entity_t *ent, const refdef_t *fd,
                     bool translucent_faces);

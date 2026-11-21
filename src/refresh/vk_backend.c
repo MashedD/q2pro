@@ -3010,6 +3010,8 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk.fd_valid = true;
 #if USE_VULKAN_RAYTRACING
     vk.view_liquid_kind = vk.raytracing_active ? vk_view_liquid_kind(&vk.fd) : 0;
+    vk.view_water_top = vk.view_liquid_kind == 1 ?
+        vk_view_water_top(&vk.fd) : 0.0f;
 #else
     vk.view_liquid_kind = 0;
 #endif

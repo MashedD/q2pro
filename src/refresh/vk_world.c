@@ -146,7 +146,9 @@ static float vk_rt_underwater_absorption_strength(const refdef_t *fd)
     return Cvar_ClampValue(vk_rt_underwater_absorption, 0.0f, 1.0f);
 }
 
-void vk_fog_params(const refdef_t *fd, float fog[4])
+// water_scale is the fraction of the line of sight that runs under water.
+static void vk_fog_params_scaled(const refdef_t *fd, float water_scale,
+                                 float fog[4])
 {
     Vector4Clear(fog);
 
@@ -157,7 +159,7 @@ void vk_fog_params(const refdef_t *fd, float fog[4])
     const vec3_t water_color = { 0.06f, 0.18f, 0.22f };
     float base_density = max(fd->fog.density, 0.0f) / 64.0f;
     float atmosphere_density = 0.00065f * vk_rt_atmosphere_strength(fd);
-    float water_density = 0.0023f *
+    float water_density = 0.0023f * water_scale *
         vk_rt_underwater_absorption_strength(fd);
     float density_sum = base_density + atmosphere_density + water_density;
     if (density_sum <= 0.0f)
@@ -170,6 +172,32 @@ void vk_fog_params(const refdef_t *fd, float fog[4])
     fog[3] = sqrtf(base_density * base_density +
                    atmosphere_density * atmosphere_density +
                    water_density * water_density);
+}
+
+void vk_fog_params(const refdef_t *fd, float fog[4])
+{
+    vk_fog_params_scaled(fd, 1.0f, fog);
+}
+
+// Fog for one world face. Seen from under water, a face above the surface
+// is only behind as much water as lies between the view and the surface,
+// so its water absorption is scaled down by that part of the distance.
+// The face's center stands in for each pixel's height.
+static void vk_world_face_fog(const refdef_t *fd, const vk_world_face_t *face,
+                              float fog[4])
+{
+    float water_scale = 1.0f;
+#if USE_VULKAN_RAYTRACING
+    if (fd && face && !face->underwater && vk.view_liquid_kind == 1) {
+        float rise = face->center[2] - fd->vieworg[2];
+        float depth = vk.view_water_top - fd->vieworg[2];
+        if (rise > depth && depth >= 0.0f)
+            water_scale = depth / rise;
+    }
+#else
+    (void)face;
+#endif
+    vk_fog_params_scaled(fd, water_scale, fog);
 }
 
 void vk_height_fog_params(const refdef_t *fd, float start[4],
@@ -755,6 +783,43 @@ int vk_view_liquid_kind(const refdef_t *fd)
         return 0;
     return contents & CONTENTS_WATER ? 1 : 0;
 }
+
+// Finds the height of the water's surface above an underwater view: steps
+// up until it leaves the water, then narrows down the crossing.
+float vk_view_water_top(const refdef_t *fd)
+{
+    if (!fd || !vk.world.cache || !vk.world.cache->nodes)
+        return 0.0f;
+
+    const mnode_t *nodes = vk.world.cache->nodes;
+    vec3_t point;
+    VectorCopy(fd->vieworg, point);
+    float low = point[2];
+    float high = low;
+    bool left = false;
+    for (int i = 0; i < 128; i++) {
+        point[2] = low + 32.0f;
+        const mleaf_t *leaf = BSP_PointLeaf(nodes, point);
+        if (!leaf || !(leaf->contents[0] & CONTENTS_WATER)) {
+            high = point[2];
+            left = true;
+            break;
+        }
+        low = point[2];
+    }
+    if (!left)
+        return low;
+
+    for (int i = 0; i < 6; i++) {
+        point[2] = (low + high) * 0.5f;
+        const mleaf_t *leaf = BSP_PointLeaf(nodes, point);
+        if (leaf && (leaf->contents[0] & CONTENTS_WATER))
+            low = point[2];
+        else
+            high = point[2];
+    }
+    return (low + high) * 0.5f;
+}
 #endif
 
 static void vk_world_rt_params(float *params, bool pixel_world,
@@ -1115,6 +1180,14 @@ void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 // water don't share one.
                 if (group_active && face->underwater != group_underwater)
                     VK_FLUSH_WORLD_GROUP();
+                // Faces above the water get their own fog when the view
+                // is under it, so they are drawn on their own.
+                if (!face->underwater && vk.view_liquid_kind == 1 &&
+                    !ent && vk_rt_underwater_absorption_strength(fd) > 0.0f) {
+                    can_group = false;
+                }
+            }
+            if (can_group) {
                 if (!group_active) {
                     group_underwater = face->underwater;
                     group_count = 0;
@@ -1147,6 +1220,7 @@ void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                     push.lm_scale[0] = pixel_world ? 1.0f : -1.0f;
                     push.lm_scale[1] = pixel_world ? 1.0f : -1.0f;
                     vk_world_rt_params(push.rt_params, pixel_world, !ent, face);
+                    vk_world_face_fog(fd, ent ? NULL : face, push.fog);
                 }
                 for (uint32_t k = 0; k < face->edge_count - 2; k++) {
                     vk.world.batch_index_data[group_count++] = face->first_vertex;
@@ -1231,6 +1305,7 @@ void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 push.lm_scale[1] = -1.0f;
             }
             vk_world_rt_params(push.rt_params, pixel_world, !ent, face);
+            vk_world_face_fog(fd, ent ? NULL : face, push.fog);
             if (pixel_world)
                 vk_push_pixel_world_constants(cmd, sizeof(push), &push);
             else
