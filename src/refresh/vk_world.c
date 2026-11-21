@@ -123,27 +123,43 @@ bool vk_dynamic_lights_enabled(void)
            (!vk_vertexlight || !vk_vertexlight->integer);
 }
 
+// Whether the view is in slime or lava, where the air and water effects
+// are both off.
+static bool vk_view_in_other_liquid(const refdef_t *fd)
+{
+    return (fd->rdflags & RDF_UNDERWATER) && vk.view_liquid_kind != 1;
+}
+
+// How much of the effects seen in air to show: they fade out as the
+// view goes under water and back in as it comes out.
+static float vk_air_fade(const refdef_t *fd)
+{
+    if (!fd || vk_view_in_other_liquid(fd))
+        return 0.0f;
+    return 1.0f - vk.water_fade;
+}
+
 static float vk_rt_atmosphere_strength(const refdef_t *fd)
 {
     if (!fd || !vk.raytracing_active || !vk_rt_atmosphere ||
         (vk_fog && !vk_fog->integer) ||
-        (fd->rdflags & (RDF_UNDERWATER | RDF_NOWORLDMODEL)) ||
+        (fd->rdflags & RDF_NOWORLDMODEL) ||
         !vk.world.cache)
         return 0.0f;
 
-    return Cvar_ClampValue(vk_rt_atmosphere, 0.0f, 1.0f);
+    return Cvar_ClampValue(vk_rt_atmosphere, 0.0f, 1.0f) * vk_air_fade(fd);
 }
 
 static float vk_rt_underwater_absorption_strength(const refdef_t *fd)
 {
     if (!fd || !vk.raytracing_active || !vk_rt_underwater_absorption ||
         (vk_fog && !vk_fog->integer) ||
-        !(fd->rdflags & RDF_UNDERWATER) ||
-        (fd->rdflags & RDF_NOWORLDMODEL) || vk.view_liquid_kind != 1 ||
+        (fd->rdflags & RDF_NOWORLDMODEL) || vk.water_fade <= 0.0f ||
         !vk.world.cache)
         return 0.0f;
 
-    return Cvar_ClampValue(vk_rt_underwater_absorption, 0.0f, 1.0f);
+    return Cvar_ClampValue(vk_rt_underwater_absorption, 0.0f, 1.0f) *
+        vk.water_fade;
 }
 
 // water_scale is the fraction of the line of sight that runs under water.
@@ -179,20 +195,35 @@ void vk_fog_params(const refdef_t *fd, float fog[4])
     vk_fog_params_scaled(fd, 1.0f, fog);
 }
 
-// Fog for one world face. Seen from under water, a face above the surface
-// is only behind as much water as lies between the view and the surface,
-// so its water absorption is scaled down by that part of the distance.
-// The face's center stands in for each pixel's height.
+// Whether a face gets the full water fog: it is in the water and so is
+// the view. Others get a share of it and are drawn on their own.
+static bool vk_world_face_full_water_fog(const refdef_t *fd,
+                                         const vk_world_face_t *face)
+{
+    return face->underwater && vk.view_liquid_kind == 1 &&
+        fd && fd->vieworg[2] <= vk.view_water_top;
+}
+
+// Fog for one world face. The water absorption is scaled by the part of
+// the line of sight from the view to the face that lies below the water's
+// surface, so faces above the water seen from below it, or seen while the
+// fog fades out after leaving the water, are only behind the water in
+// between. The face's center stands in for each pixel's height.
 static void vk_world_face_fog(const refdef_t *fd, const vk_world_face_t *face,
                               float fog[4])
 {
     float water_scale = 1.0f;
 #if USE_VULKAN_RAYTRACING
-    if (fd && face && !face->underwater && vk.view_liquid_kind == 1) {
-        float rise = face->center[2] - fd->vieworg[2];
-        float depth = vk.view_water_top - fd->vieworg[2];
-        if (rise > depth && depth >= 0.0f)
-            water_scale = depth / rise;
+    if (fd && face && vk.water_fade > 0.0f &&
+        !vk_world_face_full_water_fog(fd, face)) {
+        float eye = fd->vieworg[2];
+        float top = vk.view_water_top;
+        float low = min(eye, face->center[2]);
+        float high = max(eye, face->center[2]);
+        if (high - low < 1.0f)
+            water_scale = eye <= top ? 1.0f : 0.0f;
+        else
+            water_scale = Q_clipf((top - low) / (high - low), 0.0f, 1.0f);
     }
 #else
     (void)face;
@@ -784,6 +815,24 @@ int vk_view_liquid_kind(const refdef_t *fd)
     return contents & CONTENTS_WATER ? 1 : 0;
 }
 
+// Eases the switch between the underwater effects and those seen in air:
+// in over a fifth of a second when going under water, out over three
+// quarters of one when coming out.
+void vk_update_water_fade(const refdef_t *fd)
+{
+    float target = vk.view_liquid_kind == 1 ? 1.0f : 0.0f;
+    float dt = fd->time - vk.water_fade_time;
+    vk.water_fade_time = fd->time;
+    if (dt < 0.0f || dt > 0.5f) {
+        vk.water_fade = target;    // a new map, or a long pause
+        return;
+    }
+    if (target > vk.water_fade)
+        vk.water_fade = min(target, vk.water_fade + dt / 0.2f);
+    else
+        vk.water_fade = max(target, vk.water_fade - dt / 0.75f);
+}
+
 // Finds the height of the water's surface above an underwater view: steps
 // up until it leaves the water, then narrows down the crossing.
 float vk_view_water_top(const refdef_t *fd)
@@ -838,9 +887,9 @@ static void vk_world_rt_params(float *params, bool pixel_world,
     // Only faces in the water get caustics. Seen from below, the walls
     // above the surface would otherwise ripple as though under water.
     const mface_t *face = draw ? draw->face : NULL;
-    float caustics = world_entity && vk.view_liquid_kind && vk_rt_caustics &&
+    float caustics = world_entity && vk.water_fade > 0.0f && vk_rt_caustics &&
         draw && draw->underwater ?
-        Cvar_ClampValue(vk_rt_caustics, 0.0f, 1.0f) : 0.0f;
+        Cvar_ClampValue(vk_rt_caustics, 0.0f, 1.0f) * vk.water_fade : 0.0f;
     float shadow_fringe = world_entity && vk_rt_shadow_fringe ?
         Cvar_ClampValue(vk_rt_shadow_fringe, 0.0f, 1.0f) : 0.0f;
     float light_ripples = world_entity && vk_rt_light_ripples ?
@@ -851,12 +900,11 @@ static void vk_world_rt_params(float *params, bool pixel_world,
         Cvar_ClampValue(vk_rt_environment, 0.0f, 1.0f) : 0.0f;
     float sunlight = world_entity && vk_rt_sunlight ?
         Cvar_ClampValue(vk_rt_sunlight, 0.0f, 1.0f) : 0.0f;
-    float scattering = world_entity && vk.fd_valid &&
-        !(vk.fd.rdflags & RDF_UNDERWATER) && vk_rt_light_scattering ?
-        Cvar_ClampValue(vk_rt_light_scattering, 0.0f, 1.0f) : 0.0f;
-    float turbulence = world_entity && vk.fd_valid &&
-        !(vk.fd.rdflags & RDF_UNDERWATER) && vk_rt_fog_turbulence ?
-        Cvar_ClampValue(vk_rt_fog_turbulence, 0.0f, 1.0f) : 0.0f;
+    float air = vk.fd_valid ? vk_air_fade(&vk.fd) : 0.0f;
+    float scattering = world_entity && air > 0.0f && vk_rt_light_scattering ?
+        Cvar_ClampValue(vk_rt_light_scattering, 0.0f, 1.0f) * air : 0.0f;
+    float turbulence = world_entity && air > 0.0f && vk_rt_fog_turbulence ?
+        Cvar_ClampValue(vk_rt_fog_turbulence, 0.0f, 1.0f) * air : 0.0f;
     bool emissive_face = world_entity &&
         vk_world_emissive_flicker_eligible(face);
     float emissive_halo = emissive_face && vk_rt_emissive_halo ?
@@ -1180,10 +1228,10 @@ void vk_draw_world_mesh(const mat4_t mvp, bool marked_only,
                 // water don't share one.
                 if (group_active && face->underwater != group_underwater)
                     VK_FLUSH_WORLD_GROUP();
-                // Faces above the water get their own fog when the view
-                // is under it, so they are drawn on their own.
-                if (!face->underwater && vk.view_liquid_kind == 1 &&
-                    !ent && vk_rt_underwater_absorption_strength(fd) > 0.0f) {
+                // Faces with only a share of the water fog get their
+                // own, so they are drawn on their own.
+                if (!ent && !vk_world_face_full_water_fog(fd, face) &&
+                    vk_rt_underwater_absorption_strength(fd) > 0.0f) {
                     can_group = false;
                 }
             }
