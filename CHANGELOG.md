@@ -6,6 +6,18 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-11-21
+
+### Fixed
+
+- With SDL3 under sdl2-compat on Wayland, the view could turn by about 15
+  degrees in a single frame, usually in the first seconds of play, so a
+  shot went into a wall beside the player. SDL's accumulated mouse state
+  sometimes held a jump that no motion event carried; the SDL driver now
+  adds up the motion of the events instead.
+- With `ch_follow_shot`, the crosshair vanished or stayed in the center
+  during demo playback. It now follows the recorded aim.
+
 ## [1.5.0] - 2026-11-21
 
 ### Added
@@ -300,7 +312,8 @@ All new options are off or keep upstream's behaviour by default.
 - A game library without the executable permission is reported with the
   `chmod` command that fixes it, instead of only "Permission denied".
 
-[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/MashedD/q2pro/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/MashedD/q2pro/compare/v1.4.2...v1.5.0
 [1.4.2]: https://github.com/MashedD/q2pro/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/MashedD/q2pro/compare/v1.4.0...v1.4.1
