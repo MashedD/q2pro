@@ -6,6 +6,20 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-21
+
+### Added
+
+- `vk_rt_materials` takes the relief and roughness of world surfaces from
+  material maps, `textures/<name>_n.png`, with Vulkan ray tracing. The
+  relief shows under dynamic lights, glowing surfaces and highlights, and
+  gently under lightmaps. The ray tracing menu has a "material maps" entry.
+  No maps are included; `tools/make-pbr-materials.py` makes them from a
+  texture pack of your own.
+- `ui_cvar_names` starts each menu setting's description with the name of
+  the variable it sets, in every menu, including your own menu scripts. The
+  screen setup menu has a "show variable names" entry.
+
 ## [1.5.1] - 2026-11-21
 
 ### Fixed
@@ -312,7 +326,8 @@ All new options are off or keep upstream's behaviour by default.
 - A game library without the executable permission is reported with the
   `chmod` command that fixes it, instead of only "Permission denied".
 
-[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/MashedD/q2pro/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/MashedD/q2pro/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/MashedD/q2pro/compare/v1.4.2...v1.5.0
 [1.4.2]: https://github.com/MashedD/q2pro/compare/v1.4.1...v1.4.2
