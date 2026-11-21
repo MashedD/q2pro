@@ -37,6 +37,15 @@ float trace_hit_distance(vec3 origin, vec3 direction, float distance)
     return rayQueryGetIntersectionTEXT(query, true);
 }
 
+// The light's own brightness, before the renderer took off how far it is
+// from this face, so that effects for bright lights switch on the same on
+// every face rather than face by face.
+float dlight_intensity(int i, vec3 normal)
+{
+    return abs(pc.dlight_colors[i].w) +
+        abs(dot(pc.dlight_origins[i].xyz - v_position, normal));
+}
+
 float dynamic_ray_bias(vec3 position)
 {
     float magnitude = max(abs(position.x),
@@ -305,7 +314,12 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
             break;
         vec3 delta = pc.dlight_origins[i].xyz - v_position;
         float distance_to_light = length(delta);
-        float falloff = max(1.0 - distance_to_light / range, 0.0);
+        // Spread over the face as the OpenGL renderer spreads dynamic light
+        // over a lightmap: how far the light is off the face has already
+        // been taken off its brightness.
+        float spread = length(delta -
+            dot(delta, geometric_normal) * geometric_normal);
+        float falloff = max(1.0 - spread / range, 0.0);
         vec3 light_dir = delta / max(distance_to_light, 0.001);
         if (falloff > 0.0) {
             bool cached_afterglow = pc.dlight_colors[i].w < 0.0;
@@ -314,12 +328,23 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
                 max(pc.dlight_colors[i].g, pc.dlight_colors[i].b)) * energy;
             if (contribution < 0.01)
                 continue;
-            vec3 oriented_normal = dot(geometric_normal, delta) >= 0.0 ?
+            // A light on the face or just behind it, such as an explosion
+            // where a shot hit, should light the face from the side it is seen
+            // from, as in the OpenGL renderer. Trace its shadow to a point just
+            // in front of the face: from behind it, the ray would start inside
+            // the wall and the whole face would go dark, leaving a dark
+            // rectangle next to lit ones. (The normal faces the viewer.)
+            float plane_d = dot(geometric_normal, delta);
+            vec3 shadow_target = pc.dlight_origins[i].xyz;
+            if (plane_d < 0.0 && plane_d > -24.0)
+                shadow_target += geometric_normal * (1.0 - plane_d);
+            vec3 oriented_normal =
+                dot(geometric_normal, shadow_target - v_position) >= 0.0 ?
                 geometric_normal : -geometric_normal;
             float bias = dynamic_ray_bias(v_position);
             vec3 ray_origin = v_position + oriented_normal * bias +
                               light_dir * 0.05;
-            vec3 ray_delta = pc.dlight_origins[i].xyz - ray_origin;
+            vec3 ray_delta = shadow_target - ray_origin;
             float penumbra;
             float visibility = dynamic_light_visibility(
                 ray_origin, ray_delta, range, contribution, i, penumbra);
@@ -327,7 +352,7 @@ vec3 dynamic_light(vec3 shading_normal, vec3 geometric_normal,
             light += radiance;
             if (cached_afterglow)
                 afterglow += radiance;
-            if (!cached_afterglow && abs(pc.dlight_colors[i].w) >= 160.0 &&
+            if (!cached_afterglow && dlight_intensity(i, geometric_normal) >= 160.0 &&
                 ripple_control > 0.001) {
                 float phase = fract(distance_to_light * 0.0125 -
                                     pc.dlight.w * 1.25);
@@ -469,7 +494,7 @@ void main()
                                      dynamic_ripple);
         float scattering_control = rt_light_scattering_control(pc.rt_params.x);
         if (scattering_control > 0.001 &&
-            abs(pc.dlight_colors[0].w) >= 160.0 &&
+            dlight_intensity(0, normal) >= 160.0 &&
             pc.dlight_origins[0].w > 0.0) {
             vec3 view_ray = normalize(pc.dlight.xyz - v_position);
             vec3 light_ray = normalize(pc.dlight_origins[0].xyz - v_position);
