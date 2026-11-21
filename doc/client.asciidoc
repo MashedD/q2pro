@@ -768,6 +768,9 @@ scr_chathud_y::
     counted in pixels from the screen edge. Negative values align graph to the bottom
     edge of the screen intead of the top edge. Default value is -64.
 
+The crosshair settings below, from ‘ch_health’ to ‘ch_y’ (but not
+‘crosshair_paused’), are saved in the configuration file.
+
 ch_health::
     Enables dynamic crosshair coloring based on the health statistic seen in
     the player's HUD.  Default value is 0 (use static color).
@@ -795,8 +798,9 @@ ch_scale::
 ch_x::
 ch_y::
     These variables specify the crosshair image offset, counted in pixels from
-    the default position in center of the game screen. Default values are 0
-    (draw in center).
+    the default position in center of the game screen. Positive values move it
+    right and down. The crosshair menu sets them. Default values are 0 (draw in
+    center).
 
 scr_hit_marker_time::
     Hit marker visibility time in milliseconds. Hit marker is only visible if
