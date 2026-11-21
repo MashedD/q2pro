@@ -380,6 +380,8 @@ begin crosshair
         "crosshair type" crosshair none cross dot angle
     pairs --status "Crosshair size" \
         "crosshair scale" ch_scale 0.5x 0.5 1x 1 2x 2 4x 4 5x 5
+    toggle --status "Move the crosshair to where shots land. Turn off on servers that aim shots at the crosshair (aimfix)" \
+        "follow the shot" ch_follow_shot
     toggle --status "Color the crosshair by your health. Overrides the color settings below" \
         "color by health" ch_health
     range --status "Crosshair color. Ignored when coloring by health" \

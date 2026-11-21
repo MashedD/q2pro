@@ -792,6 +792,17 @@ crosshair_paused::
 ch_scale::
     Scaling factor of the crosshair image. Default value is 1 (original size).
 
+ch_follow_shot::
+    Moves the crosshair to where your shots will land. Quake 2 weapons fire
+    from beside and below the eye, parallel to the view, so shots hit a few
+    units right of and below the point in the center of the screen: a lot up
+    close and hardly at all far away. With this on, the client traces that
+    path every frame and draws the crosshair, and the hit marker, at the
+    point it hits, following the ‘hand’ setting. Turn it off on servers that
+    aim shots at the crosshair, such as games with ‘aimfix’ on, where it
+    would move the crosshair away from the real aim. ‘ch_x’ and ‘ch_y’ still
+    add their offset. Default value is 0 (crosshair stays in the center).
+
 ch_x::
 ch_y::
     These variables specify the crosshair image offset, counted in pixels from

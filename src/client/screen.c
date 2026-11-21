@@ -104,6 +104,7 @@ static cvar_t   *ch_alpha;
 static cvar_t   *ch_scale;
 static cvar_t   *ch_x;
 static cvar_t   *ch_y;
+static cvar_t   *ch_follow_shot;
 
 static cvar_t   *scr_hit_marker_time;
 
@@ -1452,6 +1453,7 @@ void SCR_Init(void)
     ch_scale->changed = ch_scale_changed;
     ch_x = Cvar_Get("ch_x", "0", 0);
     ch_y = Cvar_Get("ch_y", "0", 0);
+    ch_follow_shot = Cvar_Get("ch_follow_shot", "0", CVAR_ARCHIVE);
 
     scr_draw2d = Cvar_Get("scr_draw2d", "2", 0);
     scr_showturtle = Cvar_Get("scr_showturtle", "1", 0);
@@ -2173,7 +2175,53 @@ static void SCR_DrawLoading(void)
     R_SetScale(1.0f);
 }
 
-static void SCR_DrawHitMarker(void)
+/*
+=================
+SCR_ShotOffset
+
+Finds where on the screen the player's shot will land, as an offset in
+pixels from the center. Quake 2 weapons fire from 8 units in front of the
+eye, 8 to the side of the hand holding the gun and 8 below, parallel to
+the view, so the shot hits that far off the point under the crosshair: a
+lot up close and hardly at all far away. Servers that aim the shot at the
+crosshair (aimfix, for example) need this off.
+=================
+*/
+static void SCR_ShotOffset(int *dx, int *dy)
+{
+    *dx = *dy = 0;
+
+    if (!ch_follow_shot->integer || !cl.bsp)
+        return;
+    if (cl.frame.ps.pmove.pm_type != PM_NORMAL)
+        return;
+
+    vec3_t forward, right, start, end, delta;
+    float side = info_hand->integer == 1 ? -8 :
+        info_hand->integer == 2 ? 0 : 8;
+
+    AngleVectors(cl.predicted_angles, forward, right, NULL);
+    VectorMA(cl.refdef.vieworg, 8, forward, start);
+    VectorMA(start, side, right, start);
+    start[2] -= 8;
+    VectorMA(start, 8192, forward, end);
+
+    trace_t tr;
+    CL_Trace(&tr, start, end, vec3_origin, vec3_origin, MASK_SHOT);
+
+    // project the hit point into the 3D view
+    VectorSubtract(tr.endpos, cl.refdef.vieworg, delta);
+    float depth = DotProduct(delta, cl.v_forward);
+    if (depth < 1)
+        return;
+
+    float fx = cl.refdef.width * 0.5f / tanf(cl.refdef.fov_x * (M_PIf / 360));
+    float fy = cl.refdef.height * 0.5f / tanf(cl.refdef.fov_y * (M_PIf / 360));
+    *dx = Q_rint(DotProduct(delta, cl.v_right) / depth * fx);
+    *dy = Q_rint(-DotProduct(delta, cl.v_up) / depth * fy);
+}
+
+static void SCR_DrawHitMarker(int dx, int dy)
 {
     if (!cl.hit_marker_count)
         return;
@@ -2191,8 +2239,8 @@ static void SCR_DrawHitMarker(void)
 
     R_SetColor(MakeColor(255, 0, 0, alpha * 255));
 
-    R_DrawStretchPic(x + ch_x->integer,
-                     y + ch_y->integer,
+    R_DrawStretchPic(x + dx + ch_x->integer,
+                     y + dy + ch_y->integer,
                      scr.hit_marker_width,
                      scr.hit_marker_height,
                      scr.hit_marker_pic);
@@ -2200,7 +2248,7 @@ static void SCR_DrawHitMarker(void)
 
 static void SCR_DrawCrosshair(void)
 {
-    int x, y;
+    int x, y, dx, dy;
 
     if (!scr_crosshair->integer)
         return;
@@ -2211,16 +2259,17 @@ static void SCR_DrawCrosshair(void)
 
     x = (r_config.width - scr.crosshair_width) / 2;
     y = (r_config.height - scr.crosshair_height) / 2;
+    SCR_ShotOffset(&dx, &dy);
 
     R_SetColor(scr.crosshair_color.u32);
 
-    R_DrawStretchPic(x + ch_x->integer,
-                     y + ch_y->integer,
+    R_DrawStretchPic(x + dx + ch_x->integer,
+                     y + dy + ch_y->integer,
                      scr.crosshair_width,
                      scr.crosshair_height,
                      scr.crosshair_pic);
 
-    SCR_DrawHitMarker();
+    SCR_DrawHitMarker(dx, dy);
 }
 
 // The status bar is a small layout program that is based on the stats array
