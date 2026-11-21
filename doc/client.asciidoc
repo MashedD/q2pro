@@ -1073,12 +1073,13 @@ vk_rt_liquids::
     dynamic lights on water, slime and lava. Default value is 0.65.
 
 vk_rt_caustics::
-    Animated caustics on nearby surfaces while the view is under water.
-    Default value is 0.65.
+    Animated caustics on nearby underwater surfaces while the view is under
+    water. Default value is 0.65.
 
 vk_rt_underwater_absorption::
-    Blue-green fading with distance while the view is under water. Default
-    value is 0.65.
+    Blue-green fading with distance while the view is under water. Surfaces
+    above the water fade only with the water in between. Default value is
+    0.65.
 
 vk_rt_atmosphere::
     Blue-gray haze with distance. Default value is 0.45.

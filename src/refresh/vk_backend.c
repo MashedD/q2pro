@@ -3010,8 +3010,12 @@ void VKR_RenderFrame(const refdef_t *fd)
     vk.fd_valid = true;
 #if USE_VULKAN_RAYTRACING
     vk.view_liquid_kind = vk.raytracing_active ? vk_view_liquid_kind(&vk.fd) : 0;
+    if (vk.view_liquid_kind == 1)
+        vk.view_water_top = vk_view_water_top(&vk.fd);
+    vk_update_water_fade(&vk.fd);
 #else
     vk.view_liquid_kind = 0;
+    vk.water_fade = 0.0f;
 #endif
     if (!vk_dynamic_lights_enabled())
         vk.fd.num_dlights = 0;
