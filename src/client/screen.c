@@ -1437,21 +1437,21 @@ void SCR_Init(void)
     scr_chathud_x = Cvar_Get("scr_chathud_x", "8", 0);
     scr_chathud_y = Cvar_Get("scr_chathud_y", "-64", 0);
 
-    ch_health = Cvar_Get("ch_health", "0", 0);
+    ch_health = Cvar_Get("ch_health", "0", CVAR_ARCHIVE);
     ch_health->changed = ch_color_changed;
-    ch_red = Cvar_Get("ch_red", "1", 0);
+    ch_red = Cvar_Get("ch_red", "1", CVAR_ARCHIVE);
     ch_red->changed = ch_color_changed;
-    ch_green = Cvar_Get("ch_green", "1", 0);
+    ch_green = Cvar_Get("ch_green", "1", CVAR_ARCHIVE);
     ch_green->changed = ch_color_changed;
-    ch_blue = Cvar_Get("ch_blue", "1", 0);
+    ch_blue = Cvar_Get("ch_blue", "1", CVAR_ARCHIVE);
     ch_blue->changed = ch_color_changed;
-    ch_alpha = Cvar_Get("ch_alpha", "1", 0);
+    ch_alpha = Cvar_Get("ch_alpha", "1", CVAR_ARCHIVE);
     ch_alpha->changed = ch_color_changed;
 
-    ch_scale = Cvar_Get("ch_scale", "1", 0);
+    ch_scale = Cvar_Get("ch_scale", "1", CVAR_ARCHIVE);
     ch_scale->changed = ch_scale_changed;
-    ch_x = Cvar_Get("ch_x", "0", 0);
-    ch_y = Cvar_Get("ch_y", "0", 0);
+    ch_x = Cvar_Get("ch_x", "0", CVAR_ARCHIVE);
+    ch_y = Cvar_Get("ch_y", "0", CVAR_ARCHIVE);
 
     scr_draw2d = Cvar_Get("scr_draw2d", "2", 0);
     scr_showturtle = Cvar_Get("scr_showturtle", "1", 0);

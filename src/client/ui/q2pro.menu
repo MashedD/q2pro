@@ -380,6 +380,10 @@ begin crosshair
         "crosshair type" crosshair none cross dot angle
     pairs --status "Crosshair size" \
         "crosshair scale" ch_scale 0.5x 0.5 1x 1 2x 2 4x 4 5x 5
+    field --integer --width 4 --status "Pixels to move the crosshair right, or left when negative. 0 is the center" \
+        "horizontal offset" ch_x
+    field --integer --width 4 --status "Pixels to move the crosshair down, or up when negative. 0 is the center" \
+        "vertical offset" ch_y
     toggle --status "Color the crosshair by your health. Overrides the color settings below" \
         "color by health" ch_health
     range --status "Crosshair color. Ignored when coloring by health" \
