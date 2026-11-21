@@ -50,6 +50,10 @@ static struct {
 
     bool            wayland;
     int             focus_hack;
+
+    // relative mouse motion summed from events since it was last read
+    int             mouse_dx;
+    int             mouse_dy;
 } sdl;
 
 /*
@@ -567,6 +571,10 @@ static void pump_events(void)
             key_event(&event.key);
             break;
         case SDL_MOUSEMOTION:
+            if (SDL_GetRelativeMouseMode()) {
+                sdl.mouse_dx += event.motion.xrel;
+                sdl.mouse_dy += event.motion.yrel;
+            }
             if (sdl.win_width && sdl.win_height)
                 UI_MouseEvent(event.motion.x * sdl.width / sdl.win_width,
                               event.motion.y * sdl.height / sdl.win_height);
@@ -590,19 +598,31 @@ MOUSE
 ===============================================================================
 */
 
+// Motion is summed from the events rather than read with
+// SDL_GetRelativeMouseState(): with SDL3 under sdl2-compat on Wayland, the
+// accumulated state sometimes held a jump of hundreds of pixels that no
+// motion event carried, turning the view by 15 degrees in one frame.
+static void clear_mouse_motion(void)
+{
+    sdl.mouse_dx = sdl.mouse_dy = 0;
+}
+
 static bool get_mouse_motion(int *dx, int *dy)
 {
     if (!SDL_GetRelativeMouseMode()) {
+        clear_mouse_motion();
         return false;
     }
-    SDL_GetRelativeMouseState(dx, dy);
+    *dx = sdl.mouse_dx;
+    *dy = sdl.mouse_dy;
+    clear_mouse_motion();
     return true;
 }
 
 static void warp_mouse(int x, int y)
 {
     SDL_WarpMouseInWindow(sdl.window, x, y);
-    SDL_GetRelativeMouseState(NULL, NULL);
+    clear_mouse_motion();
 }
 
 static void shutdown_mouse(void)
@@ -626,7 +646,7 @@ static void grab_mouse(bool grab)
 {
     SDL_SetWindowGrab(sdl.window, grab);
     SDL_SetRelativeMouseMode(grab && !(Key_GetDest() & KEY_MENU));
-    SDL_GetRelativeMouseState(NULL, NULL);
+    clear_mouse_motion();
     SDL_ShowCursor(!(sdl.flags & QVF_FULLSCREEN));
 }
 
