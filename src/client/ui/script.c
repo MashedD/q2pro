@@ -113,6 +113,18 @@ static void long_args_hack(menuSpinControl_t *s, int argc)
     s->itemnames[s->numItems] = NULL;
 }
 
+// With ui_cvar_names, an item's status starts with the name of the cvar it
+// sets, so players can find it in the console, config files and manual.
+static char *UI_CvarStatus(const char *status, const char *cvar_name)
+{
+    if (ui_cvar_names && ui_cvar_names->integer && cvar_name && *cvar_name) {
+        if (status && *status)
+            return UI_CopyString(va("%s: %s", cvar_name, status));
+        return UI_CopyString(cvar_name);
+    }
+    return UI_CopyString(status);
+}
+
 static void Parse_Spin(menuFrameWork_t *menu, menuType_t type)
 {
     menuSpinControl_t *s;
@@ -138,7 +150,7 @@ static void Parse_Spin(menuFrameWork_t *menu, menuType_t type)
     s = UI_Mallocz(sizeof(*s));
     s->generic.type = type;
     s->generic.name = UI_CopyString(Cmd_Argv(cmd_optind));
-    s->generic.status = UI_CopyString(status);
+    s->generic.status = UI_CvarStatus(status, Cmd_Argv(cmd_optind + 1));
     s->cvar = Cvar_WeakGet(Cmd_Argv(cmd_optind + 1));
 
     cmd_optind += 2;
@@ -185,7 +197,7 @@ static void Parse_Pairs(menuFrameWork_t *menu)
     s = UI_Mallocz(sizeof(*s));
     s->generic.type = MTYPE_PAIRS;
     s->generic.name = UI_CopyString(Cmd_Argv(cmd_optind));
-    s->generic.status = UI_CopyString(status);
+    s->generic.status = UI_CvarStatus(status, Cmd_Argv(cmd_optind + 1));
     s->cvar = Cvar_WeakGet(Cmd_Argv(cmd_optind + 1));
 
     cmd_optind += 2;
@@ -250,7 +262,7 @@ static void Parse_Range(menuFrameWork_t *menu)
     s = UI_Mallocz(sizeof(*s));
     s->generic.type = MTYPE_SLIDER;
     s->generic.name = UI_CopyString(Cmd_Argv(cmd_optind));
-    s->generic.status = UI_CopyString(status);
+    s->generic.status = UI_CvarStatus(status, Cmd_Argv(cmd_optind + 1));
     s->cvar = Cvar_WeakGet(Cmd_Argv(cmd_optind + 1));
     s->minvalue = Q_atof(Cmd_Argv(cmd_optind + 2));
     s->maxvalue = Q_atof(Cmd_Argv(cmd_optind + 3));
@@ -464,7 +476,7 @@ static void Parse_Toggle(menuFrameWork_t *menu)
     s = UI_Mallocz(sizeof(*s));
     s->generic.type = type;
     s->generic.name = UI_CopyString(Cmd_Argv(cmd_optind));
-    s->generic.status = UI_CopyString(status);
+    s->generic.status = UI_CvarStatus(status, Cmd_Argv(cmd_optind + 1));
     s->cvar = Cvar_WeakGet(Cmd_Argv(cmd_optind + 1));
     s->itemnames = (char **)yes_no_names;
     s->numItems = 2;
@@ -518,7 +530,7 @@ static void Parse_Field(menuFrameWork_t *menu)
     f = UI_Mallocz(sizeof(*f));
     f->generic.type = MTYPE_FIELD;
     f->generic.name = center ? NULL : UI_CopyString(Cmd_Argv(cmd_optind));
-    f->generic.status = UI_CopyString(status);
+    f->generic.status = UI_CvarStatus(status, Cmd_Argv(center ? cmd_optind : cmd_optind + 1));
     f->generic.flags = flags;
     f->cvar = Cvar_WeakGet(Cmd_Argv(center ? cmd_optind : cmd_optind + 1));
     f->width = width;

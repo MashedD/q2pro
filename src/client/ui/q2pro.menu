@@ -418,6 +418,8 @@ begin screen
         "console scale" con_scale auto 0 1x 1 2x 2 4x 4 5x 5
     pairs --status "Size of the menus. Auto picks a size for the screen resolution" \
         "menu scale" ui_scale auto 0 1x 1 2x 2 4x 4 5x 5
+    toggle --status "Start each setting's description here with the name of the variable it sets" \
+        "show variable names" ui_cvar_names
     blank
     action --align "crosshair setup..." pushmenu crosshair
 end

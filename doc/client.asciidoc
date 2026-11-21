@@ -1786,6 +1786,13 @@ ui_open::
     Specifies if menu is automatically opened on startup, instead of full
     screen console. Default value is 0 (don't open menu).
 
+ui_cvar_names::
+    Starts the description of each menu setting, shown at the bottom of the
+    screen, with the name of the variable it sets, such as ‘cl_snow: Snow
+    falls on any map’. Settings without a description show the name alone.
+    It applies to every menu script, including ones of your own. Changing it
+    reloads the menus. Default value is 0 (descriptions only).
+
 ui_background::
     Specifies image to use as menu background. Default value is empty, which
     just fills the screen with solid black color.
