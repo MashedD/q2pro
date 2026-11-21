@@ -6,6 +6,47 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-21
+
+### Added
+
+- `cl_railtrail_type 3` draws the railgun shot as an energy bolt: a bright
+  core in a coil of glowing rings, with lightning arcs and sparks, colored
+  by `cl_railspiral_color`. `cl_railring_radius` sets the size of the rings
+  and `cl_railbolt_light` how brightly the bolt lights its surroundings.
+  The railgun trail menu has entries for all three.
+- `ch_follow_shot` moves the crosshair to where your shots will land.
+  Without aim correction on the server, Quake 2 weapons fire from beside
+  and below the eye, so the shot lands off the centered crosshair by an
+  amount that depends on the distance; a fixed `ch_x` and `ch_y` is only
+  right at one distance. It is off by default, and the crosshair menu has
+  a "follow the shot" entry.
+- The crosshair menu has fields for its horizontal and vertical offset
+  (`ch_x`, `ch_y`).
+- The OpenGL renderer can render on the GPU chosen in the video menu, on
+  Linux with Mesa drivers. The menu entry is now called "GPU" and works for
+  both renderers, and `vk_device` also accepts PCI vendor:device IDs such
+  as `1002:743f`.
+
+### Changed
+
+- The crosshair settings (`ch_scale`, `ch_x`, `ch_y`, `ch_health` and the
+  colors) are saved in the configuration file, so what the menu sets is no
+  longer lost when the game restarts.
+
+### Fixed
+
+- Under Vulkan, dynamic lights from rockets, blasters and other effects
+  spread over walls as they do under OpenGL. With ray tracing they no
+  longer leave uneven, flatly lit rectangles on walls for a moment.
+- With Vulkan ray tracing, looking up from under water no longer puts
+  caustics on surfaces above the water, and the water's blue-green fog
+  only covers the water in between, so what is above the surface stays
+  visible. Caustics now light the textures instead of tinting them, and
+  the underwater and air effects fade into each other when you dive in or
+  come out.
+- The Windows build works with the current Microsoft compiler.
+
 ## [1.4.2] - 2026-11-17
 
 ### Added
@@ -259,7 +300,8 @@ All new options are off or keep upstream's behaviour by default.
 - A game library without the executable permission is reported with the
   `chmod` command that fixes it, instead of only "Permission denied".
 
-[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.4.2...HEAD
+[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/MashedD/q2pro/compare/v1.4.2...v1.5.0
 [1.4.2]: https://github.com/MashedD/q2pro/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/MashedD/q2pro/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/MashedD/q2pro/compare/v1.3.0...v1.4.0
