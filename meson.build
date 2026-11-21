@@ -83,6 +83,7 @@ ui_src = [
 refresh_src = [
   'src/refresh/backend.c',
   'src/refresh/draw.c',
+  'src/refresh/gl_device.c',
   'src/refresh/hq2x.c',
   'src/refresh/images.c',
   'src/refresh/legacy.c',

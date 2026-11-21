@@ -69,8 +69,8 @@ begin video
     banner m_banner_video
     pairs --status "Vulkan is optional and needs a Vulkan driver. OpenGL is the default" \
         "renderer" vid_ref "OpenGL" gl "Vulkan" vk
-    pairs --status "GPU for the Vulkan renderer. Automatic prefers the GPU that drives the display" \
-        "Vulkan device" vk_device $$vk_devicelist
+    pairs --status "GPU to render with. OpenGL can choose only on Linux with Mesa drivers" \
+        "GPU" vk_device $$vk_devicelist
     action --align --status "Ray-traced lighting, reflections and effects. Vulkan only, needs ray query support" \
         "Vulkan ray tracing..." pushmenu raytracing
     values --status "Windowed, or a fullscreen mode from the list of video modes" \
