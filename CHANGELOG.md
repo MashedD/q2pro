@@ -6,6 +6,11 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The crosshair setup menu has "hit markers" and "hit marker time"
+  entries for `cl_hit_markers` and `scr_hit_marker_time`.
+
 ## [1.7.1] - 2026-11-22
 
 ### Fixed
