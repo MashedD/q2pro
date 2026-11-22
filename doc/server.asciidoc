@@ -638,6 +638,13 @@ com_debug_break::
     Development variable that turns all errors into debug breakpoints. Default
     value is 0 (disabled).
 
+g_hit_sound::
+    Sound that the bundled baseq2 game plays to a player who hits a monster
+    or another player, for clients without re-release hit markers, such as
+    older Q2PRO and R1Q2. For example, ‘misc/talk1.wav’. Clients with
+    ‘cl_hit_markers’ above 0 in their userinfo get the hit marker instead.
+    Default value is empty (disabled).
+
 Commands
 --------
 
