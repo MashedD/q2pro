@@ -849,6 +849,41 @@ Called for each player at the end of the server frame
 and right after spawning
 =================
 */
+#define SND_ATTENUATION BIT(1)
+
+/*
+=================
+G_SendHitMarker
+
+Sends the damage the player dealt this frame as a re-release hit marker,
+but only to clients that announce cl_hit_markers in their userinfo: older
+clients drop the connection on the unknown temp entity. Others get
+g_hit_sound instead, when it is set.
+=================
+*/
+static void G_SendHitMarker(edict_t *ent)
+{
+    gclient_t *client = ent->client;
+    int damage = client->hit_damage;
+
+    if (damage <= 0)
+        return;
+    client->hit_damage = 0;
+
+    if (atoi(Info_ValueForKey(client->pers.userinfo, "cl_hit_markers")) > 0) {
+        gi.WriteByte(svc_temp_entity);
+        gi.WriteByte(TE_DAMAGE_DEALT);
+        gi.WriteShort(min(damage, 32767));
+        gi.unicast(ent, false);
+    } else if (g_hit_sound->string[0]) {
+        gi.WriteByte(svc_sound);
+        gi.WriteByte(SND_ATTENUATION);
+        gi.WriteByte(gi.soundindex(g_hit_sound->string));
+        gi.WriteByte(ATTN_NONE);
+        gi.unicast(ent, false);
+    }
+}
+
 void ClientEndServerFrame(edict_t *ent)
 {
     float   bobtime;
@@ -856,6 +891,8 @@ void ClientEndServerFrame(edict_t *ent)
 
     current_player = ent;
     current_client = ent->client;
+
+    G_SendHitMarker(ent);
 
     //
     // If the origin or velocity have changed since ClientThink(),

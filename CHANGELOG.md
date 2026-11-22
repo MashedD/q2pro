@@ -6,6 +6,13 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The bundled baseq2 game sent no hit markers, so they never showed in
+  single player and coop. It now sends them for hits on monsters and
+  players to clients with `cl_hit_markers`, and can play `g_hit_sound` to
+  older clients instead.
+
 ## [1.7.0] - 2026-11-21
 
 ### Added

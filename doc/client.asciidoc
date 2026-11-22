@@ -511,7 +511,8 @@ cl_hit_markers::
 The value is also sent to the server in the userinfo. Game modules can
 read it to send hit markers (‘TE_DAMAGE_DEALT’) only to clients with a
 non-zero value; clients without the key, such as older Q2PRO or R1Q2,
-drop the connection on that unknown temp entity.
+drop the connection on that unknown temp entity. The bundled baseq2 game
+does this for hits on monsters and players.
 
 Sound Subsystem
 ~~~~~~~~~~~~~~~

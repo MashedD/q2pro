@@ -42,6 +42,7 @@ cvar_t  *maxclients;
 cvar_t  *maxspectators;
 cvar_t  *maxentities;
 cvar_t  *g_select_empty;
+cvar_t  *g_hit_sound;
 cvar_t  *g_protocol_extensions;
 cvar_t  *dedicated;
 cvar_t  *aimfix;
@@ -140,6 +141,7 @@ static void InitGame(void)
     aimfix = gi.cvar("aimfix", "0", 0);
 
     g_select_empty = gi.cvar("g_select_empty", "0", CVAR_ARCHIVE);
+    g_hit_sound = gi.cvar("g_hit_sound", "", 0);
     g_protocol_extensions = gi.cvar("g_protocol_extensions", "0", CVAR_LATCH);
 
     run_pitch = gi.cvar("run_pitch", "0.002", 0);
