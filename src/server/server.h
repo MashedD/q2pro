@@ -672,7 +672,7 @@ void SV_MvdStop_f(void);
 #define SV_MvdClientDropped(client) (void)0
 
 #define SV_MvdUnicast(ent, clientNum, reliable)     (void)0
-#define SV_MvdMulticast(leafnum, to)                (void)0
+#define SV_MvdMulticast(leafnum, to, reliable)      (void)0
 #define SV_MvdConfigstring(index, string, len)      (void)0
 #define SV_MvdBroadcastPrint(level, string)         (void)0
 #define SV_MvdStartSound(entnum, channel, flags, \
