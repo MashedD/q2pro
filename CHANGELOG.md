@@ -6,6 +6,14 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A build without the MVD server (`-Dmvd-server=false`) failed to compile:
+  the `SV_MvdMulticast` stub took two arguments instead of three.
+- An entity with a custom alpha of 1.0 lost its renderer flags above bit 31
+  (such as skin tint, bloom and effect flags) when its translucency was
+  cleared.
+
 ## [1.7.2] - 2026-11-22
 
 ### Added

@@ -1643,7 +1643,7 @@ static void CL_AddPacketEntities(void)
         if (has_alpha) {
             ent.alpha = custom_alpha;
             if (custom_alpha == 1.0f)
-                ent.flags &= ~RF_TRANSLUCENT;
+                ent.flags &= ~(uint64_t)RF_TRANSLUCENT;
             else
                 ent.flags |= RF_TRANSLUCENT;
             custom_flags = ent.flags & RF_TRANSLUCENT;
