@@ -799,7 +799,10 @@ crosshair_paused::
     it off the "Paused" image. Default value is 1.
 
 ch_scale::
-    Scaling factor of the crosshair image. Default value is 1 (original size).
+    Scaling factor of the crosshair image, from 0.1 to 9.0. Default value is 1
+    (original size). Crosshair Setup accepts decimals such as 1.5 and previews
+    numbered crosshair images (pics/ch1.pcx, pics/ch9.png, etc.) from the active
+    game search paths.
 
 ch_follow_shot::
     Moves the crosshair to where your shots will land. Quake 2 weapons fire

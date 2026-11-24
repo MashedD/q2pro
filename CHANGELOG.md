@@ -6,6 +6,11 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Crosshair Setup discovers numbered crosshair images, previews the selected
+  image and accepts fractional scales such as 1.5.
+
 ## [1.7.3] - 2026-11-23
 
 ### Fixed

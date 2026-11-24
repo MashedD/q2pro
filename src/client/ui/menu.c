@@ -636,6 +636,21 @@ static void SpinControl_Draw(menuSpinControl_t *s)
 
     UI_DrawString(s->generic.x + RCOLUMN_OFFSET, s->generic.y,
                   s->generic.uiFlags, name);
+
+    if (s->preview) {
+        int x = s->generic.x + RCOLUMN_OFFSET + 14 * CONCHAR_WIDTH;
+        int y = s->generic.y - CONCHAR_HEIGHT / 2;
+        int size = 3 * CONCHAR_HEIGHT;
+        int w, h;
+        R_GetPicSize(&w, &h, s->preview);
+        int longest = max(w, h);
+        if (longest > 0) {
+            w = max(1, Q_rint((float)w * size / longest));
+            h = max(1, Q_rint((float)h * size / longest));
+            R_DrawFill32(x, y, size, size, uis.color.background.u32);
+            R_DrawStretchPic(x + (size - w) / 2, y + (size - h) / 2, w, h, s->preview);
+        }
+    }
 }
 
 /*
@@ -687,13 +702,13 @@ static void Pairs_Push(menuSpinControl_t *s)
     int i;
 
     for (i = 0; i < s->numItems; i++) {
-        if (!Q_stricmp(s->itemvalues[i], s->cvar->string)) {
-            s->curvalue = i;
-            return;
-        }
+        if (!Q_stricmp(s->itemvalues[i], s->cvar->string))
+            break;
     }
 
-    s->curvalue = -1;
+    s->curvalue = i < s->numItems ? i : -1;
+    if (s->generic.change)
+        s->generic.change(&s->generic);
 }
 
 static void Pairs_Pop(menuSpinControl_t *s)

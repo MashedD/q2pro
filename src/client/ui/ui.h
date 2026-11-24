@@ -224,6 +224,7 @@ typedef struct {
     char    **itemvalues;
     int     numItems;
     int     curvalue;
+    qhandle_t preview;
 
     int         mask;
     bool        negate;
