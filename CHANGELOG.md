@@ -11,6 +11,11 @@ All notable changes to this fork are documented here. The format follows
 - Crosshair Setup discovers numbered crosshair images, previews the selected
   image and accepts fractional scales such as 1.5.
 
+### Fixed
+
+- Crosshair previews fit the visible pixels and use a neutral background,
+  so dark crosshairs with large transparent margins remain visible.
+
 ## [1.7.3] - 2026-11-23
 
 ### Fixed

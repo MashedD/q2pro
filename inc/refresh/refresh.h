@@ -324,6 +324,7 @@ void    R_DrawChar(int x, int y, int flags, int ch, qhandle_t font);
 int     R_DrawString(int x, int y, int flags, size_t maxChars,
                      const char *string, qhandle_t font);  // returns advanced x coord
 bool    R_GetPicSize(int *w, int *h, qhandle_t pic);   // returns transparency bit
+bool    R_GetPicContentBounds(float bounds[4], qhandle_t pic);
 void    R_DrawPic(int x, int y, qhandle_t pic);
 void    R_DrawStretchPic(int x, int y, int w, int h, qhandle_t pic);
 void    R_DrawKeepAspectPic(int x, int y, int w, int h, qhandle_t pic);

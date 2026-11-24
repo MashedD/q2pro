@@ -1944,6 +1944,39 @@ byte *IMG_LoadPixels(const char *name, int *width, int *height)
     return pic;
 }
 
+static void get_crosshair_bounds(image_t *image, const byte *pixels)
+{
+    int w = image->upload_width;
+    int h = image->upload_height;
+    int left = w, top = h, right = 0, bottom = 0;
+
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++, pixels += 4) {
+            if (!pixels[3])
+                continue;
+            left = min(left, x);
+            top = min(top, y);
+            right = max(right, x + 1);
+            bottom = y + 1;
+        }
+    }
+
+    if (left < right) {
+        image->content_bounds[0] = (float)left / w;
+        image->content_bounds[1] = (float)top / h;
+        image->content_bounds[2] = (float)right / w;
+        image->content_bounds[3] = (float)bottom / h;
+    }
+}
+
+bool R_GetPicContentBounds(float bounds[4], qhandle_t pic)
+{
+    const image_t *image = IMG_ForHandle(pic);
+
+    memcpy(bounds, image->content_bounds, sizeof(image->content_bounds));
+    return bounds[2] > bounds[0];
+}
+
 static void check_for_glow_map(image_t *image)
 {
     extern cvar_t *gl_shaders;
@@ -2077,6 +2110,8 @@ static image_t *find_or_load_image(const char *name, size_t len,
     }
 
     image->aspect = (float)image->upload_width / image->upload_height;
+    if (type == IT_PIC && !Q_stricmpn(name, "pics/ch", 7) && Q_isdigit(name[7]))
+        get_crosshair_bounds(image, pic);
 
     List_Append(&r_imageHash[hash], &image->entry);
 

@@ -643,12 +643,20 @@ static void SpinControl_Draw(menuSpinControl_t *s)
         int size = 3 * CONCHAR_HEIGHT;
         int w, h;
         R_GetPicSize(&w, &h, s->preview);
-        int longest = max(w, h);
-        if (longest > 0) {
-            w = max(1, Q_rint((float)w * size / longest));
-            h = max(1, Q_rint((float)h * size / longest));
-            R_DrawFill32(x, y, size, size, uis.color.background.u32);
-            R_DrawStretchPic(x + (size - w) / 2, y + (size - h) / 2, w, h, s->preview);
+        float bounds[4];
+        R_DrawFill32(x, y, size, size, MakeColor(128, 128, 128, 255));
+        if (w > 0 && h > 0 && R_GetPicContentBounds(bounds, s->preview)) {
+            float content_w = w * (bounds[2] - bounds[0]);
+            float content_h = h * (bounds[3] - bounds[1]);
+            float scale = (size - 4) / max(8.0f, max(content_w, content_h));
+            int px = x + Q_rint((size - content_w * scale) / 2 - bounds[0] * w * scale);
+            int py = y + Q_rint((size - content_h * scale) / 2 - bounds[1] * h * scale);
+            clipRect_t clip = { x, x + size, y, y + size };
+
+            R_SetClipRect(&clip);
+            R_DrawStretchPic(px, py, max(1, Q_rint(w * scale)),
+                             max(1, Q_rint(h * scale)), s->preview);
+            R_SetClipRect(NULL);
         }
     }
 }
