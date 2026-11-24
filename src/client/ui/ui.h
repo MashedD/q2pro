@@ -315,7 +315,6 @@ extern list_t       ui_menus;
 
 extern cvar_t       *ui_debug;
 extern cvar_t       *ui_cvar_names;
-extern cvar_t       *ui_menu_pagekeys;
 
 void        UI_PushMenu(menuFrameWork_t *menu);
 void        UI_ForceMenuOff(void);

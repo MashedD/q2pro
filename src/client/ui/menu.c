@@ -2487,7 +2487,7 @@ menuSound_t Menu_MouseMove(menuCommon_t *item)
 
 static menuSound_t Menu_Page(menuFrameWork_t *menu, int direction, bool edge, int visibleCount)
 {
-    if (!ui_menu_pagekeys->integer || !menu->maxVisible || menu->maxVisible >= visibleCount)
+    if (!menu->maxVisible || menu->maxVisible >= visibleCount)
         return QMS_NOTHANDLED;
 
     int oldOffset = menu->scrollOffset;

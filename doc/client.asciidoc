@@ -1803,12 +1803,6 @@ ui_background::
     Specifies image to use as menu background. Default value is empty, which
     just fills the screen with solid black color.
 
-ui_menu_pagekeys::
-    Set to 1 to move by a visible page with Page Up and Page Down in
-    scrollable menus. Home and End select the first and last items.
-    Embedded lists keep their own key handling.
-    Default is 0.
-
 ui_scale::
     Scaling factor of the UI widgets. Default value is 0 (automatically scale
     depending on current display resolution). Set to 1 to disable scaling.
