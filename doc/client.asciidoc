@@ -1805,7 +1805,8 @@ ui_background::
 
 ui_menu_pagekeys::
     Set to 1 to move by a visible page with Page Up and Page Down in
-    scrollable menus. Embedded lists keep their own key handling.
+    scrollable menus. Home and End select the first and last items.
+    Embedded lists keep their own key handling.
     Default is 0.
 
 ui_scale::

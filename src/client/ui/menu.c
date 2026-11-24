@@ -2485,33 +2485,36 @@ menuSound_t Menu_MouseMove(menuCommon_t *item)
     }
 }
 
-static menuSound_t Menu_Page(menuFrameWork_t *menu, int direction, int visibleCount)
+static menuSound_t Menu_Page(menuFrameWork_t *menu, int direction, bool edge, int visibleCount)
 {
     if (!ui_menu_pagekeys->integer || !menu->maxVisible || menu->maxVisible >= visibleCount)
         return QMS_NOTHANDLED;
 
     int oldOffset = menu->scrollOffset;
-    int offset = max(0, min(oldOffset + direction * menu->maxVisible,
-                            visibleCount - menu->maxVisible));
-    if (offset == oldOffset)
+    int lastOffset = visibleCount - menu->maxVisible;
+    int offset = edge ? (direction < 0 ? 0 : lastOffset)
+                      : max(0, min(oldOffset + direction * menu->maxVisible, lastOffset));
+    if (!edge && offset == oldOffset)
         return QMS_SILENT;
 
     menuCommon_t *selection = NULL;
     int ordinal = 0;
     int previous = oldOffset;
     int bestDistance = menu->maxVisible;
-    for (int i = 0; i < menu->nitems; i++) {
-        menuCommon_t *item = menu->items[i];
-        if (item->flags & QMF_HIDDEN)
-            continue;
-        if (item->flags & QMF_HASFOCUS) {
-            previous = max(oldOffset, min(ordinal, oldOffset + menu->maxVisible - 1));
-            break;
+    if (!edge) {
+        for (int i = 0; i < menu->nitems; i++) {
+            menuCommon_t *item = menu->items[i];
+            if (item->flags & QMF_HIDDEN)
+                continue;
+            if (item->flags & QMF_HASFOCUS) {
+                previous = max(oldOffset, min(ordinal, oldOffset + menu->maxVisible - 1));
+                break;
+            }
+            ordinal++;
         }
-        ordinal++;
     }
 
-    int target = offset + previous - oldOffset;
+    int target = edge ? (direction < 0 ? 0 : visibleCount - 1) : offset + previous - oldOffset;
     ordinal = 0;
     for (int i = 0; i < menu->nitems && ordinal < offset + menu->maxVisible; i++) {
         menuCommon_t *item = menu->items[i];
@@ -2559,11 +2562,19 @@ static menuSound_t Menu_DefaultKey(menuFrameWork_t *m, int key)
 
     case K_PGUP:
     case K_KP_PGUP:
-        return Menu_Page(m, -1, visibleCount);
+        return Menu_Page(m, -1, false, visibleCount);
 
     case K_PGDN:
     case K_KP_PGDN:
-        return Menu_Page(m, 1, visibleCount);
+        return Menu_Page(m, 1, false, visibleCount);
+
+    case K_HOME:
+    case K_KP_HOME:
+        return Menu_Page(m, -1, true, visibleCount);
+
+    case K_END:
+    case K_KP_END:
+        return Menu_Page(m, 1, true, visibleCount);
 
     case K_MWHEELDOWN:
         sound = Menu_SlideItem(m, -1);
