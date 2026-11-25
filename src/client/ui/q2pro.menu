@@ -378,14 +378,17 @@ end
 
 begin crosshair
     title "Crosshair Setup"
-    values --status "Crosshair image" \
-        "crosshair type" crosshair none cross dot angle
-    pairs --status "Crosshair size" \
-        "crosshair scale" ch_scale 0.5x 0.5 1x 1 2x 2 4x 4 5x 5
+    pairs --status "Crosshair image" \
+        "crosshair type" crosshair "$ui_crosshairs" none 0 cross 1 dot 2 angle 3
+    blank
+    field --numeric --width 8 --status "Crosshair scale (0.1 to 9.0, e.g. 1.5)" \
+        "crosshair scale" ch_scale
     toggle --status "Move the crosshair to where shots land. Turn off on servers that aim shots at the crosshair (aimfix)" \
         "follow the shot" ch_follow_shot
     pairs --status "Mark the crosshair when your shots hit. Servers send hit markers only to clients with this on" \
         "hit markers" cl_hit_markers off 0 marker 1 "marker and sound" 2
+    field --numeric --width 8 --status "Hit marker scale (0.1 to 9.0, e.g. 1.5)" \
+        "hit marker scale" ch_marker_scale
     pairs --status "How long a hit marker stays on screen" \
         "hit marker time" scr_hit_marker_time 0.25s 250 0.5s 500 1s 1000
     field --integer --width 4 --status "Pixels to move the crosshair right, or left when negative. 0 is the center" \

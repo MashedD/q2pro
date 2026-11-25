@@ -48,6 +48,68 @@ static const cmd_option_t o_common[] = {
     { NULL }
 };
 
+static int CrosshairCompare(const void *a, const void *b)
+{
+    int x = *(const int *)a;
+    int y = *(const int *)b;
+
+    return (x > y) - (x < y);
+}
+
+static size_t Crosshairs_m(char *buffer, size_t size)
+{
+    int count;
+    char **files = (char **)FS_ListFiles("pics", ".pcx"
+#if USE_PNG
+                                       ";.png"
+#endif
+#if USE_JPG
+                                       ";.jpg"
+#endif
+#if USE_TGA
+                                       ";.tga"
+#endif
+                                       , FS_SEARCH_STRIPEXT, &count);
+    size_t len = Q_snprintf(buffer, size, "none 0");
+    if (!count)
+        return len;
+
+    int *ids = UI_Malloc(count * sizeof(*ids));
+    int num_ids = 0;
+    for (int i = 0; i < count; i++) {
+        const char *name = files[i];
+        if (Q_stricmpn(name, "ch", 2) || name[2] < '1' || name[2] > '9')
+            continue;
+
+        char *end;
+        unsigned long id = strtoul(name + 2, &end, 10);
+        if (!*end && id <= INT_MAX)
+            ids[num_ids++] = id;
+    }
+    FS_FreeList((void **)files);
+
+    qsort(ids, num_ids, sizeof(*ids), CrosshairCompare);
+    for (int i = 0; i < num_ids; i++) {
+        if (i && ids[i] == ids[i - 1])
+            continue;
+        size_t used = min(len, size);
+        len += Q_snprintf(buffer + used, size - used, " ch%d %d", ids[i], ids[i]);
+    }
+    Z_Free(ids);
+    return len;
+}
+
+static menuSound_t CrosshairPreview(menuCommon_t *item)
+{
+    menuSpinControl_t *s = (menuSpinControl_t *)item;
+
+    s->preview = 0;
+    if (s->curvalue > 0)
+        s->preview = R_RegisterPic(s->itemnames[s->curvalue]);
+
+    return QMS_NOTHANDLED;
+}
+
 static void add_string(menuSpinControl_t *s, const char *tok)
 {
     if (s->numItems < MAX_MENU_ITEMS) {
@@ -202,6 +264,11 @@ static void Parse_Pairs(menuFrameWork_t *menu)
 
     cmd_optind += 2;
     if (deferred) {
+        if (!strcmp(Cmd_Argv(cmd_optind), "$ui_crosshairs")) {
+            // Any following pairs are for clients without the crosshair macro.
+            s->generic.change = CrosshairPreview;
+            numItems = 1;
+        }
         long_args_hack(&expanded, numItems);
         if (expanded.numItems < 2 || (expanded.numItems & 1)) {
             Com_Printf("Expanded pairs list must contain label/value pairs\n");
@@ -809,6 +876,7 @@ static bool Parse_File(const char *path, int depth)
 
 void UI_LoadScript(void)
 {
+    Cmd_AddMacro("ui_crosshairs", Crosshairs_m);
     if (!Parse_File("q2pro.menu", 0)) {
         Com_EPrintf("Could not load q2pro.menu! Menus will NOT work.\n");
         Com_EPrintf("See BUILDING.md: https://github.com/MashedD/q2pro/blob/master/BUILDING.md\n");
