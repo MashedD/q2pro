@@ -6,10 +6,16 @@ All notable changes to this fork are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.4] - 2026-11-25
+
 ### Added
 
+- Page Up and Page Down move through scrollable menus one page at a time.
+  Home and End jump to the first and last pages.
 - Crosshair Setup discovers numbered crosshair images, previews the selected
   image and accepts fractional scales such as 1.5.
+- `ch_marker_scale` sets the hit marker size independently of the crosshair.
+  Crosshair Setup has a "hit marker scale" field for it.
 
 ### Fixed
 
@@ -372,7 +378,8 @@ All new options are off or keep upstream's behaviour by default.
 - A game library without the executable permission is reported with the
   `chmod` command that fixes it, instead of only "Permission denied".
 
-[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.7.3...HEAD
+[Unreleased]: https://github.com/MashedD/q2pro/compare/v1.7.4...HEAD
+[1.7.4]: https://github.com/MashedD/q2pro/compare/v1.7.3...v1.7.4
 [1.7.3]: https://github.com/MashedD/q2pro/compare/v1.7.2...v1.7.3
 [1.7.2]: https://github.com/MashedD/q2pro/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/MashedD/q2pro/compare/v1.7.0...v1.7.1
