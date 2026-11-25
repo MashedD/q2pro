@@ -102,6 +102,7 @@ static cvar_t   *ch_blue;
 static cvar_t   *ch_alpha;
 
 static cvar_t   *ch_scale;
+static cvar_t   *ch_marker_scale;
 static cvar_t   *ch_x;
 static cvar_t   *ch_y;
 static cvar_t   *ch_follow_shot;
@@ -1273,6 +1274,15 @@ static void ch_scale_changed(cvar_t *self)
     R_GetPicSize(&w, &h, scr.crosshair_pic);
     scr.crosshair_width = Q_rint(w * scale);
     scr.crosshair_height = Q_rint(h * scale);
+}
+
+static void ch_marker_scale_changed(cvar_t *self)
+{
+    int w, h;
+    float scale = Cvar_ClampValue(self, 0.1f, 9.0f);
+
+    if (!scr.hit_marker_pic)
+        return;
 
     R_GetPicSize(&w, &h, scr.hit_marker_pic);
     scr.hit_marker_width = Q_rint(w * scale);
@@ -1380,6 +1390,7 @@ void SCR_RegisterMedia(void)
     scr.loading_pic = R_RegisterPic("loading");
     scr.net_pic = R_RegisterPic("net");
     scr.hit_marker_pic = R_RegisterImage("marker", IT_PIC, IF_PERMANENT | IF_OPTIONAL);
+    ch_marker_scale_changed(ch_marker_scale);
 
     scr_crosshair_changed(scr_crosshair);
     scr_font_changed(scr_font);
@@ -1451,6 +1462,8 @@ void SCR_Init(void)
 
     ch_scale = Cvar_Get("ch_scale", "1", CVAR_ARCHIVE);
     ch_scale->changed = ch_scale_changed;
+    ch_marker_scale = Cvar_Get("ch_marker_scale", "1", CVAR_ARCHIVE);
+    ch_marker_scale->changed = ch_marker_scale_changed;
     ch_x = Cvar_Get("ch_x", "0", CVAR_ARCHIVE);
     ch_y = Cvar_Get("ch_y", "0", CVAR_ARCHIVE);
     ch_follow_shot = Cvar_Get("ch_follow_shot", "0", CVAR_ARCHIVE);
