@@ -807,6 +807,7 @@ ch_scale::
 ch_marker_scale::
     Scaling factor of the hit marker image, independent of 'ch_scale'.
     Accepted values range from 0.1 to 9. Default value is 1 (original size).
+    You can set it in Crosshair Setup using the "hit marker scale" field.
 
 ch_follow_shot::
     Moves the crosshair to where your shots will land. Quake 2 weapons fire

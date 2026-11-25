@@ -387,6 +387,8 @@ begin crosshair
         "follow the shot" ch_follow_shot
     pairs --status "Mark the crosshair when your shots hit. Servers send hit markers only to clients with this on" \
         "hit markers" cl_hit_markers off 0 marker 1 "marker and sound" 2
+    field --numeric --width 8 --status "Hit marker scale (0.1 to 9.0, e.g. 1.5)" \
+        "hit marker scale" ch_marker_scale
     pairs --status "How long a hit marker stays on screen" \
         "hit marker time" scr_hit_marker_time 0.25s 250 0.5s 500 1s 1000
     field --integer --width 4 --status "Pixels to move the crosshair right, or left when negative. 0 is the center" \
